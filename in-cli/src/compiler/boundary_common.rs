@@ -146,4 +146,17 @@ mod tests {
         assert_eq!(result.module, "test");
         assert!(!result.layout_hash.is_empty());
     }
+
+    #[test]
+    fn test_parse_file_with_read_error() {
+        let path = Path::new("does_not_exist.txt");
+        let result = parse_file_with(path, |_| unreachable!("Should not parse on read error"));
+
+        match result {
+            Err(e) => {
+                assert!(e.starts_with("read does_not_exist.txt: "));
+            }
+            Ok(_) => panic!("Expected read error, got Ok"),
+        }
+    }
 }
