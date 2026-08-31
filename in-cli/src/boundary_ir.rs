@@ -319,6 +319,19 @@ mod tests {
         assert_ne!(m1.layout_hash, m2.layout_hash);
     }
 
+    #[test]
+    fn boundary_module_empty_vectors_hash() {
+        let m = BoundaryModule {
+            layouts: vec![],
+            symbols: vec![],
+            ..BoundaryModule::default()
+        };
+        let hash = m.compute_layout_hash();
+        assert!(!hash.is_empty());
+        assert!(hash.starts_with("siphash-"));
+        assert_eq!(hash, m.compute_layout_hash());
+    }
+
     // ─── Serde Round-Trip ──────────────────────────────────────────────
 
     #[test]
