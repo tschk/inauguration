@@ -190,10 +190,12 @@ impl<'a> LowerCtx<'a> {
                 Ok(())
             }
             Typ::Named(struct_name) => {
-                let fields = self.structs.get(struct_name).cloned().unwrap_or_else(|| {
-                    // ponytail: unknown struct type — treat as scalar
-                    vec![("val".into(), Typ::Int)]
-                });
+                let fields = self.structs.get(struct_name).cloned().ok_or_else(|| {
+                    format!(
+                        "x86_64-lower: unknown struct type `{struct_name}` in `{}`",
+                        self.fn_name
+                    )
+                })?;
                 let mut slots = HashMap::new();
                 for (field, _field_ty) in fields {
                     // ponytail: all struct fields map to scalar slots
