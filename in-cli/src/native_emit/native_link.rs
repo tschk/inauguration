@@ -29,6 +29,12 @@ const DLSYM_ALLOWLIST: &[&str] = &[
     "puts",
     "putchar",
     "printf",
+    "malloc",
+    "free",
+    "memset",
+    "memcpy",
+    "mmap",
+    "bzero",
     "in_env_var",
     "in_env_has",
     "in_env_temp_dir",
@@ -106,10 +112,12 @@ pub fn resolve_native_fn(name: &str) -> Option<*const u8> {
 /// to prevent JIT-compiled code from executing arbitrary shell commands.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
 pub fn bootstrap_jit_native() {
-    // ponytail: only exit for termination, puts/putchar/printf for debug I/O.
-    // No shell-execution symbols. Add mmap/bzero if JIT runtime needs them.
+    // Only safe I/O and memory functions.
+    // No shell-execution symbols.
     let mut c = cache().write().unwrap();
-    for name in &["exit", "puts", "putchar", "printf"] {
+    for name in &[
+        "exit", "puts", "putchar", "printf", "malloc", "free", "memset", "memcpy", "mmap", "bzero",
+    ] {
         if let Some(ptr) = dlsym_exact(name) {
             c.insert(name.to_string(), NativePtr(ptr));
         }
