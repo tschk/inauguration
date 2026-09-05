@@ -107,23 +107,7 @@ pub(crate) fn lower_stmt(
             Ok(())
         }
         Stmt::Let(name, typ, expr) => {
-            ctx.alloc_let_local(name, typ.as_ref(), expr, fn_name)?;
-            // ponytail: if the local was allocated as Scalar but expr returns a struct,
-            // we need to re-allocate as Struct. Check call return types.
-            if let Expr::Call { callee, .. } = expr {
-                if let Expr::Ident(target) = callee.as_ref() {
-                    if let Some(func) = functions.get(target) {
-                        if let Typ::Named(_) = &func.ret {
-                            // Re-check allocation: if currently Scalar but should be Struct
-                            if let Some(LocalSlot::Scalar(_)) = ctx.locals.get(name) {
-                                // Remove the Scalar allocation and re-allocate as Struct
-                                ctx.locals.remove(name);
-                                ctx.alloc_let_local(name, Some(&func.ret), expr, fn_name)?;
-                            }
-                        }
-                    }
-                }
-            }
+            ctx.alloc_let_local(name, typ.as_ref(), expr, fn_name, functions)?;
             lower_store_local(emitter, ctx, name, expr, functions, pending_calls, fn_name)
         }
         Stmt::If {

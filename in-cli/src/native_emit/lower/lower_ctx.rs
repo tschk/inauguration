@@ -69,18 +69,21 @@ pub(crate) fn alloc_declared_locals(
     ctx: &mut LowerCtx<'_>,
     body: &[Stmt],
     fn_name: &str,
+    functions: &HashMap<String, super::FunctionInfo>,
 ) -> Result<(), String> {
     for stmt in body {
         match stmt {
-            Stmt::Let(name, typ, expr) => ctx.alloc_let_local(name, typ.as_ref(), expr, fn_name)?,
+            Stmt::Let(name, typ, expr) => {
+                ctx.alloc_let_local(name, typ.as_ref(), expr, fn_name, functions)?
+            }
             Stmt::Break | Stmt::Propagate => {}
             Stmt::If {
                 then_body,
                 else_body,
                 ..
             } => {
-                alloc_declared_locals(ctx, then_body, fn_name)?;
-                alloc_declared_locals(ctx, else_body, fn_name)?;
+                alloc_declared_locals(ctx, then_body, fn_name, functions)?;
+                alloc_declared_locals(ctx, else_body, fn_name, functions)?;
             }
             Stmt::Loop {
                 kind: LoopKind::For { binding },
@@ -92,12 +95,12 @@ pub(crate) fn alloc_declared_locals(
                 let len = ctx.alloc_slot();
                 let index = ctx.alloc_slot();
                 ctx.vec_for_slots.allocate(VecForSlots { ptr, len, index });
-                alloc_declared_locals(ctx, body, fn_name)?;
+                alloc_declared_locals(ctx, body, fn_name, functions)?;
             }
-            Stmt::Loop { body, .. } => alloc_declared_locals(ctx, body, fn_name)?,
+            Stmt::Loop { body, .. } => alloc_declared_locals(ctx, body, fn_name, functions)?,
             Stmt::Match { arms, .. } => {
                 for arm in arms {
-                    alloc_declared_locals(ctx, &arm.body, fn_name)?;
+                    alloc_declared_locals(ctx, &arm.body, fn_name, functions)?;
                 }
             }
             Stmt::Return(_)
@@ -107,10 +110,10 @@ pub(crate) fn alloc_declared_locals(
             | Stmt::Expr(_) => {}
             Stmt::Throw(_) => {}
             Stmt::Try { body, catches, .. } => {
-                alloc_declared_locals(ctx, body, fn_name)?;
+                alloc_declared_locals(ctx, body, fn_name, functions)?;
                 for catch in catches {
                     ctx.alloc_local(&catch.pattern, Some(&Typ::Int), fn_name)?;
-                    alloc_declared_locals(ctx, &catch.body, fn_name)?;
+                    alloc_declared_locals(ctx, &catch.body, fn_name, functions)?;
                 }
             }
         }
@@ -632,6 +635,7 @@ impl<'a> LowerCtx<'a> {
         typ: Option<&Typ>,
         expr: &Expr,
         fn_name: &str,
+        functions: &HashMap<String, super::FunctionInfo>,
     ) -> Result<(), String> {
         if self.locals.contains_key(name) {
             return Ok(());
@@ -641,6 +645,23 @@ impl<'a> LowerCtx<'a> {
                 LocalSlot::Struct { typ, .. } => Some(Typ::Named(typ.clone())),
                 _ => None,
             }),
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident(target) = callee.as_ref() {
+                    functions
+                        .get(target)
+                        .map(|func| func.ret.clone())
+                        .or_else(|| {
+                            if let Some(idx) = target.rfind("::") {
+                                let last = &target[idx + 2..];
+                                functions.get(last).map(|func| func.ret.clone())
+                            } else {
+                                None
+                            }
+                        })
+                } else {
+                    None
+                }
+            }
             _ => expr_type(expr),
         });
         if let Some(Typ::Array(elem)) = resolved.as_ref() {
