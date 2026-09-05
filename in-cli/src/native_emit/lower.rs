@@ -590,7 +590,7 @@ fn lower_function(
         pending_strings,
         &func.name,
     )?;
-    alloc_declared_locals(&mut ctx, &func.body, &func.name)?;
+    alloc_declared_locals(&mut ctx, &func.body, &func.name, functions)?;
     ctx.binop_temp = ctx.alloc_slot();
     for index in 0..ctx.binop_temps.len() {
         ctx.binop_temps[index] = ctx.alloc_slot();
