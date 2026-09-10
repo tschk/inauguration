@@ -595,10 +595,31 @@ mod tests {
         let rust_support = language_support_for_parser("rust").expect("should find rust");
         assert_eq!(rust_support.language, "Rust");
 
-        let fake_support = language_support_for_parser("fake");
-        assert!(fake_support.is_none());
+        // Exhaustive test: Verify every registered parser_id can be looked up.
+        for lang in all_language_support() {
+            if let Some(parser_id) = lang.parser_id {
+                let support = language_support_for_parser(parser_id)
+                    .unwrap_or_else(|| panic!("should find language for parser_id '{}'", parser_id));
+                assert_eq!(support.language, lang.language);
+            }
+        }
 
-        assert!(language_support_for_parser("").is_none());
-        assert!(language_support_for_parser("Rust").is_none());
+        // Edge Cases: Validating error handling for irregular strings.
+        for edge_case in [
+            "fake",  // simple non-existent
+            "",      // empty string
+            "Rust",  // case sensitivity (should be "rust")
+            "In",    // case sensitivity (should be "in")
+            " ",     // spaces
+            "\0",    // null terminator
+            "$$$",   // special characters
+            "🦀",    // non-ascii / unicode
+        ] {
+            assert!(
+                language_support_for_parser(edge_case).is_none(),
+                "Expected None for edge case '{}'",
+                edge_case
+            );
+        }
     }
 }
