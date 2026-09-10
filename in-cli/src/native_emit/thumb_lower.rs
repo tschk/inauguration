@@ -112,7 +112,9 @@ pub fn lower_module(module: &UnifiedModule, entry: &str) -> Result<ThumbCompileR
         emitter.patch_u16(call.site + 2, lo);
     }
 
-    let entry_offset = *offsets.get(entry).unwrap();
+    let entry_offset = *offsets.get(entry).ok_or_else(|| {
+        format!("thumb-lower: entry `{entry}` offset not found (possibly an empty extern function)")
+    })?;
     Ok(ThumbCompileResult {
         code: emitter.bytes,
         entry_offset,
