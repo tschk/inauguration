@@ -1074,129 +1074,40 @@ fn lower_stmts_with_env(
                 then_body,
                 else_body,
             } => {
-                let cond_id = lower_expr(cond, env, direct_env, ssa, &mut out);
-                let label_id = *ssa;
-                *ssa += 1;
-                let then_label = format!("bb_if_then_{label_id}");
-                let else_label = format!("bb_if_else_{label_id}");
-                let end_label = format!("bb_if_end_{label_id}");
-                out.push_str(&format!("cond_br %{cond_id}, {then_label}, {else_label}\n"));
-                out.push_str(&format!("label {then_label}\n"));
-                let mut then_env = env.clone();
-                out.push_str(&lower_stmts_with_env(
+                lower_if_stmt(
+                    cond,
                     then_body,
+                    else_body,
+                    env,
+                    direct_env,
                     ssa,
                     finish_with_return,
-                    false,
-                    &mut then_env,
-                    direct_env,
-                    true,
-                ));
-                out.push_str(&format!("br {end_label}\n"));
-                out.push_str(&format!("label {else_label}\n"));
-                if !else_body.is_empty() {
-                    let mut else_env = env.clone();
-                    out.push_str(&lower_stmts_with_env(
-                        else_body,
-                        ssa,
-                        finish_with_return,
-                        false,
-                        &mut else_env,
-                        direct_env,
-                        true,
-                    ));
-                }
-                out.push_str(&format!("br {end_label}\n"));
-                out.push_str(&format!("label {end_label}\n"));
+                    &mut out,
+                );
             }
             Stmt::Loop { cond, body, .. } => {
-                let label_id = *ssa;
-                *ssa += 1;
-                let head_label = format!("bb_loop_head_{label_id}");
-                let body_label = format!("bb_loop_body_{label_id}");
-                let end_label = format!("bb_loop_end_{label_id}");
-                out.push_str(&format!("br {head_label}\n"));
-                out.push_str(&format!("label {head_label}\n"));
-                if let Some(c) = cond {
-                    let cond_id = lower_expr(c, env, direct_env, ssa, &mut out);
-                    out.push_str(&format!("cond_br %{cond_id}, {body_label}, {end_label}\n"));
-                } else {
-                    out.push_str(&format!("br {body_label}\n"));
-                }
-                out.push_str(&format!("label {body_label}\n"));
-                let mut loop_env = env.clone();
-                out.push_str(&lower_stmts_with_env(
+                lower_loop_stmt(
+                    cond,
                     body,
+                    env,
+                    direct_env,
                     ssa,
                     finish_with_return,
-                    false,
-                    &mut loop_env,
-                    direct_env,
-                    true,
-                ));
-                out.push_str(&format!("br {head_label}\n"));
-                out.push_str(&format!("label {end_label}\n"));
+                    &mut out,
+                );
             }
             Stmt::Match {
                 scrutinee, arms, ..
             } => {
-                let scrutinee_id = lower_expr(scrutinee, env, direct_env, ssa, &mut out);
-                let label_id = *ssa;
-                *ssa += 1;
-                let end_label = format!("bb_match_end_{label_id}");
-                let mut default_arm = None;
-                for arm in arms {
-                    let pattern =
-                        MatchPattern::parse(&arm.pattern).unwrap_or(MatchPattern::WildPat);
-                    if pattern == MatchPattern::WildPat {
-                        default_arm = Some(arm);
-                        continue;
-                    }
-                    let next_label = format!("bb_match_next_{label_id}_{}", *ssa);
-                    let arm_label = format!("bb_match_arm_{label_id}_{}", *ssa);
-                    let bindings = lower_pattern_into(
-                        &pattern,
-                        scrutinee_id,
-                        &arm_label,
-                        &next_label,
-                        ssa,
-                        &mut out,
-                    );
-                    out.push_str(&format!("label {arm_label}\n"));
-                    out.push_str("// match.arm\n");
-                    let pre_keys: Vec<String> = env.keys().cloned().collect();
-                    for (name, id) in &bindings {
-                        env.insert(name.clone(), *id);
-                        out.push_str(&format!("store_var {name} %{id}\n"));
-                    }
-                    out.push_str(&lower_stmts_with_env(
-                        &arm.body,
-                        ssa,
-                        finish_with_return,
-                        false,
-                        env,
-                        direct_env,
-                        true,
-                    ));
-                    env.retain(|k, _| pre_keys.contains(k));
-                    out.push_str(&format!("br {end_label}\n"));
-                    out.push_str(&format!("label {next_label}\n"));
-                }
-                if let Some(arm) = default_arm {
-                    out.push_str("// match.arm\n");
-                    let pre_keys: Vec<String> = env.keys().cloned().collect();
-                    out.push_str(&lower_stmts_with_env(
-                        &arm.body,
-                        ssa,
-                        finish_with_return,
-                        false,
-                        env,
-                        direct_env,
-                        true,
-                    ));
-                    env.retain(|k, _| pre_keys.contains(k));
-                }
-                out.push_str(&format!("label {end_label}\n"));
+                lower_match_stmt(
+                    scrutinee,
+                    arms,
+                    env,
+                    direct_env,
+                    ssa,
+                    finish_with_return,
+                    &mut out,
+                );
             }
             Stmt::Return(None) => {
                 let id = *ssa;
@@ -1226,40 +1137,16 @@ fn lower_stmts_with_env(
                 return out;
             }
             Stmt::Try { body, catches, .. } => {
-                let label_id = *ssa;
-                *ssa += 1;
-                let try_body_label = format!("bb_try_body_{label_id}");
-                let try_catch_label = format!("bb_try_catch_{label_id}");
-                let try_end_label = format!("bb_try_end_{label_id}");
-                out.push_str(&format!("br {try_body_label}\n"));
-                out.push_str(&format!("label {try_body_label}\n"));
-                let pre_keys: Vec<String> = env.keys().cloned().collect();
-                out.push_str(&lower_stmts_with_env(
+                lower_try_stmt(
                     body,
-                    ssa,
-                    finish_with_return,
-                    false,
+                    catches,
                     env,
                     direct_env,
+                    ssa,
+                    finish_with_return,
                     force_stores,
-                ));
-                env.retain(|k, _| pre_keys.contains(k));
-                out.push_str(&format!("br {try_end_label}\n"));
-                out.push_str(&format!("label {try_catch_label}\n"));
-                for arm in catches {
-                    let pre_keys: Vec<String> = env.keys().cloned().collect();
-                    out.push_str(&lower_stmts_with_env(
-                        &arm.body,
-                        ssa,
-                        finish_with_return,
-                        false,
-                        env,
-                        direct_env,
-                        force_stores,
-                    ));
-                    env.retain(|k, _| pre_keys.contains(k));
-                }
-                out.push_str(&format!("label {try_end_label}\n"));
+                    &mut out,
+                );
             }
             Stmt::Break => {}
             Stmt::Propagate => out.push_str("builtin_call \"propagate_error\"\n"),
@@ -1275,6 +1162,196 @@ fn lower_stmts_with_env(
         out.push_str(&format!("bb1:\nreturn %{v} : $Builtin.Int64\n"));
     }
     out
+}
+
+fn lower_if_stmt(
+    cond: &Expr,
+    then_body: &[Stmt],
+    else_body: &[Stmt],
+    env: &mut HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    finish_with_return: bool,
+    out: &mut String,
+) {
+    let cond_id = lower_expr(cond, env, direct_env, ssa, out);
+    let label_id = *ssa;
+    *ssa += 1;
+    let then_label = format!("bb_if_then_{label_id}");
+    let else_label = format!("bb_if_else_{label_id}");
+    let end_label = format!("bb_if_end_{label_id}");
+    out.push_str(&format!("cond_br %{cond_id}, {then_label}, {else_label}\n"));
+    out.push_str(&format!("label {then_label}\n"));
+    let mut then_env = env.clone();
+    out.push_str(&lower_stmts_with_env(
+        then_body,
+        ssa,
+        finish_with_return,
+        false,
+        &mut then_env,
+        direct_env,
+        true,
+    ));
+    out.push_str(&format!("br {end_label}\n"));
+    out.push_str(&format!("label {else_label}\n"));
+    if !else_body.is_empty() {
+        let mut else_env = env.clone();
+        out.push_str(&lower_stmts_with_env(
+            else_body,
+            ssa,
+            finish_with_return,
+            false,
+            &mut else_env,
+            direct_env,
+            true,
+        ));
+    }
+    out.push_str(&format!("br {end_label}\n"));
+    out.push_str(&format!("label {end_label}\n"));
+}
+
+fn lower_loop_stmt(
+    cond: &Option<Expr>,
+    body: &[Stmt],
+    env: &mut HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    finish_with_return: bool,
+    out: &mut String,
+) {
+    let label_id = *ssa;
+    *ssa += 1;
+    let head_label = format!("bb_loop_head_{label_id}");
+    let body_label = format!("bb_loop_body_{label_id}");
+    let end_label = format!("bb_loop_end_{label_id}");
+    out.push_str(&format!("br {head_label}\n"));
+    out.push_str(&format!("label {head_label}\n"));
+    if let Some(c) = cond {
+        let cond_id = lower_expr(c, env, direct_env, ssa, out);
+        out.push_str(&format!("cond_br %{cond_id}, {body_label}, {end_label}\n"));
+    } else {
+        out.push_str(&format!("br {body_label}\n"));
+    }
+    out.push_str(&format!("label {body_label}\n"));
+    let mut loop_env = env.clone();
+    out.push_str(&lower_stmts_with_env(
+        body,
+        ssa,
+        finish_with_return,
+        false,
+        &mut loop_env,
+        direct_env,
+        true,
+    ));
+    out.push_str(&format!("br {head_label}\n"));
+    out.push_str(&format!("label {end_label}\n"));
+}
+
+fn lower_match_stmt(
+    scrutinee: &Expr,
+    arms: &[crate::core_ir::MatchArm],
+    env: &mut HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    finish_with_return: bool,
+    out: &mut String,
+) {
+    let scrutinee_id = lower_expr(scrutinee, env, direct_env, ssa, out);
+    let label_id = *ssa;
+    *ssa += 1;
+    let end_label = format!("bb_match_end_{label_id}");
+    let mut default_arm = None;
+    for arm in arms {
+        let pattern = MatchPattern::parse(&arm.pattern).unwrap_or(MatchPattern::WildPat);
+        if pattern == MatchPattern::WildPat {
+            default_arm = Some(arm);
+            continue;
+        }
+        let next_label = format!("bb_match_next_{label_id}_{}", *ssa);
+        let arm_label = format!("bb_match_arm_{label_id}_{}", *ssa);
+        let bindings =
+            lower_pattern_into(&pattern, scrutinee_id, &arm_label, &next_label, ssa, out);
+        out.push_str(&format!("label {arm_label}\n"));
+        out.push_str("// match.arm\n");
+        let pre_keys: Vec<String> = env.keys().cloned().collect();
+        for (name, id) in &bindings {
+            env.insert(name.clone(), *id);
+            out.push_str(&format!("store_var {name} %{id}\n"));
+        }
+        out.push_str(&lower_stmts_with_env(
+            &arm.body,
+            ssa,
+            finish_with_return,
+            false,
+            env,
+            direct_env,
+            true,
+        ));
+        env.retain(|k, _| pre_keys.contains(k));
+        out.push_str(&format!("br {end_label}\n"));
+        out.push_str(&format!("label {next_label}\n"));
+    }
+    if let Some(arm) = default_arm {
+        out.push_str("// match.arm\n");
+        let pre_keys: Vec<String> = env.keys().cloned().collect();
+        out.push_str(&lower_stmts_with_env(
+            &arm.body,
+            ssa,
+            finish_with_return,
+            false,
+            env,
+            direct_env,
+            true,
+        ));
+        env.retain(|k, _| pre_keys.contains(k));
+    }
+    out.push_str(&format!("label {end_label}\n"));
+}
+
+fn lower_try_stmt(
+    body: &[Stmt],
+    catches: &[crate::core_ir::CatchArm],
+    env: &mut HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    finish_with_return: bool,
+    force_stores: bool,
+    out: &mut String,
+) {
+    let label_id = *ssa;
+    *ssa += 1;
+    let try_body_label = format!("bb_try_body_{label_id}");
+    let try_catch_label = format!("bb_try_catch_{label_id}");
+    let try_end_label = format!("bb_try_end_{label_id}");
+    out.push_str(&format!("br {try_body_label}\n"));
+    out.push_str(&format!("label {try_body_label}\n"));
+    let pre_keys: Vec<String> = env.keys().cloned().collect();
+    out.push_str(&lower_stmts_with_env(
+        body,
+        ssa,
+        finish_with_return,
+        false,
+        env,
+        direct_env,
+        force_stores,
+    ));
+    env.retain(|k, _| pre_keys.contains(k));
+    out.push_str(&format!("br {try_end_label}\n"));
+    out.push_str(&format!("label {try_catch_label}\n"));
+    for arm in catches {
+        let pre_keys: Vec<String> = env.keys().cloned().collect();
+        out.push_str(&lower_stmts_with_env(
+            &arm.body,
+            ssa,
+            finish_with_return,
+            false,
+            env,
+            direct_env,
+            force_stores,
+        ));
+        env.retain(|k, _| pre_keys.contains(k));
+    }
+    out.push_str(&format!("label {try_end_label}\n"));
 }
 
 fn helper_stub(ssa: &mut usize) -> String {
