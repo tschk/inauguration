@@ -387,4 +387,96 @@ mod tests {
             Path::new("/tmp/in.pid")
         );
     }
+
+    fn connect_with_retry(socket_path: &Path) -> std::io::Result<UnixStream> {
+        let start = std::time::Instant::now();
+        loop {
+            if let Ok(stream) = UnixStream::connect(socket_path) {
+                return Ok(stream);
+            }
+            if start.elapsed() > std::time::Duration::from_secs(2) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Failed to connect to daemon socket",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn test_run_compiler_daemon_setup_and_stop() -> std::io::Result<()> {
+        let dir =
+            std::env::temp_dir().join(format!("inaug-daemon-test-setup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let socket_path = dir.join("test.sock");
+
+        let path_clone = socket_path.clone();
+
+        let t = std::thread::spawn(move || run_compiler_daemon(&path_clone));
+
+        let mut client = connect_with_retry(&socket_path).expect("Could not connect");
+        client.write_all(b"{\"command\":\"stop\"}\n")?;
+
+        let mut response = String::new();
+        client.read_to_string(&mut response)?;
+        let response: DaemonResponse = serde_json::from_str(response.trim())?;
+        assert!(response.success);
+
+        t.join()
+            .expect("daemon thread panicked")
+            .expect("daemon error");
+
+        assert!(!socket_path.exists());
+        assert!(!daemon_pid_path(&socket_path).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_compiler_daemon_concurrent_connections() -> std::io::Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "inaug-daemon-test-concurrent-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let socket_path = dir.join("test.sock");
+
+        let path_clone = socket_path.clone();
+
+        let t = std::thread::spawn(move || run_compiler_daemon(&path_clone));
+
+        // Ensure daemon is ready
+        let _ =
+            connect_with_retry(&socket_path).expect("Could not connect to verify daemon readiness");
+
+        let mut handles = vec![];
+        for _ in 0..10 {
+            let p = socket_path.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut client = connect_with_retry(&p).expect("Client connect failed");
+                client
+                    .write_all(b"{\"command\":\"ping\"}\n")
+                    .expect("Write failed");
+                let mut response = String::new();
+                client.read_to_string(&mut response).expect("Read failed");
+                let response: DaemonResponse = serde_json::from_str(response.trim()).unwrap();
+                assert!(response.success);
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let mut client = connect_with_retry(&socket_path).expect("Could not connect to stop");
+        client.write_all(b"{\"command\":\"stop\"}\n")?;
+
+        t.join()
+            .expect("daemon thread panicked")
+            .expect("daemon error");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 }
