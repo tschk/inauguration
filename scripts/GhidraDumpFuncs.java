@@ -16,12 +16,15 @@ import ghidra.program.model.symbol.SourceType;
 
 public class GhidraDumpFuncs extends GhidraScript {
 
+	private StringBuilder outBuffer = new StringBuilder();
+
 	@Override
 	public void run() throws Exception {
-		String progName = currentProgram.getName();
-		emit("GHIDRA_PROGRAM=" + progName);
+		try {
+			String progName = currentProgram.getName();
+			emit("GHIDRA_PROGRAM=" + progName);
 
-		FunctionManager fm = currentProgram.getFunctionManager();
+			FunctionManager fm = currentProgram.getFunctionManager();
 		List<Function> funcs = new ArrayList<>();
 		FunctionIterator it = fm.getFunctions(true);
 		while (it.hasNext()) {
@@ -76,13 +79,26 @@ public class GhidraDumpFuncs extends GhidraScript {
 		finally {
 			decomp.dispose();
 		}
-		emit("GHIDRA_DECOMP_OK=" + ok);
-		emit("GHIDRA_DECOMP_FAIL=" + fail);
-		emit("GHIDRA_DECOMP_CHARS=" + totalChars);
+			emit("GHIDRA_DECOMP_OK=" + ok);
+			emit("GHIDRA_DECOMP_FAIL=" + fail);
+			emit("GHIDRA_DECOMP_CHARS=" + totalChars);
+		} finally {
+			flushEmit();
+		}
 	}
 
 	private void emit(String line) {
 		// System.out so headless log grep '^GHIDRA_' works without script prefix.
-		System.out.println(line);
+		outBuffer.append(line).append("\n");
+		if (outBuffer.length() > 65536) {
+			flushEmit();
+		}
+	}
+
+	private void flushEmit() {
+		if (outBuffer.length() > 0) {
+			System.out.print(outBuffer.toString());
+			outBuffer.setLength(0);
+		}
 	}
 }
