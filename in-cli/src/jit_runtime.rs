@@ -55,18 +55,6 @@ pub struct JitRuntime {
 struct CodePage {
     ptr: *mut u8,
     size: usize,
-    /// Bytes written; used for icache flush on macOS and AArch64 Linux.
-    #[cfg_attr(
-        not(any(
-            target_os = "macos",
-            all(
-                any(target_os = "linux", target_os = "android"),
-                target_arch = "aarch64"
-            )
-        )),
-        allow(dead_code)
-    )]
-    used: usize,
 }
 
 // SAFETY: CodePage owns mmap'd memory that is valid until dropped.
@@ -170,15 +158,14 @@ impl CodePage {
         Some(Self {
             ptr: ptr as *mut u8,
             size,
-            used: 0,
         })
     }
 
     /// Make the written code executable and flush caches.
-    fn finalize(&self) {
+    fn finalize(&self, _used: usize) {
         #[cfg(target_os = "macos")]
         unsafe {
-            sys_icache_invalidate(self.ptr as *const std::ffi::c_void, self.used);
+            sys_icache_invalidate(self.ptr as *const std::ffi::c_void, _used);
         }
         #[cfg(all(
             any(target_os = "linux", target_os = "android"),
@@ -188,7 +175,7 @@ impl CodePage {
             extern "C" {
                 fn __clear_cache(start: *const u8, end: *const u8);
             }
-            __clear_cache(self.ptr, self.ptr.add(self.used));
+            __clear_cache(self.ptr, self.ptr.add(_used));
         }
         make_executable(self.ptr, self.size);
     }
@@ -246,8 +233,7 @@ impl JitRuntime {
         relocations: &[(u32, u64)],              // (offset, codegen_base) — patched at load time
     ) -> Result<(), String> {
         // Allocate a code page large enough
-        let mut page = CodePage::new(code.len()).ok_or_else(|| "jit: mmap failed".to_string())?;
-        page.used = code.len();
+        let page = CodePage::new(code.len()).ok_or_else(|| "jit: mmap failed".to_string())?;
 
         let dest = page.ptr;
         unsafe {
@@ -284,7 +270,7 @@ impl JitRuntime {
 
         // Make code pages executable
         let last_page = self.code_pages.last().unwrap();
-        last_page.finalize();
+        last_page.finalize(code.len());
 
         let base = self.code_pages.last().unwrap().ptr;
         let mut funcs = self.functions.write().unwrap();
