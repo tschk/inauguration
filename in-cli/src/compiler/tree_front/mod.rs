@@ -3,45 +3,45 @@
 
 mod c_family;
 mod crystal;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod csharp;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod dart;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod elixir;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod erlang;
 mod extract;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod fsharp;
 mod go;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod haskell;
 mod holyc;
 mod java;
 mod js;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod julia;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod kotlin;
 mod lolcat;
 mod lua;
 mod nim;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod ocaml;
 mod perl;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod php;
 mod python;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod r_lang;
 mod ruby;
 mod rust;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod scala;
 mod swift;
 mod ts;
-#[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
+#[cfg(feature = "parse-extended")]
 mod v_lang;
 mod zig;
 
