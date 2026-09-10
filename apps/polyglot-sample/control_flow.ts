@@ -1,8 +1,8 @@
-function helper(value: number): number {
+export function helper(value: number): number {
   return value;
 }
 
-function main(): number {
+export function main(): number {
   let value = 1;
   value = value + 2;
   helper(value);
