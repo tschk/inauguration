@@ -105,10 +105,7 @@ mod tests {
             u32::from_le_bytes(bytes[8..12].try_into()?) & UF2_FLAG_FAMILY_ID_PRESENT,
             UF2_FLAG_FAMILY_ID_PRESENT
         );
-        assert_eq!(
-            u32::from_le_bytes(bytes[12..16].try_into()?),
-            0x1000_0000
-        );
+        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into()?), 0x1000_0000);
         assert_eq!(
             u32::from_le_bytes(bytes[16..20].try_into()?),
             payload.len() as u32
@@ -128,10 +125,7 @@ mod tests {
         assert_eq!(bytes.len(), UF2_BLOCK_SIZE * 2);
         assert_eq!(u32::from_le_bytes(bytes[24..28].try_into()?), 2);
         assert_eq!(
-            u32::from_le_bytes(
-                bytes[UF2_BLOCK_SIZE + 20..UF2_BLOCK_SIZE + 24]
-                    .try_into()?
-            ),
+            u32::from_le_bytes(bytes[UF2_BLOCK_SIZE + 20..UF2_BLOCK_SIZE + 24].try_into()?),
             1
         );
         Ok(())
