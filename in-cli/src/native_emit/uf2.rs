@@ -82,7 +82,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encodes_single_block_with_family() {
+    fn encodes_single_block_with_family() -> Result<(), Box<dyn std::error::Error>> {
         let payload = b"hello-thumb";
         let bytes = encode_uf2(
             payload,
@@ -94,46 +94,47 @@ mod tests {
         .expect("encode");
         assert_eq!(bytes.len(), UF2_BLOCK_SIZE);
         assert_eq!(
-            u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+            u32::from_le_bytes(bytes[0..4].try_into()?),
             UF2_MAGIC_START0
         );
         assert_eq!(
-            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            u32::from_le_bytes(bytes[4..8].try_into()?),
             UF2_MAGIC_START1
         );
         assert_eq!(
-            u32::from_le_bytes(bytes[8..12].try_into().unwrap()) & UF2_FLAG_FAMILY_ID_PRESENT,
+            u32::from_le_bytes(bytes[8..12].try_into()?) & UF2_FLAG_FAMILY_ID_PRESENT,
             UF2_FLAG_FAMILY_ID_PRESENT
         );
         assert_eq!(
-            u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            u32::from_le_bytes(bytes[12..16].try_into()?),
             0x1000_0000
         );
         assert_eq!(
-            u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+            u32::from_le_bytes(bytes[16..20].try_into()?),
             payload.len() as u32
         );
         assert_eq!(&bytes[32..32 + payload.len()], payload);
         assert_eq!(
-            u32::from_le_bytes(bytes[508..512].try_into().unwrap()),
+            u32::from_le_bytes(bytes[508..512].try_into()?),
             UF2_MAGIC_END
         );
+        Ok(())
     }
 
     #[test]
-    fn splits_large_payload() {
+    fn splits_large_payload() -> Result<(), Box<dyn std::error::Error>> {
         let payload = vec![0xABu8; UF2_PAYLOAD_MAX + 10];
         let bytes = encode_uf2(&payload, &Uf2Options::default()).expect("encode");
         assert_eq!(bytes.len(), UF2_BLOCK_SIZE * 2);
-        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into()?), 2);
         assert_eq!(
             u32::from_le_bytes(
                 bytes[UF2_BLOCK_SIZE + 20..UF2_BLOCK_SIZE + 24]
-                    .try_into()
-                    .unwrap()
+                    .try_into()?
             ),
             1
         );
+        Ok(())
     }
 
     #[test]
