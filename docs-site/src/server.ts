@@ -31,8 +31,27 @@ async function serveIndex(request: Request): Promise<Response> {
 }
 
 const fetch = async (request: Request): Promise<Response> => {
-  const url = new URL(request.url);
-  const pathname = url.pathname.replace(/\/+$/, "") || "/";
+  const urlStr = request.url;
+  const start = urlStr.indexOf("/", urlStr.indexOf("://") + 3);
+  let pathname = "/";
+  if (start !== -1) {
+    const endQuery = urlStr.indexOf("?", start);
+    const endHash = urlStr.indexOf("#", start);
+    let end = urlStr.length;
+    if (endQuery !== -1 && endHash !== -1) {
+      end = Math.min(endQuery, endHash);
+    } else if (endQuery !== -1) {
+      end = endQuery;
+    } else if (endHash !== -1) {
+      end = endHash;
+    }
+    pathname = urlStr.slice(start, end);
+    let i = pathname.length - 1;
+    while (i > 0 && pathname.charCodeAt(i) === 47) {
+      i--;
+    }
+    pathname = i === pathname.length - 1 ? pathname : pathname.slice(0, i + 1);
+  }
   const method = request.method;
 
   if (method === "GET" || method === "HEAD") {
