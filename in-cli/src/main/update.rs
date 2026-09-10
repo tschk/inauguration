@@ -53,23 +53,25 @@ pub(crate) fn cmd_update_remote() -> Result<()> {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(InError::Message(format!("Failed to fetch install.sh: HTTP {}", status)));
+            return Err(InError::Message(format!(
+                "Failed to fetch install.sh: HTTP {}",
+                status
+            )));
         }
 
-        let script = response.text()
+        let script = response
+            .text()
             .map_err(|e| InError::Message(format!("Failed to read install.sh: {}", e)))?;
 
         let mut tmp_file = tempfile::NamedTempFile::new()
             .map_err(|e| InError::Message(format!("Failed to create temp file: {}", e)))?;
 
         use std::io::Write;
-        tmp_file.write_all(script.as_bytes())
+        tmp_file
+            .write_all(script.as_bytes())
             .map_err(|e| InError::Message(format!("Failed to write to temp file: {}", e)))?;
 
-        run_cmd(
-            Command::new("bash")
-                .arg(tmp_file.path())
-        )
+        run_cmd(Command::new("bash").arg(tmp_file.path()))
     }
     #[cfg(not(unix))]
     {
