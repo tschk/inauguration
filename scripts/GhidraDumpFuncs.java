@@ -32,10 +32,15 @@ public class GhidraDumpFuncs extends GhidraScript {
 		int named = 0;
 		int hashed = 0;
 		int defaulted = 0;
+		StringBuilder sb = new StringBuilder();
 		for (Function f : funcs) {
 			String n = f.getName();
 			SourceType src = f.getSymbol().getSource();
-			emit("GHIDRA_FUNC name=" + n + " entry=" + f.getEntryPoint() + " source=" + src);
+			sb.setLength(0);
+			sb.append("GHIDRA_FUNC name=").append(n)
+			  .append(" entry=").append(f.getEntryPoint())
+			  .append(" source=").append(src);
+			emit(sb.toString());
 			if (n.startsWith("_H") && n.length() > 2) {
 				hashed++;
 			}
