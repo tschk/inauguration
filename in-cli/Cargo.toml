@@ -77,6 +77,8 @@ tree-sitter-v = { version = "0.0.3", optional = true }
 tar = "0.4.46"
 flate2 = "1.1.9"
 zip = "8.6.0"
+reqwest = { version = "0.13.5", features = ["blocking"] }
+tempfile = "3.27.0"
 [features]
 default = []
 parse-extended = [
