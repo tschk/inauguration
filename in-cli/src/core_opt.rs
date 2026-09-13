@@ -5,7 +5,7 @@
 //! Profile-specific passes (lean / harden) layer on top via
 //! [`optimize_with_profile`].
 
-use crate::core_ir::{CatchArm, Decl, Expr, MatchArm, Stmt, Typ};
+use crate::core_ir::{CatchArm, Decl, Expr, LoopKind, MatchArm, Stmt, Typ};
 use crate::emit_profile::EmitProfile;
 use std::collections::{HashMap, HashSet};
 
@@ -50,6 +50,9 @@ pub fn optimize_with_profile(decls: &mut Vec<Decl>, entry: Option<&str>, profile
             harden_obscure_literals(decls);
             harden_opaque_predicates(decls);
             harden_bogus_blocks(decls);
+            // Flatten straight-line bodies into a pc dispatcher before junk pads
+            // so each state still receives junk noise afterward at the outer level.
+            harden_cfg_dispatch_lite(decls);
             harden_junk_stmts(decls);
             harden_hash_symbols(decls, entry);
         }
@@ -2005,6 +2008,94 @@ fn harden_junk_stmts(decls: &mut [Decl]) {
     }
 }
 
+/// Lite control-flow flattening: wrap eligible straight-line bodies in a
+/// `while _pc < N` dispatcher of `if _pc == i` states.
+///
+/// Skips functions that already contain loops / breaks / try / match / throw /
+/// propagate so we do not fight real control flow or rely on `Break` (native
+/// lower currently treats break as a no-op).
+fn stmts_forbid_cfg_dispatch(stmts: &[Stmt]) -> bool {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Loop { .. }
+            | Stmt::Break
+            | Stmt::Try { .. }
+            | Stmt::Match { .. }
+            | Stmt::Throw(_)
+            | Stmt::Propagate => return true,
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } if stmts_forbid_cfg_dispatch(then_body) || stmts_forbid_cfg_dispatch(else_body) => {
+                return true;
+            }
+            Stmt::If { .. } => {}
+            _ => {}
+        }
+    }
+    false
+}
+
+fn harden_cfg_dispatch_lite(decls: &mut [Decl]) {
+    for body in fn_bodies_mut(decls) {
+        if body.len() < 3 {
+            continue;
+        }
+        if stmts_forbid_cfg_dispatch(body) {
+            continue;
+        }
+        let original: Vec<Stmt> = std::mem::take(body);
+        // Chunk large bodies so the dispatcher stays bounded.
+        let chunk = if original.len() > 8 { 2 } else { 1 };
+        let mut chunks: Vec<Vec<Stmt>> = Vec::new();
+        let mut cur = Vec::new();
+        for stmt in original {
+            cur.push(stmt);
+            if cur.len() >= chunk {
+                chunks.push(std::mem::take(&mut cur));
+            }
+        }
+        if !cur.is_empty() {
+            chunks.push(cur);
+        }
+        let state_count = chunks.len() as i64;
+        let mut chain: Option<Stmt> = None;
+        for (i, chunk_stmts) in chunks.into_iter().enumerate().rev() {
+            let i = i as i64;
+            let mut then_body = chunk_stmts;
+            then_body.push(Stmt::Assign("_pc".into(), Expr::IntLit(i + 1)));
+            let cond = Expr::Binary {
+                op: "==".into(),
+                lhs: Box::new(Expr::Ident("_pc".into())),
+                rhs: Box::new(Expr::IntLit(i)),
+            };
+            let else_body = match chain.take() {
+                Some(s) => vec![s],
+                None => vec![Stmt::Assign("_pc".into(), Expr::IntLit(state_count))],
+            };
+            chain = Some(Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            });
+        }
+        let dispatch = chain.expect("chunks non-empty");
+        *body = vec![
+            Stmt::Let("_pc".into(), Some(Typ::Int), Expr::IntLit(0)),
+            Stmt::Loop {
+                kind: LoopKind::While,
+                cond: Some(Expr::Binary {
+                    op: "<".into(),
+                    lhs: Box::new(Expr::Ident("_pc".into())),
+                    rhs: Box::new(Expr::IntLit(state_count)),
+                }),
+                body: vec![dispatch],
+            },
+        ];
+    }
+}
+
 /// Hash-mangle internal function names beyond normal ABI.
 fn harden_hash_symbols(decls: &mut [Decl], entry: Option<&str>) {
     let entry = entry.unwrap_or("main");
@@ -2951,6 +3042,68 @@ mod tests {
         assert!(names.contains(&"main"));
         assert!(names.iter().any(|n| n.starts_with("_H")));
         assert!(!names.contains(&"helper"));
+    }
+
+    #[test]
+    fn harden_cfg_dispatch_wraps_straight_line() {
+        let mut decls = vec![Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![
+                Stmt::Let("a".into(), Some(Typ::Int), Expr::IntLit(1)),
+                Stmt::Let("b".into(), Some(Typ::Int), Expr::IntLit(2)),
+                Stmt::Let(
+                    "c".into(),
+                    Some(Typ::Int),
+                    Expr::Binary {
+                        op: "+".into(),
+                        lhs: Box::new(Expr::Ident("a".into())),
+                        rhs: Box::new(Expr::Ident("b".into())),
+                    },
+                ),
+                Stmt::Return(Some(Expr::Ident("c".into()))),
+            ],
+            type_params: vec![],
+        }];
+        optimize_with_profile(&mut decls, Some("main"), EmitProfile::Harden);
+        let Decl::Function { body, .. } = &decls[0] else {
+            panic!("expected function");
+        };
+        fn walk_has_dispatch(stmts: &[Stmt]) -> (bool, bool) {
+            let mut has_loop = false;
+            let mut has_pc = false;
+            for s in stmts {
+                match s {
+                    Stmt::Let(name, ..) if name == "_pc" => has_pc = true,
+                    Stmt::Assign(name, _) if name == "_pc" => has_pc = true,
+                    Stmt::Loop { body, .. } => {
+                        has_loop = true;
+                        let (l, p) = walk_has_dispatch(body);
+                        has_loop |= l;
+                        has_pc |= p;
+                    }
+                    Stmt::If {
+                        then_body,
+                        else_body,
+                        ..
+                    } => {
+                        let (l1, p1) = walk_has_dispatch(then_body);
+                        let (l2, p2) = walk_has_dispatch(else_body);
+                        has_loop |= l1 | l2;
+                        has_pc |= p1 | p2;
+                    }
+                    _ => {}
+                }
+            }
+            (has_loop, has_pc)
+        }
+        let (has_loop, has_pc) = walk_has_dispatch(body);
+        assert!(
+            has_loop,
+            "expected dispatcher loop in harden body: {body:?}"
+        );
+        assert!(has_pc, "expected _pc state var in harden body: {body:?}");
     }
 
     #[test]
