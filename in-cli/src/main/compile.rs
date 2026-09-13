@@ -28,7 +28,50 @@ pub(crate) fn cmd_compile(
     metadata: Option<&str>,
     debug: bool,
     profile: inauguration::emit_profile::EmitProfile,
+    dual_harden_out: Option<&str>,
 ) -> Result<()> {
+    if let Some(harden_out) = dual_harden_out {
+        cmd_compile(
+            cwd,
+            path,
+            target,
+            out,
+            module_id,
+            parser,
+            entry,
+            target_triple,
+            linkage,
+            jobs,
+            json,
+            emit,
+            trampoline,
+            base,
+            metadata,
+            debug,
+            profile,
+            None,
+        )?;
+        return cmd_compile(
+            cwd,
+            path,
+            target,
+            harden_out,
+            module_id,
+            parser,
+            entry,
+            target_triple,
+            linkage,
+            jobs,
+            json,
+            emit,
+            trampoline,
+            base,
+            metadata,
+            debug,
+            inauguration::emit_profile::EmitProfile::Harden,
+            None,
+        );
+    }
     let source_path = resolve_invocation_path(cwd, path);
     let out_path = resolve_invocation_path(cwd, out);
     let source_path = if source_path.is_dir() {

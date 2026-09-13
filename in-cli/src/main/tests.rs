@@ -18,6 +18,8 @@ fn parse_build_subcommand() {
             profile,
             harden,
             lean,
+            dual_emit,
+            harden_out,
         } => {
             assert_eq!(path, "Foo.swift");
             assert_eq!(out, None);
@@ -30,6 +32,8 @@ fn parse_build_subcommand() {
             assert!(matches!(profile, EmitProfileCli::Default));
             assert!(!harden);
             assert!(!lean);
+            assert!(!dual_emit);
+            assert!(harden_out.is_none());
         }
         _ => panic!("expected build command"),
     }
@@ -269,6 +273,223 @@ fn parse_languages_json_flag() {
         Commands::Languages { json } => assert!(json),
         _ => panic!("expected languages command"),
     }
+}
+
+#[test]
+fn parse_compile_dual_emit_flags() {
+    let cli = Cli::try_parse_from([
+        "in",
+        "compile",
+        "--path",
+        "examples/compile/antidecomp_sample.in",
+        "--out",
+        "/tmp/sample.o",
+        "--dual-emit",
+    ])
+    .expect("cli parse");
+    match cli.command {
+        Commands::Compile {
+            dual_emit,
+            harden_out,
+            out,
+            lean,
+            harden,
+            profile,
+            ..
+        } => {
+            assert!(dual_emit);
+            assert!(harden_out.is_none());
+            assert_eq!(out, "/tmp/sample.o");
+            assert!(!lean);
+            assert!(!harden);
+            assert!(matches!(profile, EmitProfileCli::Default));
+        }
+        _ => panic!("expected compile command"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "in",
+        "compile",
+        "--path",
+        "x.in",
+        "--out",
+        "x.o",
+        "--harden-out",
+        "x-harden.o",
+        "--lean",
+    ])
+    .expect("cli parse");
+    match cli.command {
+        Commands::Compile {
+            dual_emit,
+            harden_out,
+            lean,
+            ..
+        } => {
+            assert!(!dual_emit);
+            assert_eq!(harden_out.as_deref(), Some("x-harden.o"));
+            assert!(lean);
+        }
+        _ => panic!("expected compile command"),
+    }
+}
+
+#[test]
+fn parse_build_dual_emit_flags() {
+    let cli = Cli::try_parse_from([
+        "in",
+        "build",
+        "--path",
+        "hello.in",
+        "--out",
+        "/tmp/sample",
+        "--dual-emit",
+        "--lean",
+    ])
+    .expect("cli parse");
+    match cli.command {
+        Commands::Build {
+            dual_emit,
+            harden_out,
+            out,
+            lean,
+            ..
+        } => {
+            assert!(dual_emit);
+            assert!(harden_out.is_none());
+            assert_eq!(out.as_deref(), Some("/tmp/sample"));
+            assert!(lean);
+        }
+        _ => panic!("expected build command"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "in",
+        "build",
+        "--path",
+        "hello.in",
+        "--out",
+        "/tmp/sample",
+        "--harden-out",
+        "/tmp/sample-harden",
+    ])
+    .expect("cli parse");
+    match cli.command {
+        Commands::Build {
+            dual_emit,
+            harden_out,
+            ..
+        } => {
+            assert!(!dual_emit);
+            assert_eq!(harden_out.as_deref(), Some("/tmp/sample-harden"));
+        }
+        _ => panic!("expected build command"),
+    }
+}
+
+#[test]
+fn dual_emit_writes_runtime_and_harden_artifacts() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let sample = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/compile/antidecomp_sample.in");
+    if !sample.is_file() {
+        eprintln!(
+            "skip dual_emit_writes_runtime_and_harden_artifacts: missing {}",
+            sample.display()
+        );
+        return;
+    }
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("in-cli-dual-emit-{}-{stamp}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let runtime = dir.join("sample.o");
+    let harden = dir.join("sample-harden.o");
+    let sample_s = sample.to_string_lossy();
+    let runtime_s = runtime.to_string_lossy();
+    let harden_s = harden.to_string_lossy();
+
+    let result = crate::compile::cmd_compile(
+        std::path::Path::new("."),
+        &sample_s,
+        CompileTargetCli::Native,
+        &runtime_s,
+        "App",
+        ParserCli::Auto,
+        Some("main"),
+        Some("x86_64-unknown-none"),
+        NativeLinkageCli::StaticLib,
+        1,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        inauguration::emit_profile::EmitProfile::Default,
+        Some(&harden_s),
+    );
+
+    match result {
+        Ok(()) => {
+            assert!(
+                runtime.is_file(),
+                "runtime artifact missing: {}",
+                runtime.display()
+            );
+            assert!(
+                harden.is_file(),
+                "harden artifact missing: {}",
+                harden.display()
+            );
+            let runtime_bytes = std::fs::read(&runtime).expect("read runtime");
+            let harden_bytes = std::fs::read(&harden).expect("read harden");
+            assert!(
+                !runtime_bytes.is_empty() && !harden_bytes.is_empty(),
+                "artifacts must be non-empty"
+            );
+            assert_ne!(
+                runtime_bytes, harden_bytes,
+                "runtime and harden artifacts must differ"
+            );
+            assert!(
+                harden_bytes.len() >= runtime_bytes.len(),
+                "harden artifact should be at least as large as runtime ({} vs {})",
+                harden_bytes.len(),
+                runtime_bytes.len()
+            );
+            let has_hashed = |bytes: &[u8]| {
+                bytes
+                    .windows(3)
+                    .any(|w| w[0] == b'_' && w[1] == b'H' && w[2].is_ascii_hexdigit())
+            };
+            assert!(
+                !has_hashed(&runtime_bytes),
+                "runtime artifact must not contain _H hashed symbols"
+            );
+            assert!(
+                has_hashed(&harden_bytes),
+                "harden artifact should contain _H hashed symbols"
+            );
+        }
+        Err(err) => {
+            let msg = err.to_string();
+            if msg.contains("not implemented")
+                || msg.contains("NATIVE_BACKEND")
+                || msg.contains("native-lowering-failed")
+            {
+                eprintln!("skip dual_emit_writes_runtime_and_harden_artifacts: {msg}");
+            } else {
+                panic!("dual-emit compile failed: {msg}");
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

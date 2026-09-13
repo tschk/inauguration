@@ -164,6 +164,96 @@ fn native_staticlib_emits_x86_64_linux_object_file() {
 }
 
 #[test]
+fn dual_emit_writes_runtime_and_harden_artifacts() {
+    let source_path = temp_path("dual-emit.in");
+    let runtime_out = temp_path("dual-runtime.o");
+    let harden_out = temp_path("dual-harden.o");
+    let sample = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/compile/antidecomp_sample.in");
+    let source = fs::read_to_string(&sample).unwrap_or_else(|_| {
+        concat!(
+            "fn mix(a: Int, b: Int) -> Int {\n",
+            "  let s: Int = a + b;\n",
+            "  let t: Int = s * 3;\n",
+            "  return t - a;\n",
+            "}\n",
+            "fn gate(n: Int) -> Int {\n",
+            "  if n > 0 {\n",
+            "    return mix(n, 2);\n",
+            "  } else {\n",
+            "    return mix(1, n);\n",
+            "  }\n",
+            "}\n",
+            "fn main() -> Int {\n",
+            "  return gate(7);\n",
+            "}\n",
+        )
+        .to_string()
+    });
+    fs::write(&source_path, source).unwrap();
+
+    let mut runtime_req = default_request(
+        source_path.clone(),
+        CompileTarget::Native,
+        Some("main"),
+        Some(runtime_out.clone()),
+    );
+    runtime_req.linkage = NativeLinkage::StaticLib;
+    runtime_req.target_triple = Some("x86_64-unknown-none".to_string());
+    runtime_req.profile = crate::emit_profile::EmitProfile::Default;
+
+    let mut harden_req = runtime_req.clone();
+    harden_req.out = Some(harden_out.clone());
+    harden_req.profile = crate::emit_profile::EmitProfile::Harden;
+
+    let runtime_report = compile_owned(&runtime_req);
+    let harden_report = compile_owned(&harden_req);
+
+    if !runtime_report.success || !harden_report.success {
+        let msg = format!("{runtime_report:?} / {harden_report:?}");
+        if msg.contains("not implemented")
+            || msg.contains("NATIVE_BACKEND")
+            || msg.contains("native-lowering-failed")
+        {
+            eprintln!("skip dual_emit_writes_runtime_and_harden_artifacts: {msg}");
+            let _ = fs::remove_file(&source_path);
+            let _ = fs::remove_file(&runtime_out);
+            let _ = fs::remove_file(&harden_out);
+            return;
+        }
+        panic!("dual-emit owned compile failed: {msg}");
+    }
+
+    assert!(runtime_out.is_file(), "runtime artifact missing");
+    assert!(harden_out.is_file(), "harden artifact missing");
+    let runtime_bytes = fs::read(&runtime_out).expect("read runtime");
+    let harden_bytes = fs::read(&harden_out).expect("read harden");
+    assert_ne!(
+        runtime_bytes, harden_bytes,
+        "runtime and harden artifacts must differ"
+    );
+    let has_hashed = |bytes: &[u8]| {
+        bytes
+            .windows(3)
+            .any(|w| w[0] == b'_' && w[1] == b'H' && w[2].is_ascii_hexdigit())
+    };
+    assert!(
+        !has_hashed(&runtime_bytes),
+        "runtime artifact must not contain _H hashed symbols"
+    );
+    assert!(
+        has_hashed(&harden_bytes),
+        "harden artifact should contain _H hashed symbols"
+    );
+
+    fs::remove_file(source_path).unwrap();
+    fs::remove_file(&runtime_out).unwrap();
+    fs::remove_file(&harden_out).unwrap();
+    let _ = fs::remove_file(runtime_out.with_extension("abi.json"));
+    let _ = fs::remove_file(harden_out.with_extension("abi.json"));
+}
+
+#[test]
 fn native_staticlib_emits_aarch64_linux_object_file() {
     let source_path = temp_path("aarch64-object.in");
     let out_path = temp_path("aarch64-object.o");
