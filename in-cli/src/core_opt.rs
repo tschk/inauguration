@@ -3044,9 +3044,8 @@ mod tests {
         assert!(!names.contains(&"helper"));
     }
 
-    #[test]
-    fn harden_cfg_dispatch_wraps_straight_line() {
-        let mut decls = vec![Decl::Function {
+    fn straight_line_sum_decls() -> Vec<Decl> {
+        vec![Decl::Function {
             name: "main".into(),
             params: vec![],
             ret: Typ::Int,
@@ -3065,45 +3064,82 @@ mod tests {
                 Stmt::Return(Some(Expr::Ident("c".into()))),
             ],
             type_params: vec![],
-        }];
-        optimize_with_profile(&mut decls, Some("main"), EmitProfile::Harden);
-        let Decl::Function { body, .. } = &decls[0] else {
-            panic!("expected function");
-        };
-        fn walk_has_dispatch(stmts: &[Stmt]) -> (bool, bool) {
-            let mut has_loop = false;
-            let mut has_pc = false;
-            for s in stmts {
-                match s {
-                    Stmt::Let(name, ..) if name == "_pc" => has_pc = true,
-                    Stmt::Assign(name, _) if name == "_pc" => has_pc = true,
-                    Stmt::Loop { body, .. } => {
-                        has_loop = true;
-                        let (l, p) = walk_has_dispatch(body);
-                        has_loop |= l;
-                        has_pc |= p;
-                    }
-                    Stmt::If {
-                        then_body,
-                        else_body,
-                        ..
-                    } => {
-                        let (l1, p1) = walk_has_dispatch(then_body);
-                        let (l2, p2) = walk_has_dispatch(else_body);
-                        has_loop |= l1 | l2;
-                        has_pc |= p1 | p2;
-                    }
-                    _ => {}
+        }]
+    }
+
+    fn walk_has_pc_dispatch(stmts: &[Stmt]) -> (bool, bool) {
+        let mut has_loop = false;
+        let mut has_pc = false;
+        for s in stmts {
+            match s {
+                Stmt::Let(name, ..) if name == "_pc" => has_pc = true,
+                Stmt::Assign(name, _) if name == "_pc" => has_pc = true,
+                Stmt::Loop { body, .. } => {
+                    has_loop = true;
+                    let (l, p) = walk_has_pc_dispatch(body);
+                    has_loop |= l;
+                    has_pc |= p;
                 }
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    let (l1, p1) = walk_has_pc_dispatch(then_body);
+                    let (l2, p2) = walk_has_pc_dispatch(else_body);
+                    has_loop |= l1 | l2;
+                    has_pc |= p1 | p2;
+                }
+                _ => {}
             }
-            (has_loop, has_pc)
         }
-        let (has_loop, has_pc) = walk_has_dispatch(body);
+        (has_loop, has_pc)
+    }
+
+    fn function_body(decls: &[Decl]) -> &[Stmt] {
+        match &decls[0] {
+            Decl::Function { body, .. } => body,
+            _ => panic!("expected function"),
+        }
+    }
+
+    #[test]
+    fn harden_cfg_dispatch_wraps_straight_line() {
+        let mut decls = straight_line_sum_decls();
+        optimize_with_profile(&mut decls, Some("main"), EmitProfile::Harden);
+        let body = function_body(&decls);
+        let (has_loop, has_pc) = walk_has_pc_dispatch(body);
         assert!(
             has_loop,
             "expected dispatcher loop in harden body: {body:?}"
         );
         assert!(has_pc, "expected _pc state var in harden body: {body:?}");
+    }
+
+    #[test]
+    fn runtime_profile_has_no_cfg_pc_dispatch() {
+        for profile in [EmitProfile::Default, EmitProfile::Lean] {
+            let mut decls = straight_line_sum_decls();
+            optimize_with_profile(&mut decls, Some("main"), profile);
+            let body = function_body(&decls);
+            let (_has_loop, has_pc) = walk_has_pc_dispatch(body);
+            assert!(
+                !has_pc,
+                "{profile} runtime profile must not insert CFG _pc dispatch: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn harden_profile_keeps_cfg_pc_dispatch() {
+        let mut decls = straight_line_sum_decls();
+        optimize_with_profile(&mut decls, Some("main"), EmitProfile::Harden);
+        let body = function_body(&decls);
+        let (has_loop, has_pc) = walk_has_pc_dispatch(body);
+        assert!(
+            has_loop && has_pc,
+            "harden profile must keep CFG _pc dispatch: {body:?}"
+        );
     }
 
     #[test]

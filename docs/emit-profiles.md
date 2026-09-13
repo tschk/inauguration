@@ -41,6 +41,29 @@ Lean raises the inliner threshold (`2` → `12` stmts) and recursion depth
 (`10` → `24`), runs two inline waves, then the usual fold/DCE/dead-fn cleanup.
 Prefer this when you want smaller call graphs inside a module without harden noise.
 
+## Dual-emit
+
+From one CLI invocation, emit **two** artifacts:
+
+1. **runtime** — `default` or `lean` only (fast; **no** harden transforms — no CFG `_pc` dispatch, no alien MBA/junk harden shapes)
+2. **distribution / anti-decomp sample** — always `EmitProfile::Harden`, written to `--harden-out` (or derived from `--out` by inserting `-harden` before the extension)
+
+The hot-path production/runtime emit must **not** enable harden IR passes. Profiles stay orthogonal: `lean ≠ harden`. Dual-emit is rejected when the only requested profile is harden (`--harden` / `--profile harden`).
+
+`--harden-out` together with `--out` implies dual-emit even without `--dual-emit`. `--out` is required when dual-emit / `--harden-out` is set (`in compile` already requires `--out`; `in build` requires it in this mode).
+
+```bash
+in compile --path examples/compile/antidecomp_sample.in \
+  --target native --target-triple x86_64-unknown-none \
+  --linkage static-lib --entry main \
+  --out /tmp/sample.o --harden-out /tmp/sample-harden.o
+# or:
+in compile ... --out /tmp/sample.o --dual-emit
+in build --path ... --out /tmp/sample --dual-emit --lean   # runtime=lean, harden beside it
+```
+
+Derived harden paths: `foo.o` → `foo-harden.o`, `foo` → `foo-harden`.
+
 ## Honest limits
 
 - No virtualization / VM-protect. Lite CFG dispatch is intentionally shallow (straight-line bodies only; skips loops/try/match/throw) — not an industrial flattener or VM-protect equivalent.
@@ -52,6 +75,8 @@ Prefer this when you want smaller call graphs inside a module without harden noi
 
 ## Ghidra / objdump smoke
 
-See `scripts/ghidra-antidecomp-smoke.sh`. When Ghidra + Java are absent the
-script still builds default vs harden artifacts and writes objdump/nm metrics
+See `scripts/ghidra-antidecomp-smoke.sh`. Prefer **dual-emit** (`--out` +
+`--harden-out`, or `--dual-emit`) as the one-shot way to produce both metrics
+artifacts. Separate `--profile default` / `--profile harden` compiles still
+work. When Ghidra + Java are absent the script still writes objdump/nm metrics
 under `docs/benchmarks/`, exiting 0 with a skip note for CI.

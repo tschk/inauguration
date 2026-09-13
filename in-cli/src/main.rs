@@ -126,6 +126,17 @@ enum Commands {
         harden: bool,
         #[arg(long, action = clap::ArgAction::SetTrue, help = "Shorthand for --profile lean")]
         lean: bool,
+        #[arg(
+            long,
+            action = clap::ArgAction::SetTrue,
+            help = "Emit runtime artifact to --out plus a separate harden sample (see --harden-out)"
+        )]
+        dual_emit: bool,
+        #[arg(
+            long,
+            help = "Harden artifact path; with --out, implies --dual-emit. Default: insert -harden before the --out extension"
+        )]
+        harden_out: Option<String>,
         #[arg(long, default_value = "App")]
         module_id: String,
         #[arg(
@@ -328,6 +339,17 @@ enum Commands {
         harden: bool,
         #[arg(long, action = clap::ArgAction::SetTrue, help = "Shorthand for --profile lean")]
         lean: bool,
+        #[arg(
+            long,
+            action = clap::ArgAction::SetTrue,
+            help = "Emit runtime artifact to --out plus a separate harden sample (see --harden-out)"
+        )]
+        dual_emit: bool,
+        #[arg(
+            long,
+            help = "Harden artifact path; with --out, implies --dual-emit. Default: insert -harden before the --out extension"
+        )]
+        harden_out: Option<String>,
     },
     #[command(about = "Compile and execute a source file via JIT")]
     Execute {
@@ -491,24 +513,37 @@ impl Commands {
                 profile,
                 harden,
                 lean,
+                dual_emit,
+                harden_out,
                 module_id,
                 verbose,
                 swiftpm,
                 allow_external_toolchain,
                 parser,
             } => {
-                let profile = inauguration::emit_profile::EmitProfile::resolve(
+                let plan = inauguration::emit_profile::EmitProfile::resolve_dual_emit(
                     profile.to_owned(),
                     harden,
                     lean,
+                    dual_emit,
+                    out.as_deref(),
+                    harden_out.as_deref(),
                 )
                 .map_err(InError::Message)?;
+                let (profile, dual_harden_out) = match plan {
+                    inauguration::emit_profile::ResolvedEmit::Single(profile) => (profile, None),
+                    inauguration::emit_profile::ResolvedEmit::Dual {
+                        runtime,
+                        harden_out,
+                    } => (runtime, Some(harden_out)),
+                };
                 cmd_build(
                     invocation_cwd,
                     &path,
                     out,
                     release,
                     profile,
+                    dual_harden_out,
                     &module_id,
                     verbose,
                     swiftpm,
@@ -627,13 +662,25 @@ impl Commands {
                 profile,
                 harden,
                 lean,
+                dual_emit,
+                harden_out,
             } => {
-                let profile = inauguration::emit_profile::EmitProfile::resolve(
+                let plan = inauguration::emit_profile::EmitProfile::resolve_dual_emit(
                     profile.to_owned(),
                     harden,
                     lean,
+                    dual_emit,
+                    Some(out.as_str()),
+                    harden_out.as_deref(),
                 )
                 .map_err(InError::Message)?;
+                let (profile, dual_harden_out) = match plan {
+                    inauguration::emit_profile::ResolvedEmit::Single(profile) => (profile, None),
+                    inauguration::emit_profile::ResolvedEmit::Dual {
+                        runtime,
+                        harden_out,
+                    } => (runtime, Some(harden_out)),
+                };
                 cmd_compile(
                     invocation_cwd,
                     &path,
@@ -652,6 +699,7 @@ impl Commands {
                     metadata.as_deref(),
                     debug,
                     profile,
+                    dual_harden_out.as_deref(),
                 )
             }
             Commands::Execute {
