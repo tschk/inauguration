@@ -2230,6 +2230,9 @@ fn lower_call_expr(
         lower_call_args(emitter, ctx, args, &target_name, pending_calls)?;
         // Extern function: emit CALL instruction with relocation.
         // The linker resolves the target — until then, displacement=0.
+        if antidecomp::harden_active() {
+            emitter.emit_insns(&antidecomp::junk_pad());
+        }
         let site = emitter.len() as u32;
         emitter.emit_insns(&x86_64::call_rel32(0));
         pending_calls.push(PendingCall {
@@ -2261,6 +2264,9 @@ fn lower_call_expr(
 
     lower_call_args(emitter, ctx, args, &target_name, pending_calls)?;
 
+    if antidecomp::harden_active() {
+        emitter.emit_insns(&antidecomp::junk_pad());
+    }
     let site = emitter.len() as u32;
     emitter.emit_insns(&x86_64::call_rel32(0));
     pending_calls.push(PendingCall {
