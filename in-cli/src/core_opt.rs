@@ -2027,11 +2027,10 @@ fn stmts_forbid_cfg_dispatch(stmts: &[Stmt]) -> bool {
                 then_body,
                 else_body,
                 ..
-            } => {
-                if stmts_forbid_cfg_dispatch(then_body) || stmts_forbid_cfg_dispatch(else_body) {
-                    return true;
-                }
+            } if stmts_forbid_cfg_dispatch(then_body) || stmts_forbid_cfg_dispatch(else_body) => {
+                return true;
             }
+            Stmt::If { .. } => {}
             _ => {}
         }
     }
@@ -2046,7 +2045,7 @@ fn harden_cfg_dispatch_lite(decls: &mut [Decl]) {
         if stmts_forbid_cfg_dispatch(body) {
             continue;
         }
-        let original: Vec<Stmt> = body.drain(..).collect();
+        let original: Vec<Stmt> = std::mem::take(body);
         // Chunk large bodies so the dispatcher stays bounded.
         let chunk = if original.len() > 8 { 2 } else { 1 };
         let mut chunks: Vec<Vec<Stmt>> = Vec::new();
