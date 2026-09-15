@@ -77,6 +77,7 @@ tree-sitter-v = { version = "0.0.3", optional = true }
 tar = "0.4.46"
 flate2 = "1.1.9"
 zip = "8.6.0"
+ureq = "3.4.1"
 [features]
 default = []
 parse-extended = [
@@ -106,6 +107,7 @@ notify = "8"
 
 [dev-dependencies]
 criterion = "0.8"
+ureq = "3.4.1"
 
 [[bench]]
 name = "hybrid_sil"

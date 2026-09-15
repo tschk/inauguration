@@ -1018,20 +1018,35 @@ fn require_https(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn get_http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .user_agent(REGISTRY_USER_AGENT)
+        .build()
+        .new_agent()
+}
+
 fn curl_get(url: &str) -> Result<String, String> {
     require_https(url)?;
-    let output = Command::new("curl")
-        .env_clear()
-        .args(["-fsSL", "-A", REGISTRY_USER_AGENT, url])
-        .output()
-        .map_err(|err| format!("curl not available for registry fetch: {err}"))?;
-    if !output.status.success() {
+    let agent = get_http_agent();
+
+    let response = match agent.get(url).call() {
+        Ok(r) => r,
+        Err(e) => return Err(format!("HTTP GET {url} failed: {e}")),
+    };
+
+    if response.status().as_u16() >= 400 {
         return Err(format!(
-            "curl GET {url} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "HTTP GET {url} failed with status code: {}",
+            response.status().as_u16()
         ));
     }
-    String::from_utf8(output.stdout).map_err(|err| format!("curl response was not utf-8: {err}"))
+
+    let mut reader = response.into_body().into_reader();
+    let mut body = String::new();
+    std::io::Read::read_to_string(&mut reader, &mut body)
+        .map_err(|err| format!("HTTP response could not be read: {err}"))?;
+
+    Ok(body)
 }
 
 fn curl_to_file(url: &str, path: &Path) -> Result<(), String> {
@@ -1044,20 +1059,32 @@ fn curl_to_file(url: &str, path: &Path) -> Result<(), String> {
             )
         })?;
     }
-    let status = Command::new("curl")
-        .args([
-            "-fsSL",
-            "-A",
-            REGISTRY_USER_AGENT,
-            url,
-            "-o",
-            &path.display().to_string(),
-        ])
-        .status()
-        .map_err(|err| format!("curl not available for registry fetch: {err}"))?;
-    if !status.success() {
-        return Err(format!("curl download failed for {url}"));
+
+    let agent = get_http_agent();
+
+    let response = match agent.get(url).call() {
+        Ok(r) => r,
+        Err(e) => return Err(format!("HTTP GET {url} failed: {e}")),
+    };
+
+    if response.status().as_u16() >= 400 {
+        return Err(format!(
+            "HTTP GET {url} failed with status code: {}",
+            response.status().as_u16()
+        ));
     }
+
+    let mut file = fs::File::create(path)
+        .map_err(|err| format!("failed to create file {}: {err}", path.display()))?;
+
+    let mut reader = response.into_body().into_reader();
+    std::io::copy(&mut reader, &mut file).map_err(|err| {
+        format!(
+            "HTTP response could not be saved to {}: {err}",
+            path.display()
+        )
+    })?;
+
     Ok(())
 }
 
