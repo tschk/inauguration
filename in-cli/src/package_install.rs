@@ -761,7 +761,7 @@ fn verify_archive_checksum(path: &Path, checksum: &ArtifactChecksum) -> Result<(
     match checksum {
         ArtifactChecksum::Sha1Hex(expected) => verify_hex_digest(
             expected,
-            &hex_encode(&sha2::Sha256::digest(&data)),
+            &hex_encode(&sha1::Sha1::digest(&data)),
             path,
             "sha1",
         ),
@@ -1045,6 +1045,7 @@ fn curl_to_file(url: &str, path: &Path) -> Result<(), String> {
         })?;
     }
     let status = Command::new("curl")
+        .env_clear()
         .args([
             "-fsSL",
             "-A",
@@ -1080,6 +1081,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn require_https_rejects_non_https() {
+        assert!(require_https("https://example.com/pkg").is_ok());
+        assert!(require_https("http://example.com/pkg").is_err());
+        assert!(require_https("file:///tmp/pkg").is_err());
+    }
+
+    #[test]
     fn verify_archive_checksum_error_paths() {
         let dir = tempfile_dir("verify-checksum-err");
         let path = dir.join("dummy.zip");
@@ -1087,6 +1095,12 @@ mod tests {
 
         let sha1 = ArtifactChecksum::Sha1Hex("badsha1".to_string());
         assert!(verify_archive_checksum(&path, &sha1).is_err());
+        let sha1_ok =
+            ArtifactChecksum::Sha1Hex("2aae6c35c94fcfb415dbe95f408b9ce91ee846ed".to_string());
+        assert!(
+            verify_archive_checksum(&path, &sha1_ok).is_ok(),
+            "npm shasum is SHA-1 of the archive bytes, not SHA-256"
+        );
 
         let sha256 = ArtifactChecksum::Sha256Hex("badsha256".to_string());
         assert!(verify_archive_checksum(&path, &sha256).is_err());

@@ -4,10 +4,10 @@
       "symbol": "fiber_greet",
       "returns": "string",
       "invoke": {
-        "program": "sh",
+        "program": "go",
         "args": [
-          "-c",
-          "cd inauguration-invoke && go run ."
+          "run",
+          "./inauguration-invoke"
         ]
       }
     }
