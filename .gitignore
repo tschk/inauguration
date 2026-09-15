@@ -28,3 +28,6 @@ docs-site/.wrangler/
 
 # moonshine docs-site deps
 docs-site/node_modules/
+
+# Amp orb portals (local)
+.amp/portals/
