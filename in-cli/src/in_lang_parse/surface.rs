@@ -508,6 +508,13 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
                 }
                 continue;
             }
+            if is_closed_world_topology_block(line) {
+                depth += brace_delta(raw_line);
+                if depth < 0 {
+                    depth = 0;
+                }
+                continue;
+            }
             if line.starts_with("fn ")
                 || line.starts_with("interrupt fn ")
                 || line.starts_with("struct ")
@@ -531,6 +538,23 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
         }
     }
     Ok(info)
+}
+
+/// Closed-world topology blocks are product-owned (e.g. Subspace system graphs).
+/// Inauguration skips them at the surface so `in graph` / `in compile` can still
+/// inspect `.in` files that mix components with system/task/grant/port decls.
+fn is_closed_world_topology_block(line: &str) -> bool {
+    const KINDS: &[&str] = &[
+        "system ",
+        "domain ",
+        "instance ",
+        "task ",
+        "grant ",
+        "port ",
+        "interrupt ",
+        "startup ",
+    ];
+    KINDS.iter().any(|kind| line.starts_with(kind))
 }
 
 pub(crate) fn normalize_import_path(raw: &str) -> &str {

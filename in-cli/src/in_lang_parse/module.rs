@@ -98,6 +98,8 @@ pub(crate) fn parse_module_from_blocks(
                 parse_component_block(block)
                     .map_err(|e| format!(".in at line {start_line}: {e}"))?,
             );
+        } else if is_skipped_topology_block(line) {
+            continue;
         } else if line.starts_with("var ") {
             let rest = trim(&line[4..]);
             if let Some(eq) = rest.find('=') {
@@ -153,6 +155,17 @@ pub(crate) fn parse_module_from_blocks(
         }
     }
     Ok(UnifiedModule::new(decls))
+}
+
+fn is_skipped_topology_block(line: &str) -> bool {
+    line.starts_with("system ")
+        || line.starts_with("domain ")
+        || line.starts_with("instance ")
+        || line.starts_with("task ")
+        || line.starts_with("grant ")
+        || line.starts_with("port ")
+        || (line.starts_with("interrupt ") && !line.starts_with("interrupt fn "))
+        || line.starts_with("startup ")
 }
 
 pub(crate) fn parse_in_module_without_validation(

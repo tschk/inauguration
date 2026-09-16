@@ -69,6 +69,31 @@ fn main() -> void
 }
 
 #[test]
+fn test_parse_in_surface_skips_closed_world_topology_blocks() {
+    let src = r#"
+        package subspace.demo
+        import "../components/uart.in"
+        system vertical-slice {
+          target "thumbv8m.main-none-eabi"
+          board "mps2-an521"
+        }
+        domain kernel { isolated false }
+        instance uart0 { component uart_driver domain kernel }
+        task prod_task { instance prod priority 10 }
+        grant uart0_mmio { kind peripheral owner uart0 }
+        port msg { type U32 from prod_task to cons_task }
+        interrupt timer0 { irq 8 owner uart0 }
+        startup uart0 { after }
+        component uart_driver {
+          target "thumbv8m.main-none-eabi"
+        }
+    "#;
+    let info = parse_in_surface_info(src).expect("topology blocks are skipped, not unknown syntax");
+    assert_eq!(info.package, Some("subspace.demo".to_string()));
+    assert_eq!(info.imports, vec![r#""../components/uart.in""#.to_string()]);
+}
+
+#[test]
 fn test_parse_in_surface_info_happy_path() {
     let src = "
         package my-pkg
