@@ -403,16 +403,17 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_cargo_dependencies_finds_and_compiles() {
+    fn test_compile_cargo_dependencies_finds_and_compiles() -> Result<(), Box<dyn std::error::Error>>
+    {
         let temp = TempDirGuard::new();
         let cargo_toml = temp.path.join("Cargo.toml");
         let src_dir = temp.path.join("src");
-        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&src_dir)?;
         let lib_rs = src_dir.join("lib.rs");
 
         let dep_dir = temp.path.join("dummy-dep");
         let dep_src_dir = dep_dir.join("src");
-        fs::create_dir_all(&dep_src_dir).unwrap();
+        fs::create_dir_all(&dep_src_dir)?;
         let dep_cargo_toml = dep_dir.join("Cargo.toml");
         let dep_lib_rs = dep_src_dir.join("lib.rs");
 
@@ -425,9 +426,8 @@ name = "libc"
 version = "0.2.0"
 edition = "2021"
 "#,
-        )
-        .unwrap();
-        fs::write(&dep_lib_rs, "pub fn libc_func() {}").unwrap();
+        )?;
+        fs::write(&dep_lib_rs, "pub fn libc_func() {}")?;
 
         fs::write(
             &cargo_toml,
@@ -439,9 +439,8 @@ edition = "2021"
 [dependencies]
 libc = { path = "dummy-dep" }
 "#,
-        )
-        .unwrap();
-        fs::write(&lib_rs, "pub fn foo() {}").unwrap();
+        )?;
+        fs::write(&lib_rs, "pub fn foo() {}")?;
 
         let modules = compile_cargo_dependencies(&temp.path);
 
@@ -454,6 +453,7 @@ libc = { path = "dummy-dep" }
             libc_dep.is_some(),
             "Expected 'libc' to be in the compiled dependencies"
         );
+        Ok(())
     }
 
     #[test]
@@ -464,11 +464,13 @@ libc = { path = "dummy-dep" }
     }
 
     #[test]
-    fn test_compile_cargo_dependencies_invalid_cargo_toml() {
+    fn test_compile_cargo_dependencies_invalid_cargo_toml() -> Result<(), Box<dyn std::error::Error>>
+    {
         let temp = TempDirGuard::new();
         let cargo_toml = temp.path.join("Cargo.toml");
-        fs::write(&cargo_toml, "invalid toml [] [] []").unwrap();
+        fs::write(&cargo_toml, "invalid toml [] [] []")?;
         let modules = compile_cargo_dependencies(&temp.path);
         assert!(modules.is_empty());
+        Ok(())
     }
 }
