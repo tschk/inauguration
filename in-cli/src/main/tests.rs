@@ -40,6 +40,39 @@ fn parse_build_subcommand() {
 }
 
 #[test]
+fn parse_pack_uf2_subcommand() {
+    let cli = Cli::try_parse_from([
+        "in",
+        "pack",
+        "uf2",
+        "--input",
+        "payload.bin",
+        "--out",
+        "out.uf2",
+        "--family",
+        "0xE48BFF59",
+    ])
+    .expect("cli parse");
+    match cli.command {
+        Commands::Pack { action } => match action {
+            PackCommands::Uf2 {
+                input,
+                out,
+                addr,
+                family,
+            } => {
+                assert_eq!(input, "payload.bin");
+                assert_eq!(out, "out.uf2");
+                assert_eq!(addr, "0x10000000");
+                assert_eq!(family.as_deref(), Some("0xE48BFF59"));
+            }
+            _ => panic!("expected pack uf2"),
+        },
+        _ => panic!("expected pack command"),
+    }
+}
+
+#[test]
 fn parse_build_swiftpm_flag() {
     let cli = Cli::try_parse_from(["in", "build", "--path", "Foo.swift", "--swiftpm"])
         .expect("cli parse");

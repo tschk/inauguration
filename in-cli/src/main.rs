@@ -416,6 +416,11 @@ enum Commands {
         debug: bool,
     },
     Doctor,
+    #[command(about = "Pack generic freestanding artifacts (UF2, raw, linker script)")]
+    Pack {
+        #[command(subcommand)]
+        action: PackCommands,
+    },
     #[command(about = "Summarize hotreload metrics")]
     Bench {
         #[arg(long, default_value = DEFAULT_BENCH_METRICS)]
@@ -425,6 +430,43 @@ enum Commands {
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PackCommands {
+    #[command(about = "Pack a payload into Microsoft UF2 blocks")]
+    Uf2 {
+        #[arg(long)]
+        input: String,
+        #[arg(long)]
+        out: String,
+        #[arg(long, default_value = "0x10000000")]
+        addr: String,
+        #[arg(long)]
+        family: Option<String>,
+    },
+    #[command(about = "Copy a payload as a raw flash image")]
+    Raw {
+        #[arg(long)]
+        input: String,
+        #[arg(long)]
+        out: String,
+    },
+    #[command(about = "Emit a generic Cortex-M GNU ld script")]
+    Linker {
+        #[arg(long)]
+        out: String,
+        #[arg(long, default_value = "0x10000000")]
+        flash_origin: String,
+        #[arg(long, default_value = "524288")]
+        flash_len: String,
+        #[arg(long, default_value = "0x38000000")]
+        ram_origin: String,
+        #[arg(long, default_value = "262144")]
+        ram_len: String,
+        #[arg(long, default_value = "Reset")]
+        entry: String,
     },
 }
 
@@ -472,6 +514,8 @@ pub mod eval;
 pub mod graph;
 #[path = "main/package.rs"]
 pub mod package;
+#[path = "main/pack.rs"]
+pub mod pack;
 #[path = "main/plugin.rs"]
 pub mod plugin;
 #[path = "main/tools.rs"]
@@ -499,6 +543,7 @@ impl Commands {
         use crate::doctor::cmd_doctor;
         use crate::eval::cmd_eval_source_or_path;
         use crate::graph::cmd_graph;
+        use crate::pack::cmd_pack;
         use crate::package::{cmd_install, cmd_package, cmd_package_lock};
         use crate::plugin::cmd_plugin;
         use crate::tools::{cmd_agent, cmd_canonicalize, cmd_explain, cmd_fix, cmd_languages};
@@ -748,6 +793,7 @@ impl Commands {
                 debug,
             } => cmd_eval_source_or_path(invocation_cwd, source, parser, verbose, debug),
             Commands::Doctor => cmd_doctor(),
+            Commands::Pack { action } => cmd_pack(invocation_cwd, action),
             Commands::Bench { metrics } => {
                 cmd_bench(&workspace_root(invocation_cwd.to_path_buf())?, &metrics)
             }

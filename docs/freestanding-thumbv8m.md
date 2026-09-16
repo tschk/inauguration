@@ -14,6 +14,8 @@ Generic Cortex-M33 freestanding target support in Inauguration.
 | Raw binary helper | Existing `native_emit::raw` |
 | UF2 packing helper | Implemented (`native_emit::uf2`) |
 | Linker layout script generator | Implemented (`native_emit::linker_layout`) |
+| UF2 / raw / linker CLI | Implemented (`in pack uf2|raw|linker`) |
+| QEMU argv helper | Implemented (`native_emit::qemu_harness`) |
 | Vector table / IRQ synthesis | Product-owned (e.g. Subspace) |
 | MPU / board capsules | Product-owned |
 

@@ -10,6 +10,7 @@ pub mod lower;
 mod macho;
 pub mod native_link;
 pub mod object;
+pub mod qemu_harness;
 pub mod raw;
 pub mod sci;
 pub mod source_emit;
@@ -43,5 +44,7 @@ pub use target::{
     freestanding_supported, macho_target_status, resolve_native_target,
 };
 pub use thumb_lower::{THUMB_TRIPLE, ThumbCompileResult, lower_module as lower_thumb_module};
+pub use qemu_harness::QemuRunSpec;
+pub use raw::write_raw_binary;
 pub use uf2::{UF2_FAMILY_RP2350_ARM_S, Uf2Options, encode_uf2, write_uf2};
 pub use wasm::{WASM32_UNKNOWN_TRIPLE, WasmModule, write_scalar_i32_module};
