@@ -85,7 +85,7 @@ pub fn invoke_package_export(
     }
 }
 
-const ALLOWED_INVOKE_PROGRAMS: &[&str] = &["echo", "node", "python3", "cargo", "go", "sh", "true"];
+const ALLOWED_INVOKE_PROGRAMS: &[&str] = &["echo", "node", "python3", "cargo", "go", "true"];
 
 pub fn run_invoke(spec: &PackageInvokeSpec, install_path: &Path) -> Result<String, String> {
     if !ALLOWED_INVOKE_PROGRAMS.contains(&spec.program.as_str()) {
@@ -174,6 +174,16 @@ mod tests {
         };
         let value = invoke_package_export(&runtime, &[]).expect("invoke");
         assert_eq!(value, Value::String("ok".to_string()));
+    }
+
+    #[test]
+    fn rejects_shell_invoke_program() {
+        let spec = PackageInvokeSpec {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "echo pwned".to_string()],
+        };
+        let err = run_invoke(&spec, Path::new(".")).expect_err("sh must not be allowlisted");
+        assert!(err.contains("not in the allowlist"));
     }
 
     #[test]
