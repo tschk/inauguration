@@ -472,6 +472,227 @@ fn rewrite_method_calls_in_expr(expr: &mut Expr, method_map: &HashMap<String, St
     }
 }
 
+fn lower_int_lit(n: i64, ssa: &mut usize, out: &mut String) -> usize {
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, {n}\n"));
+    id
+}
+
+fn lower_float_lit(f: &f64, ssa: &mut usize, out: &mut String) -> usize {
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = float_literal $Builtin.FPIEEE64, {}\n", f));
+    id
+}
+
+fn lower_bool_lit(b: bool, ssa: &mut usize, out: &mut String) -> usize {
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = bool_literal {b}\n"));
+    id
+}
+
+fn lower_string_lit(s: &str, ssa: &mut usize, out: &mut String) -> usize {
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = string_literal {s:?}\n"));
+    id
+}
+
+fn lower_ident(
+    name: &str,
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    if direct_env.contains(name) {
+        if let Some(id) = env.get(name) {
+            return *id;
+        }
+    }
+    if env.contains_key(name) {
+        let id = *ssa;
+        *ssa += 1;
+        out.push_str(&format!("%{id} = load_var {name}\n"));
+        return id;
+    }
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, 0\n"));
+    id
+}
+
+fn lower_unary(
+    op: &str,
+    expr: &Expr,
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    if let Some(n) = fold_unary_int(op, expr) {
+        return lower_int_lit(n, ssa, out);
+    }
+    if let Some(b) = fold_unary_bool(op, expr) {
+        return lower_bool_lit(b, ssa, out);
+    }
+    let arg = lower_expr(expr, env, direct_env, ssa, out);
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = builtin_unop {op:?} %{arg}\n"));
+    id
+}
+
+fn lower_binary(
+    op: &str,
+    lhs: &Expr,
+    rhs: &Expr,
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    if let Some(n) = fold_int_binop(op, lhs, rhs) {
+        return lower_int_lit(n, ssa, out);
+    }
+    if let Some(b) = fold_bool_binop(op, lhs, rhs) {
+        return lower_bool_lit(b, ssa, out);
+    }
+    let lhs_id = lower_expr(lhs, env, direct_env, ssa, out);
+    let rhs_id = lower_expr(rhs, env, direct_env, ssa, out);
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!(
+        "%{id} = builtin_binop {op:?} %{lhs_id}, %{rhs_id}\n"
+    ));
+    id
+}
+
+fn lower_struct_init(
+    name: &str,
+    fields: &[(String, Expr)],
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    let mut rendered_fields = Vec::new();
+    for (field, expr) in fields {
+        let value_id = lower_expr(expr, env, direct_env, ssa, out);
+        rendered_fields.push(format!("{field}:%{value_id}"));
+    }
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!(
+        "%{id} = struct_init {name} {}\n",
+        rendered_fields.join(", ")
+    ));
+    id
+}
+
+fn lower_field_access(
+    base: &Expr,
+    name: &str,
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    let base_id = lower_expr(base, env, direct_env, ssa, out);
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = field_access %{base_id} {name}\n"));
+    id
+}
+
+fn lower_array_lit(
+    items: &[Expr],
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    let mut item_ids = Vec::new();
+    for item in items {
+        item_ids.push(lower_expr(item, env, direct_env, ssa, out));
+    }
+    let id = *ssa;
+    *ssa += 1;
+    let rendered_items = item_ids
+        .iter()
+        .map(|id| format!("%{id}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!("%{id} = array_init {rendered_items}\n"));
+    id
+}
+
+fn lower_index_access(
+    base: &Expr,
+    index: &Expr,
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    let base_id = lower_expr(base, env, direct_env, ssa, out);
+    let index_id = lower_expr(index, env, direct_env, ssa, out);
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = index_access %{base_id}, %{index_id}\n"));
+    id
+}
+
+fn lower_call(
+    callee: &Expr,
+    args: &[Expr],
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    let mut arg_ids = Vec::new();
+    if let Expr::Ident(name) = callee {
+        let r = *ssa;
+        *ssa += 1;
+        out.push_str(&format!(
+            "%{r} = function_ref @{name} : $@convention(thin)\n"
+        ));
+        for arg in args {
+            arg_ids.push(lower_expr(arg, env, direct_env, ssa, out));
+        }
+        let id = *ssa;
+        *ssa += 1;
+        let rendered_args = arg_ids
+            .iter()
+            .map(|id| format!("%{id}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "%{id} = apply %{r}({rendered_args}) : $@convention(thin)\n"
+        ));
+        id
+    } else {
+        let _ = lower_expr(callee, env, direct_env, ssa, out);
+        for arg in args {
+            let _ = lower_expr(arg, env, direct_env, ssa, out);
+        }
+        let id = *ssa;
+        *ssa += 1;
+        out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, 0\n"));
+        id
+    }
+}
+
+fn lower_closure(ssa: &mut usize, out: &mut String) -> usize {
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, 0\n"));
+    id
+}
+
 fn lower_expr(
     e: &Expr,
     env: &HashMap<String, usize>,
@@ -480,177 +701,25 @@ fn lower_expr(
     out: &mut String,
 ) -> usize {
     match e {
-        Expr::IntLit(n) => {
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, {n}\n"));
-            id
-        }
-        Expr::FloatLit(f) => {
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!(
-                "%{id} = float_literal $Builtin.FPIEEE64, {}\n",
-                f.0
-            ));
-            id
-        }
-        Expr::BoolLit(b) => {
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = bool_literal {b}\n"));
-            id
-        }
-        Expr::StringLit(s) => {
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = string_literal {s:?}\n"));
-            id
-        }
-        Expr::Ident(name) => {
-            if direct_env.contains(name)
-                && let Some(id) = env.get(name)
-            {
-                return *id;
-            }
-            if env.contains_key(name) {
-                let id = *ssa;
-                *ssa += 1;
-                out.push_str(&format!("%{id} = load_var {name}\n"));
-                return id;
-            }
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, 0\n"));
-            id
-        }
-        Expr::Unary { op, expr, .. } => {
-            if let Some(n) = fold_unary_int(op, expr) {
-                let id = *ssa;
-                *ssa += 1;
-                out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, {n}\n"));
-                return id;
-            }
-            if let Some(b) = fold_unary_bool(op, expr) {
-                let id = *ssa;
-                *ssa += 1;
-                out.push_str(&format!("%{id} = bool_literal {b}\n"));
-                return id;
-            }
-            let arg = lower_expr(expr, env, direct_env, ssa, out);
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = builtin_unop {op:?} %{arg}\n"));
-            id
-        }
-        Expr::Binary { op, lhs, rhs, .. } => {
-            if let Some(n) = fold_int_binop(op, lhs, rhs) {
-                let id = *ssa;
-                *ssa += 1;
-                out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, {n}\n"));
-                return id;
-            }
-            if let Some(b) = fold_bool_binop(op, lhs, rhs) {
-                let id = *ssa;
-                *ssa += 1;
-                out.push_str(&format!("%{id} = bool_literal {b}\n"));
-                return id;
-            }
-            let lhs_id = lower_expr(lhs, env, direct_env, ssa, out);
-            let rhs_id = lower_expr(rhs, env, direct_env, ssa, out);
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!(
-                "%{id} = builtin_binop {op:?} %{lhs_id}, %{rhs_id}\n"
-            ));
-            id
-        }
+        Expr::IntLit(n) => lower_int_lit(*n, ssa, out),
+        Expr::FloatLit(f) => lower_float_lit(&f.0, ssa, out),
+        Expr::BoolLit(b) => lower_bool_lit(*b, ssa, out),
+        Expr::StringLit(s) => lower_string_lit(s, ssa, out),
+        Expr::Ident(name) => lower_ident(name, env, direct_env, ssa, out),
+        Expr::Unary { op, expr, .. } => lower_unary(op, expr, env, direct_env, ssa, out),
+        Expr::Binary { op, lhs, rhs, .. } => lower_binary(op, lhs, rhs, env, direct_env, ssa, out),
         Expr::StructInit { name, fields, .. } => {
-            let mut rendered_fields = Vec::new();
-            for (field, expr) in fields {
-                let value_id = lower_expr(expr, env, direct_env, ssa, out);
-                rendered_fields.push(format!("{field}:%{value_id}"));
-            }
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!(
-                "%{id} = struct_init {name} {}\n",
-                rendered_fields.join(", ")
-            ));
-            id
+            lower_struct_init(name, fields, env, direct_env, ssa, out)
         }
-        Expr::Field { base, name, .. } => {
-            let base_id = lower_expr(base, env, direct_env, ssa, out);
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = field_access %{base_id} {name}\n"));
-            id
-        }
-        Expr::ArrayLit(items) => {
-            let mut item_ids = Vec::new();
-            for item in items {
-                item_ids.push(lower_expr(item, env, direct_env, ssa, out));
-            }
-            let id = *ssa;
-            *ssa += 1;
-            let rendered_items = item_ids
-                .iter()
-                .map(|id| format!("%{id}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            out.push_str(&format!("%{id} = array_init {rendered_items}\n"));
-            id
-        }
+        Expr::Field { base, name, .. } => lower_field_access(base, name, env, direct_env, ssa, out),
+        Expr::ArrayLit(items) => lower_array_lit(items, env, direct_env, ssa, out),
         Expr::Index { base, index, .. } => {
-            let base_id = lower_expr(base, env, direct_env, ssa, out);
-            let index_id = lower_expr(index, env, direct_env, ssa, out);
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = index_access %{base_id}, %{index_id}\n"));
-            id
+            lower_index_access(base, index, env, direct_env, ssa, out)
         }
-        Expr::Call { callee, args, .. } => {
-            let mut arg_ids = Vec::new();
-            if let Expr::Ident(name) = callee.as_ref() {
-                let r = *ssa;
-                *ssa += 1;
-                out.push_str(&format!(
-                    "%{r} = function_ref @{name} : $@convention(thin)\n"
-                ));
-                for arg in args {
-                    arg_ids.push(lower_expr(arg, env, direct_env, ssa, out));
-                }
-                let id = *ssa;
-                *ssa += 1;
-                let rendered_args = arg_ids
-                    .iter()
-                    .map(|id| format!("%{id}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                out.push_str(&format!(
-                    "%{id} = apply %{r}({rendered_args}) : $@convention(thin)\n"
-                ));
-                id
-            } else {
-                let _ = lower_expr(callee, env, direct_env, ssa, out);
-                for arg in args {
-                    let _ = lower_expr(arg, env, direct_env, ssa, out);
-                }
-                let id = *ssa;
-                *ssa += 1;
-                out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, 0\n"));
-                id
-            }
-        }
-        Expr::Closure { .. } => {
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, 0\n"));
-            id
-        }
+        Expr::Call { callee, args, .. } => lower_call(callee, args, env, direct_env, ssa, out),
+        Expr::Closure { .. } => lower_closure(ssa, out),
     }
 }
-
 fn const_int(e: &Expr) -> Option<i64> {
     match e {
         Expr::IntLit(n) => Some(*n),
