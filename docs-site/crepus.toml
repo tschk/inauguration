@@ -139,6 +139,7 @@ sources = [
   { path = "../docs/parser-surface.md", href = "https://inauguration.tsc.hk/docs/parser-surface.html", title = "Parser surface" },
   { path = "../docs/native-backend.md", href = "https://inauguration.tsc.hk/docs/native-backend.html", title = "Native backend" },
   { path = "../docs/docs-site.md", href = "https://inauguration.tsc.hk/docs/docs-site.html", title = "Docs-site" },
+  { path = "../docs/changelog.md", href = "https://inauguration.tsc.hk/docs/changelog.html", title = "Changelog" },
   { path = "../docs/benchmarks/README.md", href = "https://inauguration.tsc.hk/docs/benchmarks/README.html", title = "Benchmarks" },
   { path = "../docs/benchmarks/jit.md", href = "https://inauguration.tsc.hk/docs/benchmarks/jit.html", title = "JIT benchmarks" },
   { path = "../docs/benchmarks/polyglot-compilers.md", href = "https://inauguration.tsc.hk/docs/benchmarks/polyglot-compilers.html", title = "Polyglot benchmarks" },

@@ -13,6 +13,8 @@ div min-h-screen bg-zinc-950 text-zinc-300 p-6 sm:p-12 text-sm leading-relaxed i
 			nav flex gap-4 text-xs
 				a href="./docs/in-language.html" no-underline text-zinc-400 hover:text-white transition-colors
 					"Docs"
+				a href="./docs/changelog.html" no-underline text-zinc-400 hover:text-white transition-colors
+					"Changelog"
 				a href="https://github.com/tschk/inauguration" no-underline text-zinc-400 hover:text-white transition-colors rel="noopener noreferrer" target="_blank"
 					"GitHub"
 				a href="https://crates.io/crates/inauguration" no-underline text-zinc-400 hover:text-white transition-colors rel="noopener noreferrer" target="_blank"

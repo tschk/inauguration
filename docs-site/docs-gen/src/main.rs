@@ -75,6 +75,7 @@ const NAV_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("docs-site", "Docs-site"),
         ],
     ),
+    ("Project", &[("changelog", "Changelog")]),
     (
         "Benchmarks",
         &[
