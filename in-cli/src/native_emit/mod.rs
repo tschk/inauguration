@@ -38,13 +38,13 @@ pub use object::{
     NATIVE_OBJECT_SUBSET as NATIVE_OBJECT_REASON, NativeObjectArtifact, NativeObjectRequest,
     emit_native_object,
 };
+pub use qemu_harness::QemuRunSpec;
+pub use raw::write_raw_binary;
 pub use target::{
     NATIVE_EMIT_CONTRACT, NATIVE_EMIT_IMPLEMENTED, NATIVE_EMIT_SKELETON, NativeEmitTargetStatus,
     NativeTarget, NativeTargetKind, all_native_emit_targets, elf_linux_target_status,
     freestanding_supported, macho_target_status, resolve_native_target,
 };
 pub use thumb_lower::{THUMB_TRIPLE, ThumbCompileResult, lower_module as lower_thumb_module};
-pub use qemu_harness::QemuRunSpec;
-pub use raw::write_raw_binary;
 pub use uf2::{UF2_FAMILY_RP2350_ARM_S, Uf2Options, encode_uf2, write_uf2};
 pub use wasm::{WASM32_UNKNOWN_TRIPLE, WasmModule, write_scalar_i32_module};

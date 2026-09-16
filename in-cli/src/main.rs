@@ -512,10 +512,10 @@ pub mod doctor;
 pub mod eval;
 #[path = "main/graph.rs"]
 pub mod graph;
-#[path = "main/package.rs"]
-pub mod package;
 #[path = "main/pack.rs"]
 pub mod pack;
+#[path = "main/package.rs"]
+pub mod package;
 #[path = "main/plugin.rs"]
 pub mod plugin;
 #[path = "main/tools.rs"]

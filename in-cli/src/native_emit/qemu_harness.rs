@@ -16,7 +16,11 @@ pub struct QemuRunSpec {
 }
 
 impl QemuRunSpec {
-    pub fn new(qemu_bin: impl Into<String>, machine: impl Into<String>, kernel: impl AsRef<Path>) -> Self {
+    pub fn new(
+        qemu_bin: impl Into<String>,
+        machine: impl Into<String>,
+        kernel: impl AsRef<Path>,
+    ) -> Self {
         Self {
             qemu_bin: qemu_bin.into(),
             machine: machine.into(),

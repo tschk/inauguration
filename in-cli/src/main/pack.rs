@@ -1,7 +1,5 @@
 use super::{InError, PackCommands, Result};
-use inauguration::native_emit::{
-    LinkerLayout, Uf2Options, write_raw_binary, write_uf2,
-};
+use inauguration::native_emit::{LinkerLayout, Uf2Options, write_raw_binary, write_uf2};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +13,10 @@ fn resolve(cwd: &Path, p: &str) -> PathBuf {
 }
 
 fn parse_u32(value: &str, flag: &str) -> Result<u32> {
-    if let Some(stripped) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+    if let Some(stripped) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
         u32::from_str_radix(stripped, 16)
             .map_err(|_| InError::Message(format!("invalid hex {flag}: {value}")))
     } else {
@@ -26,7 +27,10 @@ fn parse_u32(value: &str, flag: &str) -> Result<u32> {
 }
 
 fn parse_u64(value: &str, flag: &str) -> Result<u64> {
-    if let Some(stripped) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+    if let Some(stripped) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
         u64::from_str_radix(stripped, 16)
             .map_err(|_| InError::Message(format!("invalid hex {flag}: {value}")))
     } else {
