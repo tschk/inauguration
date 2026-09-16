@@ -58,7 +58,7 @@ impl LinkerLayout {
         for region in &self.regions {
             let _ = writeln!(
                 out,
-                "  {} ({}) : ORIGIN = 0x{:08X}, LENGTH = {}",
+                "  {} ({}) : ORIGIN = 0x{:08X}, LENGTH = 0x{:X}",
                 region.name, region.attrs, region.origin, region.length
             );
         }
@@ -99,6 +99,7 @@ mod tests {
         let script = layout.to_ld_script();
         assert!(script.contains("ENTRY(Reset)"));
         assert!(script.contains("ORIGIN = 0x10000000"));
+        assert!(script.contains("LENGTH = 0x80000"));
         assert!(script.contains("ORIGIN = 0x38000000"));
         assert!(script.contains(".vector"));
         assert!(script.contains("__vector_table"));
