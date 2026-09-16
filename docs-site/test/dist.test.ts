@@ -60,6 +60,21 @@ test("docs HTML is generated documentation, not the homepage", () => {
   expect(languagesPage).not.toBe(homepage);
 });
 
+test("changelog is generated docs HTML and linked from the homepage", async () => {
+  const changelog = await readFile(
+    join(outDir, "docs", "changelog.html"),
+    "utf8",
+  );
+  expect(changelog).toContain("doc-shell");
+  expect(changelog).toContain("0.9.8");
+  expect(changelog).toContain("Changelog");
+  expect(changelog).toContain("doc-nav-section");
+  expect(changelog).toContain("Project");
+  expect(changelog).not.toBe(homepage);
+  expect(homepage).toContain("./docs/changelog.html");
+  expect(homepage).toContain("Changelog");
+});
+
 test("static assets are real files, not homepage HTML", () => {
   expect(favicon).toContain("<svg");
   expect(favicon).not.toContain("<!DOCTYPE html>");

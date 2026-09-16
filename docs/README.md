@@ -12,6 +12,7 @@ Guides for **inlang** (`.in`), the inauguration compiler, and the docs site.
 | [Native backend](native-backend.md) | MIR, JIT, AArch64 / x86_64 emit |
 | [Emit profiles](emit-profiles.md) | `default` / `harden` / `lean` anti-decomp & inlining |
 | [Docs-site](docs-site.md) | `crepus web`, `backend.in`, Cloudflare deploy |
+| [Changelog](changelog.md) | Released crate and GitHub binary versions |
 | [Benchmarks](benchmarks/README.md) | JIT, polyglot `in` vs native toolchains, self-host vs rustc |
 
 **Published HTML**
