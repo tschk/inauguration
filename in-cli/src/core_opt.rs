@@ -916,6 +916,7 @@ fn remove_dead_functions(decls: &mut Vec<Decl>, entry: Option<&str>) {
         // Fallback for callers that don't know the entry name
         called.insert("kernel_entry".to_string());
         called.insert("kernel-entry".to_string());
+        called.insert("main".to_string());
     }
     decls.retain(|d| match d {
         Decl::Function { name, .. } => called.contains(name),
@@ -3139,6 +3140,42 @@ mod tests {
         assert!(
             has_loop && has_pc,
             "harden profile must keep CFG _pc dispatch: {body:?}"
+        );
+    }
+
+    #[test]
+    fn remove_dead_functions_keeps_main_without_explicit_entry() {
+        let mut decls = vec![
+            Decl::Function {
+                name: "unused".into(),
+                params: vec![],
+                ret: Typ::Void,
+                body: vec![Stmt::Return(None)],
+                type_params: vec![],
+            },
+            Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Void,
+                body: vec![Stmt::Return(None)],
+                type_params: vec![],
+            },
+        ];
+        optimize_with_profile(&mut decls, None, EmitProfile::Default);
+        let names: Vec<_> = decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Function { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.contains(&"main"),
+            "implicit JIT entry `main` must survive DCE: {names:?}"
+        );
+        assert!(
+            !names.contains(&"unused"),
+            "uncalled helpers should still be removed: {names:?}"
         );
     }
 
