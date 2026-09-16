@@ -244,4 +244,15 @@ mod tests {
         assert!(CompileError::io("").span.is_none());
         assert!(CompileError::internal("").span.is_none());
     }
+
+    #[test]
+    fn type_error_constructor() {
+        let e_str = CompileError::type_error("type mismatch str");
+        assert_eq!(e_str.category, ErrorCategory::TypeError);
+        assert_eq!(e_str.message, "type mismatch str");
+
+        let e_string = CompileError::type_error("type mismatch string".to_string());
+        assert_eq!(e_string.category, ErrorCategory::TypeError);
+        assert_eq!(e_string.message, "type mismatch string");
+    }
 }
