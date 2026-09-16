@@ -67,6 +67,9 @@ test("changelog is generated docs HTML and linked from the homepage", async () =
   );
   expect(changelog).toContain("doc-shell");
   expect(changelog).toContain("0.9.8");
+  expect(changelog).toContain("0.9.7");
+  expect(changelog).toContain("dual-emit");
+  expect(changelog).toContain("remove_dead_functions");
   expect(changelog).toContain("Changelog");
   expect(changelog).toContain("doc-nav-section");
   expect(changelog).toContain("Project");
