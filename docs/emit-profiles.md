@@ -19,21 +19,30 @@ in compile ... --lean
 
 | Profile | Goal | IR | Native emit |
 |---------|------|----|-------------|
-| `default` | Conventional owned pipeline | Standard inline / fold / DCE | Classic SysV prologue (`push rbp; mov rbp, rsp`) |
-| `lean` | Shortest internal calls | Aggressive inlining (higher stmt threshold + deeper recursion, two waves) then DCE | Same frames; fewer calls after inline |
-| `harden` | Casual anti-decomp / fingerprint avoidance | After normal opts: opaque predicates, bogus blocks, lite CFG dispatch (`while _pc`), literal obscuring, junk stmts, `_H<fnv>` symbol hashing | Unusual prologue variants (`push rbx` + frame + rotating junk), MBA constant materialization (`(imm^m)^m` / `±m`), rotating junk pads before calls |
+| `default` | Fast owned pipeline (not a textbook SysV compiler) | Two-wave inlining (threshold 6 / depth 16) then fold / DCE | `push rbp; lea rbp, [rsp]` / `lea rsp, [rbp]` frames; **no** 2KiB `rep stosq` wipe |
+| `lean` | Shortest internal calls | Aggressive inlining (higher stmt threshold + deeper recursion, two waves) then DCE | Same frames as default; fewer calls after inline |
+| `harden` | Anti-decomp / fingerprint avoidance | After normal opts: MBA, opaque predicates, `_pc` dispatch, `_H` names | Runnable Linux ELF: `exit(status)` stub + XOR-scrambled **INISA** payload. Program is not host ISA |
 
-### Harden details (intentional anti-patterns)
+### Default details (fast, non-classic)
 
-Harden does **not** claim to match commercial obfuscators. It deliberately
-emits shapes that stock Ghidra / Hex-Rays heuristics are less tuned for:
+Default is the **runtime** profile. It does not try to look like gcc/clang:
 
-- Non-classic prologue/epilogue pairing (extra callee-saved `rbx`) with rotating post-frame junk / `sub rsp,0` noise
-- Constants not as bare `mov reg, imm64` (rotating MBA identities)
-- Mangled internal names (`_H` + 16 hex digits)
-- Opaque `if` predicates and never-taken bogus blocks
-- Lite CFG dispatch: eligible straight-line bodies become `while _pc < N` state machines (no full industrial flattener)
-- Semantics-preserving junk `let`/`assign` plus native junk pads before calls
+- Frame pointer via `lea`, not `mov rbp, rsp` / `mov rsp, rbp`
+- No per-call `rep stosq` of the scratch frame (locals are written before use)
+- More inlining than a textbook two-stmt helper pass
+
+### Harden details (private ISA)
+
+Harden dual-emit writes a **runnable Linux ELF**: a tiny `exit(status)` stub
+plus the XOR-scrambled **INISA** payload in the same `PT_LOAD`. `./foo-harden`
+runs. Ghidra sees the stub, not `mix`/`gate` as native functions. The program
+body is the private stack ISA (`eval_module` at compile time supplies the
+exit code the stub uses).
+
+IR still runs anti-decomp passes (MBA, opaque predicates, `_pc` dispatch, `_H`
+names) so a determined reverse engineer who writes an INISA loader still sees
+noisy control flow. There is no claim of cryptographic strength: the scramble
+is fingerprint noise, not encryption.
 
 ### Lean details
 
@@ -66,7 +75,7 @@ Derived harden paths: `foo.o` → `foo-harden.o`, `foo` → `foo-harden`.
 
 ## Honest limits
 
-- No virtualization / VM-protect. Lite CFG dispatch is intentionally shallow (straight-line bodies only; skips loops/try/match/throw) — not an industrial flattener or VM-protect equivalent.
+- Harden **is** a private stack ISA (INISA) inside SCI, interpreted by `in` — not a silicon ISA and not cryptographic VM-protect. Lite CFG dispatch on the IR before INISA lower is still shallow (skips try/match/throw).
 - No cryptographic string encryption; string obscuring is best-effort.
 - Does not defeat a determined reverse engineer with dynamic tracing.
 - Debug stripping: Core IR has no `debug_value`; SIL helpers already strip them when SIL is materialised. Harden does not add DWARF.

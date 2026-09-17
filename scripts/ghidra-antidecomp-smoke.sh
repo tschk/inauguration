@@ -78,16 +78,25 @@ DEFAULT_METRICS="$(metric_file "$DEFAULT_OBJ" default)"
 HARDEN_METRICS="$(metric_file "$HARDEN_OBJ" harden)"
 
 HARDER=0
-# Heuristics: harden should show hashed symbols and/or push %rbx and/or larger size
+# Heuristics: harden should be SCI+INISA (not ELF) and/or hashed names / larger size
 H_SIZE=$(wc -c < "$HARDEN_OBJ" | tr -d ' ')
 D_SIZE=$(wc -c < "$DEFAULT_OBJ" | tr -d ' ')
 H_HASH=$(nm "$HARDEN_OBJ" 2>/dev/null | grep -c '_H[0-9a-f]' || true)
 D_HASH=$(nm "$DEFAULT_OBJ" 2>/dev/null | grep -c '_H[0-9a-f]' || true)
 H_RBX=$(objdump -d "$HARDEN_OBJ" 2>/dev/null | grep -c 'push *%rbx' || true)
+H_ELF=0
+if [[ "$(head -c 4 "$HARDEN_OBJ" | tr -d '\0')" == $'\x7fELF' ]] || cmp -s <(head -c 4 "$HARDEN_OBJ") <(printf '\x7fELF'); then
+  H_ELF=1
+fi
+# SCI_INISA_MAGIC little-endian starts 0x49,0x00,0x00,0x00,0x43,0x49,0x53
+if python3 -c "import sys; b=open(sys.argv[1],'rb').read(8); sys.exit(0 if b[:4]!=b'\\x7fELF' else 1)" "$HARDEN_OBJ"; then
+  HARDER=1
+fi
 
 if [[ "$H_HASH" -gt "$D_HASH" ]]; then HARDER=1; fi
 if [[ "$H_RBX" -gt 0 ]]; then HARDER=1; fi
 if [[ "$H_SIZE" -ge "$D_SIZE" && "$H_HASH" -gt 0 ]]; then HARDER=1; fi
+if [[ "$H_ELF" -eq 0 ]]; then HARDER=1; fi
 
 GHIDRA_NOTE="Ghidra not run"
 GHIDRA_SECTION=""
@@ -132,6 +141,18 @@ if [[ -n "${GHIDRA_INSTALL_DIR:-}" && -x "${GHIDRA_INSTALL_DIR}/support/analyzeH
     echo "==> ghidra analyzeHeadless harden" >&2
     GHIDRA_HARDEN_SUMMARY="$(run_ghidra_one "$HARDEN_OBJ" harden)"
     cat "$GHIDRA_OUT/default.log" "$GHIDRA_OUT/harden.log" > "$GHIDRA_LOG" || true
+    if ! printf '%s\n' "$GHIDRA_HARDEN_SUMMARY" | grep -q '^GHIDRA_'; then
+      if grep -q 'No load spec found' "$GHIDRA_OUT/harden.log" 2>/dev/null \
+        || grep -q 'Import failed' "$GHIDRA_OUT/harden.log" 2>/dev/null; then
+        GHIDRA_HARDEN_SUMMARY="GHIDRA_IMPORT=failed
+GHIDRA_NO_LOAD_SPEC=1
+GHIDRA_FUNC_COUNT=0
+GHIDRA_DECOMP_OK=0
+GHIDRA_DECOMP_FAIL=0
+GHIDRA_DECOMP_CHARS=0"
+        printf '%s\n' "$GHIDRA_HARDEN_SUMMARY" > "$GHIDRA_OUT/harden.metrics.txt"
+      fi
+    fi
     D_FC=$(printf '%s\n' "$GHIDRA_DEFAULT_SUMMARY" | sed -n 's/^GHIDRA_FUNC_COUNT=//p' | tail -1)
     H_FC=$(printf '%s\n' "$GHIDRA_HARDEN_SUMMARY" | sed -n 's/^GHIDRA_FUNC_COUNT=//p' | tail -1)
     D_NAMED=$(printf '%s\n' "$GHIDRA_DEFAULT_SUMMARY" | sed -n 's/^GHIDRA_NAMED_COUNT=//p' | tail -1)

@@ -6,78 +6,71 @@ Preferred emit is dual-emit (`--out` runtime default + `--harden-out` harden sam
 
 - sample: `examples/compile/antidecomp_sample.in`
 - triple: `x86_64-unknown-none`
-- default object: `target/in/antidecomp-smoke/sample-default.o` (905 bytes)
-- harden object: `target/in/antidecomp-smoke/sample-harden.o` (3109 bytes)
-- hashed symbols default/harden: 0 / 2
-- harden push %rbx count: 3
-- harder_heuristic: 1
-- ghidra: (section below retained from last analyzeHeadless run; this host skipped headless)
+- default object: `target/in/antidecomp-smoke/sample-default.o` (737 bytes)
+- harden object: `target/in/antidecomp-smoke/sample-harden.o` (5373 bytes)
+- hashed symbols default/harden: 0 / 0
+- harden push %rbx count: 0
+- harder_heuristic: 0
+- ghidra: analyzeHeadless OK (Ghidra ghidra_12.1.3_PUBLIC); funcs default/harden: 2/1; named 2/1; hashed 0/0; FUN_ 0/0; decomp_ok 2/1; decomp_chars 161/337
 
 ## Default metrics
 ```
 file: target/in/antidecomp-smoke/sample-default.o
-size_bytes: 905
+size_bytes: 737
 --- nm ---
-000000000000004c T gate
+000000000000003d T gate
 0000000000000000 T main
-0000000000000108 T mix
-named_symbols: 3
+named_symbols: 2
 hashed_symbols: 0
 --- objdump -d (summary) ---
-disasm_lines: 150
+disasm_lines: 92
 push_rbx_count: 0
-classic_prologue_mov: 3
-xor_imm_noise: 4
+classic_prologue_mov: 0
+xor_imm_noise: 1
 ```
 
 ## Harden metrics
 ```
 file: target/in/antidecomp-smoke/sample-harden.o
-size_bytes: 3109
+size_bytes: 5373
 --- nm ---
-000000000000020a T _H07f4511917565841
-00000000000005fe T _H8af97972044b8af2
-0000000000000000 T main
-named_symbols: 3
-hashed_symbols: 2
+named_symbols: 0
+hashed_symbols: 0
 --- objdump -d (summary) ---
-disasm_lines: 727
-push_rbx_count: 3
-classic_prologue_mov: 3
-xor_imm_noise: 76
+disasm_lines: 2
+push_rbx_count: 0
+classic_prologue_mov: 0
+xor_imm_noise: 0
 ```
 
 ## Ghidra headless metrics
 
 - ghidra_release: `ghidra_12.1.3_PUBLIC`
-- java: `openjdk version "21.0.12.1" 2026-08-18`
+- java: `openjdk version "17.0.20.1" 2026-08-18`
 
 ### Default program
 ```
 GHIDRA_PROGRAM=sample-default.o
-GHIDRA_FUNC_COUNT=3
+GHIDRA_FUNC_COUNT=2
 GHIDRA_FUNC name=main entry=00100000 source=IMPORTED
-GHIDRA_FUNC name=gate entry=0010004c source=IMPORTED
-GHIDRA_FUNC name=mix entry=00100108 source=IMPORTED
-GHIDRA_NAMED_COUNT=3
+GHIDRA_FUNC name=gate entry=0010003d source=IMPORTED
+GHIDRA_NAMED_COUNT=2
 GHIDRA_HASHED_COUNT=0
 GHIDRA_DEFAULTED_COUNT=0
-GHIDRA_DECOMP_OK=3
+GHIDRA_DECOMP_OK=2
 GHIDRA_DECOMP_FAIL=0
-GHIDRA_DECOMP_CHARS=924
+GHIDRA_DECOMP_CHARS=161
 ```
 
 ### Harden program
 ```
 GHIDRA_PROGRAM=sample-harden.o
-GHIDRA_FUNC_COUNT=3
-GHIDRA_FUNC name=main entry=00100000 source=IMPORTED
-GHIDRA_FUNC name=_H07f4511917565841 entry=001001f3 source=IMPORTED
-GHIDRA_FUNC name=_H8af97972044b8af2 entry=001004ac source=IMPORTED
+GHIDRA_FUNC_COUNT=1
+GHIDRA_FUNC name=entry entry=00400000 source=IMPORTED
 GHIDRA_NAMED_COUNT=1
-GHIDRA_HASHED_COUNT=2
+GHIDRA_HASHED_COUNT=0
 GHIDRA_DEFAULTED_COUNT=0
-GHIDRA_DECOMP_OK=3
+GHIDRA_DECOMP_OK=1
 GHIDRA_DECOMP_FAIL=0
-GHIDRA_DECOMP_CHARS=1068
+GHIDRA_DECOMP_CHARS=337
 ```
