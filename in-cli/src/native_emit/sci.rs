@@ -12,6 +12,8 @@ use crate::core_ir::{Decl, UnifiedModule};
 use crate::native_emit::x86_64_lower::{X86_64CompileResult, lower_module_with_bases};
 
 pub const SCI_MAGIC: u64 = 0x5343490000000001;
+/// SCI container whose payload is the private INISA (harden profile).
+pub const SCI_INISA_MAGIC: u64 = 0x5343490000000049; // ...'I'
 pub const SCI_MANIFEST_SIZE: usize = 32;
 
 /// Emit a raw SCI binary for `module` with entry point `entry` loaded at `base`.

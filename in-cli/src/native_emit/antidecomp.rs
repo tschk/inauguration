@@ -5,7 +5,7 @@
 //! cleanly. They preserve SysV ABI and observable semantics.
 
 use crate::emit_profile::EmitProfile;
-use crate::native_emit::x86_64::{self, R10, R11, RAX, RBX, REG_FP, REG_SP};
+use crate::native_emit::x86_64::{self, R10, R11, RAX, RBX, REG_FP};
 use std::cell::RefCell;
 
 thread_local! {
@@ -38,40 +38,60 @@ pub fn harden_active() -> bool {
     current_profile() == EmitProfile::Harden
 }
 
-/// Unusual prologue variants (all start with `push rbx` + classic frame).
+/// Never-taken `ud2` behind an always-true `je` (ZF from `xor r11,r11`).
+/// Ghidra often treats `ud2` as a hard stop; hiding it behind a predicate
+/// still poisons linear disassembly when the branch is inverted by a heuristic.
+fn opaque_ud2_skip() -> Vec<u8> {
+    let mut code = x86_64::xor_rr(R11, R11);
+    code.extend_from_slice(&x86_64::test_rr(R11, R11));
+    code.extend_from_slice(&x86_64::je(2)); // skip 2-byte ud2
+    code.extend_from_slice(&[0x0F, 0x0B]); // ud2
+    code
+}
+
+/// Unusual prologue variants (all start with `push rbx` + lea frame).
 /// Caller must pair with [`harden_epilogue`].
 pub fn harden_prologue() -> Vec<u8> {
     match next_tick() % 3 {
         0 => {
             let mut code = x86_64::push_r(RBX);
             code.extend_from_slice(&x86_64::prologue());
-            // Junk that preserves ABI-live state: xor r11,r11
-            code.extend_from_slice(&x86_64::xor_rr(R11, R11));
+            code.extend_from_slice(&opaque_ud2_skip());
             code
         }
         1 => {
             let mut code = x86_64::push_r(RBX);
-            code.extend_from_slice(&x86_64::prologue());
             code.extend_from_slice(&x86_64::xor_rr(R10, R10));
+            code.extend_from_slice(&x86_64::prologue());
+            code.extend_from_slice(&opaque_ud2_skip());
             code.extend_from_slice(&x86_64::nop());
             code
         }
         _ => {
-            // Alien: pointless `sub rsp,0` then classic frame + lea/xor wipe.
             let mut code = x86_64::push_r(RBX);
             code.extend_from_slice(&x86_64::sub_rsp_i8(0));
             code.extend_from_slice(&x86_64::prologue());
             code.extend_from_slice(&x86_64::lea_rsp_disp(R11, 0));
-            code.extend_from_slice(&x86_64::xor_rr(R11, R11));
+            code.extend_from_slice(&opaque_ud2_skip());
             code
         }
     }
 }
 
 pub fn harden_epilogue() -> Vec<u8> {
-    let mut code = x86_64::mov_rr(REG_SP, REG_FP);
+    let mut code = x86_64::lea_sp_from_fp();
     code.extend_from_slice(&x86_64::pop_r(REG_FP));
     code.extend_from_slice(&x86_64::pop_r(RBX));
+    code.extend_from_slice(&ret_via_jmp());
+    code
+}
+
+/// `jmp +0; ret` is a common anti-linear-sweep decoy; we use `lea rax, [rip+ret]; jmp rax` shape
+/// via a short `jmp` over a dummy then `ret`.
+fn ret_via_jmp() -> Vec<u8> {
+    // jmp +2; ud2; ret  — linear sweep hits ud2; actual flow jumps to ret.
+    let mut code = x86_64::jmp_rel8(2);
+    code.extend_from_slice(&[0x0F, 0x0B]); // ud2
     code.extend_from_slice(&x86_64::ret());
     code
 }
@@ -117,28 +137,27 @@ pub fn weird_materialize_rax(imm: i64) -> Vec<u8> {
 pub fn junk_pad() -> Vec<u8> {
     match next_tick() % 4 {
         0 => {
-            let mut code = x86_64::xor_rr(R11, R11);
+            let mut code = opaque_ud2_skip();
             code.extend_from_slice(&x86_64::xor_rr(R10, R10));
-            code.push(0x90); // nop
+            code.push(0x90);
             code
         }
         1 => {
             let mut code = x86_64::xor_rr(R10, R10);
             code.extend_from_slice(&x86_64::lea_rsp_disp(R11, 0));
-            code.extend_from_slice(&x86_64::xor_rr(R11, R11));
+            code.extend_from_slice(&opaque_ud2_skip());
             code
         }
         2 => {
             let mut code = x86_64::nop();
-            code.extend_from_slice(&x86_64::xor_rr(R11, R11));
+            code.extend_from_slice(&opaque_ud2_skip());
             code.extend_from_slice(&x86_64::nop());
             code
         }
         _ => {
             let mut code = x86_64::xor_rr(R11, R11);
-            // r11+r11 stays zero
             code.extend_from_slice(&x86_64::add_rr(R11, R11));
-            code.extend_from_slice(&x86_64::nop());
+            code.extend_from_slice(&opaque_ud2_skip());
             code
         }
     }
@@ -154,7 +173,19 @@ mod tests {
         for _ in 0..6 {
             let p = harden_prologue();
             assert_eq!(p[0], 0x53); // push rbx
+            assert!(
+                p.windows(2).any(|w| w == [0x0F, 0x0B]),
+                "harden prologue should hide a ud2 decoy"
+            );
         }
+    }
+
+    #[test]
+    fn harden_epilogue_jumps_over_ud2_to_ret() {
+        let e = harden_epilogue();
+        assert_eq!(*e.last().unwrap(), 0xC3);
+        assert!(e.windows(2).any(|w| w == [0xEB, 0x02]));
+        assert!(e.windows(2).any(|w| w == [0x0F, 0x0B]));
     }
 
     #[test]

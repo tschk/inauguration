@@ -789,7 +789,7 @@ fn has_iter_once(body: &[Stmt]) -> bool {
         Stmt::Try { body, catches, .. } => {
             has_iter_once(body) || catches.iter().any(|catch| has_iter_once(&catch.body))
         }
-        Stmt::Return(None) | Stmt::Break | Stmt::Propagate => false,
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => false,
     })
 }
 
@@ -838,7 +838,7 @@ fn has_iter_map(body: &[Stmt]) -> bool {
         Stmt::Try { body, catches, .. } => {
             has_iter_map(body) || catches.iter().any(|catch| has_iter_map(&catch.body))
         }
-        Stmt::Return(None) | Stmt::Break | Stmt::Propagate => false,
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => false,
     })
 }
 
@@ -889,7 +889,7 @@ fn has_iter_chain(body: &[Stmt]) -> bool {
             base, index, value, ..
         } => expr_has_chain(base) || expr_has_chain(index) || expr_has_chain(value),
         Stmt::FieldAssign { base, value, .. } => expr_has_chain(base) || expr_has_chain(value),
-        Stmt::Return(None) | Stmt::Break | Stmt::Propagate => false,
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => false,
     })
 }
 
@@ -1100,7 +1100,7 @@ fn max_aggregate_vector_literal_words(
                         inspect_body(&catch.body, structs, fn_name, max)?;
                     }
                 }
-                Stmt::Return(None) | Stmt::Break | Stmt::Propagate => {}
+                Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
             }
         }
         Ok(())

@@ -571,6 +571,7 @@ fn stmt(out: &mut String, lang: SourceLang, s: &Stmt, indent: usize) {
         Stmt::Propagate => out.push_str(&format!("{p}// propagate\n")),
         Stmt::Expr(e) => out.push_str(&format!("{p}{}{semi}\n", expr(lang, e))),
         Stmt::Break => out.push_str(&format!("{p}break{semi}\n")),
+        Stmt::Continue => out.push_str(&format!("{p}continue{semi}\n")),
     }
 }
 
@@ -646,7 +647,7 @@ fn count_stmt(s: &Stmt, depth: u32, nodes: &mut usize) -> bool {
             count_expr(e, depth + 1, nodes)
         }
         Stmt::Return(Some(e)) => count_expr(e, depth + 1, nodes),
-        Stmt::Return(None) | Stmt::Propagate | Stmt::Break => true,
+        Stmt::Return(None) | Stmt::Propagate | Stmt::Break | Stmt::Continue => true,
         Stmt::IndexAssign { base, index, value } => {
             count_expr(base, depth + 1, nodes)
                 && count_expr(index, depth + 1, nodes)

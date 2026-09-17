@@ -245,6 +245,11 @@ fn dual_emit_writes_runtime_and_harden_artifacts() {
         has_hashed(&harden_bytes),
         "harden artifact should contain _H hashed symbols"
     );
+    assert_eq!(
+        &harden_bytes[..4.min(harden_bytes.len())],
+        b"\x7fELF",
+        "harden bundle is a Linux ELF wrapping INISA"
+    );
 
     fs::remove_file(source_path).unwrap();
     fs::remove_file(&runtime_out).unwrap();

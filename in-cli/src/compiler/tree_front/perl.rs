@@ -18,8 +18,9 @@ const PERLAST: AstShape = AstShape {
     call_kinds: &[
         "call_expression_with_spaced_args",
         "call_expression_with_bareword",
+        "call_expression_with_args_with_brackets",
     ],
-    arg_container_kinds: &["arguments"],
+    arg_container_kinds: &["arguments", "array"],
     arg_wrapper_kinds: &[],
     paren_kinds: &[],
     binary_kinds: &["binary_expression"],

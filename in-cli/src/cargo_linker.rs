@@ -141,59 +141,14 @@ fn compile_resolved_dependencies(
     modules: &mut Vec<(String, UnifiedModule)>,
 ) {
     let mut already_compiled: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let direct_dep_names: std::collections::HashSet<&str> = [
-        "clap",
-        "serde",
-        "serde_json",
-        "sha2",
-        "syn",
-        "quote",
-        "thiserror",
-        "tokio",
-        "tree-sitter",
-        "tree-sitter-c",
-        "tree-sitter-cpp",
-        "tree-sitter-c-sharp",
-        "tree-sitter-dart",
-        "tree-sitter-elixir",
-        "tree-sitter-erlang",
-        "tree-sitter-fsharp",
-        "tree-sitter-go",
-        "tree-sitter-groovy",
-        "tree-sitter-haskell",
-        "tree-sitter-holyc",
-        "tree-sitter-java",
-        "tree-sitter-javascript",
-        "tree-sitter-julia",
-        "tree-sitter-kotlin-ng",
-        "tree-sitter-lua",
-        "tree-sitter-objc",
-        "tree-sitter-ocaml",
-        "tree-sitter-perl",
-        "tree-sitter-php",
-        "tree-sitter-python",
-        "tree-sitter-r",
-        "tree-sitter-ruby",
-        "tree-sitter-rust",
-        "tree-sitter-scala",
-        "tree-sitter-swift",
-        "tree-sitter-typescript",
-        "tree-sitter-v",
-        "tree-sitter-zig",
-        "libc",
-        "libloading",
-        "notify",
-    ]
-    .iter()
-    .cloned()
-    .collect();
+    const MAX_DEP_CRATES: usize = 64;
     for dep_id in all_dep_ids {
+        if already_compiled.len() >= MAX_DEP_CRATES {
+            break;
+        }
         if let Some(manifest) = pkg_manifest.get(*dep_id) {
             if let Some(pkg) = pkg_by_id.get(*dep_id) {
                 let crate_name = pkg["name"].as_str().unwrap_or("");
-                if !direct_dep_names.contains(crate_name) {
-                    continue;
-                }
                 // Skip proc-macro crates (metadata first; narrow manifest
                 // fallback — substring match mirrors the prior behavior that
                 // Self-host relied on, for manifests metadata under-reports).
@@ -228,8 +183,27 @@ fn compile_resolved_dependencies(
                 let src_dir = manifest.parent().unwrap_or(Path::new("."));
                 let lib_rs = src_dir.join("src").join("lib.rs");
                 if lib_rs.exists() {
-                    if let Ok(module) = rust_front::parse_rust_file(&lib_rs) {
-                        modules.push((crate_name.to_string(), module));
+                    let in_registry = lib_rs
+                        .components()
+                        .any(|c| c.as_os_str() == "registry" || c.as_os_str() == "git");
+                    let src_tree = lib_rs.parent();
+                    let tree_bytes = src_tree
+                        .and_then(|dir| std::fs::read_dir(dir).ok())
+                        .map(|rd| {
+                            rd.filter_map(|e| e.ok())
+                                .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
+                                .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
+                                .sum::<u64>()
+                        })
+                        .unwrap_or(0);
+                    if in_registry && tree_bytes > 40_000 {
+                        continue;
+                    }
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        rust_front::parse_rust_file(&lib_rs)
+                    })) {
+                        Ok(Ok(module)) => modules.push((crate_name.to_string(), module)),
+                        _ => {}
                     }
                 }
             }
@@ -240,8 +214,46 @@ fn compile_resolved_dependencies(
 /// Merge dependency modules into the main module.
 /// All function and struct declarations from dependencies are added.
 /// Also creates aliases for common re-export patterns.
+/// Walk parents until a `Cargo.toml` directory is found.
+pub fn find_crate_dir(start: &Path) -> Option<PathBuf> {
+    let mut cur = if start.is_file() {
+        start.parent()?.to_path_buf()
+    } else {
+        start.to_path_buf()
+    };
+    loop {
+        if cur.join("Cargo.toml").is_file() {
+            return Some(cur);
+        }
+        cur = cur.parent()?.to_path_buf();
+    }
+}
+
+pub fn crate_package_name(crate_dir: &Path) -> Option<String> {
+    let toml = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
+    let mut in_package = false;
+    for line in toml.lines() {
+        let t = line.trim();
+        if t == "[package]" {
+            in_package = true;
+            continue;
+        }
+        if t.starts_with('[') {
+            in_package = false;
+        }
+        if in_package && t.starts_with("name") {
+            return t
+                .split('=')
+                .nth(1)
+                .map(|v| v.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
 /// Find the crate root file (lib.rs or main.rs) from a project directory.
 pub fn find_crate_root(project_dir: &Path) -> Result<PathBuf, String> {
+    let project_dir = find_crate_dir(project_dir).unwrap_or_else(|| project_dir.to_path_buf());
     // Check for Cargo.toml
     let cargo_toml = project_dir.join("Cargo.toml");
     if cargo_toml.exists() {
@@ -281,28 +293,50 @@ pub fn find_crate_root(project_dir: &Path) -> Result<PathBuf, String> {
 
 pub fn merge_dependency_modules(main: &mut UnifiedModule, deps: Vec<(String, UnifiedModule)>) {
     for (crate_name, mut dep_module) in deps {
-        // Prefix function names with crate name to avoid duplicates across crates
-        // Skip if crate_name starts with "in-" (the main crate) — keep original names
-        if !crate_name.starts_with("in-") {
-            for decl in &mut dep_module.decls {
-                if let Decl::Function { name, .. } = decl {
-                    if !name.contains("::") {
-                        *name = format!("{crate_name}::{name}");
-                    }
-                }
-            }
+        if crate_name.is_empty() || crate_name.starts_with("in-") {
+            main.decls.append(&mut dep_module.decls);
+            continue;
         }
-        // Update call sites: replace unprefixed calls with prefixed names
-        for decl in &mut dep_module.decls {
-            if let Decl::Function { body, .. } = decl {
-                prefix_calls(body, &crate_name, false);
+        // Keep original names (`cli::run`, `run`) and add crate-qualified
+        // forwarding aliases (`telekinesis::cli::run`, `telekinesis::run`).
+        let mut aliases = Vec::new();
+        for decl in &dep_module.decls {
+            let Decl::Function {
+                name, params, ret, ..
+            } = decl
+            else {
+                continue;
+            };
+            let qualified = if name.starts_with(&format!("{crate_name}::")) {
+                continue;
+            } else {
+                format!("{crate_name}::{name}")
+            };
+            if dep_module
+                .decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name: n, .. } if n == &qualified))
+            {
+                continue;
             }
+            let args: Vec<Expr> = params.iter().map(|(n, _)| Expr::Ident(n.clone())).collect();
+            aliases.push(Decl::Function {
+                name: qualified,
+                params: params.clone(),
+                ret: ret.clone(),
+                body: vec![Stmt::Return(Some(Expr::Call {
+                    callee: Box::new(Expr::Ident(name.clone())),
+                    args,
+                }))],
+                type_params: vec![],
+            });
         }
+        dep_module.decls.extend(aliases);
         main.decls.append(&mut dep_module.decls);
     }
 }
 
-/// Recursively prefix function call targets in a statement list.
+#[allow(dead_code)]
 fn prefix_calls(stmts: &mut [Stmt], crate_name: &str, _in_prefixed: bool) {
     for stmt in stmts {
         match stmt {
@@ -334,6 +368,7 @@ fn prefix_calls(stmts: &mut [Stmt], crate_name: &str, _in_prefixed: bool) {
     }
 }
 
+#[allow(dead_code)]
 fn prefix_call_expr(expr: &mut Expr, crate_name: &str) {
     match expr {
         Expr::Call { callee, args, .. } => {
@@ -454,6 +489,26 @@ libc = { path = "dummy-dep" }
             libc_dep.is_some(),
             "Expected 'libc' to be in the compiled dependencies"
         );
+    }
+
+    #[test]
+    fn find_crate_dir_walks_parents() {
+        let dir = std::env::temp_dir().join(format!(
+            "in-crate-walk-{}-{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"walkme\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let nested = dir.join("src").join("main.rs");
+        fs::write(&nested, "fn main() {}").unwrap();
+        assert_eq!(find_crate_dir(&nested).as_deref(), Some(dir.as_path()));
+        assert_eq!(crate_package_name(&dir).as_deref(), Some("walkme"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

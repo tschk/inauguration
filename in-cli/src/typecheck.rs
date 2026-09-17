@@ -353,7 +353,7 @@ impl TypeChecker {
                     });
                 }
             }
-            Stmt::Break => {}
+            Stmt::Break | Stmt::Continue => {}
             Stmt::Expr(expr) => {
                 self.check_expr(fn_name, expr, facts, env, errors);
             }

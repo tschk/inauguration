@@ -10,9 +10,9 @@ use crate::boundary_verify::boundary_ir_verify;
 use crate::core_ir::{CatchArm, Expr, LoopKind, MatchArm, Stmt, Typ};
 use crate::core_ir::{Decl, UnifiedModule};
 use quote::ToTokens;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use syn::parse::Parser;
 
 type RustLayoutSpecs = HashMap<String, (BoundaryRepr, Vec<(String, syn::Type)>)>;
@@ -61,8 +61,21 @@ pub fn parse_rust_artifact_source_with_dir(
 }
 
 fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<UnifiedModule, String> {
+    lower_file_items_at_visited(file, base_dir, &mut HashSet::new(), 0)
+}
+
+fn lower_file_items_at_visited(
+    file: &syn::File,
+    base_dir: &Path,
+    visited: &mut HashSet<PathBuf>,
+    depth: u32,
+) -> Result<UnifiedModule, String> {
+    if depth > 8 {
+        return Err("rust front: module nest limit".into());
+    }
     let mut decls = Vec::new();
     let mut external_modules: Vec<String> = Vec::new();
+    let mut uses: Vec<syn::ItemUse> = Vec::new();
 
     for item in &file.items {
         match item {
@@ -84,20 +97,111 @@ fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<UnifiedModul
                     decls.push(decl);
                 }
             }
-            syn::Item::Use(_u) => {
-                // Skip `use` imports — path resolution is handled by cargo_linker.rs
+            syn::Item::Use(u) => uses.push(u.clone()),
+            syn::Item::Const(c) => {
+                if let Some(d) = lower_const_item(c) {
+                    decls.push(d);
+                }
             }
+            syn::Item::Static(s) => {
+                if let Some(d) = lower_static_item(s) {
+                    decls.push(d);
+                }
+            }
+            syn::Item::Type(t) => {
+                decls.push(Decl::Struct {
+                    name: t.ident.to_string(),
+                    fields: vec![],
+                    type_params: vec![],
+                });
+            }
+            syn::Item::ForeignMod(fm) => {
+                for item in &fm.items {
+                    if let syn::ForeignItem::Fn(f) = item {
+                        decls.push(Decl::Function {
+                            name: f.sig.ident.to_string(),
+                            params: f
+                                .sig
+                                .inputs
+                                .iter()
+                                .map(|arg| match arg {
+                                    syn::FnArg::Typed(pat_ty) => (
+                                        pattern_name(&pat_ty.pat).unwrap_or_else(|| "arg".into()),
+                                        map_type(&pat_ty.ty),
+                                    ),
+                                    syn::FnArg::Receiver(_) => {
+                                        ("self".into(), Typ::Named("Self".into()))
+                                    }
+                                })
+                                .collect(),
+                            ret: match &f.sig.output {
+                                syn::ReturnType::Default => Typ::Void,
+                                syn::ReturnType::Type(_, ty) => map_type(ty),
+                            },
+                            body: vec![],
+                            type_params: vec![],
+                        });
+                    }
+                }
+            }
+            syn::Item::Trait(tr) => {
+                for item in &tr.items {
+                    if let syn::TraitItem::Fn(method) = item {
+                        if let Some(block) = &method.default {
+                            let f = syn::ItemFn {
+                                attrs: method.attrs.clone(),
+                                vis: syn::Visibility::Inherited,
+                                sig: method.sig.clone(),
+                                block: Box::new(block.clone()),
+                            };
+                            decls.push(lower_fn(f));
+                        }
+                    }
+                }
+            }
+            syn::Item::Union(u) => {
+                decls.push(Decl::Struct {
+                    name: u.ident.to_string(),
+                    fields: rust_struct_fields(&syn::Fields::Named(u.fields.clone())),
+                    type_params: vec![],
+                });
+            }
+            syn::Item::TraitAlias(ta) => {
+                decls.push(Decl::Struct {
+                    name: ta.ident.to_string(),
+                    fields: vec![],
+                    type_params: vec![],
+                });
+            }
+            syn::Item::Macro(m) => {
+                if m.mac.path.is_ident("include") || m.mac.path.is_ident("include_str") {
+                    // Keep a named hook so later DCE can see the include site.
+                    decls.push(Decl::Function {
+                        name: format!("__macro_{}", m.mac.path.to_token_stream()),
+                        params: vec![],
+                        ret: Typ::Void,
+                        body: vec![Stmt::Expr(Expr::StringLit(m.mac.tokens.to_string()))],
+                        type_params: vec![],
+                    });
+                }
+            }
+            syn::Item::ExternCrate(_) | syn::Item::Verbatim(_) => {}
             syn::Item::Mod(m) => {
                 // Handle `mod foo;` (external file) and `mod foo { ... }` (inline)
                 if let Some((_brace, items)) = &m.content {
-                    // Inline module — process its items
-                    let inner_file = syn::File {
-                        shebang: None,
-                        attrs: vec![],
-                        items: items.clone(),
-                    };
-                    if let Ok(inner) = lower_file_items_at(&inner_file, base_dir) {
-                        decls.extend(inner.decls);
+                    if depth >= 6 {
+                        // Bound inline-mod explosion (generated / re-export trees).
+                    } else {
+                        let inner_file = syn::File {
+                            shebang: None,
+                            attrs: vec![],
+                            items: items.clone(),
+                        };
+                        if let Ok(inner) =
+                            lower_file_items_at_visited(&inner_file, base_dir, visited, depth + 1)
+                        {
+                            decls.extend(prefix_module_decls(inner.decls, &m.ident.to_string()));
+                        }
                     }
                 } else {
                     // External module: record candidate path for parallel parsing
@@ -117,11 +221,14 @@ fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<UnifiedModul
                 handles.push(s.spawn(move || {
                     let candidate_rs = base.join(format!("{mod_name}.rs"));
                     let candidate_mod = base.join(format!("{mod_name}/mod.rs"));
+                    let candidate_nested = base.join(&mod_name).join("mod.rs");
 
                     let candidate = if candidate_rs.exists() {
                         candidate_rs
                     } else if candidate_mod.exists() {
                         candidate_mod
+                    } else if candidate_nested.exists() {
+                        candidate_nested
                     } else {
                         return None;
                     };
@@ -131,7 +238,12 @@ fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<UnifiedModul
                         .and_then(|src| syn::parse_file(&src).ok())
                         .and_then(|sub_file| {
                             let sub_dir = candidate.parent().unwrap_or(&base);
-                            lower_file_items_at(&sub_file, sub_dir).ok()
+                            let mut v = HashSet::new();
+                            lower_file_items_at_visited(&sub_file, sub_dir, &mut v, 1)
+                                .ok()
+                                .map(|m| {
+                                    UnifiedModule::new(prefix_module_decls(m.decls, &mod_name))
+                                })
                         })
                 }));
             }
@@ -144,11 +256,14 @@ fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<UnifiedModul
     } else if let Some(mod_name) = external_modules.first() {
         let candidate_rs = base_dir.join(format!("{mod_name}.rs"));
         let candidate_mod = base_dir.join(format!("{mod_name}/mod.rs"));
+        let candidate_nested = base_dir.join(mod_name).join("mod.rs");
 
         let candidate = if candidate_rs.exists() {
             Some(candidate_rs)
         } else if candidate_mod.exists() {
             Some(candidate_mod)
+        } else if candidate_nested.exists() {
+            Some(candidate_nested)
         } else {
             None
         };
@@ -157,18 +272,138 @@ fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<UnifiedModul
             if let Ok(src) = std::fs::read_to_string(&candidate) {
                 if let Ok(sub_file) = syn::parse_file(&src) {
                     let sub_dir = candidate.parent().unwrap_or(base_dir);
-                    if let Ok(inner) = lower_file_items_at(&sub_file, sub_dir) {
-                        decls.extend(inner.decls);
+                    let canon = candidate.canonicalize().unwrap_or(candidate.clone());
+                    if visited.insert(canon)
+                        && let Ok(inner) =
+                            lower_file_items_at_visited(&sub_file, sub_dir, visited, depth + 1)
+                    {
+                        decls.extend(prefix_module_decls(inner.decls, mod_name));
                     }
                 }
             }
         }
     }
 
+    for u in &uses {
+        apply_use_tree(&mut decls, &u.tree, "");
+    }
     if decls.is_empty() {
         return Err("rust front parsed file but found no top-level structs/functions".to_string());
     }
     Ok(UnifiedModule::new(decls))
+}
+
+fn prefix_module_decls(mut decls: Vec<Decl>, module: &str) -> Vec<Decl> {
+    if module.is_empty() {
+        return decls;
+    }
+    for d in &mut decls {
+        match d {
+            Decl::Function { name, .. } | Decl::Struct { name, .. } => {
+                if !name.contains("::") || !name.starts_with(module) {
+                    *name = format!("{module}::{name}");
+                }
+            }
+            _ => {}
+        }
+    }
+    decls
+}
+
+fn lower_const_item(c: &syn::ItemConst) -> Option<Decl> {
+    let mut locals = HashMap::new();
+    Some(Decl::Function {
+        name: c.ident.to_string(),
+        params: vec![],
+        ret: map_type(&c.ty),
+        body: vec![Stmt::Return(Some(lower_expr_with_types(
+            &c.expr,
+            &mut locals,
+        )))],
+        type_params: vec![],
+    })
+}
+
+fn lower_static_item(s: &syn::ItemStatic) -> Option<Decl> {
+    let mut locals = HashMap::new();
+    Some(Decl::Function {
+        name: s.ident.to_string(),
+        params: vec![],
+        ret: map_type(&s.ty),
+        body: vec![Stmt::Return(Some(lower_expr_with_types(
+            &s.expr,
+            &mut locals,
+        )))],
+        type_params: vec![],
+    })
+}
+
+fn apply_use_tree(decls: &mut Vec<Decl>, tree: &syn::UseTree, prefix: &str) {
+    match tree {
+        syn::UseTree::Path(p) => {
+            let next = if prefix.is_empty() {
+                p.ident.to_string()
+            } else {
+                format!("{prefix}::{}", p.ident)
+            };
+            apply_use_tree(decls, &p.tree, &next);
+        }
+        syn::UseTree::Name(n) => {
+            let full = if prefix.is_empty() {
+                n.ident.to_string()
+            } else {
+                format!("{prefix}::{}", n.ident)
+            };
+            alias_fn(decls, &full, &n.ident.to_string());
+        }
+        syn::UseTree::Rename(r) => {
+            let full = if prefix.is_empty() {
+                r.ident.to_string()
+            } else {
+                format!("{prefix}::{}", r.ident)
+            };
+            alias_fn(decls, &full, &r.rename.to_string());
+        }
+        syn::UseTree::Glob(_) => {}
+        syn::UseTree::Group(g) => {
+            for t in &g.items {
+                apply_use_tree(decls, t, prefix);
+            }
+        }
+    }
+}
+
+fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str) {
+    if full == short {
+        return;
+    }
+    if decls
+        .iter()
+        .any(|d| matches!(d, Decl::Function { name, .. } if name == short))
+    {
+        return;
+    }
+    let Some((target, params, ret)) = decls.iter().find_map(|d| match d {
+        Decl::Function {
+            name, params, ret, ..
+        } if name == full || name.ends_with(&format!("::{short}")) => {
+            Some((name.clone(), params.clone(), ret.clone()))
+        }
+        _ => None,
+    }) else {
+        return;
+    };
+    let args: Vec<Expr> = params.iter().map(|(n, _)| Expr::Ident(n.clone())).collect();
+    decls.push(Decl::Function {
+        name: short.to_string(),
+        params,
+        ret,
+        body: vec![Stmt::Return(Some(Expr::Call {
+            callee: Box::new(Expr::Ident(target)),
+            args,
+        }))],
+        type_params: vec![],
+    });
 }
 
 fn extract_boundary_module(file: &syn::File, module_id: &str) -> Option<BoundaryModule> {
@@ -709,7 +944,30 @@ fn lower_block_no_implicit_return_with_types(
     lower_block_inner_with_types(block, false, local_types)
 }
 
+thread_local! {
+    static BLOCK_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 fn lower_block_inner_with_types(
+    block: &syn::Block,
+    wrap_implicit_return: bool,
+    local_types: &mut HashMap<String, String>,
+) -> Vec<Stmt> {
+    let depth = BLOCK_DEPTH.with(|d| {
+        let n = d.get();
+        d.set(n.saturating_add(1));
+        n
+    });
+    if depth > 32 {
+        BLOCK_DEPTH.with(|d| d.set(depth));
+        return vec![];
+    }
+    let out = lower_block_inner_with_types_go(block, wrap_implicit_return, local_types);
+    BLOCK_DEPTH.with(|d| d.set(depth));
+    out
+}
+
+fn lower_block_inner_with_types_go(
     block: &syn::Block,
     wrap_implicit_return: bool,
     local_types: &mut HashMap<String, String>,
@@ -784,10 +1042,21 @@ fn lower_block_inner_with_types(
             syn::Stmt::Expr(expr, _) => {
                 lower_expr_stmt(expr, &mut out, local_types);
             }
-            syn::Stmt::Macro(_m) => {
-                // Skip macros (eprintln!, println!, etc.) — not needed for compile verification
+            syn::Stmt::Macro(m) => {
+                let expr = syn::Expr::Macro(syn::ExprMacro {
+                    attrs: vec![],
+                    mac: m.mac.clone(),
+                });
+                lower_expr_stmt(&expr, &mut out, local_types);
             }
-            syn::Stmt::Item(_) => {}
+            syn::Stmt::Item(item) => {
+                if let syn::Item::Fn(f) = item {
+                    out.push(Stmt::Expr(Expr::Ident(format!(
+                        "nested-fn:{}",
+                        f.sig.ident
+                    ))));
+                }
+            }
         }
     }
     // Only add implicit Return(None) if not all paths already return
@@ -857,6 +1126,8 @@ fn lower_expr_stmt(
 ) {
     match expr {
         syn::Expr::Return(ret) => lower_return_expr(ret.expr.as_deref(), out, local_types),
+        syn::Expr::Break(_) => out.push(Stmt::Break),
+        syn::Expr::Continue(_) => out.push(Stmt::Continue),
         syn::Expr::Try(try_expr) => {
             out.push(Stmt::Expr(lower_expr_with_types(
                 &try_expr.expr,
@@ -981,6 +1252,25 @@ fn lower_expr_stmt(
                 });
             }
         }
+        syn::Expr::Binary(b) if assign_op_from_binop(&b.op).is_some() => {
+            let op = assign_op_from_binop(&b.op).expect("checked");
+            if let Some(name) = assign_lhs_name(&b.left) {
+                out.push(Stmt::Assign(
+                    name.clone(),
+                    Expr::Binary {
+                        op: op.into(),
+                        lhs: Box::new(Expr::Ident(name)),
+                        rhs: Box::new(lower_expr_with_types(&b.right, local_types)),
+                    },
+                ));
+            } else {
+                out.push(Stmt::Expr(Expr::Binary {
+                    op: op.into(),
+                    lhs: Box::new(lower_expr_with_types(&b.left, local_types)),
+                    rhs: Box::new(lower_expr_with_types(&b.right, local_types)),
+                }));
+            }
+        }
         _ => out.push(Stmt::Expr(lower_expr_with_types(expr, local_types))),
     }
 }
@@ -1047,6 +1337,22 @@ fn lower_else_body_with_types(
     }
 }
 
+fn assign_op_from_binop(op: &syn::BinOp) -> Option<&'static str> {
+    match op {
+        syn::BinOp::AddAssign(_) => Some("+"),
+        syn::BinOp::SubAssign(_) => Some("-"),
+        syn::BinOp::MulAssign(_) => Some("*"),
+        syn::BinOp::DivAssign(_) => Some("/"),
+        syn::BinOp::RemAssign(_) => Some("%"),
+        syn::BinOp::BitXorAssign(_) => Some("^"),
+        syn::BinOp::BitAndAssign(_) => Some("&"),
+        syn::BinOp::BitOrAssign(_) => Some("|"),
+        syn::BinOp::ShlAssign(_) => Some("<<"),
+        syn::BinOp::ShrAssign(_) => Some(">>"),
+        _ => None,
+    }
+}
+
 fn assign_lhs_name(lhs: &syn::Expr) -> Option<String> {
     match lhs {
         syn::Expr::Path(p) => Some(p.path.to_token_stream().to_string()),
@@ -1065,7 +1371,29 @@ fn local_decl_type(pat: &syn::Pat) -> Option<Typ> {
     }
 }
 
+thread_local! {
+    static EXPR_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 fn lower_expr_with_types(expr: &syn::Expr, local_types: &mut HashMap<String, String>) -> Expr {
+    let depth = EXPR_DEPTH.with(|d| {
+        let n = d.get();
+        d.set(n.saturating_add(1));
+        n
+    });
+    if depth > 64 {
+        EXPR_DEPTH.with(|d| d.set(depth));
+        return Expr::IntLit(0);
+    }
+    let out = lower_expr_with_types_inner(expr, local_types);
+    EXPR_DEPTH.with(|d| d.set(depth));
+    out
+}
+
+fn lower_expr_with_types_inner(
+    expr: &syn::Expr,
+    local_types: &mut HashMap<String, String>,
+) -> Expr {
     match expr {
         syn::Expr::Lit(l) => match &l.lit {
             syn::Lit::Int(i) => i
@@ -1103,6 +1431,52 @@ fn lower_expr_with_types(expr: &syn::Expr, local_types: &mut HashMap<String, Str
                     )
                 })
                 .unwrap_or_else(|_| Expr::Ident(mac.to_token_stream().to_string()))
+        }
+        syn::Expr::Macro(mac) if mac.mac.path.is_ident("env") => {
+            syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                .parse2(mac.mac.tokens.clone())
+                .ok()
+                .and_then(|items| {
+                    let syn::Expr::Lit(lit) = items.into_iter().next()? else {
+                        return None;
+                    };
+                    let syn::Lit::Str(key) = lit.lit else {
+                        return None;
+                    };
+                    let key = key.value();
+                    let value = if key == "CARGO_PKG_VERSION" {
+                        std::env::var("CARGO_PKG_VERSION")
+                            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
+                    } else {
+                        std::env::var(&key).unwrap_or_default()
+                    };
+                    Some(Expr::StringLit(value))
+                })
+                .unwrap_or_else(|| Expr::StringLit(String::new()))
+        }
+        syn::Expr::Macro(mac)
+            if mac.mac.path.is_ident("println") || mac.mac.path.is_ident("eprintln") =>
+        {
+            syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                .parse2(mac.mac.tokens.clone())
+                .map(|items| {
+                    let args: Vec<Expr> = items
+                        .iter()
+                        .map(|item| lower_expr_with_types(item, local_types))
+                        .collect();
+                    Expr::Call {
+                        callee: Box::new(Expr::Ident("print".into())),
+                        args: if args.is_empty() {
+                            vec![Expr::StringLit(String::new())]
+                        } else {
+                            args
+                        },
+                    }
+                })
+                .unwrap_or_else(|_| Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into())),
+                    args: vec![Expr::StringLit(String::new())],
+                })
         }
         syn::Expr::Macro(mac) if mac.mac.path.is_ident("format") => {
             syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
@@ -1166,27 +1540,64 @@ fn lower_expr_with_types(expr: &syn::Expr, local_types: &mut HashMap<String, Str
                 captures: vec![],
             }
         }
-        syn::Expr::Call(c) => Expr::Call {
-            callee: Box::new(lower_expr_with_types(&c.func, local_types)),
-            args: c
+        syn::Expr::Call(c) => {
+            let callee = lower_expr_with_types(&c.func, local_types);
+            let args: Vec<Expr> = c
                 .args
                 .iter()
                 .map(|a| lower_expr_with_types(a, local_types))
-                .collect(),
-        },
+                .collect();
+            if let Expr::Ident(name) = &callee {
+                let short = name.rsplit("::").next().unwrap_or(name);
+                if short == "exit"
+                    || name.ends_with("process::exit")
+                    || name == "std::process::exit"
+                {
+                    return Expr::Call {
+                        callee: Box::new(Expr::Ident("process-exit".into())),
+                        args,
+                    };
+                }
+                if name == "std::env::args" || (short == "args" && name.contains("env")) {
+                    return Expr::Call {
+                        callee: Box::new(Expr::Ident("env-args".into())),
+                        args,
+                    };
+                }
+            }
+            Expr::Call {
+                callee: Box::new(callee),
+                args,
+            }
+        }
         syn::Expr::MethodCall(m) => {
             let mut args = Vec::with_capacity(m.args.len() + 1);
             args.push(lower_expr_with_types(&m.receiver, local_types));
             args.extend(m.args.iter().map(|a| lower_expr_with_types(a, local_types)));
             // ponytail: qualify method name with receiver type when known
+            let method = m.method.to_string();
+            // Iterator adapters: `.iter()` / `.cloned()` / `.copied()` are identity
+            // in the owned subset. `.collect()` yields the receiver.
+            if matches!(
+                method.as_str(),
+                "iter" | "into_iter" | "cloned" | "copied" | "collect" | "to_vec" | "to_string"
+            ) {
+                return args.into_iter().next().unwrap_or(Expr::IntLit(0));
+            }
+            if method == "len" {
+                return Expr::Call {
+                    callee: Box::new(Expr::Ident("len".into())),
+                    args,
+                };
+            }
             let method_name = if let Some(Expr::Ident(receiver_name)) = args.first() {
                 if let Some(ty) = local_types.get(receiver_name) {
-                    format!("{ty}::{m}", m = m.method)
+                    format!("{ty}::{method}")
                 } else {
-                    m.method.to_string()
+                    method
                 }
             } else {
-                m.method.to_string()
+                method
             };
             Expr::Call {
                 callee: Box::new(Expr::Ident(method_name)),
@@ -1217,10 +1628,144 @@ fn lower_expr_with_types(expr: &syn::Expr, local_types: &mut HashMap<String, Str
             // ponytail: ignore integer casts, types all match at register width
             lower_expr_with_types(&cast.expr, local_types)
         }
-        syn::Expr::Try(t) => {
-            // `expr?` → lower expr, skip the ? for now (ponytail: full try lowering later)
-            lower_expr_with_types(&t.expr, local_types)
+        syn::Expr::Try(t) => lower_expr_with_types(&t.expr, local_types),
+        syn::Expr::Await(a) => lower_expr_with_types(&a.base, local_types),
+        syn::Expr::Async(a) => Expr::Closure {
+            params: vec![],
+            ret: Typ::Generic("_".into()),
+            body: lower_block_with_types(&a.block, local_types),
+            captures: vec![],
+        },
+        syn::Expr::If(eif) => {
+            let then_body = lower_block_with_types(&eif.then_branch, local_types);
+            let else_body = eif
+                .else_branch
+                .as_ref()
+                .map(|(_, e)| lower_else_body_with_types(e, local_types))
+                .unwrap_or_default();
+            Expr::Closure {
+                params: vec![],
+                ret: Typ::Generic("_".into()),
+                body: vec![Stmt::If {
+                    cond: lower_expr_with_types(&eif.cond, local_types),
+                    then_body,
+                    else_body,
+                }],
+                captures: vec![],
+            }
         }
+        syn::Expr::Block(b) => {
+            let body = lower_block_with_types(&b.block, local_types);
+            Expr::Closure {
+                params: vec![],
+                ret: Typ::Generic("_".into()),
+                body,
+                captures: vec![],
+            }
+        }
+        syn::Expr::Repeat(r) => Expr::ArrayLit(vec![lower_expr_with_types(&r.expr, local_types)]),
+        syn::Expr::Range(r) => Expr::Call {
+            callee: Box::new(Expr::Ident("range".into())),
+            args: vec![
+                r.start
+                    .as_ref()
+                    .map(|s| lower_expr_with_types(s, local_types))
+                    .unwrap_or(Expr::IntLit(0)),
+                r.end
+                    .as_ref()
+                    .map(|s| lower_expr_with_types(s, local_types))
+                    .unwrap_or(Expr::IntLit(0)),
+            ],
+        },
+        syn::Expr::Tuple(t) => Expr::ArrayLit(
+            t.elems
+                .iter()
+                .map(|e| lower_expr_with_types(e, local_types))
+                .collect(),
+        ),
+        syn::Expr::Unsafe(u) => {
+            let body = lower_block_with_types(&u.block, local_types);
+            Expr::Closure {
+                params: vec![],
+                ret: Typ::Generic("_".into()),
+                body,
+                captures: vec![],
+            }
+        }
+        syn::Expr::Match(m) => {
+            let arms = m
+                .arms
+                .iter()
+                .map(|arm| MatchArm {
+                    pattern: arm.pat.to_token_stream().to_string(),
+                    body: match arm.body.as_ref() {
+                        syn::Expr::Block(b) => lower_block_with_types(&b.block, local_types),
+                        body => vec![Stmt::Return(Some(lower_expr_with_types(body, local_types)))],
+                    },
+                })
+                .collect();
+            Expr::Closure {
+                params: vec![],
+                ret: Typ::Generic("_".into()),
+                body: vec![Stmt::Match {
+                    scrutinee: lower_expr_with_types(&m.expr, local_types),
+                    arms,
+                }],
+                captures: vec![],
+            }
+        }
+        syn::Expr::Group(g) => lower_expr_with_types(&g.expr, local_types),
+        syn::Expr::Const(c) => Expr::Closure {
+            params: vec![],
+            ret: Typ::Generic("_".into()),
+            body: lower_block_with_types(&c.block, local_types),
+            captures: vec![],
+        },
+        syn::Expr::Return(r) => r
+            .expr
+            .as_ref()
+            .map(|inner| lower_expr_with_types(inner, local_types))
+            .unwrap_or(Expr::IntLit(0)),
+        syn::Expr::Assign(a) => lower_expr_with_types(&a.right, local_types),
+        syn::Expr::Break(b) => b
+            .expr
+            .as_ref()
+            .map(|inner| lower_expr_with_types(inner, local_types))
+            .unwrap_or(Expr::IntLit(0)),
+        syn::Expr::Continue(_) | syn::Expr::Infer(_) | syn::Expr::Yield(_) => Expr::IntLit(0),
+        syn::Expr::ForLoop(f) => Expr::Closure {
+            params: vec![],
+            ret: Typ::Void,
+            body: vec![Stmt::Loop {
+                kind: LoopKind::For {
+                    binding: f.pat.to_token_stream().to_string(),
+                },
+                cond: Some(lower_expr_with_types(&f.expr, local_types)),
+                body: lower_block_no_implicit_return_with_types(&f.body, local_types),
+            }],
+            captures: vec![],
+        },
+        syn::Expr::Loop(l) => Expr::Closure {
+            params: vec![],
+            ret: Typ::Void,
+            body: vec![Stmt::Loop {
+                kind: LoopKind::Infinite,
+                cond: None,
+                body: lower_block_no_implicit_return_with_types(&l.body, local_types),
+            }],
+            captures: vec![],
+        },
+        syn::Expr::Let(l) => lower_expr_with_types(&l.expr, local_types),
+        syn::Expr::While(w) => Expr::Closure {
+            params: vec![],
+            ret: Typ::Void,
+            body: vec![Stmt::Loop {
+                kind: LoopKind::While,
+                cond: Some(lower_expr_with_types(&w.cond, local_types)),
+                body: lower_block_no_implicit_return_with_types(&w.body, local_types),
+            }],
+            captures: vec![],
+        },
         syn::Expr::Struct(s) => Expr::StructInit {
             name: s.path.to_token_stream().to_string(),
             fields: s
@@ -1237,7 +1782,22 @@ fn lower_expr_with_types(expr: &syn::Expr, local_types: &mut HashMap<String, Str
                 })
                 .collect(),
         },
-        _ => Expr::Ident(expr.to_token_stream().to_string()),
+        other => {
+            if let syn::Expr::Verbatim(ts) = other {
+                let text: String = ts
+                    .to_string()
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                if !text.is_empty() {
+                    return Expr::Ident(text);
+                }
+            }
+            Expr::Call {
+                callee: Box::new(Expr::Ident(other.to_token_stream().to_string())),
+                args: vec![],
+            }
+        }
     }
 }
 
@@ -1463,6 +2023,184 @@ fn main() {
     }
 
     #[test]
+    fn pub_use_forwards_to_prefixed_fn() {
+        let dir = std::env::temp_dir().join(format!(
+            "in-pub-use-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cli.rs"), "pub fn run() -> i64 { 7 }\n").unwrap();
+        std::fs::write(dir.join("lib.rs"), "mod cli;\npub use cli::run;\n").unwrap();
+        let module = parse_rust_file(&dir.join("lib.rs")).expect("parse");
+        let _ = std::fs::remove_dir_all(&dir);
+        let run = module.decls.iter().find_map(|d| match d {
+            Decl::Function { name, body, .. } if name == "run" => Some(body),
+            _ => None,
+        });
+        let src = format!("{run:?}");
+        assert!(
+            src.contains("cli::run"),
+            "pub use run should call cli::run: {src}"
+        );
+    }
+
+    #[test]
+    fn prefixes_submodule_functions() {
+        let dir = std::env::temp_dir().join(format!(
+            "in-mod-prefix-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cli.rs"), "pub fn run() -> i64 { 7 }\n").unwrap();
+        std::fs::write(
+            dir.join("lib.rs"),
+            "mod cli;\npub use cli::run;\nfn helper() {}\n",
+        )
+        .unwrap();
+        let module = parse_rust_file(&dir.join("lib.rs")).expect("parse crate");
+        let names: Vec<_> = module
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Function { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            names
+                .iter()
+                .any(|n| *n == "cli::run" || n.ends_with("::run")),
+            "submodule fns should be prefixed: {names:?}"
+        );
+    }
+
+    #[test]
+    fn lowers_expr_match_to_stmt_match() {
+        let module = parse_rust_source(
+            r#"
+fn main() -> i64 {
+    let x = 1;
+    let y = match x { 1 => 2, _ => 3 };
+    y
+}
+"#,
+        )
+        .expect("parse match expr");
+        let body = module
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Function { name, body, .. } if name == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main");
+        let src = format!("{body:?}");
+        assert!(
+            !src.contains("match-expr"),
+            "expr match must not be a fake callee: {src}"
+        );
+        assert!(src.contains("Match"), "expected Stmt::Match: {src}");
+    }
+
+    #[test]
+    fn lowers_break_in_loop() {
+        let module = parse_rust_source(
+            r#"
+fn main() {
+    loop { break; }
+}
+"#,
+        )
+        .expect("parse break");
+        let body = module
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Function { name, body, .. } if name == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main");
+        let src = format!("{body:?}");
+        assert!(src.contains("Break"), "expected Stmt::Break: {src}");
+    }
+
+    #[test]
+    fn lowers_await_and_const() {
+        let module = parse_rust_source(
+            r#"
+const N: i64 = 4;
+async fn go() -> i64 { 1.await }
+fn main() -> i64 { N }
+"#,
+        )
+        .expect("parse await/const");
+        assert!(
+            module
+                .decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "N"))
+        );
+        assert!(
+            module
+                .decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "go"))
+        );
+    }
+
+    #[test]
+    fn lowers_collect_as_identity() {
+        let module = parse_rust_source(
+            r#"
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+}
+"#,
+        )
+        .expect("parse collect");
+        let body = module
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Function { name, body, .. } if name == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main");
+        let src = format!("{body:?}");
+        assert!(
+            !src.contains("Ident(\"collect\")"),
+            "collect should not remain a call: {src}"
+        );
+    }
+
+    #[test]
+    fn lowers_println_to_print() {
+        let module = parse_rust_source(r#"fn main() { println!("tk"); }"#).expect("parse println");
+        let body = module
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Function { name, body, .. } if name == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main");
+        let src = format!("{body:?}");
+        assert!(
+            src.contains("print"),
+            "println should lower to print: {src}"
+        );
+    }
+
+    #[test]
     fn infers_vec_new_and_qualifies_extend() {
         let src = r#"
 fn produced() -> Vec<i64> { Vec::new() }
@@ -1493,5 +2231,79 @@ fn main() {
                         if receiver == "values"
                             && matches!(callee.as_ref(), Expr::Ident(name) if name == "produced"))
         ));
+    }
+
+    #[test]
+    fn lowers_trait_alias_and_grouped_expr() {
+        let module = parse_rust_source(
+            r#"
+pub trait Sharable = Clone + Send;
+fn main() -> i64 { (1 + 2) }
+"#,
+        )
+        .expect("parse trait alias");
+        assert!(
+            module
+                .decls
+                .iter()
+                .any(|d| matches!(d, Decl::Struct { name, .. } if name == "Sharable"))
+        );
+        let body = module
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Function { name, body, .. } if name == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main");
+        let src = format!("{body:?}");
+        assert!(src.contains("Binary") || src.contains("IntLit"), "{src}");
+    }
+
+    #[test]
+    fn lowers_for_range_to_for_loop_kind() {
+        let module = parse_rust_source(
+            r#"
+fn main() {
+    for i in 0..3 { let _ = i; }
+}
+"#,
+        )
+        .expect("parse for");
+        let body = module
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Function { name, body, .. } if name == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main");
+        assert!(
+            body.iter().any(|s| matches!(
+                s,
+                Stmt::Loop {
+                    kind: LoopKind::For { .. },
+                    ..
+                }
+            )),
+            "expected For loop: {body:?}"
+        );
+    }
+
+    #[test]
+    fn lowers_add_assign() {
+        let module =
+            parse_rust_source(r#"fn main() { let mut acc = 0; acc += 1; }"#).expect("parse +=");
+        let body = module
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Function { name, body, .. } if name == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main");
+        let src = format!("{body:?}");
+        assert!(src.contains("Assign"), "expected Assign from +=: {src}");
+        assert!(src.contains('+') || src.contains("\"+\""), "{src}");
     }
 }

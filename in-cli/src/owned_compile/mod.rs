@@ -295,25 +295,74 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     // ponytail: link cargo dependencies + crate root for Rust sources
     let is_rust_source = primary_path.extension().is_some_and(|e| e == "rs");
     if is_rust_source {
-        let project_dir = primary_path.parent().unwrap_or(Path::new("."));
-        let deps = crate::cargo_linker::compile_cargo_dependencies(project_dir);
+        let project_dir = crate::cargo_linker::find_crate_dir(primary_path).unwrap_or_else(|| {
+            primary_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_path_buf()
+        });
+        let skip_deps = std::env::var_os("IN_CARGO_LINK")
+            .map(|v| v == "0")
+            .unwrap_or(false);
+        let deps = if skip_deps {
+            Vec::new()
+        } else {
+            std::thread::Builder::new()
+                .name("in-cargo-link".into())
+                .stack_size(64 * 1024 * 1024)
+                .spawn({
+                    let project_dir = project_dir.clone();
+                    move || crate::cargo_linker::compile_cargo_dependencies(&project_dir)
+                })
+                .ok()
+                .and_then(|h| h.join().ok())
+                .unwrap_or_default()
+        };
+        if request.debug {
+            eprintln!("[cargo-link] {} dependency crates", deps.len());
+        }
         if !deps.is_empty() {
             crate::cargo_linker::merge_dependency_modules(&mut module, deps);
         }
         // Also compile the crate's library root (lib.rs) to make crate-local
         // functions available (e.g. inauguration::agent_mode::analyze_path)
-        let crate_root = crate::cargo_linker::find_crate_root(project_dir);
+        let crate_root = crate::cargo_linker::find_crate_root(&project_dir);
         if let Ok(ref root) = crate_root {
+            if root != &request.path && request.debug {
+                eprintln!("[cargo-link] crate root {}", root.display());
+            }
             if root != &request.path {
-                if let Ok(crate_module) = crate::compiler::rust_front::parse_rust_file(root) {
-                    let crate_name = project_dir
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    crate::cargo_linker::merge_dependency_modules(
-                        &mut module,
-                        vec![(crate_name, crate_module)],
-                    );
+                let root_path = root.clone();
+                let parsed = std::thread::Builder::new()
+                    .name("in-crate-root".into())
+                    .stack_size(32 * 1024 * 1024)
+                    .spawn(move || crate::compiler::rust_front::parse_rust_file(&root_path))
+                    .and_then(|h| h.join().map_err(|_| std::io::Error::other("join")))
+                    .ok();
+                match parsed {
+                    Some(Ok(crate_module)) => {
+                        let crate_name = crate::cargo_linker::crate_package_name(&project_dir)
+                            .or_else(|| {
+                                project_dir
+                                    .file_stem()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                            })
+                            .unwrap_or_default();
+                        crate::cargo_linker::merge_dependency_modules(
+                            &mut module,
+                            vec![(crate_name, crate_module)],
+                        );
+                    }
+                    Some(Err(err)) => {
+                        if request.debug {
+                            eprintln!("[cargo-link] crate root parse failed: {err}");
+                        }
+                    }
+                    None => {
+                        if request.debug {
+                            eprintln!("[cargo-link] crate root parse panicked (skipped)");
+                        }
+                    }
                 }
             }
         }

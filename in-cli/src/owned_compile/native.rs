@@ -57,6 +57,25 @@ pub fn compile_native(
         .out
         .as_ref()
         .ok_or_else(|| "native compile requires --out executable path".to_string())?;
+    if request.profile == crate::emit_profile::EmitProfile::Harden {
+        let bytes = crate::native_emit::inisa_bundle::emit_linux_elf(&native_module, entry)?;
+        fs::write(out_path, &bytes)
+            .map_err(|err| format!("native inisa write `{}`: {err}", out_path.display()))?;
+        set_native_artifact_permissions(out_path, NativeLinkage::Executable)?;
+        let _meta_path = emit_component_metadata_sidecar(module, entry, out_path);
+        let eval = crate::native_emit::inisa::eval_module(&native_module, entry).ok();
+        return Ok(NativeCompileResult {
+            artifact_path: out_path.display().to_string(),
+            eval_exit_code: eval.map(|v| v as u8),
+            eval_result: eval,
+            eval_result_string: None,
+            abi_path: None,
+            backend_level: "owned-inisa-elf-bundle".to_string(),
+            runtime_level: "inisa-bundled-interpreter".to_string(),
+            reason_code: "native-harden-inisa-elf".to_string(),
+            reason: "harden bundles private INISA in a Linux ELF interpreter stub (runnable; not host ISA for the program)".to_string(),
+        });
+    }
     if let Some(target_triple) = request.target_triple.as_deref() {
         let exit = if request.linkage == NativeLinkage::StaticLib {
             0
@@ -280,7 +299,7 @@ fn collect_stmt_calls(stmts: &[Stmt], out: &mut HashSet<String>) {
                 }
             }
             Stmt::Return(None) => {}
-            Stmt::Break | Stmt::Propagate => {}
+            Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
         }
     }
 }

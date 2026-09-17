@@ -135,11 +135,15 @@ pub(crate) fn cmd_eval(
     if verbose {
         match &execution {
             JitExecution::Int(result) => eprintln!("> {}", result),
+            JitExecution::Bool(result) => eprintln!("> {}", result),
+            JitExecution::Float(result) => eprintln!("> {}", result.0),
             JitExecution::String(result) => eprintln!("> {}", result),
         }
     } else if print_result {
         match execution {
             JitExecution::Int(result) => println!("{}", result),
+            JitExecution::Bool(result) => println!("{}", result),
+            JitExecution::Float(result) => println!("{}", result.0),
             JitExecution::String(result) => println!("{}", result),
         }
     }

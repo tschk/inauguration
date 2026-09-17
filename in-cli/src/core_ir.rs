@@ -193,6 +193,8 @@ pub enum Stmt {
     Expr(Expr),
     /// Break out of the current loop.
     Break,
+    /// Continue the current loop.
+    Continue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

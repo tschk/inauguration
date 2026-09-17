@@ -841,6 +841,9 @@ fn emit_stmt(ctx: &mut Ctx, stmt: &Stmt) {
         Stmt::Break => {
             ctx.line("break;");
         }
+        Stmt::Continue => {
+            ctx.line("continue;");
+        }
     }
 }
 

@@ -273,6 +273,14 @@ pub(crate) fn parse_stmt_line(line: &str) -> Result<Stmt, String> {
     {
         return Ok(Stmt::Break);
     }
+    if s.starts_with("continue")
+        && (s.len() == 8
+            || s.as_bytes()
+                .get(8)
+                .map_or(true, |&c| c == b' ' || c == b';' || c == b'}'))
+    {
+        return Ok(Stmt::Continue);
+    }
     // `for` is handled by parse_function_body expansion
     if s.starts_with("for ") {
         return Err(

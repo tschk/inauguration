@@ -209,7 +209,7 @@ pub(crate) fn validate_stmt_types(
             validate_expr_shapes(fn_name, struct_fields, value)?;
         }
         Stmt::Return(None) => {}
-        Stmt::Break | Stmt::Propagate => {}
+        Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
         Stmt::If {
             cond,
             then_body,
@@ -346,7 +346,7 @@ pub(crate) fn desugar_method_calls_in_body(
                 }
             }
             Stmt::Return(None) => {}
-            Stmt::Break | Stmt::Propagate => {}
+            Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
             Stmt::Throw(expr) => {
                 desugar_method_calls_in_expr(expr, env, structs, fn_rets);
             }
@@ -590,7 +590,7 @@ fn replace_stmt_idents(stmt: &mut Stmt, consts: &std::collections::HashMap<Strin
             }
         }
         Stmt::Return(None) => {}
-        Stmt::Break | Stmt::Propagate => {}
+        Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
     }
 }
 

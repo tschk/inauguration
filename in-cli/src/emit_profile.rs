@@ -1,6 +1,7 @@
 //! Emit profiles controlling IR optimization and native codegen shape.
 //!
-//! - [`EmitProfile::Default`] — standard optimize + conventional emit.
+//! - [`EmitProfile::Default`] — fast owned optimize + non-classic native frames
+//!   (`lea` frame, no `rep stosq` wipe, more inlining than a textbook compiler).
 //! - [`EmitProfile::Harden`] — anti-decomp transforms and unusual codegen shapes
 //!   (intentional fingerprint avoidance vs Ghidra/Hex-Rays heuristics).
 //! - [`EmitProfile::Lean`] — aggressive inlining / shortest internal calls.

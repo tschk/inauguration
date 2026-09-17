@@ -1,6 +1,6 @@
 //! Lower [`crate::core_ir::UnifiedModule`] to textual SIL.
 
-use crate::core_ir::{Decl, MatchPattern, Typ, UnifiedModule};
+use crate::core_ir::{Decl, LoopKind, MatchPattern, Typ, UnifiedModule};
 use crate::core_ir::{Expr, Stmt};
 use std::collections::{HashMap, HashSet};
 
@@ -52,8 +52,10 @@ pub fn desugar_module(module: &mut UnifiedModule) {
 
     let mut closure_counter = 0usize;
     let mut extra_decls: Vec<Decl> = Vec::new();
+    let mut for_counter = 0usize;
     for decl in &mut new_decls {
         if let Decl::Function { body, .. } = decl {
+            desugar_for_loops(body, &mut for_counter);
             desugar_closures_in_body(body, &mut closure_counter, &mut extra_decls);
             if !method_map.is_empty() {
                 rewrite_method_calls_in_body(body, &method_map);
@@ -63,6 +65,138 @@ pub fn desugar_module(module: &mut UnifiedModule) {
     new_decls.extend(extra_decls);
 
     module.decls = new_decls;
+}
+
+fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize) {
+    let mut out = Vec::with_capacity(body.len());
+    for stmt in std::mem::take(body) {
+        match stmt {
+            Stmt::Loop {
+                kind: LoopKind::For { binding },
+                cond: Some(iter),
+                body: mut loop_body,
+            } => {
+                desugar_for_loops(&mut loop_body, counter);
+                out.extend(expand_for_loop(binding, iter, loop_body, counter));
+            }
+            Stmt::If {
+                cond,
+                mut then_body,
+                mut else_body,
+            } => {
+                desugar_for_loops(&mut then_body, counter);
+                desugar_for_loops(&mut else_body, counter);
+                out.push(Stmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                });
+            }
+            Stmt::Loop {
+                kind,
+                cond,
+                mut body,
+            } => {
+                desugar_for_loops(&mut body, counter);
+                out.push(Stmt::Loop { kind, cond, body });
+            }
+            Stmt::Match {
+                scrutinee,
+                mut arms,
+            } => {
+                for arm in &mut arms {
+                    desugar_for_loops(&mut arm.body, counter);
+                }
+                out.push(Stmt::Match { scrutinee, arms });
+            }
+            Stmt::Try {
+                mut body,
+                mut catches,
+            } => {
+                desugar_for_loops(&mut body, counter);
+                for c in &mut catches {
+                    desugar_for_loops(&mut c.body, counter);
+                }
+                out.push(Stmt::Try { body, catches });
+            }
+            other => out.push(other),
+        }
+    }
+    *body = out;
+}
+
+fn expand_for_loop(
+    binding: String,
+    iter: Expr,
+    mut loop_body: Vec<Stmt>,
+    counter: &mut usize,
+) -> Vec<Stmt> {
+    let binding = binding.trim().to_string();
+    if let Expr::Call { callee, args } = &iter {
+        if matches!(callee.as_ref(), Expr::Ident(name) if name == "range") && args.len() >= 2 {
+            let start = args[0].clone();
+            let end = args[1].clone();
+            loop_body.push(Stmt::Assign(
+                binding.clone(),
+                Expr::Binary {
+                    op: "+".into(),
+                    lhs: Box::new(Expr::Ident(binding.clone())),
+                    rhs: Box::new(Expr::IntLit(1)),
+                },
+            ));
+            return vec![
+                Stmt::Let(binding.clone(), Some(Typ::Int), start),
+                Stmt::Loop {
+                    kind: LoopKind::While,
+                    cond: Some(Expr::Binary {
+                        op: "<".into(),
+                        lhs: Box::new(Expr::Ident(binding)),
+                        rhs: Box::new(end),
+                    }),
+                    body: loop_body,
+                },
+            ];
+        }
+    }
+
+    let idx = format!("__for_{counter}");
+    *counter += 1;
+    let len_expr = match &iter {
+        Expr::ArrayLit(items) => Expr::IntLit(items.len() as i64),
+        other => Expr::Call {
+            callee: Box::new(Expr::Ident("array-len".into())),
+            args: vec![other.clone()],
+        },
+    };
+    let mut body = vec![Stmt::Let(
+        binding,
+        None,
+        Expr::Index {
+            base: Box::new(iter),
+            index: Box::new(Expr::Ident(idx.clone())),
+        },
+    )];
+    body.append(&mut loop_body);
+    body.push(Stmt::Assign(
+        idx.clone(),
+        Expr::Binary {
+            op: "+".into(),
+            lhs: Box::new(Expr::Ident(idx.clone())),
+            rhs: Box::new(Expr::IntLit(1)),
+        },
+    ));
+    vec![
+        Stmt::Let(idx.clone(), Some(Typ::Int), Expr::IntLit(0)),
+        Stmt::Loop {
+            kind: LoopKind::While,
+            cond: Some(Expr::Binary {
+                op: "<".into(),
+                lhs: Box::new(Expr::Ident(idx)),
+                rhs: Box::new(len_expr),
+            }),
+            body,
+        },
+    ]
 }
 
 fn desugar_closures_in_body(body: &mut [Stmt], counter: &mut usize, extra_decls: &mut Vec<Decl>) {
@@ -106,7 +240,7 @@ fn desugar_closures_in_body(body: &mut [Stmt], counter: &mut usize, extra_decls:
                 }
             }
             Stmt::Return(None) => {}
-            Stmt::Break | Stmt::Propagate => {}
+            Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
             Stmt::Throw(e) => {
                 desugar_closures_in_expr(e, counter, extra_decls);
             }
@@ -217,7 +351,7 @@ fn rewrite_captures_in_body(body: &mut [Stmt], captures: &HashSet<&str>) {
                 }
             }
             Stmt::Return(None) => {}
-            Stmt::Break | Stmt::Propagate => {}
+            Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
             Stmt::Throw(e) => {
                 rewrite_captures_in_expr(e, captures);
             }
@@ -405,7 +539,7 @@ fn rewrite_method_calls_in_body(body: &mut [Stmt], method_map: &HashMap<String, 
                     rewrite_method_calls_in_body(&mut catch.body, method_map);
                 }
             }
-            Stmt::Break | Stmt::Propagate => {}
+            Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
         }
     }
 }
@@ -430,6 +564,10 @@ fn rewrite_method_calls_in_expr(expr: &mut Expr, method_map: &HashMap<String, St
             } else if let Expr::Ident(name) = callee.as_mut() {
                 if name.contains('-') {
                     if let Some(mangled) = method_map.get(name.as_str()) {
+                        **callee = Expr::Ident(mangled.clone());
+                    }
+                } else if let Some(method) = name.strip_prefix("__method__") {
+                    if let Some(mangled) = method_map.get(method) {
                         **callee = Expr::Ident(mangled.clone());
                     }
                 }
@@ -803,7 +941,7 @@ fn collect_stmt_reads(st: &Stmt, reads: &mut HashSet<String>) {
                 collect_body_reads(&arm.body, reads);
             }
         }
-        Stmt::Break | Stmt::Propagate => {}
+        Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
     }
 }
 
@@ -1261,7 +1399,7 @@ fn lower_stmts_with_env(
                 }
                 out.push_str(&format!("label {try_end_label}\n"));
             }
-            Stmt::Break => {}
+            Stmt::Break | Stmt::Continue => {}
             Stmt::Propagate => out.push_str("builtin_call \"propagate_error\"\n"),
         }
     }
@@ -2222,6 +2360,53 @@ mod tests {
         assert!(
             !sil.contains("apply @Circle_draw"),
             "interface method on unknown concrete type should not be rewritten to class method"
+        );
+    }
+
+    #[test]
+    fn desugar_range_for_to_while() {
+        let mut module = UnifiedModule {
+            identity: Default::default(),
+            decls: vec![Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Int,
+                body: vec![Stmt::Loop {
+                    kind: LoopKind::For {
+                        binding: "i".into(),
+                    },
+                    cond: Some(Expr::Call {
+                        callee: Box::new(Expr::Ident("range".into())),
+                        args: vec![Expr::IntLit(0), Expr::IntLit(3)],
+                    }),
+                    body: vec![],
+                }],
+                type_params: vec![],
+            }],
+        };
+        desugar_module(&mut module);
+        let Decl::Function { body, .. } = &module.decls[0] else {
+            panic!("expected function");
+        };
+        assert!(
+            body.iter().any(|s| matches!(
+                s,
+                Stmt::Loop {
+                    kind: LoopKind::While,
+                    ..
+                }
+            )),
+            "range for should become while: {body:?}"
+        );
+        assert!(
+            !body.iter().any(|s| matches!(
+                s,
+                Stmt::Loop {
+                    kind: LoopKind::For { .. },
+                    ..
+                }
+            )),
+            "For should be gone: {body:?}"
         );
     }
 }

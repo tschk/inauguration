@@ -589,6 +589,7 @@ fn write_elf64_executable(exe: &ElfExecutable, machine: u16, out: &mut Vec<u8>) 
     out.push(ELFDATA2LSB);
     out.push(EV_CURRENT);
     out.extend_from_slice(&[0u8; 9]);
+    // Statically linked: one PT_LOAD, no PT_INTERP / PT_DYNAMIC.
     out.extend_from_slice(&ET_EXEC.to_le_bytes());
     out.extend_from_slice(&machine.to_le_bytes());
     out.extend_from_slice(&1u32.to_le_bytes());

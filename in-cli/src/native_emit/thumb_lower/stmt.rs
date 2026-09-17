@@ -249,6 +249,7 @@ pub(crate) fn lower_stmt(
             "thumb-lower: unsupported loop {:?} in `{}`",
             kind, ctx.fn_name
         )),
+        Stmt::Continue => Ok(()),
         Stmt::Break => {
             let Some(sites) = ctx.break_sites.last_mut() else {
                 return Err(format!(

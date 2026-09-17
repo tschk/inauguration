@@ -21,10 +21,13 @@ pub fn optimize_with_entry(decls: &mut Vec<Decl>, entry: Option<&str>) {
 pub fn optimize_with_profile(decls: &mut Vec<Decl>, entry: Option<&str>, profile: EmitProfile) {
     match profile {
         EmitProfile::Default => {
-            inline_small_functions_with(decls, INLINE_THRESHOLD, 10);
+            // Fast owned path: more inlining than a textbook compiler, then fold/DCE.
+            inline_small_functions_with(decls, INLINE_THRESHOLD, DEFAULT_INLINE_DEPTH);
+            inline_small_functions_with(decls, INLINE_THRESHOLD, DEFAULT_INLINE_DEPTH);
             algebraic_simplify(decls);
             fold_constants_in_decls(decls);
             propagate_constants(decls);
+            fold_constants_in_decls(decls);
             dead_code_eliminate(decls);
             remove_dead_functions(decls, entry);
         }
@@ -35,22 +38,25 @@ pub fn optimize_with_profile(decls: &mut Vec<Decl>, entry: Option<&str>, profile
             algebraic_simplify(decls);
             fold_constants_in_decls(decls);
             propagate_constants(decls);
+            fold_constants_in_decls(decls);
             dead_code_eliminate(decls);
             remove_dead_functions(decls, entry);
         }
         EmitProfile::Harden => {
             // Normal opts first so harden noise is not immediately folded away.
-            inline_small_functions_with(decls, INLINE_THRESHOLD, 10);
+            inline_small_functions_with(decls, INLINE_THRESHOLD, DEFAULT_INLINE_DEPTH);
             algebraic_simplify(decls);
             fold_constants_in_decls(decls);
             propagate_constants(decls);
+            fold_constants_in_decls(decls);
             dead_code_eliminate(decls);
             remove_dead_functions(decls, entry);
             // Anti-decomp transforms (must run after fold/dce).
+            harden_mba_arithmetic(decls);
             harden_obscure_literals(decls);
             harden_opaque_predicates(decls);
             harden_bogus_blocks(decls);
-            // Flatten straight-line bodies into a pc dispatcher before junk pads
+            // Flatten eligible bodies into a pc dispatcher before junk pads
             // so each state still receives junk noise afterward at the outer level.
             harden_cfg_dispatch_lite(decls);
             harden_junk_stmts(decls);
@@ -186,7 +192,7 @@ fn map_stmt_mut<F: FnMut(&mut Expr)>(s: &mut Stmt, f: &mut F) {
 }
 
 fn map_expr<F: FnMut(Expr) -> Expr + Copy>(e: Expr, f: &mut F) -> Expr {
-    match e {
+    let mapped = match e {
         Expr::Call { callee, args, .. } => Expr::Call {
             callee: Box::new(map_expr(*callee, f)),
             args: args.into_iter().map(|a| map_expr(a, f)).collect(),
@@ -215,8 +221,21 @@ fn map_expr<F: FnMut(Expr) -> Expr + Copy>(e: Expr, f: &mut F) -> Expr {
                 .map(|(n, e)| (n, map_expr(e, f)))
                 .collect(),
         },
-        other => f(other),
-    }
+        Expr::ArrayLit(args) => Expr::ArrayLit(args.into_iter().map(|a| map_expr(a, f)).collect()),
+        Expr::Closure {
+            params,
+            ret,
+            body,
+            captures,
+        } => Expr::Closure {
+            params,
+            ret,
+            body: body.into_iter().map(|s| map_stmt(s, f)).collect(),
+            captures,
+        },
+        other => other,
+    };
+    f(mapped)
 }
 
 fn map_stmt<F: FnMut(Expr) -> Expr + Copy>(s: Stmt, f: &mut F) -> Stmt {
@@ -283,13 +302,14 @@ fn map_stmt<F: FnMut(Expr) -> Expr + Copy>(s: Stmt, f: &mut F) -> Stmt {
 
 // ─── Inlining ──────────────────────────────────────────────────────────────
 
-const INLINE_THRESHOLD: usize = 2;
+const INLINE_THRESHOLD: usize = 6;
+const DEFAULT_INLINE_DEPTH: u32 = 16;
 const LEAN_INLINE_THRESHOLD: usize = 12;
 const LEAN_INLINE_DEPTH: u32 = 24;
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn inline_small_functions(decls: &mut [Decl]) {
-    inline_small_functions_with(decls, INLINE_THRESHOLD, 10);
+    inline_small_functions_with(decls, INLINE_THRESHOLD, DEFAULT_INLINE_DEPTH);
 }
 
 fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: u32) {
@@ -543,6 +563,7 @@ fn subst_stmt(s: &Stmt, sub: &HashMap<&str, &Expr>) -> Stmt {
                 .collect(),
         },
         Stmt::Break => Stmt::Break,
+        Stmt::Continue => Stmt::Continue,
         Stmt::Propagate => Stmt::Propagate,
     }
 }
@@ -568,6 +589,7 @@ fn has_cf(stmts: &[Stmt]) -> bool {
                 | Stmt::Try { .. }
                 | Stmt::Propagate
                 | Stmt::Break
+                | Stmt::Continue
         )
     })
 }
@@ -918,6 +940,25 @@ fn remove_dead_functions(decls: &mut Vec<Decl>, entry: Option<&str>) {
         called.insert("kernel-entry".to_string());
         called.insert("main".to_string());
     }
+    // Transitive closure: aliases / wrappers that only show up as callees.
+    let mut work: Vec<String> = called.iter().cloned().collect();
+    while let Some(name) = work.pop() {
+        let Some(Decl::Function { body, .. }) = decls
+            .iter()
+            .find(|d| matches!(d, Decl::Function { name: n, .. } if n == &name))
+        else {
+            continue;
+        };
+        let mut extra = HashSet::new();
+        for s in body {
+            collect_calls_in_stmt(s, &mut extra);
+        }
+        for n in extra {
+            if called.insert(n.clone()) {
+                work.push(n);
+            }
+        }
+    }
     decls.retain(|d| match d {
         Decl::Function { name, .. } => called.contains(name),
         _ => true,
@@ -994,6 +1035,11 @@ fn collect_calls_in_expr(e: &Expr, out: &mut HashSet<String>) {
                 out.insert(name.clone());
             }
         }
+        if let Expr::Closure { body, .. } = e {
+            for s in body {
+                collect_calls_in_stmt(s, out);
+            }
+        }
     });
 }
 
@@ -1005,14 +1051,92 @@ fn fold_constants_in_decls(decls: &mut [Decl]) {
         let old = std::mem::take(body);
         *body = old
             .into_iter()
-            .map(|s| map_stmt(s, &mut |e| fold_expr(e)))
+            .flat_map(|s| fold_stmt_matches(map_stmt(s, &mut |e| fold_expr(e))))
             .collect();
+    }
+}
+
+fn fold_stmt_matches(s: Stmt) -> Vec<Stmt> {
+    match s {
+        Stmt::Match {
+            scrutinee, arms, ..
+        } => {
+            let chosen = match &scrutinee {
+                Expr::IntLit(v) => arms.iter().find(|a| {
+                    parse_folded_int_pat(&a.pattern)
+                        .map(|p| p == *v)
+                        .unwrap_or(false)
+                }),
+                Expr::StringLit(v) => arms.iter().find(|a| {
+                    parse_folded_string_pat(&a.pattern)
+                        .as_ref()
+                        .map(|p| p == v)
+                        .unwrap_or(false)
+                }),
+                Expr::BoolLit(v) => arms.iter().find(|a| {
+                    let t = a.pattern.trim();
+                    (*v && t == "true") || (!*v && t == "false")
+                }),
+                _ => None,
+            };
+            if let Some(arm) = chosen {
+                return arm.body.clone();
+            }
+            if matches!(
+                &scrutinee,
+                Expr::IntLit(_) | Expr::StringLit(_) | Expr::BoolLit(_)
+            ) {
+                if let Some(arm) = arms
+                    .iter()
+                    .find(|a| matches!(a.pattern.trim(), "_" | "-" | "else" | "default"))
+                {
+                    return arm.body.clone();
+                }
+            }
+            vec![Stmt::Match { scrutinee, arms }]
+        }
+        other => vec![other],
+    }
+}
+
+fn parse_folded_int_pat(pattern: &str) -> Option<i64> {
+    let trimmed = pattern.trim().trim_end_matches(':').trim();
+    let trimmed = trimmed.strip_prefix("case ").unwrap_or(trimmed).trim();
+    trimmed.parse::<i64>().ok()
+}
+
+fn parse_folded_string_pat(pattern: &str) -> Option<String> {
+    let trimmed = pattern.trim().trim_end_matches(':').trim();
+    let trimmed = trimmed.strip_prefix("case ").unwrap_or(trimmed).trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        Some(trimmed[1..trimmed.len() - 1].to_string())
+    } else {
+        None
     }
 }
 
 fn fold_expr(e: Expr) -> Expr {
     match &e {
         Expr::Binary { op, lhs, rhs, .. } => {
+            if let (Expr::FloatLit(a), Expr::FloatLit(b)) = (lhs.as_ref(), rhs.as_ref()) {
+                let av = a.0;
+                let bv = b.0;
+                let result = match op.as_str() {
+                    "+" | "add" => Some(av + bv),
+                    "-" | "sub" => Some(av - bv),
+                    "*" | "mul" => Some(av * bv),
+                    "/" | "div" if bv != 0.0 => Some(av / bv),
+                    _ => None,
+                };
+                if let Some(v) = result {
+                    return Expr::FloatLit(crate::core_ir::FloatVal(v));
+                }
+            }
+            if let (Expr::StringLit(a), Expr::StringLit(b)) = (lhs.as_ref(), rhs.as_ref()) {
+                if matches!(op.as_str(), "+" | "add") {
+                    return Expr::StringLit(format!("{a}{b}"));
+                }
+            }
             if let (Expr::IntLit(a), Expr::IntLit(b)) = (lhs.as_ref(), rhs.as_ref()) {
                 // ponytail: skip div-by-zero (would change runtime behavior)
                 let result = match op.as_str() {
@@ -1055,109 +1179,82 @@ fn fold_expr(e: Expr) -> Expr {
             }
             e
         }
+        Expr::Index { base, index, .. } => {
+            if let (Expr::ArrayLit(items), Expr::IntLit(i)) = (base.as_ref(), index.as_ref()) {
+                if *i >= 0 {
+                    let idx = *i as usize;
+                    if idx < items.len() {
+                        return items[idx].clone();
+                    }
+                }
+            }
+            e
+        }
+        Expr::Field { base, name, .. } => {
+            if let Expr::StructInit { fields, .. } = base.as_ref() {
+                if let Some((_, value)) = fields.iter().find(|(n, _)| n == name) {
+                    return value.clone();
+                }
+            }
+            e
+        }
         _ => e,
     }
 }
 
 // ─── Constant Propagation ──────────────────────────────────────────────────
 
-/// Replace `let x = C; ... x ...` (x used once) with `... C ...`, remove the let.
+/// Replace `let x = C; ... x ...` with `... C ...` when `x` is never assigned.
+/// Pure literals (including array lits) substitute on every use so `arr[0] + arr[2]`
+/// can fold after this pass.
 fn propagate_constants(decls: &mut [Decl]) {
     for body in fn_bodies_mut(decls) {
         propagate_in_body(body);
     }
 }
 
-fn propagate_in_body(stmts: &mut Vec<Stmt>) {
-    // Collect int-let bindings and count uses
-    let mut consts: HashMap<String, (i64, usize)> = HashMap::new(); // name → (value, use_count)
-    for s in stmts.iter() {
-        if let Stmt::Let(n, _, Expr::IntLit(v)) = s {
-            consts.entry(n.clone()).or_insert((*v, 0));
-        }
-        count_uses_in_stmt(s, &mut consts);
+fn is_propagatable_const(e: &Expr) -> bool {
+    match e {
+        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) => true,
+        Expr::ArrayLit(items) => items.iter().all(is_propagatable_const),
+        Expr::StructInit { fields, .. } => fields.iter().all(|(_, v)| is_propagatable_const(v)),
+        _ => false,
     }
-
-    let single_use: HashSet<String> = consts
-        .iter()
-        .filter(|(_, (_, count))| *count == 1)
-        .map(|(n, _)| n.clone())
-        .collect();
-    if single_use.is_empty() {
-        return;
-    }
-
-    // Build substitution map
-    let sub: HashMap<String, Expr> = consts
-        .iter()
-        .filter(|(n, _)| single_use.contains(n.as_str()))
-        .map(|(n, (v, _))| (n.clone(), Expr::IntLit(*v)))
-        .collect();
-
-    // Replace and remove
-    for s in stmts.iter_mut() {
-        *s = replace_in_stmt(s, &sub);
-    }
-    stmts.retain(|s| !matches!(s, Stmt::Let(n, _, _) if single_use.contains(n)));
 }
 
-fn count_uses_in_stmt(s: &Stmt, consts: &mut HashMap<String, (i64, usize)>) {
+fn collect_assigned_names(s: &Stmt, assigned: &mut HashSet<String>) {
     match s {
-        Stmt::Let(_, _, e) => count_uses_in_expr(e, consts),
-        Stmt::Assign(_, e) => count_uses_in_expr(e, consts),
-        Stmt::IndexAssign {
-            base, index, value, ..
-        } => {
-            count_uses_in_expr(base, consts);
-            count_uses_in_expr(index, consts);
-            count_uses_in_expr(value, consts);
+        Stmt::Assign(n, _) => {
+            assigned.insert(n.clone());
         }
-        Stmt::Return(Some(e)) => count_uses_in_expr(e, consts),
         Stmt::If {
-            cond,
             then_body,
             else_body,
             ..
         } => {
-            count_uses_in_expr(cond, consts);
-            for s in then_body {
-                count_uses_in_stmt(s, consts);
-            }
-            for s in else_body {
-                count_uses_in_stmt(s, consts);
+            for inner in then_body.iter().chain(else_body.iter()) {
+                collect_assigned_names(inner, assigned);
             }
         }
-        Stmt::Loop { cond, body, .. } => {
-            if let Some(c) = cond {
-                count_uses_in_expr(c, consts);
-            }
-            for s in body {
-                count_uses_in_stmt(s, consts);
+        Stmt::Loop { body, .. } => {
+            for inner in body {
+                collect_assigned_names(inner, assigned);
             }
         }
-        Stmt::FieldAssign { base, value, .. } => {
-            count_uses_in_expr(base, consts);
-            count_uses_in_expr(value, consts);
-        }
-        Stmt::Expr(e) => count_uses_in_expr(e, consts),
-        Stmt::Throw(e) => count_uses_in_expr(e, consts),
-        Stmt::Try { body, catches, .. } => {
-            for s in body {
-                count_uses_in_stmt(s, consts);
-            }
-            for c in catches {
-                for s in &c.body {
-                    count_uses_in_stmt(s, consts);
+        Stmt::Match { arms, .. } => {
+            for arm in arms {
+                for inner in &arm.body {
+                    collect_assigned_names(inner, assigned);
                 }
             }
         }
-        Stmt::Match {
-            scrutinee, arms, ..
-        } => {
-            count_uses_in_expr(scrutinee, consts);
-            for arm in arms {
-                for s in &arm.body {
-                    count_uses_in_stmt(s, consts);
+        Stmt::Try { body, catches, .. } => {
+            for inner in body {
+                collect_assigned_names(inner, assigned);
+            }
+            for c in catches {
+                for inner in &c.body {
+                    collect_assigned_names(inner, assigned);
                 }
             }
         }
@@ -1165,14 +1262,26 @@ fn count_uses_in_stmt(s: &Stmt, consts: &mut HashMap<String, (i64, usize)>) {
     }
 }
 
-fn count_uses_in_expr(e: &Expr, consts: &mut HashMap<String, (i64, usize)>) {
-    walk_expr(e, &mut |e| {
-        if let Expr::Ident(n) = e {
-            if let Some(pair) = consts.get_mut(n) {
-                pair.1 += 1;
+fn propagate_in_body(stmts: &mut Vec<Stmt>) {
+    let mut consts: HashMap<String, Expr> = HashMap::new();
+    let mut assigned: HashSet<String> = HashSet::new();
+    for s in stmts.iter() {
+        if let Stmt::Let(n, _, e) = s {
+            if is_propagatable_const(e) {
+                consts.entry(n.clone()).or_insert_with(|| e.clone());
             }
         }
-    });
+        collect_assigned_names(s, &mut assigned);
+    }
+    consts.retain(|n, _| !assigned.contains(n));
+    if consts.is_empty() {
+        return;
+    }
+
+    for s in stmts.iter_mut() {
+        *s = replace_in_stmt(s, &consts);
+    }
+    stmts.retain(|s| !matches!(s, Stmt::Let(n, _, _) if consts.contains_key(n)));
 }
 
 fn replace_in_stmt(s: &Stmt, sub: &HashMap<String, Expr>) -> Stmt {
@@ -1838,6 +1947,62 @@ fn is_stdlib_or_reserved(name: &str) -> bool {
         || name.starts_with("std.")
 }
 
+fn bin_expr(op: &str, lhs: Expr, rhs: Expr) -> Expr {
+    Expr::Binary {
+        op: op.into(),
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }
+}
+
+/// Mixed-boolean arithmetic that Hex-Rays / Ghidra rarely fold:
+/// `x + y` → `(x ^ y) + 2*(x & y)`
+/// `x ^ y` → `(x | y) - (x & y)`
+/// `x | y` → `(x & y) + (x ^ y)`
+fn harden_mba_arithmetic(decls: &mut [Decl]) {
+    for body in fn_bodies_mut(decls) {
+        for stmt in body.iter_mut() {
+            map_stmt_mut(stmt, &mut |e| {
+                if let Expr::Binary { op, lhs, rhs } = e {
+                    // One MBA layer on leaf operands only — nested binaries would
+                    // explode after the bottom-up walk rewrote the children.
+                    if matches!(&**lhs, Expr::Binary { .. })
+                        || matches!(&**rhs, Expr::Binary { .. })
+                    {
+                        return;
+                    }
+                    let l = *lhs.clone();
+                    let r = *rhs.clone();
+                    match op.as_str() {
+                        "+" => {
+                            *e = bin_expr(
+                                "+",
+                                bin_expr("^", l.clone(), r.clone()),
+                                bin_expr("*", Expr::IntLit(2), bin_expr("&", l, r)),
+                            );
+                        }
+                        "^" => {
+                            *e = bin_expr(
+                                "-",
+                                bin_expr("|", l.clone(), r.clone()),
+                                bin_expr("&", l, r),
+                            );
+                        }
+                        "|" => {
+                            *e = bin_expr(
+                                "+",
+                                bin_expr("&", l.clone(), r.clone()),
+                                bin_expr("^", l, r),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+    }
+}
+
 /// Obscure integer/bool literals as `(x ^ k) ^ k` / equivalent forms.
 fn harden_obscure_literals(decls: &mut [Decl]) {
     let mut counter = 0u64;
@@ -1855,32 +2020,21 @@ fn obscure_expr_literals(e: &mut Expr, counter: &mut u64) {
         Expr::IntLit(v) => {
             *counter = counter.wrapping_add(1);
             let k = ((*counter).wrapping_mul(0x9E3779B97F4A7C15) ^ (*v as u64)) as i64 | 1;
-            *e = Expr::Binary {
-                op: "^".into(),
-                lhs: Box::new(Expr::Binary {
-                    op: "^".into(),
-                    lhs: Box::new(Expr::IntLit(*v ^ k)),
-                    rhs: Box::new(Expr::IntLit(k)),
-                }),
-                rhs: Box::new(Expr::IntLit(0)),
-            };
+            // ((v ^ k) ^ k) | (k & 0) == v. Extra `| 0` is noise, not a third XOR of k.
+            *e = bin_expr(
+                "|",
+                bin_expr("^", Expr::IntLit(*v ^ k), Expr::IntLit(k)),
+                bin_expr("&", Expr::IntLit(k), Expr::IntLit(0)),
+            );
         }
         Expr::BoolLit(b) => {
-            // (1 ^ 1) == 0 → false, etc. Keep as comparison shape decompilers mishandle.
+            // Opaque comparisons: true as `1 != 0`, false as `1 == 0` (never `0 == 0`).
             let one = Expr::IntLit(1);
             let zero = Expr::IntLit(0);
             *e = if *b {
-                Expr::Binary {
-                    op: "!=".into(),
-                    lhs: Box::new(one),
-                    rhs: Box::new(zero),
-                }
+                bin_expr("!=", one, zero)
             } else {
-                Expr::Binary {
-                    op: "==".into(),
-                    lhs: Box::new(zero),
-                    rhs: Box::new(Expr::IntLit(0)),
-                }
+                bin_expr("==", one, zero)
             };
         }
         Expr::StringLit(s) => {
@@ -1913,25 +2067,17 @@ fn harden_opaque_in_stmts(stmts: &mut [Stmt]) {
                 else_body,
             } => {
                 let original = std::mem::replace(cond, Expr::BoolLit(true));
-                // (x*x >= 0) is always true for practical Int ranges we emit.
-                let opaque = Expr::Binary {
-                    op: "||".into(),
-                    lhs: Box::new(Expr::Binary {
-                        op: ">=".into(),
-                        lhs: Box::new(Expr::Binary {
-                            op: "*".into(),
-                            lhs: Box::new(Expr::IntLit(3)),
-                            rhs: Box::new(Expr::IntLit(3)),
-                        }),
-                        rhs: Box::new(Expr::IntLit(0)),
-                    }),
-                    rhs: Box::new(Expr::BoolLit(false)),
-                };
-                *cond = Expr::Binary {
-                    op: "&&".into(),
-                    lhs: Box::new(opaque),
-                    rhs: Box::new(original),
-                };
+                // 7*7 - 49 == 0  (always true) AND original.
+                let opaque = bin_expr(
+                    "==",
+                    bin_expr(
+                        "-",
+                        bin_expr("*", Expr::IntLit(7), Expr::IntLit(7)),
+                        Expr::IntLit(49),
+                    ),
+                    Expr::IntLit(0),
+                );
+                *cond = bin_expr("&&", opaque, original);
                 harden_opaque_in_stmts(then_body);
                 harden_opaque_in_stmts(else_body);
             }
@@ -1958,25 +2104,22 @@ fn harden_bogus_blocks(decls: &mut [Decl]) {
         if body.is_empty() {
             continue;
         }
+        // Never-taken: (1 == 0) && (x*x < 0). Looks live to pattern matchers.
         let bogey = Stmt::If {
-            cond: Expr::Binary {
-                op: "&&".into(),
-                lhs: Box::new(Expr::BoolLit(false)),
-                rhs: Box::new(Expr::Binary {
-                    op: "==".into(),
-                    lhs: Box::new(Expr::IntLit(1)),
-                    rhs: Box::new(Expr::IntLit(2)),
-                }),
-            },
+            cond: bin_expr(
+                "&&",
+                bin_expr("==", Expr::IntLit(1), Expr::IntLit(0)),
+                bin_expr(
+                    "<",
+                    bin_expr("*", Expr::IntLit(5), Expr::IntLit(5)),
+                    Expr::IntLit(0),
+                ),
+            ),
             then_body: vec![
                 Stmt::Let("_bogus".into(), Some(Typ::Int), Expr::IntLit(0xDEAD)),
                 Stmt::Assign(
                     "_bogus".into(),
-                    Expr::Binary {
-                        op: "+".into(),
-                        lhs: Box::new(Expr::Ident("_bogus".into())),
-                        rhs: Box::new(Expr::IntLit(1)),
-                    },
+                    bin_expr("+", Expr::Ident("_bogus".into()), Expr::IntLit(1)),
                 ),
             ],
             else_body: vec![],
@@ -1997,11 +2140,11 @@ fn harden_junk_stmts(decls: &mut [Decl]) {
             out.push(Stmt::Let(jname.clone(), Some(Typ::Int), Expr::IntLit(0)));
             out.push(Stmt::Assign(
                 jname,
-                Expr::Binary {
-                    op: "+".into(),
-                    lhs: Box::new(Expr::IntLit(0)),
-                    rhs: Box::new(Expr::IntLit(0)),
-                },
+                bin_expr(
+                    "^",
+                    bin_expr("&", Expr::IntLit(0x55), Expr::IntLit(0xAA)),
+                    bin_expr("|", Expr::IntLit(0), Expr::IntLit(0)),
+                ),
             ));
             out.push(stmt);
         }
@@ -2009,17 +2152,18 @@ fn harden_junk_stmts(decls: &mut [Decl]) {
     }
 }
 
-/// Lite control-flow flattening: wrap eligible straight-line bodies in a
-/// `while _pc < N` dispatcher of `if _pc == i` states.
+/// Lite control-flow flattening: wrap eligible bodies in a `while _pc < N`
+/// dispatcher of `if _pc == i` states.
 ///
-/// Skips functions that already contain loops / breaks / try / match / throw /
-/// propagate so we do not fight real control flow or rely on `Break` (native
-/// lower currently treats break as a no-op).
+/// Nested `if` is allowed (then/else stay inside a state). Skips loops /
+/// breaks / try / match / throw / propagate so we do not fight real control
+/// flow or rely on `Break` (native lower currently treats break as a no-op).
 fn stmts_forbid_cfg_dispatch(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
         match stmt {
             Stmt::Loop { .. }
             | Stmt::Break
+            | Stmt::Continue
             | Stmt::Try { .. }
             | Stmt::Match { .. }
             | Stmt::Throw(_)
@@ -2040,7 +2184,7 @@ fn stmts_forbid_cfg_dispatch(stmts: &[Stmt]) -> bool {
 
 fn harden_cfg_dispatch_lite(decls: &mut [Decl]) {
     for body in fn_bodies_mut(decls) {
-        if body.len() < 3 {
+        if body.len() < 2 {
             continue;
         }
         if stmts_forbid_cfg_dispatch(body) {
@@ -2166,7 +2310,7 @@ fn rename_calls_in_stmts(stmts: &mut [Stmt], rename: &HashMap<String, String>) {
                     rename_calls_in_stmts(&mut c.body, rename);
                 }
             }
-            Stmt::Return(None) | Stmt::Propagate | Stmt::Break => {}
+            Stmt::Return(None) | Stmt::Propagate | Stmt::Break | Stmt::Continue => {}
         }
     }
 }
@@ -2640,16 +2784,120 @@ mod tests {
     }
 
     #[test]
-    fn propagate_skips_multi_use() {
+    fn propagate_skips_loop_assigned() {
+        let mut body = vec![
+            Stmt::Let("i".into(), Some(Typ::Int), Expr::IntLit(0)),
+            Stmt::Loop {
+                kind: LoopKind::While,
+                cond: Some(bin("<", ident("i"), Expr::IntLit(5))),
+                body: vec![Stmt::Assign(
+                    "i".into(),
+                    bin("+", ident("i"), Expr::IntLit(1)),
+                )],
+            },
+            Stmt::Return(Some(ident("i"))),
+        ];
+        propagate_in_body(&mut body);
+        assert!(matches!(&body[0], Stmt::Let(n, _, Expr::IntLit(0)) if n == "i"));
+        assert!(
+            matches!(&body[1], Stmt::Loop { cond: Some(Expr::Binary { lhs, .. }), .. }
+            if matches!(lhs.as_ref(), Expr::Ident(n) if n == "i"))
+        );
+    }
+
+    #[test]
+    fn propagate_multi_use_literal() {
         let mut body = vec![
             Stmt::Let("c".into(), Some(Typ::Int), Expr::IntLit(5)),
             Stmt::Expr(bin("add", ident("c"), ident("c"))),
         ];
         propagate_in_body(&mut body);
-        assert_eq!(body.len(), 2);
+        assert_eq!(body.len(), 1);
+        assert!(matches!(
+            &body[0],
+            Stmt::Expr(Expr::Binary { lhs, rhs, .. })
+                if matches!(lhs.as_ref(), Expr::IntLit(5)) && matches!(rhs.as_ref(), Expr::IntLit(5))
+        ));
+    }
+
+    #[test]
+    fn fold_const_array_index() {
+        let e = fold_expr(Expr::Index {
+            base: Box::new(Expr::ArrayLit(vec![
+                Expr::IntLit(1),
+                Expr::IntLit(2),
+                Expr::IntLit(3),
+            ])),
+            index: Box::new(Expr::IntLit(2)),
+        });
+        assert_eq!(e, Expr::IntLit(3));
+    }
+
+    #[test]
+    fn fold_float_add() {
+        let e = fold_expr(bin(
+            "+",
+            Expr::FloatLit(crate::core_ir::FloatVal(2.5)),
+            Expr::FloatLit(crate::core_ir::FloatVal(3.5)),
+        ));
+        assert_eq!(e, Expr::FloatLit(crate::core_ir::FloatVal(6.0)));
     }
 
     // ─── Dead Function Elimination ──────────────────────────────────────
+
+    #[test]
+    fn dce_follows_alias_wrappers() {
+        let mut decls = vec![
+            Decl::Function {
+                name: "helper".into(),
+                params: vec![],
+                ret: Typ::Int,
+                body: vec![Stmt::If {
+                    cond: Expr::BoolLit(true),
+                    then_body: vec![Stmt::Return(Some(Expr::IntLit(1)))],
+                    else_body: vec![Stmt::Return(Some(Expr::IntLit(0)))],
+                }],
+                type_params: vec![],
+            },
+            Decl::Function {
+                name: "alias".into(),
+                params: vec![],
+                ret: Typ::Int,
+                body: vec![Stmt::If {
+                    cond: Expr::BoolLit(true),
+                    then_body: vec![Stmt::Return(Some(Expr::Call {
+                        callee: Box::new(Expr::Ident("helper".into())),
+                        args: vec![],
+                    }))],
+                    else_body: vec![Stmt::Return(Some(Expr::IntLit(0)))],
+                }],
+                type_params: vec![],
+            },
+            Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Int,
+                body: vec![Stmt::Return(Some(Expr::Call {
+                    callee: Box::new(Expr::Ident("alias".into())),
+                    args: vec![],
+                }))],
+                type_params: vec![],
+            },
+        ];
+        optimize_with_profile(&mut decls, Some("main"), EmitProfile::Default);
+        let names: Vec<_> = decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Function { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.contains(&"helper"),
+            "alias must keep helper: {names:?}"
+        );
+        assert!(names.contains(&"alias"), "{names:?}");
+    }
 
     #[test]
     fn remove_dead_functions_keeps_called() {
@@ -3181,10 +3429,14 @@ mod tests {
 
     #[test]
     fn lean_inlines_larger_helpers() {
-        // Body of 3 stmts exceeds default threshold (2) but fits lean (12).
+        // Body of 7 stmts exceeds default threshold (6) but fits lean (12).
         let helper_body = vec![
             Stmt::Let("a".into(), None, Expr::IntLit(1)),
             Stmt::Let("b".into(), None, Expr::IntLit(2)),
+            Stmt::Let("c".into(), None, Expr::IntLit(3)),
+            Stmt::Let("d".into(), None, Expr::IntLit(4)),
+            Stmt::Let("e".into(), None, Expr::IntLit(5)),
+            Stmt::Let("f".into(), None, Expr::IntLit(6)),
             Stmt::Return(Some(Expr::Binary {
                 op: "+".into(),
                 lhs: Box::new(Expr::Ident("a".into())),
@@ -3222,6 +3474,72 @@ mod tests {
         assert!(
             !src.contains("Ident(\"helper\")"),
             "lean should inline helper into main: {src}"
+        );
+    }
+
+    #[test]
+    fn default_inlines_medium_helpers() {
+        let helper_body = vec![
+            Stmt::Let("a".into(), None, Expr::IntLit(1)),
+            Stmt::Let("b".into(), None, Expr::IntLit(2)),
+            Stmt::Return(Some(Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(Expr::Ident("a".into())),
+                rhs: Box::new(Expr::Ident("b".into())),
+            })),
+        ];
+        let mut decls = vec![
+            Decl::Function {
+                name: "helper".into(),
+                params: vec![],
+                ret: Typ::Int,
+                body: helper_body,
+                type_params: vec![],
+            },
+            Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Int,
+                body: vec![Stmt::Return(Some(Expr::Call {
+                    callee: Box::new(Expr::Ident("helper".into())),
+                    args: vec![],
+                }))],
+                type_params: vec![],
+            },
+        ];
+        optimize_with_profile(&mut decls, Some("main"), EmitProfile::Default);
+        let main = decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Function { name, body, .. } if name == "main" => Some(body),
+                _ => None,
+            })
+            .unwrap();
+        let src = format!("{main:?}");
+        assert!(
+            !src.contains("Ident(\"helper\")"),
+            "default should inline 3-stmt helper: {src}"
+        );
+    }
+
+    #[test]
+    fn harden_mba_rewrites_add() {
+        let mut decls = vec![Decl::Function {
+            name: "main".into(),
+            params: vec![("x".into(), Typ::Int), ("y".into(), Typ::Int)],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(Expr::Ident("x".into())),
+                rhs: Box::new(Expr::Ident("y".into())),
+            }))],
+            type_params: vec![],
+        }];
+        optimize_with_profile(&mut decls, Some("main"), EmitProfile::Harden);
+        let src = format!("{:?}", function_body(&decls));
+        assert!(
+            src.contains("\"^\"") && src.contains("\"&\""),
+            "harden MBA should rewrite x+y into xor/and form: {src}"
         );
     }
 }

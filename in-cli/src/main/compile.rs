@@ -484,7 +484,47 @@ fn cmd_emit_boot(
 #[derive(Debug)]
 pub(crate) enum JitExecution {
     Int(i64),
+    Bool(bool),
+    Float(FloatValFmt),
     String(String),
+}
+
+pub(crate) struct FloatValFmt(pub f64);
+
+impl std::fmt::Debug for FloatValFmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FloatVal({:?})", self.0)
+    }
+}
+
+impl std::fmt::Display for FloatValFmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FloatVal({:?})", self.0)
+    }
+}
+
+enum EntryReturnKind {
+    Bool,
+    Float,
+    Other,
+}
+
+fn entry_return_kind(path: &Path) -> EntryReturnKind {
+    let Ok(src) = std::fs::read_to_string(path) else {
+        return EntryReturnKind::Other;
+    };
+    for line in src.lines() {
+        let t = line.trim();
+        if t.contains("fn main") && t.contains("->") {
+            if t.contains("Bool") || t.contains("bool") {
+                return EntryReturnKind::Bool;
+            }
+            if t.contains("Float") || t.contains("float") {
+                return EntryReturnKind::Float;
+            }
+        }
+    }
+    EntryReturnKind::Other
 }
 
 pub(crate) fn compile_and_run_jit_report(
@@ -524,7 +564,13 @@ pub(crate) fn compile_and_run_jit_report(
     let execution = if let Some(s) = report.eval_result_string.clone() {
         JitExecution::String(s)
     } else {
-        JitExecution::Int(report.eval_result.unwrap_or(0))
+        match entry_return_kind(source_path) {
+            EntryReturnKind::Bool => JitExecution::Bool(report.eval_result.unwrap_or(0) != 0),
+            EntryReturnKind::Float => {
+                JitExecution::Float(FloatValFmt(report.eval_result.unwrap_or(0) as f64))
+            }
+            EntryReturnKind::Other => JitExecution::Int(report.eval_result.unwrap_or(0)),
+        }
     };
     Ok((report, execution))
 }
@@ -572,12 +618,13 @@ pub(crate) fn cmd_execute(
         eprintln!("[jit] Execution completed with result: {:?}", result);
     }
 
-    if let JitExecution::Int(code) = result
-        && code != 0
-    {
-        return Err(InError::Message(format!(
-            "program exited with status {code}"
-        )));
+    if !report.success {
+        return Err(InError::Message(
+            report
+                .error
+                .clone()
+                .unwrap_or_else(|| "jit execution failed".to_string()),
+        ));
     }
 
     if debug {

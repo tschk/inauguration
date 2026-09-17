@@ -240,7 +240,7 @@ fn collect_dependency_symbol_calls_from_stmt<'a>(
             }
         }
         Stmt::Return(None) => {}
-        Stmt::Break => {}
+        Stmt::Break | Stmt::Continue => {}
         Stmt::Throw(_) | Stmt::Try { .. } | Stmt::Propagate => {}
     }
 }

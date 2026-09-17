@@ -72,7 +72,7 @@ fn stmt_needs_invec(s: &Stmt) -> bool {
         Stmt::Try { body, catches } => {
             stmts_need_invec(body) || catches.iter().any(|c| stmts_need_invec(&c.body))
         }
-        Stmt::Return(None) | Stmt::Propagate | Stmt::Break => false,
+        Stmt::Return(None) | Stmt::Propagate | Stmt::Break | Stmt::Continue => false,
     }
 }
 
@@ -161,7 +161,7 @@ fn count_stmt(s: &Stmt, depth: u32, nodes: &mut usize) -> Result<(), String> {
             count_expr(e, depth + 1, nodes)
         }
         Stmt::Return(Some(e)) => count_expr(e, depth + 1, nodes),
-        Stmt::Return(None) | Stmt::Propagate | Stmt::Break => Ok(()),
+        Stmt::Return(None) | Stmt::Propagate | Stmt::Break | Stmt::Continue => Ok(()),
         Stmt::IndexAssign { base, index, value } => {
             count_expr(base, depth + 1, nodes)?;
             count_expr(index, depth + 1, nodes)?;

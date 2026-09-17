@@ -256,7 +256,7 @@ fn rewrite_this_receiver_in_stmt(stmt: &mut Stmt) {
             }
         }
         Stmt::Return(None) => {}
-        Stmt::Break | Stmt::Propagate => {}
+        Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
     }
 }
 
@@ -347,7 +347,7 @@ fn rewrite_constructor_calls_in_stmt(stmt: &mut Stmt, class_fields: &HashMap<Str
         | Stmt::Return(Some(expr))
         | Stmt::Expr(expr)
         | Stmt::Throw(expr) => rewrite_constructor_calls_in_expr(expr, class_fields),
-        Stmt::Break => {}
+        Stmt::Break | Stmt::Continue => {}
         Stmt::FieldAssign { base, value, .. } => {
             rewrite_constructor_calls_in_expr(base, class_fields);
             rewrite_constructor_calls_in_expr(value, class_fields);

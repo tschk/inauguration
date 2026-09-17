@@ -17,6 +17,10 @@ pub const R8: u8 = 8;
 pub const R9: u8 = 9;
 pub const R10: u8 = 10;
 pub const R11: u8 = 11;
+pub const R12: u8 = 12;
+pub const R13: u8 = 13;
+pub const R14: u8 = 14;
+pub const R15: u8 = 15;
 pub const REG_SP: u8 = RSP;
 pub const REG_FP: u8 = RBP;
 pub const REG_XZR: u8 = 0; // alias for zero idiom (xor same)
@@ -207,6 +211,9 @@ pub fn mov_m_r(base: u8, disp: i32, reg: u8) -> Vec<u8> {
     let needs_sib = base == RSP;
     if disp == 0 && !needs_sib && base != RBP {
         code.push(modrm(0, reg & 7, base & 7));
+        if needs_sib {
+            code.push(sib_for_base(base).unwrap_or(0x24));
+        }
     } else if disp as i8 as i32 == disp {
         code.push(modrm(1, reg & 7, base & 7));
         if needs_sib {
@@ -232,6 +239,9 @@ pub fn mov_r_m(reg: u8, base: u8, disp: i32) -> Vec<u8> {
     let needs_sib = base == RSP;
     if disp == 0 && !needs_sib && base != RBP {
         code.push(modrm(0, reg & 7, base & 7));
+        if needs_sib {
+            code.push(sib_for_base(base).unwrap_or(0x24));
+        }
     } else if disp as i8 as i32 == disp {
         code.push(modrm(1, reg & 7, base & 7));
         if needs_sib {
@@ -665,16 +675,34 @@ pub fn load_i32(reg: u8, value: i32) -> Vec<u8> {
     }
 }
 
-/// Emit the function prologue: push rbp; mov rbp, rsp
+/// `lea rbp/ebp, [rsp/esp]` with a proper SIB (rm=RSP requires it).
+pub fn lea_fp_from_sp() -> Vec<u8> {
+    if is_32bit() {
+        vec![0x8D, 0x2C, 0x24]
+    } else {
+        vec![0x48, 0x8D, 0x2C, 0x24]
+    }
+}
+
+/// `lea rsp/esp, [rbp/ebp]` (mod=01 disp8=0; 64-bit `[rbp]` is not RIP-relative).
+pub fn lea_sp_from_fp() -> Vec<u8> {
+    if is_32bit() {
+        vec![0x8D, 0x65, 0x00]
+    } else {
+        vec![0x48, 0x8D, 0x65, 0x00]
+    }
+}
+
+/// Fast owned prologue: `push rbp; lea rbp, [rsp]` — not the classic `mov rbp, rsp`.
 pub fn prologue() -> Vec<u8> {
     let mut code = push_r(REG_FP);
-    code.extend_from_slice(&mov_rr(REG_FP, REG_SP));
+    code.extend_from_slice(&lea_fp_from_sp());
     code
 }
 
-/// Emit the function epilogue: mov rsp, rbp; pop rbp; ret
+/// Fast owned epilogue: `lea rsp, [rbp]; pop rbp; ret` — not classic `mov rsp, rbp`.
 pub fn epilogue() -> Vec<u8> {
-    let mut code = mov_rr(REG_SP, REG_FP);
+    let mut code = lea_sp_from_fp();
     code.extend_from_slice(&pop_r(REG_FP));
     code.extend_from_slice(&ret());
     code
@@ -719,7 +747,8 @@ mod tests {
     #[test]
     fn encodes_prologue() {
         let code = prologue();
-        assert_eq!(&code[..3], &[0x55, 0x48, 0x89]);
+        // push rbp; lea rbp, [rsp]  — not classic `mov rbp, rsp` (0x48 0x89 0xE5)
+        assert_eq!(&code[..], &[0x55, 0x48, 0x8D, 0x2C, 0x24]);
     }
 
     #[test]
@@ -816,8 +845,10 @@ mod tests {
         let epi = epilogue();
         assert!(pro.len() > 0);
         assert!(epi.len() > 0);
-        // prologue first bytes: push rbp (0x55)
+        // prologue first bytes: push rbp (0x55); lea, not mov
         assert_eq!(pro[0], 0x55);
+        assert_eq!(&pro[1..], &[0x48, 0x8D, 0x2C, 0x24]);
+        assert_eq!(&epi[..4], &[0x48, 0x8D, 0x65, 0x00]);
         // epilogue last byte: ret (0xC3)
         assert_eq!(epi[epi.len() - 1], 0xC3);
     }

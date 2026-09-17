@@ -298,10 +298,13 @@ pub(super) fn extract_holyc(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, Str
             continue;
         }
         decls.push(Decl::Function {
-            name,
+            name: name.clone(),
             params: vec![],
             ret: Typ::Void,
-            body: vec![],
+            body: vec![Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident(name)),
+                args: vec![],
+            })],
             type_params: vec![],
         });
     }

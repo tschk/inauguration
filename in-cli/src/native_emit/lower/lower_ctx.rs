@@ -76,7 +76,7 @@ pub(crate) fn alloc_declared_locals(
             Stmt::Let(name, typ, expr) => {
                 ctx.alloc_let_local(name, typ.as_ref(), expr, fn_name, functions)?
             }
-            Stmt::Break | Stmt::Propagate => {}
+            Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
             Stmt::If {
                 then_body,
                 else_body,

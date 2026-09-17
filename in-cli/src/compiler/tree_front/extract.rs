@@ -594,29 +594,45 @@ pub fn parse_zig_artifact(path: &Path) -> Result<CompileArtifact, String> {
     parse_zig_artifact_source(&src, &module_id)
 }
 
+fn textual_fn(name: String, body_src: &str) -> Decl {
+    let body = simple_bounded_body(body_src, "=")
+        .or_else(|| simple_bounded_body(body_src, "<-"))
+        .unwrap_or_default();
+    Decl::Function {
+        name,
+        params: vec![],
+        ret: Typ::Named("dynamic".into()),
+        body,
+        type_params: vec![],
+    }
+}
+
+fn slice_lines(lines: &[&str], start: usize, end: usize) -> String {
+    lines
+        .get(start.saturating_add(1)..end)
+        .unwrap_or(&[])
+        .join("\n")
+}
+
 pub fn parse_textual_polyglot_module(id: ParserId, src: &str) -> Result<UnifiedModule, String> {
-    let mut decls = Vec::new();
     let lines: Vec<&str> = src.lines().collect();
+    let mut headers: Vec<(String, usize)> = Vec::new();
 
     match id {
         ParserId::Cobol => {
             let mut prog_name = "main".to_string();
-            for line in &lines {
+            let mut start = 0usize;
+            for (i, line) in lines.iter().enumerate() {
                 let trimmed = line.trim();
                 if let Some(rest) = trimmed.strip_prefix("PROGRAM-ID.") {
                     prog_name = normalize_entry(&rest.trim_end_matches('.').trim().to_lowercase());
+                    start = i;
                 }
             }
-            decls.push(Decl::Function {
-                name: prog_name,
-                params: vec![],
-                ret: Typ::Named("dynamic".into()),
-                body: vec![],
-                type_params: vec![],
-            });
+            headers.push((prog_name, start));
         }
         ParserId::Fortran => {
-            for line in &lines {
+            for (i, line) in lines.iter().enumerate() {
                 let trimmed = line.trim();
                 let lower = trimmed.to_lowercase();
                 if lower.starts_with("subroutine ")
@@ -628,20 +644,14 @@ pub fn parse_textual_polyglot_module(id: ParserId, src: &str) -> Result<UnifiedM
                         let name =
                             normalize_entry(parts[1].split('(').next().unwrap_or(parts[1]).trim());
                         if !name.is_empty() {
-                            decls.push(Decl::Function {
-                                name,
-                                params: vec![],
-                                ret: Typ::Named("dynamic".into()),
-                                body: vec![],
-                                type_params: vec![],
-                            });
+                            headers.push((name, i));
                         }
                     }
                 }
             }
         }
         ParserId::VbNet => {
-            for line in &lines {
+            for (i, line) in lines.iter().enumerate() {
                 let trimmed = line.trim();
                 let lower = trimmed.to_lowercase();
                 if lower.starts_with("sub ") || lower.starts_with("function ") {
@@ -650,39 +660,27 @@ pub fn parse_textual_polyglot_module(id: ParserId, src: &str) -> Result<UnifiedM
                         let name =
                             normalize_entry(parts[1].split('(').next().unwrap_or(parts[1]).trim());
                         if !name.is_empty() {
-                            decls.push(Decl::Function {
-                                name,
-                                params: vec![],
-                                ret: Typ::Named("dynamic".into()),
-                                body: vec![],
-                                type_params: vec![],
-                            });
+                            headers.push((name, i));
                         }
                     }
                 }
             }
         }
         ParserId::Odin => {
-            for line in &lines {
+            for (i, line) in lines.iter().enumerate() {
                 let trimmed = line.trim();
                 if trimmed.contains(":: proc(") || trimmed.contains("::proc(") {
                     if let Some((name_part, _)) = trimmed.split_once("::") {
                         let name = normalize_entry(name_part.trim());
                         if !name.is_empty() {
-                            decls.push(Decl::Function {
-                                name,
-                                params: vec![],
-                                ret: Typ::Named("dynamic".into()),
-                                body: vec![],
-                                type_params: vec![],
-                            });
+                            headers.push((name, i));
                         }
                     }
                 }
             }
         }
         ParserId::Hare => {
-            for line in &lines {
+            for (i, line) in lines.iter().enumerate() {
                 let trimmed = line.trim();
                 if let Some(rest) = trimmed
                     .strip_prefix("fn ")
@@ -690,19 +688,13 @@ pub fn parse_textual_polyglot_module(id: ParserId, src: &str) -> Result<UnifiedM
                 {
                     let name = normalize_entry(rest.split('(').next().unwrap_or(rest).trim());
                     if !name.is_empty() {
-                        decls.push(Decl::Function {
-                            name,
-                            params: vec![],
-                            ret: Typ::Named("dynamic".into()),
-                            body: vec![],
-                            type_params: vec![],
-                        });
+                        headers.push((name, i));
                     }
                 }
             }
         }
         ParserId::D => {
-            for line in &lines {
+            for (i, line) in lines.iter().enumerate() {
                 let trimmed = line.trim();
                 if (trimmed.contains('(') && trimmed.ends_with('{'))
                     || trimmed.starts_with("void ")
@@ -713,20 +705,14 @@ pub fn parse_textual_polyglot_module(id: ParserId, src: &str) -> Result<UnifiedM
                         let name_part = parts[1].split('(').next().unwrap_or(parts[1]);
                         let name = normalize_entry(name_part.trim());
                         if !name.is_empty() && !name.contains('=') {
-                            decls.push(Decl::Function {
-                                name,
-                                params: vec![],
-                                ret: Typ::Named("dynamic".into()),
-                                body: vec![],
-                                type_params: vec![],
-                            });
+                            headers.push((name, i));
                         }
                     }
                 }
             }
         }
         ParserId::Clojure => {
-            for line in &lines {
+            for (i, line) in lines.iter().enumerate() {
                 let trimmed = line.trim();
                 if let Some(rest) = trimmed
                     .strip_prefix("(defn ")
@@ -735,13 +721,7 @@ pub fn parse_textual_polyglot_module(id: ParserId, src: &str) -> Result<UnifiedM
                     let name =
                         normalize_entry(rest.split_whitespace().next().unwrap_or(rest).trim());
                     if !name.is_empty() {
-                        decls.push(Decl::Function {
-                            name,
-                            params: vec![],
-                            ret: Typ::Named("dynamic".into()),
-                            body: vec![],
-                            type_params: vec![],
-                        });
+                        headers.push((name, i));
                     }
                 }
             }
@@ -749,14 +729,14 @@ pub fn parse_textual_polyglot_module(id: ParserId, src: &str) -> Result<UnifiedM
         _ => {}
     }
 
+    let mut decls = Vec::new();
+    for (idx, (name, start)) in headers.iter().enumerate() {
+        let end = headers.get(idx + 1).map(|(_, n)| *n).unwrap_or(lines.len());
+        decls.push(textual_fn(name.clone(), &slice_lines(&lines, *start, end)));
+    }
+
     if decls.is_empty() {
-        decls.push(Decl::Function {
-            name: "main".to_string(),
-            params: vec![],
-            ret: Typ::Named("dynamic".into()),
-            body: vec![],
-            type_params: vec![],
-        });
+        decls.push(textual_fn("main".to_string(), src));
     }
 
     let decls = dedup_fns(decls);
@@ -1351,7 +1331,51 @@ pub(super) fn ast_expr(src: &[u8], expr: Node<'_>, shape: AstShape) -> Option<Ex
     if kind_in(expr, shape.unary_kinds) {
         return ast_unary_expr(src, expr, shape);
     }
-    None
+    if matches!(
+        expr.kind(),
+        "subscript_expression"
+            | "index_expression"
+            | "element_access_expression"
+            | "array_access"
+            | "indexed_expression"
+    ) {
+        let base = expr
+            .child_by_field_name("object")
+            .or_else(|| expr.child_by_field_name("array"))
+            .or_else(|| expr.child_by_field_name("argument"))
+            .or_else(|| expr.named_child(0))?;
+        let index = expr
+            .child_by_field_name("index")
+            .or_else(|| expr.named_child(1))?;
+        return Some(Expr::Index {
+            base: Box::new(ast_expr(src, base, shape)?),
+            index: Box::new(ast_expr(src, index, shape)?),
+        });
+    }
+    if matches!(
+        expr.kind(),
+        "array" | "array_literal" | "list" | "slice" | "array_creation_expression"
+    ) {
+        let mut items = Vec::new();
+        let mut w = expr.walk();
+        for ch in expr.named_children(&mut w) {
+            if let Some(e) = ast_expr(src, ch, shape) {
+                items.push(e);
+            }
+        }
+        return Some(Expr::ArrayLit(items));
+    }
+    if matches!(
+        expr.kind(),
+        "field_expression"
+            | "member_expression"
+            | "field_access"
+            | "selector_expression"
+            | "member_access_expression"
+    ) {
+        return ast_member_expr(src, expr, shape);
+    }
+    expr.named_child(0).and_then(|n| ast_expr(src, n, shape))
 }
 
 fn ast_member_expr(src: &[u8], expr: Node<'_>, shape: AstShape) -> Option<Expr> {
@@ -1922,6 +1946,13 @@ class X {
                         Stmt::Expr(Expr::Call {
                             callee: Box::new(Expr::Ident("helper".into())),
                             args: vec![Expr::Ident("value".into())],
+                        }),
+                        Stmt::Expr(Expr::Call {
+                            callee: Box::new(Expr::Ident("helper".into())),
+                            args: vec![Expr::Field {
+                                base: Box::new(Expr::Ident("args".into())),
+                                name: "length".into(),
+                            }],
                         }),
                         Stmt::Let(
                             "local".into(),
@@ -5158,5 +5189,35 @@ main()
             }
             _ => panic!("expected function"),
         }
+    }
+
+    #[test]
+    fn textual_hare_lowers_return_body() {
+        let src = "fn add() {\n  return 1 + 2;\n}\n";
+        let m = parse_textual_polyglot_module(ParserId::Hare, src).expect("hare");
+        let body = m
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Function { name, body, .. } if name == "add" => Some(body),
+                _ => None,
+            })
+            .expect("add");
+        assert!(
+            !body.is_empty(),
+            "hare textual front should lower a body: {body:?}"
+        );
+    }
+
+    #[test]
+    fn textual_cobol_program_id() {
+        let src =
+            "IDENTIFICATION DIVISION.\nPROGRAM-ID. GREET.\nPROCEDURE DIVISION.\n  return 0.\n";
+        let m = parse_textual_polyglot_module(ParserId::Cobol, src).expect("cobol");
+        assert!(
+            m.decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "greet"))
+        );
     }
 }

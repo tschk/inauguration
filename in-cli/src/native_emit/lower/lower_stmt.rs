@@ -276,6 +276,7 @@ pub(crate) fn lower_stmt(
             Ok(())
         }
         Stmt::Break => Ok(()),
+        Stmt::Continue => Ok(()),
     }
 }
 

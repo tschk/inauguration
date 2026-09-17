@@ -5,6 +5,8 @@ pub mod antidecomp;
 pub mod c_backend;
 pub mod coff;
 pub mod elf;
+pub mod inisa;
+pub mod inisa_bundle;
 pub mod linker_layout;
 pub mod lower;
 mod macho;
