@@ -45,6 +45,10 @@ unsafe impl Sync for JitFunction {}
 pub struct JitRuntime {
     /// Mapped executable pages (the code arena).
     code_pages: Vec<CodePage>,
+    /// Mapped read-write pages holding the lowered data section (globals).
+    /// Kept alive for the lifetime of the runtime so executed code can
+    /// read and write global slots.
+    data_pages: Vec<(*mut u8, usize)>,
     /// Function dispatch table: name → entry point.
     functions: RwLock<HashMap<String, JitFunction>>,
     /// Writable page for error flag (byte at +0) and error value (ptr at +8).
@@ -229,6 +233,7 @@ impl JitRuntime {
         };
         Self {
             code_pages: Vec::new(),
+            data_pages: Vec::new(),
             functions: RwLock::new(HashMap::new()),
             error_page,
         }
@@ -245,6 +250,26 @@ impl JitRuntime {
         function_offsets: &[(String, u32, u32)], // (name, offset, size)
         relocations: &[(u32, u64)],              // (offset, codegen_base) — patched at load time
     ) -> Result<(), String> {
+        self.load_with_globals(code, function_offsets, relocations, &[], &[])
+    }
+
+    /// Like [`load`], with the lowered data section mapped for execution.
+    ///
+    /// `global_relocs` holds `(site, data_offset)` pairs: each `site` is the
+    /// imm64/displacement offset of an absolute reference to the global slot
+    /// at `data_offset`. The lowering baked `data_base + offset` into the
+    /// image; this pass rewrites it to the actually-mapped data address so
+    /// executed code reads and writes real globals instead of unmapped
+    /// memory. Sites listed here are skipped by the code-relative relocation
+    /// pass.
+    pub fn load_with_globals(
+        &mut self,
+        code: &[u8],
+        function_offsets: &[(String, u32, u32)],
+        relocations: &[(u32, u64)],
+        data: &[u8],
+        global_relocs: &[(u32, u64)],
+    ) -> Result<(), String> {
         // Allocate a code page large enough
         let mut page = CodePage::new(code.len()).ok_or_else(|| "jit: mmap failed".to_string())?;
         page.used = code.len();
@@ -254,11 +279,18 @@ impl JitRuntime {
             std::ptr::copy_nonoverlapping(code.as_ptr(), dest, code.len());
         }
 
-        // Apply relocations: patch each absolute address by adding (actual_base - codegen_base)
+        // Apply relocations: patch each absolute address by adding (actual_base - codegen_base).
+        // Global-data sites are excluded — they are rebased against the
+        // mapped data section below.
         if !relocations.is_empty() {
             let actual_base = dest as u64;
+            let global_sites: std::collections::HashSet<usize> =
+                global_relocs.iter().map(|(s, _)| *s as usize).collect();
             for &(offset, codegen_base) in relocations {
                 let site = offset as usize;
+                if global_sites.contains(&site) {
+                    continue;
+                }
                 if site + 8 <= code.len() {
                     let old_val = u64::from_le_bytes([
                         code[site],
@@ -272,6 +304,41 @@ impl JitRuntime {
                     ]);
                     let new_val = old_val.wrapping_sub(codegen_base).wrapping_add(actual_base);
                     let patch = new_val.to_le_bytes();
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(patch.as_ptr(), dest.add(site), 8);
+                    }
+                }
+            }
+        }
+
+        // Map the data section (globals) read-write and rebase every global
+        // reference to the mapped address. Without this, executed code would
+        // touch the lowered data_base (0x200000) directly, which is unmapped.
+        if !data.is_empty() {
+            let rounded = data.len().next_multiple_of(0x1000);
+            let map = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    rounded,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANON,
+                    -1,
+                    0,
+                )
+            };
+            if map == libc::MAP_FAILED {
+                return Err("jit: data section mmap failed".to_string());
+            }
+            let data_ptr = map as *mut u8;
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr, data.len());
+            }
+            self.data_pages.push((data_ptr, rounded));
+            let actual_data_base = data_ptr as u64;
+            for &(site, offset) in global_relocs {
+                let site = site as usize;
+                if site + 8 <= code.len() {
+                    let patch = actual_data_base.wrapping_add(offset).to_le_bytes();
                     unsafe {
                         std::ptr::copy_nonoverlapping(patch.as_ptr(), dest.add(site), 8);
                     }

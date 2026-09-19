@@ -92,6 +92,11 @@ pub struct X86_64CompileResult {
     /// Byte offsets in `code` where 8-byte absolute addresses were written.
     /// At load time, patch each by adding (actual_base - codegen_base).
     pub relocations: Vec<u32>,
+    /// (site, data offset) for every absolute reference to a global slot.
+    /// Native linkers rebase these against `.data`; the JIT maps the data
+    /// section and rebases to the mapped address. Sites here are excluded
+    /// from the code-relative `relocations` pass at JIT load time.
+    pub global_relocs: Vec<(u32, u64)>,
     /// The base address used during codegen (KERNEL_BASE = 0x101100).
     pub codegen_base: u64,
     /// Initialised data section bytes (global variable initial values).
@@ -294,7 +299,7 @@ pub fn lower_module_with_bases(
 ) -> Result<X86_64CompileResult, String> {
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
-    let globals = collect_globals(module);
+    let globals = collect_globals(module, &structs);
 
     let all_strings = collect_string_literals(module);
 
@@ -405,9 +410,11 @@ pub fn lower_module_with_bases(
     }
 
     // Patch global-variable references now that the data section address is known.
+    let mut global_relocs: Vec<(u32, u64)> = Vec::new();
     for pg in &all_pending_globals {
         let abs_addr = data_base + pg.offset;
         let site = pg.site as usize;
+        global_relocs.push((pg.site, pg.offset));
         if pg.width == 4 && site + 4 <= emitter.bytes.len() {
             emitter.bytes[site..site + 4].copy_from_slice(&(abs_addr as u32).to_le_bytes());
             relocations.push(pg.site);
@@ -441,6 +448,7 @@ pub fn lower_module_with_bases(
         entry_offset,
         exports,
         relocations,
+        global_relocs,
         codegen_base: code_base,
         data,
         externs,
@@ -775,12 +783,26 @@ fn collect_string_literals(module: &UnifiedModule) -> Vec<String> {
 
 /// Collect global variable names and assign them fixed absolute addresses.
 /// Returns: (name → address) map.
-fn collect_globals(module: &UnifiedModule) -> HashMap<String, u64> {
+fn collect_globals(
+    module: &UnifiedModule,
+    structs: &HashMap<String, Vec<(String, Typ)>>,
+) -> HashMap<String, u64> {
     let mut globals = HashMap::new();
     let mut offset = 0u64;
     for decl in &module.decls {
-        if let Decl::Global { name, .. } = decl {
+        if let Decl::Global { name, typ, .. } = decl {
             globals.insert(name.clone(), offset);
+            // Struct-typed globals reserve one word per known field so that
+            // `{name}.{field}` sites lower to direct data-section slots.
+            if let Typ::Named(struct_name) = typ {
+                if let Some(fields) = structs.get(struct_name) {
+                    for (idx, (field, _)) in fields.iter().enumerate() {
+                        globals.insert(format!("{name}.{field}"), offset + idx as u64 * 8);
+                    }
+                    offset += (fields.len().max(1) as u64) * 8;
+                    continue;
+                }
+            }
             offset += 8;
         }
     }
@@ -806,6 +828,12 @@ fn build_data_section(module: &UnifiedModule, globals: &HashMap<String, u64>) ->
                 max_offset = offset + 8;
             }
         }
+    }
+    // Struct-typed globals reserve extra field slots past their base word;
+    // extend the section so every mapped slot exists in the image.
+    let max_needed = globals.values().copied().max().unwrap_or(0) + 8;
+    while data.len() < max_needed as usize {
+        data.push(0);
     }
     data
 }

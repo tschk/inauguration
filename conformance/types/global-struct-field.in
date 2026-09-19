@@ -1,0 +1,13 @@
+// @expect parse: ok
+struct Counter {
+  Int count
+}
+var counter: Counter = 0;
+fn bump() -> Int {
+  counter.count = counter.count + 5;
+  return counter.count;
+}
+fn main() -> Int {
+  counter.count = 3;
+  return bump();
+}
