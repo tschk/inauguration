@@ -457,9 +457,12 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     report.call_edge_count = count_call_edges(&module, &request.module_id);
 
     // Profile-aware IR optimize before lowering (default/lean/harden).
+    // Static-lib objects keep every function: assembly capsules and sibling
+    // objects resolve them by symbol (e.g. IRQ/SysTick handler entry points).
     {
         let entry = effective_entry.as_deref();
-        crate::core_opt::optimize_with_profile(&mut module.decls, entry, request.profile);
+        let keep_all = request.linkage == crate::native_emit::NativeLinkage::StaticLib;
+        crate::core_opt::optimize_with_linkage(&mut module.decls, entry, request.profile, keep_all);
         report.typed_function_count = count_functions(&module);
         report.call_edge_count = count_call_edges(&module, &request.module_id);
     }

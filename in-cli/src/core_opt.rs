@@ -19,6 +19,19 @@ pub fn optimize_with_entry(decls: &mut Vec<Decl>, entry: Option<&str>) {
 
 /// Profile-aware IR optimize entry point used by `compile_owned`.
 pub fn optimize_with_profile(decls: &mut Vec<Decl>, entry: Option<&str>, profile: EmitProfile) {
+    optimize_with_linkage(decls, entry, profile, false);
+}
+
+/// Linkage-aware variant: for static-lib linkage every function is a
+/// potential export — callers outside this module (assembly capsules, other
+/// objects) may resolve them by symbol. Function-level removal must not run;
+/// statement-level DCE and folding above are safe.
+pub fn optimize_with_linkage(
+    decls: &mut Vec<Decl>,
+    entry: Option<&str>,
+    profile: EmitProfile,
+    keep_all_functions: bool,
+) {
     match profile {
         EmitProfile::Default => {
             // Fast owned path: more inlining than a textbook compiler, then fold/DCE.
@@ -29,7 +42,9 @@ pub fn optimize_with_profile(decls: &mut Vec<Decl>, entry: Option<&str>, profile
             propagate_constants(decls);
             fold_constants_in_decls(decls);
             dead_code_eliminate(decls);
-            remove_dead_functions(decls, entry);
+            if !keep_all_functions {
+                remove_dead_functions(decls, entry);
+            }
         }
         EmitProfile::Lean => {
             // Aggressive inlining + deeper recursion, then standard cleanup.
@@ -40,7 +55,9 @@ pub fn optimize_with_profile(decls: &mut Vec<Decl>, entry: Option<&str>, profile
             propagate_constants(decls);
             fold_constants_in_decls(decls);
             dead_code_eliminate(decls);
-            remove_dead_functions(decls, entry);
+            if !keep_all_functions {
+                remove_dead_functions(decls, entry);
+            }
         }
         EmitProfile::Harden => {
             // Normal opts first so harden noise is not immediately folded away.
@@ -50,7 +67,9 @@ pub fn optimize_with_profile(decls: &mut Vec<Decl>, entry: Option<&str>, profile
             propagate_constants(decls);
             fold_constants_in_decls(decls);
             dead_code_eliminate(decls);
-            remove_dead_functions(decls, entry);
+            if !keep_all_functions {
+                remove_dead_functions(decls, entry);
+            }
             // Anti-decomp transforms (must run after fold/dce).
             harden_mba_arithmetic(decls);
             harden_obscure_literals(decls);
@@ -328,7 +347,14 @@ fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: 
             matches!(
                 d,
                 Decl::Function { body, .. }
-                    if body.len() <= threshold && !ptr_refs.contains(n) && !has_cf(body)
+                    // An empty body is an extern binding (asm/zig/rust), not a
+                    // function to inline: "inlining" it would delete the call
+                    // to the external symbol, silently dropping MMIO writes,
+                    // context switches, and other side effects.
+                    if !body.is_empty()
+                        && body.len() <= threshold
+                        && !ptr_refs.contains(n)
+                        && !has_cf(body)
             )
         })
         .map(|(n, _)| n.clone())
@@ -2897,6 +2923,74 @@ mod tests {
             "alias must keep helper: {names:?}"
         );
         assert!(names.contains(&"alias"), "{names:?}");
+    }
+
+    #[test]
+    fn static_lib_keeps_unreferenced_functions() {
+        // Static-lib linkage: every function is a potential export resolved by
+        // assembly capsules or sibling objects (e.g. IRQ handlers called only
+        // from asm). Function-level removal must not run.
+        let mut decls = vec![
+            make_fn("subspace_main", vec![Stmt::Return(Some(Expr::IntLit(0)))]),
+            make_fn("subspace_systick_handler", vec![Stmt::Return(None)]),
+        ];
+        optimize_with_linkage(&mut decls, Some("subspace_main"), EmitProfile::Default, true);
+        let names: Vec<&str> = decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Function { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.contains(&"subspace_systick_handler"),
+            "static-lib must keep asm-called handlers: {names:?}"
+        );
+    }
+
+    #[test]
+    fn inline_keeps_calls_to_extern_bindings() {
+        // Extern bindings (asm/zig/rust) lower as Decl::Function with an empty
+        // body. Inlining an empty body deletes the call, silently dropping
+        // side effects (MMIO stores, context switches). A statement-level call
+        // to an empty-bodied extern must survive optimization.
+        let mut extern_touch = make_fn("ext_touch", vec![]);
+        if let Decl::Function { params, .. } = &mut extern_touch {
+            *params = vec![("x".to_string(), Typ::Int)];
+        }
+        let mut decls = vec![
+            make_fn("kernel_entry", vec![Stmt::Expr(call("ext_touch", vec![ident("x")]))]),
+            extern_touch,
+            make_fn(
+                "uses_result",
+                vec![
+                    Stmt::Let(
+                        "v".to_string(),
+                        Some(Typ::Int),
+                        call("ext_value", vec![Expr::IntLit(3)]),
+                    ),
+                    Stmt::Return(Some(ident("v"))),
+                ],
+            ),
+            make_fn_with_params("ext_value", vec![("x", Typ::Int)], Typ::Int, vec![]),
+        ];
+        optimize_with_linkage(&mut decls, Some("kernel_entry"), EmitProfile::Default, false);
+        let entry = decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Function { name, body, .. } if name == "kernel_entry" => Some(body.clone()),
+                _ => None,
+            })
+            .expect("kernel_entry");
+        let has_extern_call = entry.iter().any(|s| match s {
+            Stmt::Expr(e) => matches!(e, Expr::Call { callee, .. }
+                if matches!(callee.as_ref(), Expr::Ident(n) if n == "ext_touch")),
+            _ => false,
+        });
+        assert!(
+            has_extern_call,
+            "optimizer must keep statement calls to extern bindings: {entry:?}"
+        );
     }
 
     #[test]
