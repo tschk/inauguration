@@ -1231,8 +1231,10 @@ fn fold_expr(e: Expr) -> Expr {
 // ─── Constant Propagation ──────────────────────────────────────────────────
 
 /// Replace `let x = C; ... x ...` with `... C ...` when `x` is never assigned.
-/// Pure literals (including array lits) substitute on every use so `arr[0] + arr[2]`
-/// can fold after this pass.
+/// Scalars and structs substitute on every use; array literals are excluded
+/// because backends materialize arrays as stack slots — inlining the literal
+/// into `arr[i]` would leave `arr` unbound and turn variable-index reads into
+/// a form no owned backend can execute.
 fn propagate_constants(decls: &mut [Decl]) {
     for body in fn_bodies_mut(decls) {
         propagate_in_body(body);
@@ -1242,7 +1244,6 @@ fn propagate_constants(decls: &mut [Decl]) {
 fn is_propagatable_const(e: &Expr) -> bool {
     match e {
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) => true,
-        Expr::ArrayLit(items) => items.iter().all(is_propagatable_const),
         Expr::StructInit { fields, .. } => fields.iter().all(|(_, v)| is_propagatable_const(v)),
         _ => false,
     }
@@ -1252,6 +1253,14 @@ fn collect_assigned_names(s: &Stmt, assigned: &mut HashSet<String>) {
     match s {
         Stmt::Assign(n, _) => {
             assigned.insert(n.clone());
+        }
+        // `arr[i] = v` and `s.f = v` mutate the base binding, so the base must
+        // be treated as assigned (otherwise constant propagation would inline
+        // the initializer and the store would write to a discarded temporary).
+        Stmt::IndexAssign { base, .. } | Stmt::FieldAssign { base, .. } => {
+            if let Expr::Ident(n) = base {
+                assigned.insert(n.clone());
+            }
         }
         Stmt::If {
             then_body,

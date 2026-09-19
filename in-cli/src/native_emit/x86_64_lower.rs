@@ -977,8 +977,17 @@ fn lower_function(
 fn alloc_declared_locals(ctx: &mut LowerCtx<'_>, body: &[Stmt]) -> Result<(), String> {
     for stmt in body {
         match stmt {
-            Stmt::Let(name, typ, _) => {
-                if let Some(typ) = typ {
+            Stmt::Let(name, typ, expr) => {
+                if let Expr::ArrayLit(items) = expr {
+                    // Array literals occupy one slot per element so element
+                    // reads/writes can address them; the main Let path stores
+                    // the items into these offsets.
+                    if !ctx.locals.contains_key(name) {
+                        let offsets = (0..items.len()).map(|_| ctx.alloc_slot()).collect();
+                        ctx.locals
+                            .insert(name.clone(), StackSlot::Array { offsets });
+                    }
+                } else if let Some(typ) = typ {
                     ctx.alloc_local(name, typ)?;
                 } else {
                     // Infer type from expression
@@ -1169,6 +1178,22 @@ fn lower_stmt(
                 return Ok(());
             };
             if !ctx.locals.contains_key(base_name) {
+                // Global struct: collect_globals maps `{base}.{field}` to a
+                // data-section slot, so store through the pending-global path
+                // instead of the evaluate-and-discard fallback below.
+                let field_key = format!("{base_name}.{name}");
+                if let Some(&offset) = ctx.globals.get(&field_key) {
+                    lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                    let addr_offset = if x86_64::is_32bit() { 1 } else { 2 };
+                    let site = emitter.len() + addr_offset;
+                    emitter.emit_insns(&x86_64::mov_abs_from_rax(0));
+                    ctx.pending_globals.push(PendingGlobal {
+                        site,
+                        width: if x86_64::is_32bit() { 4 } else { 8 },
+                        offset,
+                    });
+                    return Ok(());
+                }
                 // The typed subset may not materialize bindings introduced by
                 // destructuring patterns (for example `let Some(state) = …`).
                 // Preserve evaluation of the assigned value and continue with
@@ -1200,6 +1225,51 @@ fn lower_stmt(
         Stmt::IndexAssign {
             base, index, value, ..
         } => {
+            // Local array element store: `arr[i] = value` writes the stack slot.
+            if let Expr::Ident(name) = base {
+                if let Some(StackSlot::Array { offsets }) = ctx.locals.get(name).cloned() {
+                    if let Expr::IntLit(i) = index {
+                        if *i >= 0 {
+                            if let Some(&off) = offsets.get(*i as usize) {
+                                lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                                emitter.emit_insns(&x86_64::str64(RAX, off as u16));
+                                return Ok(());
+                            }
+                        }
+                        // Out-of-range constant index: keep value side effects,
+                        // write nowhere (matches the read path's OOB behavior).
+                        lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                        return Ok(());
+                    }
+                    if offsets.is_empty() {
+                        lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                        return Ok(());
+                    }
+                    // Dynamic index: value first (a call inside it would
+                    // clobber the address registers), then slot address math
+                    // mirroring lower_array_elem_read.
+                    let Some(&first) = offsets.first() else {
+                        return Ok(());
+                    };
+                    lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                    emitter.emit_insns(&x86_64::push_r(RAX));
+                    lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
+                    emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
+                    emitter.emit_insns(&x86_64::load_i64(RBX, first as i64 + 8));
+                    emitter.emit_insns(&x86_64::add_rr(RAX, RBX));
+                    emitter.emit_insns(&x86_64::mov_rr(RDI, x86_64::REG_FP));
+                    emitter.emit_insns(&x86_64::sub_rr(RDI, RAX));
+                    emitter.emit_insns(&x86_64::pop_r(RSI));
+                    emitter.emit_insns(&x86_64::mov_ptr_reg(RDI, RSI));
+                    return Ok(());
+                }
+            }
+            // A store into a bare literal has no observable effect; keep only
+            // the value's side effects.
+            if let Expr::ArrayLit(_) = base {
+                lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                return Ok(());
+            }
             // a[i] = value → compute addr = base + i*8, store value
             lower_expr_into(emitter, ctx, base, RDI, pending_calls)?;
             lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
@@ -2596,6 +2666,64 @@ fn lower_unary_expr(
     Ok(())
 }
 
+fn lower_array_elem_read(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    offsets: &[u32],
+    index: &Expr,
+    target_reg: u8,
+    pending_calls: &mut Vec<PendingCall>,
+) -> Result<(), String> {
+    if let Expr::IntLit(i) = index {
+        if *i >= 0 {
+            let idx = *i as usize;
+            if let Some(&off) = offsets.get(idx) {
+                emitter.emit_insns(&x86_64::ldr64(RAX, off as u16));
+                if target_reg != RAX {
+                    emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+                }
+                return Ok(());
+            }
+        }
+        return lower_int_lit(emitter, target_reg, 0);
+    }
+    let Some(&first) = offsets.first() else {
+        return lower_int_lit(emitter, target_reg, 0);
+    };
+    lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
+    emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
+    emitter.emit_insns(&x86_64::load_i64(RBX, first as i64 + 8));
+    emitter.emit_insns(&x86_64::add_rr(RAX, RBX));
+    emitter.emit_insns(&x86_64::mov_rr(RDI, x86_64::REG_FP));
+    emitter.emit_insns(&x86_64::sub_rr(RDI, RAX));
+    emitter.emit_insns(&x86_64::mov_reg_ptr(RAX, RDI));
+    if target_reg != RAX {
+        emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+    }
+    Ok(())
+}
+
+/// Materialize an array literal into fresh stack slots and return the offsets.
+/// Used when a literal is indexed directly with a dynamic index; the stores
+/// are emitted at the use site so a zero-iteration loop cannot leave the
+/// slots uninitialized.
+fn materialize_array_literal(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    items: &[Expr],
+    pending_calls: &mut Vec<PendingCall>,
+) -> Result<Vec<u32>, String> {
+    let mut offsets = Vec::with_capacity(items.len());
+    for _ in items {
+        offsets.push(ctx.alloc_slot());
+    }
+    for (item, &off) in items.iter().zip(offsets.iter()) {
+        lower_expr_into(emitter, ctx, item, RAX, pending_calls)?;
+        emitter.emit_insns(&x86_64::str64(RAX, off as u16));
+    }
+    Ok(offsets)
+}
+
 fn lower_index_expr(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -2615,34 +2743,12 @@ fn lower_index_expr(
     }
     if let Expr::Ident(name) = base {
         if let Some(StackSlot::Array { offsets }) = ctx.locals.get(name).cloned() {
-            if let Expr::IntLit(i) = index {
-                if *i >= 0 {
-                    let idx = *i as usize;
-                    if let Some(&off) = offsets.get(idx) {
-                        emitter.emit_insns(&x86_64::ldr64(RAX, off as u16));
-                        if target_reg != RAX {
-                            emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
-                        }
-                        return Ok(());
-                    }
-                }
-                return lower_int_lit(emitter, target_reg, 0);
-            }
-            let Some(&first) = offsets.first() else {
-                return lower_int_lit(emitter, target_reg, 0);
-            };
-            lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
-            emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
-            emitter.emit_insns(&x86_64::load_i64(RBX, first as i64 + 8));
-            emitter.emit_insns(&x86_64::add_rr(RAX, RBX));
-            emitter.emit_insns(&x86_64::mov_rr(RDI, x86_64::REG_FP));
-            emitter.emit_insns(&x86_64::sub_rr(RDI, RAX));
-            emitter.emit_insns(&x86_64::mov_reg_ptr(RAX, RDI));
-            if target_reg != RAX {
-                emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
-            }
-            return Ok(());
+            return lower_array_elem_read(emitter, ctx, &offsets, index, target_reg, pending_calls);
         }
+    }
+    if let Expr::ArrayLit(items) = base {
+        let offsets = materialize_array_literal(emitter, ctx, items, pending_calls)?;
+        return lower_array_elem_read(emitter, ctx, &offsets, index, target_reg, pending_calls);
     }
     lower_expr_into(emitter, ctx, base, RDI, pending_calls)?;
     lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
