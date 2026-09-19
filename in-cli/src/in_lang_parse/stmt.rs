@@ -40,7 +40,76 @@ pub(crate) fn parse_return_stmt(s: &str) -> Result<Stmt, String> {
     Ok(Stmt::Return(Some(parse_expr(rest))))
 }
 
+/// Compound assignment operators, desugared to plain assignments:
+/// `x += e` becomes `x = x + e`, `arr[i] *= e` becomes `arr[i] = arr[i] * e`.
+const COMPOUND_ASSIGN_OPS: [&str; 5] = ["+=", "-=", "*=", "/=", "%="];
+
+/// Find the first top-level compound assignment operator, skipping string
+/// literals so `"a += b"` inside an expression is not mistaken for one.
+fn find_compound_assign_op(s: &str) -> Option<(usize, &'static str)> {
+    let bytes = s.as_bytes();
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => in_string = !in_string,
+            b'\\' if in_string => i += 1,
+            _ if !in_string => {
+                for op in COMPOUND_ASSIGN_OPS {
+                    if s[i..].starts_with(op) {
+                        return Some((i, op));
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn compound_binary(op: &str, lhs: Expr, rhs: Expr) -> Expr {
+    Expr::Binary {
+        op: op[..1].to_string(),
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }
+}
+
 pub(crate) fn parse_assign_stmt(s: &str) -> Option<Stmt> {
+    if let Some((op_idx, op)) = find_compound_assign_op(s) {
+        let target = trim(&s[..op_idx]);
+        let rhs = parse_expr(trim(&s[op_idx + op.len()..]));
+        return match parse_expr(target) {
+            Expr::Index { base, index } => {
+                let read = Expr::Index {
+                    base: base.clone(),
+                    index: index.clone(),
+                };
+                Some(Stmt::IndexAssign {
+                    base: *base,
+                    index: *index,
+                    value: compound_binary(op, read, rhs),
+                })
+            }
+            Expr::Field { base, name: field } => {
+                let read = Expr::Field {
+                    base: base.clone(),
+                    name: field.clone(),
+                };
+                Some(Stmt::FieldAssign {
+                    base: *base,
+                    name: field,
+                    value: compound_binary(op, read, rhs),
+                })
+            }
+            Expr::Ident(name) => {
+                let read = Expr::Ident(name.clone());
+                Some(Stmt::Assign(name, compound_binary(op, read, rhs)))
+            }
+            _ => None,
+        };
+    }
     let eq_pos = s.find('=')?;
     if s.get(eq_pos + 1..)
         .is_some_and(|tail| tail.starts_with('='))

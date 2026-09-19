@@ -1,0 +1,13 @@
+// @expect result: 5
+fn main() -> Int {
+    let n = 0;
+    let i = 0;
+    while i < 10 {
+        i = i + 1;
+        if (i - (i / 2) * 2) == 0 {
+            continue;
+        }
+        n = n + 1;
+    }
+    return n;
+}

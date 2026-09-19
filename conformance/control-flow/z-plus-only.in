@@ -1,0 +1,6 @@
+// @expect result: 8
+fn main() -> Int {
+    let x = 3;
+    x += 5;
+    return x;
+}

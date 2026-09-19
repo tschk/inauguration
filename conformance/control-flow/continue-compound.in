@@ -1,0 +1,18 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 5
+
+// continue skips even values; only odds are counted.
+fn main() -> Int {
+    let n = 0;
+    let i = 0;
+    while i < 10 {
+        i += 1;
+        if (i - (i / 2) * 2) == 0 {
+            continue;
+        }
+        n += 1;
+    }
+    return n;
+}

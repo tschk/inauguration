@@ -1,0 +1,19 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 25
+
+// Compound assignment desugars to a plain assignment whose value re-reads the
+// target: scalars, array elements, and compound ops on both.
+fn main() -> Int {
+    let x = 10;
+    x -= 2;
+    x *= 3;
+    x /= 4;
+    x %= 5;
+    let arr = [1, 2, 3];
+    arr[2] *= 7;
+    arr[0] += arr[1];
+    x += arr[0] + arr[2];
+    return x;
+}
