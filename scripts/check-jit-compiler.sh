@@ -28,7 +28,9 @@ fn main() -> Int {
 EOF
 
 echo 'jit compile ok: polyglot sample'
-output="$("${IN_CMD[@]}" execute --verbose "$tmp_dir/sample.in" --module-id App 2>&1)"
+# The sample returns 42 on purpose; capture its output (and result line)
+# while tolerating the nonzero program exit status.
+output="$("${IN_CMD[@]}" execute --verbose "$tmp_dir/sample.in" --module-id App 2>&1 || true)"
 printf '%s\n' "$output" | grep -q 'result: Int(42)'
 
 echo 'jit compile ok: agent-native sample'

@@ -627,6 +627,17 @@ pub(crate) fn cmd_execute(
         ));
     }
 
+    // Propagate the program's own exit status: a JIT run that returns a
+    // nonzero Int is a failed execution, not a successful no-op. Bool and
+    // String results are values, not exit codes.
+    if let JitExecution::Int(code) = result
+        && code != 0
+    {
+        return Err(InError::Message(format!(
+            "program exited with status {code}"
+        )));
+    }
+
     if debug {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         println!("[jit] Finished execution in {:.3}ms", elapsed_ms);
