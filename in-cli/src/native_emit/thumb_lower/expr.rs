@@ -811,8 +811,7 @@ mod tests {
         let structs = HashMap::new();
         let mut emitter = CodeEmitter::new();
         let mut pending = Vec::new();
-        lower_function(&mut emitter, &func, &functions, &structs, &mut pending)
-            .expect("lower f");
+        lower_function(&mut emitter, &func, &functions, &structs, &mut pending).expect("lower f");
 
         // str rt, [sp, #imm] (T1) halfword: 0x9000 | rt<<8 | imm8 where the
         // immediate encodes imm/4. R0 stores: 0x9000 | imm8.
@@ -845,7 +844,11 @@ mod tests {
                 idx += 1;
             }
         }
-        assert_eq!(idx, want.len(), "scratch stores out of order: {str_imm_offsets:?}");
+        assert_eq!(
+            idx,
+            want.len(),
+            "scratch stores out of order: {str_imm_offsets:?}"
+        );
         assert_eq!(hits, want);
     }
 }

@@ -2943,7 +2943,12 @@ mod tests {
             make_fn("subspace_main", vec![Stmt::Return(Some(Expr::IntLit(0)))]),
             make_fn("subspace_systick_handler", vec![Stmt::Return(None)]),
         ];
-        optimize_with_linkage(&mut decls, Some("subspace_main"), EmitProfile::Default, true);
+        optimize_with_linkage(
+            &mut decls,
+            Some("subspace_main"),
+            EmitProfile::Default,
+            true,
+        );
         let names: Vec<&str> = decls
             .iter()
             .filter_map(|d| match d {
@@ -2968,7 +2973,10 @@ mod tests {
             *params = vec![("x".to_string(), Typ::Int)];
         }
         let mut decls = vec![
-            make_fn("kernel_entry", vec![Stmt::Expr(call("ext_touch", vec![ident("x")]))]),
+            make_fn(
+                "kernel_entry",
+                vec![Stmt::Expr(call("ext_touch", vec![ident("x")]))],
+            ),
             extern_touch,
             make_fn(
                 "uses_result",
@@ -2983,7 +2991,12 @@ mod tests {
             ),
             make_fn_with_params("ext_value", vec![("x", Typ::Int)], Typ::Int, vec![]),
         ];
-        optimize_with_linkage(&mut decls, Some("kernel_entry"), EmitProfile::Default, false);
+        optimize_with_linkage(
+            &mut decls,
+            Some("kernel_entry"),
+            EmitProfile::Default,
+            false,
+        );
         let entry = decls
             .iter()
             .find_map(|d| match d {
