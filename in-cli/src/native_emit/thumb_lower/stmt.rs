@@ -40,11 +40,13 @@ pub(crate) fn lower_function(
     ctx.ret_typ = func.ret.canonical();
     alloc_declared_locals(&mut ctx, &func.body)?;
 
-    // Scratch slots for binary ops (two 4-byte temps)
-    let scratch0 = ctx.alloc_slot();
-    let scratch1 = ctx.alloc_slot();
-    ctx.scratch0 = scratch0;
-    ctx.scratch1 = scratch1;
+    // Scratch-slot pool for binary ops: 2 slots per nesting depth, 8 depths.
+    // Nested binary operands (e.g. the `b * c` in `a - b * c`) evaluate into
+    // the next depth's pair so they cannot clobber the outer operand stash.
+    for _ in 0..16 {
+        let off = ctx.alloc_slot();
+        ctx.scratch_temps.push(off);
+    }
 
     // Call-argument temp pool: chunk = max arity, depth = 8 nested calls.
     let max_arity = max_call_arity(&func.body);

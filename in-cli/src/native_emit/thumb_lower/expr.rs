@@ -608,13 +608,17 @@ pub(crate) fn lower_binary(
 
     // Evaluate both operands into dedicated scratch slots (stable SP offsets)
     // instead of push/pop: pushing shifts SP, which misaligns the SP-relative
-    // access to locals in the nested operand expressions.
+    // access to locals in the nested operand expressions. Each evaluation
+    // depth gets its own pair so a nested binary operand (e.g. the `b * c`
+    // in `a - b * c`) cannot clobber the outer operand's stashed value.
+    let (scratch0, scratch1) = ctx.acquire_scratch_temps()?;
     lower_expr_into(emitter, ctx, lhs, R0, pending)?;
-    emitter.emit_u16(thumb::str_sp(R0, ctx.scratch0)?);
+    emitter.emit_u16(thumb::str_sp(R0, scratch0)?);
     lower_expr_into(emitter, ctx, rhs, R0, pending)?;
-    emitter.emit_u16(thumb::str_sp(R0, ctx.scratch1)?);
-    emitter.emit_u16(thumb::ldr_sp(R1, ctx.scratch0)?);
-    emitter.emit_u16(thumb::ldr_sp(R2, ctx.scratch1)?);
+    emitter.emit_u16(thumb::str_sp(R0, scratch1)?);
+    emitter.emit_u16(thumb::ldr_sp(R1, scratch0)?);
+    emitter.emit_u16(thumb::ldr_sp(R2, scratch1)?);
+    ctx.release_scratch_temps();
 
     match op {
         "+" => {
@@ -768,4 +772,80 @@ pub(crate) fn patch_b_cond(
     let cond = ((old >> 6) & 0xF) as u8;
     emitter.patch_u32(site, thumb::b_cond_wide(cond, rel as i32));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_ir::{Expr, Stmt, Typ};
+    use crate::native_emit::thumb::CodeEmitter;
+    use crate::native_emit::thumb_lower::ctx::FunctionInfo;
+    use crate::native_emit::thumb_lower::stmt::lower_function;
+    use std::collections::HashMap;
+
+    #[test]
+    fn nested_binary_operands_use_distinct_scratch_slots() {
+        // `a - b * c`: the inner `b * c` is a binary operand of the outer
+        // subtraction. Each depth must stash operands in its own scratch pair;
+        // sharing one pair clobbers the outer lhs before the subtract runs.
+        let func = FunctionInfo {
+            name: "f".to_string(),
+            params: vec![
+                ("a".to_string(), Typ::Int),
+                ("b".to_string(), Typ::Int),
+                ("c".to_string(), Typ::Int),
+            ],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::Binary {
+                op: "-".to_string(),
+                lhs: Box::new(Expr::Ident("a".to_string())),
+                rhs: Box::new(Expr::Binary {
+                    op: "*".to_string(),
+                    lhs: Box::new(Expr::Ident("b".to_string())),
+                    rhs: Box::new(Expr::Ident("c".to_string())),
+                }),
+            }))],
+        };
+        let mut functions = HashMap::new();
+        functions.insert("f".to_string(), func.clone());
+        let structs = HashMap::new();
+        let mut emitter = CodeEmitter::new();
+        let mut pending = Vec::new();
+        lower_function(&mut emitter, &func, &functions, &structs, &mut pending)
+            .expect("lower f");
+
+        // str rt, [sp, #imm] (T1) halfword: 0x9000 | rt<<8 | imm8 where the
+        // immediate encodes imm/4. R0 stores: 0x9000 | imm8.
+        let str_imm_offsets: Vec<u32> = emitter
+            .bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .filter(|hw| hw & 0xF000 == 0x9000 && (hw >> 8) & 0x7 == 0)
+            .map(|hw| ((hw & 0xFF) as u32) * 4)
+            .collect();
+
+        // Params sit at frame offsets 0/4/8; the first scratch depth gets
+        // offsets 12/16, the nested depth 20/24. The operand stashes must be
+        // a: 12 (outer lhs), b: 20 (inner lhs), c: 24 (inner rhs), and the
+        // product: 16 (outer rhs) — four distinct slots, in that order.
+        let want = [12, 20, 24, 16];
+        let mut hits = Vec::new();
+        for off in &want {
+            match str_imm_offsets.iter().position(|s| s == off) {
+                Some(_) => hits.push(*off),
+                None => panic!(
+                    "expected scratch store to [sp, #{off}] not emitted; stores: {str_imm_offsets:?}"
+                ),
+            }
+        }
+        // Ordered subsequence check: strip to want-matching stores in emit order.
+        let mut idx = 0;
+        for s in &str_imm_offsets {
+            if idx < want.len() && s == &want[idx] {
+                idx += 1;
+            }
+        }
+        assert_eq!(idx, want.len(), "scratch stores out of order: {str_imm_offsets:?}");
+        assert_eq!(hits, want);
+    }
 }

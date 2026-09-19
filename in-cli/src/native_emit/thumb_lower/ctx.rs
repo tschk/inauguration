@@ -38,10 +38,12 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) call_arg_temps: Vec<u32>,
     pub(crate) call_arg_depth: usize,
     pub(crate) call_arg_chunk: usize,
-    /// Two dedicated scratch slots for binary-op operand evaluation (stable SP
-    /// offsets, so nested operands can access locals correctly).
-    pub(crate) scratch0: u32,
-    pub(crate) scratch1: u32,
+    /// Scratch-slot pairs for binary-op operand evaluation. Indexed by
+    /// [depth * 2] and [depth * 2 + 1]: each nested lower_binary acquires its
+    /// own pair, so a binary operand of a binary (e.g. `a - b * c`) cannot
+    /// clobber the outer operand's stashed value.
+    pub(crate) scratch_temps: Vec<u32>,
+    pub(crate) scratch_depth: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,8 +85,8 @@ impl<'a> LowerCtx<'a> {
             call_arg_temps: Vec::new(),
             call_arg_depth: 0,
             call_arg_chunk: 4,
-            scratch0: 0,
-            scratch1: 0,
+            scratch_temps: Vec::new(),
+            scratch_depth: 0,
         };
         for (name, typ) in params {
             match typ.canonical() {
@@ -133,6 +135,26 @@ impl<'a> LowerCtx<'a> {
 
     pub(crate) fn release_call_arg_temps(&mut self) {
         self.call_arg_depth = self.call_arg_depth.saturating_sub(1);
+    }
+
+    /// Acquire the scratch-slot pair for one lower_binary evaluation. Nested
+    /// binary evaluation acquires the next depth's pair, so operand stash
+    /// slots are never shared between an outer and an inner binary.
+    pub(crate) fn acquire_scratch_temps(&mut self) -> Result<(u32, u32), String> {
+        let base = self.scratch_depth * 2;
+        if base + 2 > self.scratch_temps.len() {
+            return Err(format!(
+                "thumb-lower: binary scratch temp pool exhausted in `{}`",
+                self.fn_name
+            ));
+        }
+        let pair = (self.scratch_temps[base], self.scratch_temps[base + 1]);
+        self.scratch_depth += 1;
+        Ok(pair)
+    }
+
+    pub(crate) fn release_scratch_temps(&mut self) {
+        self.scratch_depth = self.scratch_depth.saturating_sub(1);
     }
 
     pub(crate) fn frame_reserve(&self) -> u32 {
