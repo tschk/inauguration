@@ -459,9 +459,14 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     // Profile-aware IR optimize before lowering (default/lean/harden).
     // Static-lib objects keep every function: assembly capsules and sibling
     // objects resolve them by symbol (e.g. IRQ/SysTick handler entry points).
+    // SCI images keep every function too: an SCI is a dynamic-linking
+    // surface whose export table must expose all defined symbols, not just
+    // those reachable from the entry (e.g. a shared library whose entry is
+    // never invoked by the loader).
     {
         let entry = effective_entry.as_deref();
-        let keep_all = request.linkage == crate::native_emit::NativeLinkage::StaticLib;
+        let keep_all = request.linkage == crate::native_emit::NativeLinkage::StaticLib
+            || matches!(request.emit, Some(OwnedEmit::Sci { .. }));
         crate::core_opt::optimize_with_linkage(&mut module.decls, entry, request.profile, keep_all);
         report.typed_function_count = count_functions(&module);
         report.call_edge_count = count_call_edges(&module, &request.module_id);
