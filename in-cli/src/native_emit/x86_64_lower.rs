@@ -104,6 +104,11 @@ pub struct X86_64CompileResult {
     /// Undefined symbols (externs) — names of functions called but not
     /// defined in this module. Resolved at link time.
     pub externs: Vec<String>,
+    /// (extern symbol name, code offset of the `E8` opcode byte) for every
+    /// call to a function defined outside this module. The dynamic SCI
+    /// emitter turns these into import records; the loader patches the
+    /// disp32 at `code + site + 1` to the provider's virtual address.
+    pub extern_calls: Vec<(String, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -286,6 +291,17 @@ pub fn lower_module(module: &UnifiedModule, entry: &str) -> Result<X86_64Compile
     lower_module_with_bases(module, entry, 0x101100, 0x200000)
 }
 
+/// Layout of string-literal data in the emitted artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum X86StringLayout {
+    /// Hosted JIT ABI: `{ u64 byte length, bytes }` — the runtime instring
+    /// representation read by `decode_jit_string` / `instring_from_ptr`.
+    Instring,
+    /// Freestanding ABI: NUL-terminated bytes; a string's value address is
+    /// its first byte. Used by the SCI and boot-image emitters.
+    Cstring,
+}
+
 /// Lower a Core IR module to x86_64 machine code for a specific load layout.
 ///
 /// `code_base` is the virtual address of the first instruction in `code`.
@@ -297,6 +313,23 @@ pub fn lower_module_with_bases(
     code_base: u64,
     data_base: u64,
 ) -> Result<X86_64CompileResult, String> {
+    lower_module_with_bases_layout(
+        module,
+        entry,
+        code_base,
+        data_base,
+        X86StringLayout::Instring,
+    )
+}
+
+/// Like [`lower_module_with_bases`] with an explicit string-literal layout.
+pub fn lower_module_with_bases_layout(
+    module: &UnifiedModule,
+    entry: &str,
+    code_base: u64,
+    data_base: u64,
+    layout: X86StringLayout,
+) -> Result<X86_64CompileResult, String> {
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
     let globals = collect_globals(module, &structs);
@@ -307,6 +340,7 @@ pub fn lower_module_with_bases(
     let mut function_offsets: HashMap<String, u32> = HashMap::new();
     let mut all_pending_calls: Vec<PendingCall> = Vec::new();
     let mut all_pending_globals: Vec<PendingGlobal> = Vec::new();
+    let mut extern_calls: Vec<(String, u32)> = Vec::new();
 
     // Sort functions so the entry function is always first (so the trampoline
     // can jump to a known offset 0 in the compiled code section).
@@ -368,8 +402,12 @@ pub fn lower_module_with_bases(
         } else if let Some(&target_offset) = function_offsets.get(&call.target) {
             let rel_offset = target_offset as i32 - call.site as i32 - 5; // call is 5 bytes
             emitter.patch_u32(call.site + 1, rel_offset as u32);
+        } else {
+            // Extern call: keep the rel32 placeholder at zero. The dynamic
+            // SCI emitter records (symbol, site) as an import record and the
+            // loader patches the disp32 at site+1 to the provider's address.
+            extern_calls.push((call.target.clone(), call.site));
         }
-        // else: extern call — keep rel32=0, symbol unresolved until linked
     }
 
     // Append string data section and patch string literal references
@@ -396,16 +434,35 @@ pub fn lower_module_with_bases(
                     }
                 }
             }
-            // Length-prefixed payload (`decode_jit_string` reads u64 len then bytes).
-            let padded = (8 + s.len() + 7) & !7;
+            // Payload layout depends on the target artifact kind.
             let start = code_end as usize + str_offset as usize;
-            let end = start + padded;
-            if end > emitter.bytes.len() {
-                emitter.bytes.resize(end, 0);
+            match layout {
+                X86StringLayout::Instring => {
+                    // Length-prefixed payload (`decode_jit_string` reads u64
+                    // len then bytes).
+                    let padded = (8 + s.len() + 7) & !7;
+                    let end = start + padded;
+                    if end > emitter.bytes.len() {
+                        emitter.bytes.resize(end, 0);
+                    }
+                    emitter.bytes[start..start + 8]
+                        .copy_from_slice(&(s.len() as u64).to_le_bytes());
+                    emitter.bytes[start + 8..start + 8 + s.len()].copy_from_slice(s.as_bytes());
+                    str_offset += padded as u64;
+                }
+                X86StringLayout::Cstring => {
+                    // NUL-terminated payload; the referenced address is the
+                    // first byte of the string.
+                    let padded = (s.len() + 1 + 7) & !7;
+                    let end = start + padded;
+                    if end > emitter.bytes.len() {
+                        emitter.bytes.resize(end, 0);
+                    }
+                    emitter.bytes[start..start + s.len()].copy_from_slice(s.as_bytes());
+                    emitter.bytes[start + s.len()] = 0;
+                    str_offset += padded as u64;
+                }
             }
-            emitter.bytes[start..start + 8].copy_from_slice(&(s.len() as u64).to_le_bytes());
-            emitter.bytes[start + 8..start + 8 + s.len()].copy_from_slice(s.as_bytes());
-            str_offset += padded as u64;
         }
     }
 
@@ -452,6 +509,7 @@ pub fn lower_module_with_bases(
         codegen_base: code_base,
         data,
         externs,
+        extern_calls,
     })
 }
 
@@ -761,7 +819,7 @@ fn collect_strings_from_stmt(stmt: &Stmt, out: &mut Vec<String>) {
 }
 
 /// Collect all unique string literal contents from the module.
-fn collect_string_literals(module: &UnifiedModule) -> Vec<String> {
+pub(crate) fn collect_string_literals(module: &UnifiedModule) -> Vec<String> {
     let mut strings = Vec::new();
     for decl in &module.decls {
         if let Decl::Function { body, .. } = decl {
