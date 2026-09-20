@@ -20,7 +20,7 @@ pub(crate) enum InError {
 #[derive(Parser, Debug)]
 #[command(name = "in")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "inauguration v0.5.1")]
+#[command(about = "inauguration compiler CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
