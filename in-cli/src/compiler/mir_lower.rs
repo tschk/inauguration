@@ -222,29 +222,44 @@ fn lower_expr(expr: &Expr, func: &mut MirFunction) {
     lower_expr_into(expr, &temp, func);
 }
 
-/// Legacy bridge: keep for boot image path.
-/// Lower a Core IR module to MIR, then emit x86_64 code.
+/// Lower a Core IR module for the boot image: MIR plus freestanding x86_64
+/// (or AArch64) machine code with C-string literals, and the module's
+/// function export table as `(name, code offset)` pairs for the kernel's
+/// boot-header export table.
 pub fn lower_boot_image(
     module: &UnifiedModule,
     entry: &str,
     target_triple: Option<&str>,
-) -> Result<(MirModule, Vec<u8>), String> {
+) -> Result<(MirModule, Vec<u8>, Vec<(String, u32)>), String> {
     let triple = target_triple.unwrap_or("x86_64-unknown-none");
-    let code = if triple.contains("aarch64") || triple.contains("arm64") {
+    let (code, exports) = if triple.contains("aarch64") || triple.contains("arm64") {
         let result = crate::native_emit::lower::lower_module(
             module,
             entry,
             crate::native_emit::NativeLinkage::Executable,
         )?;
-        result.code
+        (
+            result.code,
+            result
+                .exports
+                .iter()
+                .map(|s| (s.name.clone(), s.offset))
+                .collect(),
+        )
     } else {
         let is_32bit = triple.starts_with("i386-") || triple.starts_with("i686-");
         crate::native_emit::x86_64::set_32bit(is_32bit);
-        let result = crate::native_emit::x86_64_lower::lower_module(module, entry)?;
-        result.code
+        let result = crate::native_emit::x86_64_lower::lower_module_with_bases_layout(
+            module,
+            entry,
+            0x101100,
+            0x200000,
+            crate::native_emit::x86_64_lower::X86StringLayout::Cstring,
+        )?;
+        (result.code, result.exports)
     };
     let mir_module = MirModule::new();
-    Ok((mir_module, code))
+    Ok((mir_module, code, exports))
 }
 
 #[cfg(test)]

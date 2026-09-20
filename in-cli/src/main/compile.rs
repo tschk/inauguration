@@ -318,7 +318,7 @@ fn cmd_emit_boot(
 
     inauguration::core_opt::optimize_with_entry(&mut module.decls, Some(entry_name));
 
-    let (_mir, code) =
+    let (_mir, code, kernel_exports) =
         inauguration::compiler::mir_lower::lower_boot_image(&module, entry_name, target_triple)
             .map_err(|e| InError::Message(format!("lower: {e}")))?;
 
@@ -372,10 +372,37 @@ fn cmd_emit_boot(
     }
     sci_header[56..64].copy_from_slice(&caps_mask.to_le_bytes());
 
-    let mut image = Vec::with_capacity(tramp_size + SCI_HEADER_SIZE + code.len());
+    // Kernel export table: lets a dynamic loader register the kernel's
+    // functions as symbol providers for dynamically linked components.
+    // The boot image loads at KERNEL_BASE 0x100000 (multiboot), so the code
+    // base is 0x100000 + trampoline (0x1000) + header (0x100) = 0x101100.
+    // Layout at the address stored in header [40..48]:
+    //   u64 count;
+    //   count × { u64 name_off (table-relative), u64 fn_off (code-relative) };
+    //   NUL-terminated names.
+    const BOOT_LOAD_BASE: u64 = 0x100000;
+    let code_load = BOOT_LOAD_BASE + tramp_size as u64 + SCI_HEADER_SIZE as u64;
+    let export_table_addr = code_load + code.len() as u64;
+    let entries_size = 8 + kernel_exports.len() * 16;
+    let mut name_blob: Vec<u8> = Vec::new();
+    let mut table_bytes: Vec<u8> = Vec::with_capacity(entries_size);
+    table_bytes.extend_from_slice(&(kernel_exports.len() as u64).to_le_bytes());
+    for (name, fn_off) in &kernel_exports {
+        let name_off = (entries_size + name_blob.len()) as u64;
+        table_bytes.extend_from_slice(&name_off.to_le_bytes());
+        table_bytes.extend_from_slice(&(*fn_off as u64).to_le_bytes());
+        name_blob.extend_from_slice(name.as_bytes());
+        name_blob.push(0);
+    }
+    table_bytes.extend_from_slice(&name_blob);
+    sci_header[40..48].copy_from_slice(&export_table_addr.to_le_bytes());
+
+    let mut image =
+        Vec::with_capacity(tramp_size + SCI_HEADER_SIZE + code.len() + table_bytes.len());
     image.extend_from_slice(&trampoline_bytes);
     image.extend_from_slice(&sci_header);
     image.extend_from_slice(&code);
+    image.extend_from_slice(&table_bytes);
 
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)
