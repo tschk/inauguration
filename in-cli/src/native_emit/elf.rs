@@ -36,6 +36,9 @@ pub struct ElfObject {
     pub exports: Vec<(String, u32)>,
     /// Undefined symbols (externs) — must be resolved at link time.
     pub undefs: Vec<String>,
+    /// x86_64 call sites needing R_X86_64_PLT32 relocations:
+    /// (offset of the disp32 within .text, symbol).
+    pub x86_plt_relocs: Vec<(u32, String)>,
     /// Thumb BL sites needing R_ARM_THM_CALL relocation: (offset, symbol).
     pub thumb_calls: Vec<(u32, String)>,
     /// Thumb function-address movw/movt pairs needing R_ARM_THM_MOVW_ABS_NC +
@@ -154,7 +157,12 @@ fn write_elf64_header(out: &mut Vec<u8>, machine: u16, shoff: u64) {
 }
 
 fn write_elf64_relocatable_object(object: &ElfObject, machine: u16, out: &mut Vec<u8>) {
-    let shstrtab = b"\0.text\0.symtab\0.strtab\0.shstrtab\0";
+    let rela_section = !object.x86_plt_relocs.is_empty();
+    let shstrtab: &[u8] = if rela_section {
+        b"\0.text\0.symtab\0.strtab\0.shstrtab\0.rela.text\0"
+    } else {
+        b"\0.text\0.symtab\0.strtab\0.shstrtab\0"
+    };
 
     let all_exports = build_elf64_exports(object);
     let (strtab, name_indices, undef_indices) = build_elf64_strtab(object, &all_exports);
@@ -166,11 +174,15 @@ fn write_elf64_relocatable_object(object: &ElfObject, machine: u16, out: &mut Ve
     let symtab_name = 7u32;
     let strtab_name = 15u32;
     let shstrtab_name = 23u32;
+    let rela_text_name = 34u32;
+    let rela_entry_size = 24u64;
+    let rela_size = (object.x86_plt_relocs.len() as u64) * rela_entry_size;
     let text_offset = EHDR_SIZE;
     let symtab_offset = text_offset + object.code.len() as u64;
     let strtab_offset = symtab_offset + symtab_size;
     let shstrtab_offset = strtab_offset + strtab.len() as u64;
-    let shoff = shstrtab_offset + shstrtab.len() as u64;
+    let rela_offset = shstrtab_offset + shstrtab.len() as u64;
+    let shoff = rela_offset + rela_size;
 
     write_elf64_header(out, machine, shoff);
 
@@ -199,6 +211,27 @@ fn write_elf64_relocatable_object(object: &ElfObject, machine: u16, out: &mut Ve
 
     out.extend_from_slice(&strtab);
     out.extend_from_slice(shstrtab);
+
+    // R_X86_64_PLT32 call relocations: { r_offset, r_info, r_addend } where
+    // r_offset points at the disp32 inside .text, the symbol index selects
+    // the undefined extern, and addend -4 accounts for the disp32 being
+    // relative to the next instruction.
+    if rela_section {
+        let undef_base = 1u32 + all_exports.len() as u32;
+        for (site, symbol) in &object.x86_plt_relocs {
+            let sym_index = undef_base
+                + object
+                    .undefs
+                    .iter()
+                    .position(|name| name == symbol)
+                    .unwrap_or_else(|| panic!("PLT32 relocation against unknown symbol `{symbol}`"))
+                    as u32;
+            let r_info = ((sym_index as u64) << 32) | 4u64; // R_X86_64_PLT32
+            out.extend_from_slice(&(*site as u64).to_le_bytes());
+            out.extend_from_slice(&r_info.to_le_bytes());
+            out.extend_from_slice(&(-4i64).to_le_bytes());
+        }
+    }
 
     write_section_header(out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     write_section_header(
@@ -253,6 +286,23 @@ fn write_elf64_relocatable_object(object: &ElfObject, machine: u16, out: &mut Ve
         0,
         0,
     );
+    if rela_section {
+        // SHT_RELA with SHF_INFO_LINK: sh_link = .symtab (2), sh_info =
+        // .text (1), entsize = 24.
+        write_section_header(
+            out,
+            rela_text_name,
+            4,
+            0x40,
+            0,
+            rela_offset,
+            rela_size,
+            8,
+            2,
+            1,
+            24,
+        );
+    }
 }
 
 fn gather_arm32_exports_and_undefs(object: &ElfObject) -> (Vec<(&str, u32)>, Vec<String>) {
@@ -790,7 +840,8 @@ mod tests {
             code: x86_64_return_i32_object_code(42),
             export_name: "answer".to_string(),
             exports: vec![],
-            undefs: vec![],
+            undefs: vec!["rtos_tick".to_string()],
+            x86_plt_relocs: vec![(5, "rtos_tick".to_string())],
             thumb_calls: vec![],
             thumb_addr_refs: vec![],
         };
@@ -803,7 +854,34 @@ mod tests {
         assert!(out.windows(7).any(|window| window == b".symtab"));
         assert!(out.windows(7).any(|window| window == b".strtab"));
         assert!(out.windows(9).any(|window| window == b".shstrtab"));
-        assert!(out.windows(6).any(|window| window == b"answer"));
+        assert!(out.windows(10).any(|window| window == b".rela.text"));
+        // The single relocation sits just before the section headers
+        // (e_shoff at header offset 0x28): r_offset=5, r_info=(sym 2)<<32|4,
+        // addend -4.
+        let shoff = u64::from_le_bytes(out[40..48].try_into().unwrap()) as usize;
+        let entry = &out[shoff - 24..shoff];
+        assert_eq!(u64::from_le_bytes(entry[0..8].try_into().unwrap()), 5);
+        assert_eq!(
+            u64::from_le_bytes(entry[8..16].try_into().unwrap()),
+            (2u64 << 32) | 4
+        );
+        assert_eq!(i64::from_le_bytes(entry[16..24].try_into().unwrap()), -4);
+    }
+
+    #[test]
+    fn x86_64_relocatable_without_relocs_has_no_rela_section() {
+        let object = ElfObject {
+            code: x86_64_return_i32_object_code(42),
+            export_name: "answer".to_string(),
+            exports: vec![],
+            undefs: vec![],
+            x86_plt_relocs: vec![],
+            thumb_calls: vec![],
+            thumb_addr_refs: vec![],
+        };
+        let mut out = Vec::new();
+        write_x86_64_relocatable_object(&object, &mut out);
+        assert!(!out.windows(10).any(|window| window == b".rela.text"));
     }
 
     #[test]
@@ -813,6 +891,7 @@ mod tests {
             export_name: "answer".to_string(),
             exports: vec![],
             undefs: vec![],
+            x86_plt_relocs: vec![],
             thumb_calls: vec![],
             thumb_addr_refs: vec![],
         };
@@ -840,6 +919,7 @@ mod tests {
             export_name: "answer".to_string(),
             exports: vec![],
             undefs: vec![],
+            x86_plt_relocs: vec![],
             thumb_calls: vec![],
             thumb_addr_refs: vec![],
         };
@@ -879,6 +959,7 @@ mod tests {
             export_name: "entry".to_string(),
             exports: vec![("entry".to_string(), 0), ("helper".to_string(), 32)],
             undefs: vec!["rtos_pendsv".to_string()],
+            x86_plt_relocs: vec![],
             thumb_calls: vec![(12, "rtos_pendsv".to_string())],
             thumb_addr_refs: vec![(20, 24, "helper".to_string())],
         };

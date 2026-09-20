@@ -41,7 +41,7 @@ pub struct NativeObjectArtifact {
 
 pub fn emit_native_object(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
     match (request.target_triple, request.linkage) {
-        (ELF_LINUX_TRIPLE, NativeLinkage::StaticLib) => Some(emit_x86_64_elf_object(request)),
+        (ELF_LINUX_TRIPLE, NativeLinkage::StaticLib) => emit_x86_64_elf_object(request),
         (ELF_LINUX_TRIPLE, NativeLinkage::Executable) => Some(emit_x86_64_elf_executable(request)),
         (COFF_WINDOWS_TRIPLE, NativeLinkage::Executable) => {
             Some(emit_x86_64_pe_executable(request))
@@ -94,6 +94,7 @@ fn emit_thumbv8m_freestanding_object(
             .filter(|(name, off)| name != request.entry || *off != 0)
             .collect(),
         undefs: result.externs,
+        x86_plt_relocs: vec![],
         thumb_calls: result.relocations,
         thumb_addr_refs: result.addr_relocs,
     };
@@ -124,26 +125,51 @@ fn emit_x86_64_pe_executable(request: &NativeObjectRequest<'_>) -> NativeObjectA
     }
 }
 
-fn emit_x86_64_elf_object(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
+fn emit_x86_64_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
+    // Real x86_64 lowering (hosted ABI: instring literals are rejected below
+    // together with globals). External calls stay `call rel32 0` and are
+    // recorded as R_X86_64_PLT32 relocations so `ld` binds them at link
+    // time; every lowered function is exported.
+    crate::native_emit::x86_64::set_32bit(false);
+    let result = match lower_module(request.module, request.entry) {
+        Ok(result) => result,
+        Err(_err) => return None,
+    };
+    if !result.relocations.is_empty() {
+        // Any absolute-address site (string/global/function references)
+        // would embed a baked load address that hosted `ld` cannot fix up
+        // (no R_X86_64_64 support in the writer yet). Refuse rather than
+        // emit code that only works at one load address. Code without such
+        // sites is position-independent: rel32 calls and stack access.
+        return None;
+    }
+    let mut bytes = Vec::new();
     let object = ElfObject {
-        code: x86_64_return_i32_object_code(request.exit_code),
+        code: result.code.clone(),
         export_name: request.entry.to_string(),
+        // Export the entry globally only. Sibling bodies stay in .text but
+        // out of the symbol table so a hosted link against `main` or other
+        // host symbols cannot collide.
         exports: vec![],
-        undefs: vec![],
+        undefs: result.externs.clone(),
+        x86_plt_relocs: result
+            .extern_calls
+            .iter()
+            .map(|(symbol, site)| (site + 1, symbol.clone()))
+            .collect(),
         thumb_calls: vec![],
         thumb_addr_refs: vec![],
     };
-    let mut bytes = Vec::new();
     write_x86_64_relocatable_object(&object, &mut bytes);
-    NativeObjectArtifact {
+    Some(NativeObjectArtifact {
         bytes,
         artifact_kind: "elf-relocatable-object",
         backend_level: "owned-object-subset",
         runtime_level: "none",
         reason_code: NATIVE_OBJECT_SUBSET,
-        reason: "inauguration owns ELF64 relocatable object emission for const-evaluable scalar entry functions on this target",
+        reason: "inauguration lowers x86_64 ELF relocatable objects directly (real function bodies; extern calls carry R_X86_64_PLT32 relocations)",
         abi_manifest: Some(object_abi_manifest(request)),
-    }
+    })
 }
 
 fn emit_aarch64_elf_object(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
@@ -154,6 +180,7 @@ fn emit_aarch64_elf_object(request: &NativeObjectRequest<'_>) -> NativeObjectArt
         undefs: vec![],
         thumb_calls: vec![],
         thumb_addr_refs: vec![],
+        x86_plt_relocs: vec![],
     };
     let mut bytes = Vec::new();
     write_aarch64_relocatable_object(&object, &mut bytes);
@@ -194,6 +221,7 @@ fn emit_arm32_elf_object(request: &NativeObjectRequest<'_>) -> NativeObjectArtif
         undefs: vec![],
         thumb_calls: vec![],
         thumb_addr_refs: vec![],
+        x86_plt_relocs: vec![],
     };
     let mut bytes = Vec::new();
     write_arm32_relocatable_object(&object, &mut bytes);
@@ -281,6 +309,7 @@ fn emit_aarch64_freestanding_object(request: &NativeObjectRequest<'_>) -> Native
                 export_name: request.entry.to_string(),
                 exports: vec![],
                 undefs: vec![],
+                x86_plt_relocs: vec![],
                 thumb_calls: vec![],
                 thumb_addr_refs: vec![],
             };
@@ -302,6 +331,7 @@ fn emit_aarch64_freestanding_object(request: &NativeObjectRequest<'_>) -> Native
                 export_name: request.entry.to_string(),
                 exports: vec![],
                 undefs: vec![],
+                x86_plt_relocs: vec![],
                 thumb_calls: vec![],
                 thumb_addr_refs: vec![],
             };
@@ -349,6 +379,11 @@ fn emit_x86_64_freestanding_object(request: &NativeObjectRequest<'_>) -> NativeO
                 export_name: request.entry.to_string(),
                 exports: result.exports.clone(),
                 undefs: result.externs.clone(),
+                x86_plt_relocs: result
+                    .extern_calls
+                    .iter()
+                    .map(|(symbol, site)| (site + 1, symbol.clone()))
+                    .collect(),
                 thumb_calls: vec![],
                 thumb_addr_refs: vec![],
             };
@@ -382,6 +417,7 @@ fn emit_x86_64_freestanding_object(request: &NativeObjectRequest<'_>) -> NativeO
                 export_name: request.entry.to_string(),
                 exports: vec![],
                 undefs: vec![],
+                x86_plt_relocs: vec![],
                 thumb_calls: vec![],
                 thumb_addr_refs: vec![],
             };
@@ -447,11 +483,24 @@ fn object_abi_manifest(request: &NativeObjectRequest<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core_ir::UnifiedModule;
+    use crate::core_ir::{CoreModuleIdentity, Decl, Expr, Stmt, Typ, UnifiedModule};
+
+    fn scalar_answer_module() -> UnifiedModule {
+        UnifiedModule::with_identity(
+            vec![Decl::Function {
+                name: "answer".into(),
+                params: vec![],
+                ret: Typ::Int,
+                body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                type_params: vec![],
+            }],
+            CoreModuleIdentity::default(),
+        )
+    }
 
     #[test]
     fn dispatches_x86_64_staticlib_object() {
-        let module = UnifiedModule::new(Vec::new());
+        let module = scalar_answer_module();
         let request = NativeObjectRequest {
             target_triple: ELF_LINUX_TRIPLE,
             linkage: NativeLinkage::StaticLib,
@@ -465,7 +514,43 @@ mod tests {
         assert_eq!(artifact.artifact_kind, "elf-relocatable-object");
         assert_eq!(artifact.reason_code, NATIVE_OBJECT_SUBSET);
         assert!(artifact.bytes.windows(6).any(|window| window == b"answer"));
+        // Real lowering: `mov rax, 42` inside a real prologue must appear.
+        assert!(
+            artifact
+                .bytes
+                .windows(8)
+                .any(|w| w == [0x48, 0xB8, 42, 0, 0, 0, 0, 0])
+        );
         assert!(artifact.abi_manifest.is_some());
+    }
+
+    #[test]
+    fn x86_64_staticlib_object_rejects_absolute_globals() {
+        let module = UnifiedModule::with_identity(
+            vec![Decl::Function {
+                name: "answer".into(),
+                params: vec![],
+                ret: Typ::Int,
+                body: vec![
+                    Stmt::Let("s".into(), None, Expr::StringLit("hi".into())),
+                    Stmt::Return(Some(Expr::IntLit(42))),
+                ],
+                type_params: vec![],
+            }],
+            CoreModuleIdentity::default(),
+        );
+        let request = NativeObjectRequest {
+            target_triple: ELF_LINUX_TRIPLE,
+            linkage: NativeLinkage::StaticLib,
+            entry: "answer",
+            exit_code: 42,
+            module: &module,
+            module_id: "App",
+            base: None,
+        };
+        // Hosted objects cannot carry absolute string/global references yet;
+        // the backend must refuse rather than emit baked addresses.
+        assert!(emit_native_object(&request).is_none());
     }
 
     #[test]
