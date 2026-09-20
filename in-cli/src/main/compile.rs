@@ -316,7 +316,16 @@ fn cmd_emit_boot(
     let mut module = inauguration::in_lang_parse::parse_in_library_file(source_path)
         .map_err(|e| InError::Message(format!("parse {}: {e}", source_path.display())))?;
 
-    inauguration::core_opt::optimize_with_entry(&mut module.decls, Some(entry_name));
+    // The boot image is a dynamic-nanokernel surface: its export table must
+    // expose every defined kernel function, because dynamically linked apps
+    // bind export-only leaves (e.g. ticks-now) that nothing in the kernel
+    // calls. Keep all functions instead of pruning to entry-reachable ones.
+    inauguration::core_opt::optimize_with_linkage(
+        &mut module.decls,
+        Some(entry_name),
+        inauguration::emit_profile::EmitProfile::Default,
+        true,
+    );
 
     let (_mir, code, kernel_exports) =
         inauguration::compiler::mir_lower::lower_boot_image(&module, entry_name, target_triple)
