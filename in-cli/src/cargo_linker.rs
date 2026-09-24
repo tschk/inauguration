@@ -526,4 +526,75 @@ libc = { path = "dummy-dep" }
         let modules = compile_cargo_dependencies(&temp.path);
         assert!(modules.is_empty());
     }
+
+    #[test]
+    fn test_find_crate_root_default() {
+        let temp = TempDirGuard::new();
+        let src_dir = temp.path.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(&lib_rs, "pub fn default() {}").unwrap();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"test-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(find_crate_root(&temp.path).unwrap(), lib_rs);
+    }
+
+    #[test]
+    fn test_find_crate_root_custom_path() {
+        let temp = TempDirGuard::new();
+        let custom_lib = temp.path.join("custom_lib.rs");
+        fs::write(&custom_lib, "pub fn custom() {}").unwrap();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"custom-crate\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"custom_lib.rs\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(find_crate_root(&temp.path).unwrap(), custom_lib);
+    }
+
+    #[test]
+    fn test_find_crate_root_nested_dir() {
+        let temp = TempDirGuard::new();
+        let src_dir = temp.path.join("src");
+        let nested_dir = src_dir.join("nested").join("module");
+        fs::create_dir_all(&nested_dir).unwrap();
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(&lib_rs, "pub fn default() {}").unwrap();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"test-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(find_crate_root(&nested_dir).unwrap(), lib_rs);
+    }
+
+    #[test]
+    fn test_find_crate_root_no_cargo_toml() {
+        let temp = TempDirGuard::new();
+        assert_eq!(
+            find_crate_root(&temp.path),
+            Err("no crate root found".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_crate_root_no_lib_rs() {
+        let temp = TempDirGuard::new();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"test-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_crate_root(&temp.path),
+            Err("no crate root found".to_string())
+        );
+    }
 }
