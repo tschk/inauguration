@@ -3,10 +3,21 @@ package main
 import "testing"
 
 func TestNewCalculator(t *testing.T) {
-	calc := NewCalculator()
-	if calc.value != 0 {
-		t.Errorf("Expected Initialized Calculator value to be 0, got %d", calc.value)
-	}
+	t.Run("Initial value is 0", func(t *testing.T) {
+		calc := NewCalculator()
+		if calc.value != 0 {
+			t.Errorf("Expected Initialized Calculator value to be 0, got %d", calc.value)
+		}
+	})
+
+	t.Run("Independence", func(t *testing.T) {
+		calc1 := NewCalculator()
+		calc2 := NewCalculator()
+		calc1.Add(5)
+		if calc2.value != 0 {
+			t.Errorf("Expected calc2.value to remain 0, got %d", calc2.value)
+		}
+	})
 }
 
 func TestCalculatorAdd(t *testing.T) {
