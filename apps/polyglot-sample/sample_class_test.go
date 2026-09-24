@@ -9,6 +9,20 @@ func TestNewCalculator(t *testing.T) {
 	}
 }
 
+func TestNewCalculatorIndependence(t *testing.T) {
+	calc1 := NewCalculator()
+	calc2 := NewCalculator()
+
+	calc1.Add(10)
+
+	if calc1.value != 10 {
+		t.Errorf("Expected calc1 value to be 10, got %d", calc1.value)
+	}
+	if calc2.value != 0 {
+		t.Errorf("Expected calc2 value to remain 0, got %d", calc2.value)
+	}
+}
+
 func TestCalculatorAdd(t *testing.T) {
 	calc := NewCalculator()
 	res := calc.Add(10)
