@@ -103,11 +103,71 @@ pub fn load_dynamic_module(path: &Path) -> Result<Box<dyn DynamicModule>, Dynami
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::process::Command;
+
+    fn compile_dummy_library(c_code: &str, output_path: &Path) {
+        let mut child = Command::new("cc")
+            .args([
+                "-shared",
+                "-fPIC",
+                "-o",
+                output_path.to_str().unwrap(),
+                "-xc",
+                "-",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn cc");
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(c_code.as_bytes())
+                .expect("Failed to write to stdin");
+        }
+
+        let status = child.wait().expect("Failed to wait for cc");
+        assert!(status.success(), "cc failed");
+    }
 
     #[test]
     fn test_load_dynamic_module_invalid_library() {
         let path = Path::new("/path/to/nonexistent_library.so");
         let result = load_dynamic_module(path);
         assert!(matches!(result, Err(DynamicModuleError::LoadFailed { .. })));
+    }
+
+    #[test]
+    fn test_load_dynamic_module_missing_symbol() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_missing_symbol.so");
+        compile_dummy_library("void dummy() {}", &path);
+
+        let result = load_dynamic_module(&path);
+
+        if let Err(DynamicModuleError::EntryMissing { symbol, .. }) = result {
+            assert_eq!(symbol, super::IN_MODULE_ENTRY_SYMBOL);
+        } else {
+            panic!("Expected EntryMissing error, got: {:?}", result.err());
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_load_dynamic_module_null_vtable() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_null_vtable.so");
+        compile_dummy_library("void* in_module_vtable() { return 0; }", &path);
+
+        let result = load_dynamic_module(&path);
+
+        if let Err(DynamicModuleError::LoadFailed { reason, .. }) = result {
+            assert_eq!(reason, "entry returned null vtable");
+        } else {
+            panic!("Expected LoadFailed error with null vtable reason, got: {:?}", result.err());
+        }
+
+        let _ = std::fs::remove_file(path);
     }
 }
