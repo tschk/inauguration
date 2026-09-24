@@ -251,24 +251,22 @@ pub fn crate_package_name(crate_dir: &Path) -> Option<String> {
     None
 }
 
-/// Find the crate root file (lib.rs or main.rs) from a project directory.
-pub fn find_crate_root(project_dir: &Path) -> Result<PathBuf, String> {
+fn compute_crate_root(project_dir: &Path) -> Result<PathBuf, String> {
     let project_dir = find_crate_dir(project_dir).unwrap_or_else(|| project_dir.to_path_buf());
     // Check for Cargo.toml
     let cargo_toml = project_dir.join("Cargo.toml");
     if cargo_toml.exists() {
         if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
-            let lines: Vec<&str> = content.lines().collect();
+            let mut lines_iter = content.lines().map(|l| l.trim());
             // Find [lib] section and look for path = ... within it
-            for i in 0..lines.len() {
-                if lines[i].trim() == "[lib]" {
+            while let Some(line) = lines_iter.next() {
+                if line == "[lib]" {
                     // Scan subsequent lines until next section
-                    for j in (i + 1)..lines.len().min(i + 20) {
-                        let trimmed = lines[j].trim();
-                        if trimmed.starts_with('[') {
+                    for line in lines_iter {
+                        if line.starts_with('[') {
                             break;
                         } // next section
-                        if let Some(val) = trimmed.strip_prefix("path").and_then(|s| {
+                        if let Some(val) = line.strip_prefix("path").and_then(|s| {
                             s.split('=')
                                 .nth(1)
                                 .map(|v| v.trim().trim_matches('"').to_string())
@@ -279,6 +277,7 @@ pub fn find_crate_root(project_dir: &Path) -> Result<PathBuf, String> {
                             }
                         }
                     }
+                    break;
                 }
             }
             // Default: src/lib.rs
@@ -289,6 +288,25 @@ pub fn find_crate_root(project_dir: &Path) -> Result<PathBuf, String> {
         }
     }
     Err("no crate root found".to_string())
+}
+
+/// Find the crate root file (lib.rs or main.rs) from a project directory.
+pub fn find_crate_root(project_dir: &Path) -> Result<PathBuf, String> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, Result<PathBuf, String>>>,
+    > = std::sync::OnceLock::new();
+    let cache_mutex = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+    if let Ok(mut cache) = cache_mutex.lock() {
+        if let Some(res) = cache.get(project_dir) {
+            return res.clone();
+        }
+        let res = compute_crate_root(project_dir);
+        cache.insert(project_dir.to_path_buf(), res.clone());
+        res
+    } else {
+        compute_crate_root(project_dir)
+    }
 }
 
 pub fn merge_dependency_modules(main: &mut UnifiedModule, deps: Vec<(String, UnifiedModule)>) {
