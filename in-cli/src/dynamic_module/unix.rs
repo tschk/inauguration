@@ -145,7 +145,10 @@ mod tests {
     fn test_load_dynamic_module_entry_missing() {
         let lib = compile_c_fixture("void some_other_function() {}", "libmissing.so");
         let result = load_dynamic_module(&lib);
-        assert!(matches!(result, Err(DynamicModuleError::EntryMissing { .. })));
+        assert!(matches!(
+            result,
+            Err(DynamicModuleError::EntryMissing { .. })
+        ));
     }
 
     #[test]
