@@ -103,11 +103,58 @@ pub fn load_dynamic_module(path: &Path) -> Result<Box<dyn DynamicModule>, Dynami
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    fn compile_c_fixture(c_src: &str, lib_name: &str) -> std::path::PathBuf {
+        let out_dir = std::env::temp_dir().join(format!(
+            "in-dyn-unix-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&out_dir).expect("temp dir");
+        let lib = out_dir.join(lib_name);
+        let src = out_dir.join("src.c");
+        std::fs::write(&src, c_src).expect("write src");
+
+        let status = Command::new("cc")
+            .args([
+                "-shared",
+                "-fPIC",
+                "-O0",
+                "-o",
+                lib.to_str().expect("lib path"),
+                src.to_str().expect("source path"),
+            ])
+            .status()
+            .expect("cc");
+        assert!(status.success(), "cc failed to build fixture");
+        lib
+    }
 
     #[test]
     fn test_load_dynamic_module_invalid_library() {
         let path = Path::new("/path/to/nonexistent_library.so");
         let result = load_dynamic_module(path);
         assert!(matches!(result, Err(DynamicModuleError::LoadFailed { .. })));
+    }
+
+    #[test]
+    fn test_load_dynamic_module_entry_missing() {
+        let lib = compile_c_fixture("void some_other_function() {}", "libmissing.so");
+        let result = load_dynamic_module(&lib);
+        assert!(matches!(result, Err(DynamicModuleError::EntryMissing { .. })));
+    }
+
+    #[test]
+    fn test_load_dynamic_module_null_vtable() {
+        let lib = compile_c_fixture("void* in_module_vtable() { return 0; }", "libnull.so");
+        let result = load_dynamic_module(&lib);
+        assert!(matches!(
+            result,
+            Err(DynamicModuleError::LoadFailed { ref reason, .. }) if reason == "entry returned null vtable"
+        ));
     }
 }
