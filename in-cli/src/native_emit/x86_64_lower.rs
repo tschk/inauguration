@@ -412,7 +412,7 @@ pub fn lower_module_with_bases_layout(
 
     // Append string data section and patch string literal references
     if !str_refs.is_empty() || !all_strings.is_empty() {
-        while !emitter.len().is_multiple_of(8) {
+        while emitter.len() % 8 != 0 {
             emitter.bytes.push(0x90);
         }
         let code_end = emitter.len();
@@ -1369,7 +1369,7 @@ fn lower_stmt(
             let iter = cond.clone().unwrap_or(Expr::ArrayLit(vec![]));
             let idx = format!("__x86_for_{binding}");
             ctx.alloc_local(&idx, &Typ::Int)?;
-            ctx.alloc_local(binding, &Typ::Int)?;
+            ctx.alloc_local(&binding, &Typ::Int)?;
             emitter.emit_insns(&x86_64::load_i64(RAX, 0));
             if let Ok(off) = ctx.slot_offset(&idx) {
                 emitter.emit_insns(&x86_64::str64(RAX, off as u16));
@@ -1406,7 +1406,7 @@ fn lower_stmt(
                 RAX,
                 pending_calls,
             )?;
-            if let Ok(off) = ctx.slot_offset(binding) {
+            if let Ok(off) = ctx.slot_offset(&binding) {
                 emitter.emit_insns(&x86_64::str64(RAX, off as u16));
             }
             for stmt in body {
@@ -2885,11 +2885,20 @@ fn lower_expr_into(
             lower_int_lit(emitter, target_reg, items.len() as i64)
         }
         Expr::Closure { body, .. } => {
-            if let Some(Stmt::Return(Some(e)) | Stmt::Expr(e)) = body.last() {
-                return lower_expr_into(emitter, ctx, e, target_reg, pending_calls);
+            if let Some(last) = body.last() {
+                match last {
+                    Stmt::Return(Some(e)) | Stmt::Expr(e) => {
+                        return lower_expr_into(emitter, ctx, e, target_reg, pending_calls);
+                    }
+                    _ => {}
+                }
             }
             lower_int_lit(emitter, target_reg, 0)
         }
+        _ => Err(format!(
+            "x86_64-lower: unsupported expression in `{}`",
+            ctx.fn_name
+        )),
     }
 }
 

@@ -199,12 +199,11 @@ fn compile_resolved_dependencies(
                     if in_registry && tree_bytes > 40_000 {
                         continue;
                     }
-                    if let Ok(Ok(module)) =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            rust_front::parse_rust_file(&lib_rs)
-                        }))
-                    {
-                        modules.push((crate_name.to_string(), module));
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        rust_front::parse_rust_file(&lib_rs)
+                    })) {
+                        Ok(Ok(module)) => modules.push((crate_name.to_string(), module)),
+                        _ => {}
                     }
                 }
             }

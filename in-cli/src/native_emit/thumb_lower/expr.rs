@@ -776,6 +776,7 @@ pub(crate) fn patch_b_cond(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::core_ir::{Expr, Stmt, Typ};
     use crate::native_emit::thumb::CodeEmitter;
     use crate::native_emit::thumb_lower::ctx::FunctionInfo;

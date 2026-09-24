@@ -13,7 +13,7 @@
 //! strings, then XOR-scrambled code
 //! ```
 
-use crate::core_ir::{Decl, Expr, Stmt, UnifiedModule};
+use crate::core_ir::{Decl, Expr, LoopKind, Stmt, UnifiedModule};
 use crate::native_emit::sci::{SCI_INISA_MAGIC, SCI_MANIFEST_SIZE};
 
 pub const INISA_MAGIC: u64 = 0x3141_5349_4e49_0001; // "\x01\0INISA1" le-ish unique
@@ -263,11 +263,7 @@ fn compile_stmt(
             let end = c.code.len() as i32;
             patch_i32(&mut c.code, jmp, end);
         }
-        Stmt::Loop {
-            kind: _kind,
-            cond,
-            body,
-        } => {
+        Stmt::Loop { kind, cond, body } => {
             // Range/array fors are desugared to while; leftover For still loops.
             let head = c.code.len() as i32;
             let jz_at = if let Some(cond) = cond {
