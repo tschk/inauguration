@@ -512,6 +512,45 @@ libc = { path = "dummy-dep" }
     }
 
     #[test]
+    fn test_find_crate_root_default() {
+        let temp = TempDirGuard::new();
+        fs::write(temp.path.join("Cargo.toml"), "[package]\nname = \"dummy\"\n").unwrap();
+        let src_dir = temp.path.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(&lib_rs, "pub fn foo() {}").unwrap();
+
+        let root = find_crate_root(&temp.path);
+        assert_eq!(root.unwrap(), lib_rs);
+    }
+
+    #[test]
+    fn test_find_crate_root_custom_path() {
+        let temp = TempDirGuard::new();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"dummy\"\n\n[lib]\npath = \"custom/path.rs\"\n",
+        )
+        .unwrap();
+        let custom_dir = temp.path.join("custom");
+        fs::create_dir_all(&custom_dir).unwrap();
+        let custom_rs = custom_dir.join("path.rs");
+        fs::write(&custom_rs, "pub fn foo() {}").unwrap();
+
+        let root = find_crate_root(&temp.path);
+        assert_eq!(root.unwrap(), custom_rs);
+    }
+
+    #[test]
+    fn test_find_crate_root_not_found() {
+        let temp = TempDirGuard::new();
+        fs::write(temp.path.join("Cargo.toml"), "[package]\nname = \"dummy\"\n").unwrap();
+
+        let root = find_crate_root(&temp.path);
+        assert!(root.is_err());
+    }
+
+    #[test]
     fn test_compile_cargo_dependencies_no_cargo_toml() {
         let temp = TempDirGuard::new();
         let modules = compile_cargo_dependencies(&temp.path);
