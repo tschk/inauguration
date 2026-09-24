@@ -4,7 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-IN_CMD=("${IN_BIN:-in}")
+if [[ -n "${IN_BIN:-}" ]]; then
+  read -r -a IN_CMD <<< "$IN_BIN"
+else
+  IN_CMD=("in")
+fi
 
 SKIP_FIXTURES=()
 if [[ -f "$ROOT/conformance/skipped.txt" ]]; then
@@ -45,13 +49,15 @@ FILTERED=()
 for f in "${FIXTURES[@]}"; do
   rel="${f#$ROOT/}"
   skip=0
-  for skip_f in "${SKIP_FIXTURES[@]}"; do
-    if [[ "$rel" == "$skip_f" ]]; then
-      echo "  skipping known failure: $rel"
-      skip=1
-      break
-    fi
-  done
+  if [[ ${#SKIP_FIXTURES[@]} -gt 0 ]]; then
+    for skip_f in "${SKIP_FIXTURES[@]}"; do
+      if [[ "$rel" == "$skip_f" ]]; then
+        echo "  skipping known failure: $rel"
+        skip=1
+        break
+      fi
+    done
+  fi
   if [[ $skip -eq 0 ]]; then
     FILTERED+=("$f")
   fi
