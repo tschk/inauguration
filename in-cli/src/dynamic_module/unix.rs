@@ -165,7 +165,10 @@ mod tests {
         if let Err(DynamicModuleError::LoadFailed { reason, .. }) = result {
             assert_eq!(reason, "entry returned null vtable");
         } else {
-            panic!("Expected LoadFailed error with null vtable reason, got: {:?}", result.err());
+            panic!(
+                "Expected LoadFailed error with null vtable reason, got: {:?}",
+                result.err()
+            );
         }
 
         let _ = std::fs::remove_file(path);
