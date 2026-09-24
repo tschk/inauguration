@@ -194,6 +194,45 @@ mod tests {
     }
 
     #[test]
+    fn wrapper_rejects_empty_module_id() {
+        let mut module = sample_module();
+        module.module.clear();
+        let err = emit_swift_wrapper(&module).expect_err("expected error");
+        assert!(err.contains("module id is empty"));
+    }
+
+    #[test]
+    fn wrapper_rejects_empty_layout_name() {
+        let mut module = sample_module();
+        module.layouts[0].name.clear();
+        let err = emit_swift_wrapper(&module).expect_err("expected error");
+        assert!(err.contains("layout name is empty"));
+    }
+
+    #[test]
+    fn wrapper_rejects_empty_symbol_name() {
+        let mut module = sample_module();
+        module.symbols[0].name.clear();
+        let err = emit_swift_wrapper(&module).expect_err("expected error");
+        assert!(err.contains("symbol name is empty"));
+    }
+
+    #[test]
+    fn wrapper_emits_correct_return_types() {
+        use crate::boundary_ir::BoundaryOwnership;
+
+        let mut module = sample_module();
+
+        module.symbols[0].ownership = BoundaryOwnership::OwnedBuffer;
+        let wrapper_buf = emit_swift_wrapper(&module).expect("wrapper");
+        assert!(wrapper_buf.contains("public static func personNew() -> InBufU8"));
+
+        module.symbols[0].ownership = BoundaryOwnership::Borrowed;
+        let wrapper_borrow = emit_swift_wrapper(&module).expect("wrapper");
+        assert!(wrapper_borrow.contains("public static func personNew() -> InSliceU8"));
+    }
+
+    #[test]
     fn layout_probes_emit_memory_layout_xctest() {
         let module = sample_module();
         let probes = emit_swift_layout_probes(&module).expect("probes");
