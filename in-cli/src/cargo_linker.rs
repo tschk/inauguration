@@ -229,66 +229,92 @@ pub fn find_crate_dir(start: &Path) -> Option<PathBuf> {
     }
 }
 
-pub fn crate_package_name(crate_dir: &Path) -> Option<String> {
-    let toml = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
+#[derive(Clone)]
+struct ManifestInfo {
+    package_name: Option<String>,
+    crate_root: Option<PathBuf>,
+}
+
+static MANIFEST_CACHE: std::sync::LazyLock<Mutex<HashMap<PathBuf, ManifestInfo>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn parse_manifest(project_dir: &Path) -> Result<ManifestInfo, String> {
+    let cargo_toml = project_dir.join("Cargo.toml");
+    let content = std::fs::read_to_string(&cargo_toml).map_err(|e| e.to_string())?;
+
+    let mut package_name = None;
+    let mut custom_lib_path = None;
+
     let mut in_package = false;
-    for line in toml.lines() {
+    let mut in_lib = false;
+
+    for line in content.lines() {
         let t = line.trim();
-        if t == "[package]" {
-            in_package = true;
+        if t.starts_with('[') {
+            in_package = t == "[package]";
+            in_lib = t == "[lib]";
             continue;
         }
-        if t.starts_with('[') {
-            in_package = false;
-        }
+
         if in_package && t.starts_with("name") {
-            return t
-                .split('=')
-                .nth(1)
-                .map(|v| v.trim().trim_matches('"').to_string());
+            if let Some(val) = t.split('=').nth(1) {
+                package_name = Some(val.trim().trim_matches('"').to_string());
+            }
+        } else if in_lib && t.starts_with("path") {
+            if let Some(val) = t.split('=').nth(1) {
+                let path_str = val.trim().trim_matches('"');
+                custom_lib_path = Some(project_dir.join(path_str));
+            }
         }
     }
-    None
+
+    let crate_root = if let Some(path) = custom_lib_path {
+        if path.exists() { Some(path) } else { None }
+    } else {
+        let default_lib = project_dir.join("src").join("lib.rs");
+        if default_lib.exists() {
+            Some(default_lib)
+        } else {
+            None
+        }
+    };
+
+    Ok(ManifestInfo {
+        package_name,
+        crate_root,
+    })
+}
+
+fn get_manifest_info(project_dir: &Path) -> Result<ManifestInfo, String> {
+    let key = project_dir.to_path_buf();
+    if let Ok(cache) = MANIFEST_CACHE.lock() {
+        if let Some(info) = cache.get(&key) {
+            return Ok(info.clone());
+        }
+    }
+
+    let info = parse_manifest(project_dir)?;
+
+    if let Ok(mut cache) = MANIFEST_CACHE.lock() {
+        cache.insert(key, info.clone());
+    }
+
+    Ok(info)
+}
+
+pub fn crate_package_name(crate_dir: &Path) -> Option<String> {
+    get_manifest_info(crate_dir)
+        .ok()
+        .and_then(|info| info.package_name)
 }
 
 /// Find the crate root file (lib.rs or main.rs) from a project directory.
 pub fn find_crate_root(project_dir: &Path) -> Result<PathBuf, String> {
     let project_dir = find_crate_dir(project_dir).unwrap_or_else(|| project_dir.to_path_buf());
-    // Check for Cargo.toml
-    let cargo_toml = project_dir.join("Cargo.toml");
-    if cargo_toml.exists() {
-        if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
-            let lines: Vec<&str> = content.lines().collect();
-            // Find [lib] section and look for path = ... within it
-            for i in 0..lines.len() {
-                if lines[i].trim() == "[lib]" {
-                    // Scan subsequent lines until next section
-                    for j in (i + 1)..lines.len().min(i + 20) {
-                        let trimmed = lines[j].trim();
-                        if trimmed.starts_with('[') {
-                            break;
-                        } // next section
-                        if let Some(val) = trimmed.strip_prefix("path").and_then(|s| {
-                            s.split('=')
-                                .nth(1)
-                                .map(|v| v.trim().trim_matches('"').to_string())
-                        }) {
-                            let lib_rs = project_dir.join(&val);
-                            if lib_rs.exists() {
-                                return Ok(lib_rs);
-                            }
-                        }
-                    }
-                }
-            }
-            // Default: src/lib.rs
-            let default_lib = project_dir.join("src").join("lib.rs");
-            if default_lib.exists() {
-                return Ok(default_lib);
-            }
-        }
-    }
-    Err("no crate root found".to_string())
+    get_manifest_info(&project_dir).and_then(|info| {
+        info.crate_root
+            .ok_or_else(|| "no crate root found".to_string())
+    })
 }
 
 pub fn merge_dependency_modules(main: &mut UnifiedModule, deps: Vec<(String, UnifiedModule)>) {
