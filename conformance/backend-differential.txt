@@ -33,5 +33,5 @@ agree conformance/errors/throw-caught.in
 agree conformance/errors/throw-from-function.in
 agree conformance/errors/throw.in
 agree conformance/errors/try-catch.in
-native-refused conformance/functions/string-return.in
-native-refused conformance/types/string-concat.in
+agree conformance/functions/string-return.in
+agree conformance/types/string-concat.in

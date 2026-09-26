@@ -17,12 +17,21 @@ pub fn movk64(rd: u8, imm16: u16, shift: u8) -> u32 {
     0xF280_0000 | (hw << 21) | ((imm16 as u32) << 5) | (rd as u32)
 }
 
+/// `mov rd, rm` for a general-purpose register. `rm` of 31 is the stack pointer,
+/// because the encoding cannot distinguish it from the zero register; use
+/// [`mov_zero64`] to materialize zero.
 pub fn mov_reg64(rd: u8, rm: u8) -> u32 {
     if rm == REG_SP {
         add_imm64(rd, REG_SP, 0)
     } else {
-        add_reg64(rd, rm, REG_XZR)
+        // Canonical register move: `orr rd, xzr, rm`.
+        0xAA00_03E0 | ((rm as u32) << 16) | (rd as u32)
     }
+}
+
+/// `mov rd, #0`, the zero-register form of a move.
+pub fn mov_zero64(rd: u8) -> u32 {
+    movz64(rd, 0, 0)
 }
 
 pub fn add_imm64(rd: u8, rn: u8, imm12: u16) -> u32 {
@@ -66,11 +75,11 @@ pub fn eor_reg64(rd: u8, rn: u8, rm: u8) -> u32 {
 }
 
 pub fn lsl_reg64(rd: u8, rn: u8, rm: u8) -> u32 {
-    0x9ACC_0000 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
+    0x9AC0_2000 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
 }
 
 pub fn lsr_reg64(rd: u8, rn: u8, rm: u8) -> u32 {
-    0x9ACC_0020 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
+    0x9AC0_2400 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
 }
 
 pub fn bl(offset_bytes: i32) -> u32 {
@@ -107,11 +116,14 @@ pub fn adr(rd: u8, offset_bytes: i32) -> u32 {
     0x1000_0000 | (immlo << 29) | (immhi << 5) | (rd as u32)
 }
 
+/// Store pair, pre-index: `stp rt, rt2, [sp, #offset]!`. `offset` is negative
+/// for the usual frame setup, and the 7-bit immediate is its two's complement.
 pub fn stp_pre(rt: u8, rt2: u8, offset: i32) -> u32 {
-    let imm7 = ((-offset / 8) as u32) & 0x7F;
-    0xA9C0_0000 | (imm7 << 15) | ((rt2 as u32) << 10) | (REG_SP as u32) << 5 | (rt as u32)
+    let imm7 = ((offset / 8) as u32) & 0x7F;
+    0xA980_0000 | (imm7 << 15) | ((rt2 as u32) << 10) | (REG_SP as u32) << 5 | (rt as u32)
 }
 
+/// Load pair, post-index: `ldp rt, rt2, [sp], #offset`.
 pub fn ldp_post(rt: u8, rt2: u8, offset: i32) -> u32 {
     let imm7 = ((offset / 8) as u32) & 0x7F;
     0xA8C0_0000 | (imm7 << 15) | ((rt2 as u32) << 10) | (REG_SP as u32) << 5 | (rt as u32)
@@ -163,19 +175,19 @@ pub fn cbz_w(rt: u8, offset_bytes: i32) -> u32 {
 }
 
 pub fn fmov_from_gp(rd_v: u8, rn_x: u8) -> u32 {
-    0x1E27_0000 | ((rn_x as u32) << 5) | (rd_v as u32)
+    0x9E67_0000 | ((rn_x as u32) << 5) | (rd_v as u32)
 }
 
 pub fn fmov_to_gp(rd_x: u8, rn_v: u8) -> u32 {
-    0x1E26_0000 | ((rn_v as u32) << 16) | (rd_x as u32)
+    0x9E66_0000 | ((rn_v as u32) << 5) | (rd_x as u32)
 }
 
 pub fn fadd_s(rd: u8, rn: u8, rm: u8) -> u32 {
-    0x1E20_2A00 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
+    0x1E20_2800 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
 }
 
 pub fn fsub_s(rd: u8, rn: u8, rm: u8) -> u32 {
-    0x1E20_3A00 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
+    0x1E20_3800 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
 }
 
 pub fn fmul_s(rd: u8, rn: u8, rm: u8) -> u32 {
@@ -238,5 +250,68 @@ impl CodeEmitter {
     pub fn patch_u32(&mut self, offset: u32, insn: u32) {
         let start = offset as usize;
         self.bytes[start..start + 4].copy_from_slice(&insn.to_le_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every encoder's output, cross-checked against `as -arch arm64`. This audit
+    /// found real bugs: `stp_pre` emitted a load with an inverted offset, the
+    /// register-shift encoders used the wrong opcode field, and the float encoders
+    /// were 32-bit forms — so `<<`, `>>`, and every float operation compiled to
+    /// nonsense in the native backend.
+    #[test]
+    fn every_encoder_matches_the_assembler() {
+        assert_eq!(movz64(3, 0x1234, 16), 0xD2A24683);
+        assert_eq!(movk64(3, 0x1234, 16), 0xF2A24683);
+        assert_eq!(mov_reg64(3, 7), 0xAA0703E3);
+        assert_eq!(mov_zero64(3), 0xD2800003);
+        assert_eq!(b(8), 0x14000002);
+        assert_eq!(bl(8), 0x94000002);
+        assert_eq!(add_imm64(3, 7, 0x123), 0x91048CE3);
+        assert_eq!(sub_imm64(3, 7, 0x123), 0xD1048CE3);
+        assert_eq!(add_reg64(3, 7, 9), 0x8B0900E3);
+        assert_eq!(sub_reg64(3, 7, 9), 0xCB0900E3);
+        assert_eq!(mul64(3, 7, 9), 0x9B097CE3);
+        assert_eq!(sdiv64(3, 7, 9), 0x9AC90CE3);
+        assert_eq!(msub64(3, 7, 9, 11), 0x9B09ACE3);
+        assert_eq!(and_reg64(3, 7, 9), 0x8A0900E3);
+        assert_eq!(orr_reg64(3, 7, 9), 0xAA0900E3);
+        assert_eq!(eor_reg64(3, 7, 9), 0xCA0900E3);
+        assert_eq!(lsl_reg64(3, 7, 9), 0x9AC920E3);
+        assert_eq!(lsr_reg64(3, 7, 9), 0x9AC924E3);
+        assert_eq!(ret(), 0xD65F03C0);
+        assert_eq!(cmp_reg64(7, 9), 0xEB0900FF);
+        assert_eq!(b_cond(0, 8), 0x54000040);
+        assert_eq!(adr(3, 8), 0x10000043);
+        assert_eq!(stp_pre(29, 30, -16), 0xA9BF7BFD);
+        assert_eq!(ldp_post(29, 30, 16), 0xA8C17BFD);
+        assert_eq!(str64(3, 7, 24), 0xF9000CE3);
+        assert_eq!(ldr64(3, 7, 24), 0xF9400CE3);
+        assert_eq!(ldr64_reg_offset(3, 7, 9), 0xF86978E3);
+        assert_eq!(str64_reg_offset(3, 7, 9), 0xF82978E3);
+        assert_eq!(svc(0x80), 0xD4001001);
+        assert_eq!(brk(1), 0xD4200020);
+        assert_eq!(strb(3, 7, 5), 0x390014E3);
+        assert_eq!(ldrb(3, 7, 5), 0x394014E3);
+        assert_eq!(cbnz_w(3, 8), 0x35000043);
+        assert_eq!(cbz_w(3, 8), 0x34000043);
+        assert_eq!(nop(), 0xD503201F);
+        assert_eq!(fmov_from_gp(3, 7), 0x9E6700E3);
+        assert_eq!(fmov_to_gp(3, 7), 0x9E6600E3);
+        assert_eq!(fadd_s(3, 7, 9), 0x1E2928E3);
+        assert_eq!(fsub_s(3, 7, 9), 0x1E2938E3);
+        assert_eq!(fmul_s(3, 7, 9), 0x1E2908E3);
+        assert_eq!(fdiv_s(3, 7, 9), 0x1E2918E3);
+    }
+
+
+    /// A pre-index store must be a store: bit 22 selects load over store.
+    #[test]
+    fn stp_pre_is_a_store_not_a_load() {
+        assert_eq!(stp_pre(29, 30, -16) & (1 << 22), 0, "bit 22 must be 0");
+        assert_ne!(ldp_post(29, 30, 16) & (1 << 22), 0, "bit 22 must be 1");
     }
 }

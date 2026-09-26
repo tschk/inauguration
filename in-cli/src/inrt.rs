@@ -6,6 +6,10 @@ use std::collections::BTreeMap;
 
 pub const INRT_ENTRY_SYMBOL: &str = "_inrt_start";
 
+/// String concatenation, embedded in the artifact so a native executable does not
+/// need the Rust-side `in_str_concat` helper the JIT resolves by dlsym.
+pub const INRT_STR_CONCAT: &str = "__inrt_str_concat";
+
 /// Builtin reached when a native program executes code the lowerer could not
 /// compile. It writes the supplied message to stderr and exits with
 /// [`INRT_TRAP_EXIT_CODE`]; it never returns.
@@ -18,7 +22,7 @@ pub const INRT_TRAP_EXIT_CODE: u16 = 70;
 
 pub const INRT_BUILTINS: &[&str] = &[
     "__inrt_str_len",
-    "__inrt_str_concat",
+    INRT_STR_CONCAT,
     "__inrt_str_substr",
     "__inrt_array_len",
     "__inrt_array_load",
@@ -37,7 +41,7 @@ pub fn inrt_builtin_param_slots(name: &str) -> Option<usize> {
         "__inrt_array_load" => Some(2),
         "__inrt_array_store" => Some(3),
         "__inrt_array_push" => Some(2),
-        "__inrt_str_concat" => Some(2),
+        INRT_STR_CONCAT => Some(2),
         "__inrt_str_substr" => Some(3),
         INRT_TRAP_BUILTIN => Some(2),
         _ => None,
@@ -108,40 +112,51 @@ fn build_inrt_str_len() -> Vec<u8> {
 }
 
 fn build_inrt_str_concat() -> Vec<u8> {
-    let mut buf = Vec::with_capacity(256);
+    // Layout: [u64 byte length][bytes][padding]. The copy works a word at a time
+    // because the payload is 8-byte aligned on both sides; the header length is
+    // what readers trust, so the trailing padding bytes never surface.
+    //
+    // Frame: the caller's x29/x30 land at 0 and 8, so locals start at 16.
+    let mut buf = Vec::with_capacity(384);
     emit_insn_blob(
         &[
-            aarch64::stp_pre(FP, LR, -32),
+            aarch64::stp_pre(FP, LR, -64),
             aarch64::add_imm64(FP, SP, 0),
-            aarch64::str64(X0, SP, 0),
-            aarch64::str64(X1, SP, 8),
+            aarch64::str64(X0, SP, 16), // a
+            aarch64::str64(X1, SP, 24), // b
+            aarch64::ldr64(X2, X0, 0),  // len(a)
+            aarch64::str64(X2, SP, 32),
+            aarch64::ldr64(X3, X1, 0), // len(b)
+            aarch64::str64(X3, SP, 40),
+            aarch64::add_reg64(X4, X2, X3),
+            aarch64::str64(X4, SP, 48), // total bytes
         ],
         &mut buf,
     );
-    emit_insn_blob(
-        &[aarch64::ldr64(X2, X0, 0), aarch64::ldr64(X3, X1, 0)],
-        &mut buf,
-    );
+    // Header, payload, and one spare word so the word copy below cannot write
+    // past the mapping when the payload length is not a multiple of eight.
     emit_insn_blob(
         &[
-            aarch64::add_reg64(X4, X2, X3),
-            aarch64::add_imm64(X1, X4, 8),
-            aarch64::str64(X4, SP, 16),
+            aarch64::add_imm64(X1, X4, 16),
+            aarch64::mov_zero64(X0),
         ],
         &mut buf,
     );
-    emit_insn_blob(&[aarch64::mov_reg64(X0, XZR)], &mut buf);
     emit_inline_mmap(&mut buf);
     emit_insn_blob(
-        &[aarch64::ldr64(X4, SP, 16), aarch64::str64(X4, X0, 0)],
-        &mut buf,
-    );
-    emit_insn_blob(
         &[
-            aarch64::ldr64(X5, SP, 0),
-            aarch64::add_imm64(X5, X5, 8),
-            aarch64::add_imm64(X6, X0, 8),
-            aarch64::mov_reg64(X7, XZR),
+            aarch64::str64(X0, SP, 56), // out
+            aarch64::ldr64(X4, SP, 48),
+            aarch64::str64(X4, X0, 0), // header = total bytes
+            aarch64::movz64(X9, 3, 0),
+            aarch64::ldr64(X2, SP, 32),
+            aarch64::add_imm64(X2, X2, 7),
+            aarch64::lsr_reg64(X2, X2, X9), // words in a
+            aarch64::ldr64(X5, SP, 16),
+            aarch64::add_imm64(X5, X5, 8), // src = a payload
+            aarch64::ldr64(X6, SP, 56),
+            aarch64::add_imm64(X6, X6, 8), // dst = out payload
+            aarch64::mov_zero64(X7),
         ],
         &mut buf,
     );
@@ -159,22 +174,28 @@ fn build_inrt_str_concat() -> Vec<u8> {
     emit_insn_blob(&[aarch64::b(la as i32 - buf.len() as i32)], &mut buf);
     emit_insn_blob(
         &[
-            aarch64::ldr64(X5, SP, 8),
-            aarch64::add_imm64(X5, X5, 8),
-            aarch64::mov_reg64(X7, X2),
-            aarch64::str64(X0, SP, 16),
+            aarch64::ldr64(X3, SP, 40),
+            aarch64::add_imm64(X3, X3, 7),
+            aarch64::lsr_reg64(X3, X3, X9), // words in b
+            aarch64::ldr64(X5, SP, 24),
+            aarch64::add_imm64(X5, X5, 8), // src = b payload
+            aarch64::ldr64(X6, SP, 56),
+            aarch64::add_imm64(X6, X6, 8),
+            // b's payload starts after a's *byte* length, not after its padded
+            // word count, so the two payloads stay contiguous.
+            aarch64::ldr64(X2, SP, 32),
+            aarch64::add_reg64(X6, X6, X2), // dst = out payload + len(a)
+            aarch64::mov_zero64(X7),
         ],
         &mut buf,
     );
     let lb = buf.len() as u32;
     emit_insn_blob(
         &[
-            aarch64::cmp_reg64(X7, X4),
+            aarch64::cmp_reg64(X7, X3),
             aarch64::b_cond(10, 5 * 4),
             aarch64::ldr64_reg_offset(X8, X5, X7),
-            aarch64::ldr64(X3, SP, 16),
-            aarch64::add_imm64(X3, X3, 8),
-            aarch64::str64_reg_offset(X8, X3, X7),
+            aarch64::str64_reg_offset(X8, X6, X7),
             aarch64::add_imm64(X7, X7, 1),
         ],
         &mut buf,
@@ -182,8 +203,8 @@ fn build_inrt_str_concat() -> Vec<u8> {
     emit_insn_blob(&[aarch64::b(lb as i32 - buf.len() as i32)], &mut buf);
     emit_insn_blob(
         &[
-            aarch64::ldr64(X0, SP, 16),
-            aarch64::ldp_post(FP, LR, 32),
+            aarch64::ldr64(X0, SP, 56),
+            aarch64::ldp_post(FP, LR, 64),
             aarch64::ret(),
         ],
         &mut buf,
@@ -197,9 +218,9 @@ fn build_inrt_str_substr() -> Vec<u8> {
         &[
             aarch64::stp_pre(FP, LR, -48),
             aarch64::add_imm64(FP, SP, 0),
-            aarch64::str64(X0, SP, 0),
-            aarch64::str64(X1, SP, 8),
-            aarch64::str64(X2, SP, 16),
+            aarch64::str64(X0, SP, 16),
+            aarch64::str64(X1, SP, 24),
+            aarch64::str64(X2, SP, 32),
         ],
         &mut buf,
     );
@@ -215,32 +236,32 @@ fn build_inrt_str_substr() -> Vec<u8> {
         &mut buf,
     );
     emit_insn_blob(
-        &[aarch64::add_imm64(X1, X2, 8), aarch64::mov_reg64(X0, XZR)],
+        &[aarch64::add_imm64(X1, X2, 8), aarch64::mov_zero64(X0)],
         &mut buf,
     );
     emit_inline_mmap(&mut buf);
     emit_insn_blob(
         &[
-            aarch64::ldr64(X2, SP, 16),
+            aarch64::ldr64(X2, SP, 32),
             aarch64::str64(X2, X0, 0),
-            aarch64::str64(X0, SP, 24),
+            aarch64::str64(X0, SP, 40),
         ],
         &mut buf,
     );
     emit_insn_blob(
         &[
-            aarch64::ldr64(X3, SP, 0),
+            aarch64::ldr64(X3, SP, 16),
             aarch64::add_imm64(X3, X3, 8),
-            aarch64::ldr64(X4, SP, 8),
+            aarch64::ldr64(X4, SP, 24),
             aarch64::add_imm64(X5, X0, 8),
-            aarch64::mov_reg64(X6, XZR),
+            aarch64::mov_zero64(X6),
         ],
         &mut buf,
     );
     let cl = buf.len() as u32;
     emit_insn_blob(
         &[
-            aarch64::ldr64(X7, SP, 16),
+            aarch64::ldr64(X7, SP, 32),
             aarch64::cmp_reg64(X6, X7),
             aarch64::b_cond(10, 5 * 4),
             aarch64::add_reg64(X9, X4, X6),
@@ -253,7 +274,7 @@ fn build_inrt_str_substr() -> Vec<u8> {
     emit_insn_blob(&[aarch64::b(cl as i32 - buf.len() as i32)], &mut buf);
     emit_insn_blob(
         &[
-            aarch64::ldr64(X0, SP, 24),
+            aarch64::ldr64(X0, SP, 40),
             aarch64::ldp_post(FP, LR, 48),
             aarch64::ret(),
         ],
@@ -261,7 +282,7 @@ fn build_inrt_str_substr() -> Vec<u8> {
     );
     emit_insn_blob(
         &[
-            aarch64::mov_reg64(X0, XZR),
+            aarch64::mov_zero64(X0),
             aarch64::ldp_post(FP, LR, 48),
             aarch64::ret(),
         ],
@@ -288,7 +309,7 @@ fn build_inrt_array_load() -> Vec<u8> {
             aarch64::add_imm64(X0, X0, 16),
             aarch64::ldr64_reg_offset(X0, X0, X1),
             aarch64::ret(),
-            aarch64::mov_reg64(X0, XZR),
+            aarch64::mov_zero64(X0),
             aarch64::ret(),
         ],
         &mut buf,
@@ -308,7 +329,7 @@ fn build_inrt_array_store() -> Vec<u8> {
             aarch64::add_imm64(X0, X0, 16),
             aarch64::str64_reg_offset(X2, X0, X1),
             aarch64::ret(),
-            aarch64::mov_reg64(X0, XZR),
+            aarch64::mov_zero64(X0),
             aarch64::ret(),
         ],
         &mut buf,
@@ -322,8 +343,8 @@ fn build_inrt_array_push() -> Vec<u8> {
         &[
             aarch64::stp_pre(FP, LR, -64),
             aarch64::add_imm64(FP, SP, 0),
-            aarch64::str64(X0, SP, 0),
-            aarch64::str64(X1, SP, 8),
+            aarch64::str64(X0, SP, 16),
+            aarch64::str64(X1, SP, 24),
         ],
         &mut buf,
     );
@@ -331,8 +352,8 @@ fn build_inrt_array_push() -> Vec<u8> {
         &[
             aarch64::ldr64(X2, X0, 0),
             aarch64::ldr64(X3, X0, 8),
-            aarch64::str64(X2, SP, 16),
-            aarch64::str64(X3, SP, 24),
+            aarch64::str64(X2, SP, 32),
+            aarch64::str64(X3, SP, 40),
         ],
         &mut buf,
     );
@@ -355,35 +376,35 @@ fn build_inrt_array_push() -> Vec<u8> {
         &[
             aarch64::add_imm64(X5, X3, 2),
             insn_lsl_imm64(X1, X5, 3),
-            aarch64::str64(X3, SP, 24),
+            aarch64::str64(X3, SP, 40),
         ],
         &mut buf,
     );
-    emit_insn_blob(&[aarch64::mov_reg64(X0, XZR)], &mut buf);
+    emit_insn_blob(&[aarch64::mov_zero64(X0)], &mut buf);
     emit_inline_mmap(&mut buf);
     emit_insn_blob(
         &[
-            aarch64::ldr64(X2, SP, 16),
-            aarch64::ldr64(X3, SP, 24),
+            aarch64::ldr64(X2, SP, 32),
+            aarch64::ldr64(X3, SP, 40),
             aarch64::str64(X2, X0, 0),
             aarch64::str64(X3, X0, 8),
-            aarch64::str64(X0, SP, 32),
+            aarch64::str64(X0, SP, 48),
         ],
         &mut buf,
     );
     emit_insn_blob(
         &[
-            aarch64::ldr64(X4, SP, 0),
+            aarch64::ldr64(X4, SP, 16),
             aarch64::add_imm64(X5, X4, 16),
             aarch64::add_imm64(X6, X0, 16),
-            aarch64::mov_reg64(X7, XZR),
+            aarch64::mov_zero64(X7),
         ],
         &mut buf,
     );
     let cl = buf.len() as u32;
     emit_insn_blob(
         &[
-            aarch64::ldr64(X2, SP, 16),
+            aarch64::ldr64(X2, SP, 32),
             aarch64::cmp_reg64(X7, X2),
             aarch64::b_cond(10, 5 * 4),
             aarch64::ldr64_reg_offset(X8, X5, X7),
@@ -394,7 +415,7 @@ fn build_inrt_array_push() -> Vec<u8> {
     );
     emit_insn_blob(&[aarch64::b(cl as i32 - buf.len() as i32)], &mut buf);
     emit_insn_blob(
-        &[aarch64::ldr64(X0, SP, 32), aarch64::str64(X0, SP, 0)],
+        &[aarch64::ldr64(X0, SP, 48), aarch64::str64(X0, SP, 16)],
         &mut buf,
     );
     let ng = buf.len() as u32;
@@ -402,9 +423,9 @@ fn build_inrt_array_push() -> Vec<u8> {
         .copy_from_slice(&aarch64::b_cond(11, ng as i32 - (gs - 4) as i32).to_le_bytes());
     emit_insn_blob(
         &[
-            aarch64::ldr64(X0, SP, 0),
-            aarch64::ldr64(X2, SP, 16),
-            aarch64::ldr64(X1, SP, 8),
+            aarch64::ldr64(X0, SP, 16),
+            aarch64::ldr64(X2, SP, 32),
+            aarch64::ldr64(X1, SP, 24),
             aarch64::add_imm64(X3, X0, 16),
             aarch64::str64_reg_offset(X1, X3, X2),
             aarch64::add_imm64(X2, X2, 1),
@@ -425,7 +446,7 @@ fn emit_inline_mmap(buf: &mut Vec<u8>) {
             aarch64::movz64(X3, 0x1001, 0),
             aarch64::movz64(X4, 1, 0),
             aarch64::sub_reg64(X4, XZR, X4),
-            aarch64::mov_reg64(X5, XZR),
+            aarch64::mov_zero64(X5),
             aarch64::movz64(X16, 0xC5, 0),
             aarch64::movk64(X16, 2, 16),
             aarch64::svc(0x80),
@@ -466,7 +487,7 @@ pub fn build_runtime_blob() -> (Vec<u8>, BTreeMap<String, u32>) {
         }};
     }
     add_fn!("__inrt_str_len", build_inrt_str_len());
-    add_fn!("__inrt_str_concat", build_inrt_str_concat());
+    add_fn!(INRT_STR_CONCAT, build_inrt_str_concat());
     add_fn!("__inrt_str_substr", build_inrt_str_substr());
     add_fn!("__inrt_array_len", build_inrt_array_len());
     add_fn!("__inrt_array_load", build_inrt_array_load());
@@ -535,7 +556,7 @@ mod tests {
         for name in INRT_BUILTINS {
             let f = match *name {
                 "__inrt_str_len" => build_inrt_str_len(),
-                "__inrt_str_concat" => build_inrt_str_concat(),
+                INRT_STR_CONCAT => build_inrt_str_concat(),
                 "__inrt_str_substr" => build_inrt_str_substr(),
                 "__inrt_array_len" => build_inrt_array_len(),
                 "__inrt_array_load" => build_inrt_array_load(),
