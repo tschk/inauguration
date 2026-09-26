@@ -720,10 +720,15 @@ fn lower_string_concat(
     emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, temp));
     ctx.release_binop_temp();
     if is_native {
-        let call_site = emitter.len() as u32;
+        // A native executable links only against the system libraries, so the
+        // Rust-side wrapper is not there to link against. Call the runtime
+        // builtin embedded in the artifact instead.
+        let call_site = emitter.len();
         emitter.emit_u32(aarch64::bl(0));
-        super::TL_EXTERNAL_REFS
-            .with(|refs| refs.borrow_mut().push((call_site, wrapper.to_string())));
+        ctx.pending_inrt_calls.push(super::PendingInrtCall {
+            site: call_site,
+            target: crate::inrt::INRT_STR_CONCAT.to_string(),
+        });
     } else if let Some(native_ptr) = crate::native_emit::native_link::resolve_native_fn(wrapper) {
         emitter.emit_insns(&aarch64::load_i64(15, native_ptr as usize as i64));
         emitter.emit_u32(0xD63F_01E0u32 | (15 << 5));

@@ -2320,3 +2320,37 @@ fn float_entry_is_not_an_exit_status() {
         EntryReturn::IntLike
     );
 }
+
+/// The embedded string runtime has to actually concatenate. The JIT resolved the
+/// Rust-side wrapper for every string operation, so the blob's copy loops were
+/// never exercised and shipped broken: it copied eight bytes per index, used loop
+/// bounds a syscall had clobbered, and wrote past the frame it saved into.
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn jit_executes_the_embedded_string_concat() {
+    let module = crate::in_lang_parse::parse_in_source(
+        r#"
+fn main() -> String {
+  return __inrt_str_concat("hello", " world");
+}
+"#,
+    )
+    .expect("parse");
+    let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
+    let function_offsets = vec![(
+        "main".into(),
+        ENTRY_STUB_SIZE,
+        lowered.code.len() as u32 - ENTRY_STUB_SIZE,
+    )];
+    let mut rt = crate::jit_runtime::JitRuntime::new();
+    rt.load(&lowered.code, &function_offsets, &lowered.relocations)
+        .expect("jit load");
+    let raw = unsafe { rt.invoke("main", &[]).expect("invoke") };
+    assert_ne!(raw, 0, "concat returned a null string");
+
+    // An instring is an 8-byte length header followed by the bytes.
+    let ptr = raw as *const u8;
+    let len = unsafe { *(ptr as *const u64) as usize };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr.add(8), len) };
+    assert_eq!(String::from_utf8_lossy(bytes), "hello world");
+}
