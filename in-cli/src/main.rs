@@ -189,6 +189,31 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(
+        about = "Report what compiles to native code and what blocks the rest"
+    )]
+    Coverage {
+        #[arg(
+            long,
+            default_value = ".",
+            help = "Source path: .in, .icore, or supported frontend source"
+        )]
+        path: String,
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = ParserCli::Auto,
+            help = "`auto`: extension + `IN_PARSER` pick Core IR vs Swift; `in` / `icore` force `.in` or JSON icore"
+        )]
+        parser: ParserCli,
+        #[arg(
+            long,
+            help = "Entry function name (defaults to `main` when the module has one)"
+        )]
+        entry: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     #[command(about = "Emit typed repair plans for agents")]
     Fix {
         #[arg(long, action = clap::ArgAction::SetTrue)]
@@ -546,7 +571,9 @@ impl Commands {
         use crate::pack::cmd_pack;
         use crate::package::{cmd_install, cmd_package, cmd_package_lock};
         use crate::plugin::cmd_plugin;
-        use crate::tools::{cmd_agent, cmd_canonicalize, cmd_explain, cmd_fix, cmd_languages};
+        use crate::tools::{
+            cmd_agent, cmd_canonicalize, cmd_coverage, cmd_explain, cmd_fix, cmd_languages,
+        };
         use crate::update::{cmd_update, cmd_update_remote};
         use crate::util::workspace_root;
 
@@ -605,6 +632,12 @@ impl Commands {
                 diagnostic_code,
                 json,
             } => cmd_explain(&diagnostic_code, json),
+            Commands::Coverage {
+                path,
+                parser,
+                entry,
+                json,
+            } => cmd_coverage(invocation_cwd, &path, parser, entry.as_deref(), json),
             Commands::Fix {
                 plan,
                 json,
