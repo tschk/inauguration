@@ -2302,3 +2302,21 @@ fn main() -> Int {
     let _ = std::fs::remove_file(path.with_extension("s"));
     let _ = std::fs::remove_file(path.with_extension("o"));
 }
+
+/// A Float return arrives in v0, so the entry stub must not exit with x0; doing
+/// so made the process exit with whatever that register happened to hold.
+#[test]
+fn float_entry_is_not_an_exit_status() {
+    assert_eq!(
+        entry_return_kind(&crate::core_ir::Typ::Float),
+        EntryReturn::VoidOrReference
+    );
+    assert_eq!(
+        entry_return_kind(&crate::core_ir::Typ::Int),
+        EntryReturn::IntLike
+    );
+    assert_eq!(
+        entry_return_kind(&crate::core_ir::Typ::Bool),
+        EntryReturn::IntLike
+    );
+}

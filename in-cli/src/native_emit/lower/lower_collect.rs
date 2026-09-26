@@ -129,8 +129,12 @@ pub(crate) fn rename_call_expr(expr: &mut Expr, name_map: &HashMap<String, Strin
 
 pub(crate) fn entry_return_kind(ret: &Typ) -> EntryReturn {
     match canonical_type(ret) {
-        Typ::Int | Typ::Float | Typ::Bool => EntryReturn::IntLike,
-        Typ::String
+        Typ::Int | Typ::Bool => EntryReturn::IntLike,
+        // A Float comes back in v0, not x0, so the entry stub cannot exit with
+        // it; treating it as IntLike made the process exit with whatever the
+        // register happened to hold.
+        Typ::Float
+        | Typ::String
         | Typ::Void
         | Typ::Array(_)
         | Typ::Vector(_)
