@@ -3,6 +3,7 @@ use super::types::{
     SourceExcerptBounds,
 };
 use crate::core_ir::{Decl, Expr, Stmt, UnifiedModule};
+use crate::native_emit::lower::{DEGRADATION_SKIPPED_FUNCTION, DEGRADATION_UNRESOLVED_CALL};
 use crate::package_manifest::PackageSymbolIndexEntry;
 
 pub(super) fn diagnostic(
@@ -332,6 +333,28 @@ fn collect_dependency_symbol_calls_from_expr<'a>(
 }
 
 pub fn explain_diagnostic(code: &str) -> Option<DiagnosticExplanation> {
+    // Lowerer codes are matched through their constants so the explanation cannot
+    // drift from the code the compiler actually emits.
+    if code == DEGRADATION_SKIPPED_FUNCTION {
+        return Some(DiagnosticExplanation {
+            code: code.to_string(),
+            severity: AgentDiagnosticSeverity::Warning,
+            expected_shape: "a function the AArch64 lowerer can compile".to_string(),
+            repair_hint: "Rewrite the function to stay inside the native subset, or move it behind an extern binding".to_string(),
+            meaning: "The native lowerer could not compile this function, so its body is a trap that reports the reason and exits with the trap status if reached".to_string(),
+            fix: "Simplify the function's types and constructs until it lowers, or call it through a boundary that is not compiled natively".to_string(),
+        });
+    }
+    if code == DEGRADATION_UNRESOLVED_CALL {
+        return Some(DiagnosticExplanation {
+            code: code.to_string(),
+            severity: AgentDiagnosticSeverity::Warning,
+            expected_shape: "a call target with a definition in the compiled unit".to_string(),
+            repair_hint: "Add the missing definition, import it, or declare it as an extern binding".to_string(),
+            meaning: "A call names a function with no definition in the compiled unit, so the call site is a trap".to_string(),
+            fix: "Define the callee, resolve its package or crate, or declare it as an extern binding".to_string(),
+        });
+    }
     let (severity, expected_shape, repair_hint, meaning, fix) = match code {
         "AGENT_NO_MAIN" | "INAGENT010" => (
             AgentDiagnosticSeverity::Warning,
