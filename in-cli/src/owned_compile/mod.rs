@@ -412,10 +412,11 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     // ponytail: skip Core IR verification for Rust files (self-hosting demo).
     // The syn-based Rust frontend lowers complex Rust constructs that the verifier
     // can't fully type-check yet (stdlib imports, generics, Result types).
-    // Also skip for JIT (development speed) and when IN_SKIP_VERIFY env var is set.
+    // Every other source verifies on every target, JIT included: the verifier is
+    // what turns unresolved symbols into coded refusals instead of silent wrong
+    // answers from lowering fallbacks. IN_SKIP_VERIFY remains an escape hatch.
     let effective_entry = request.entry.clone().or(pkg_entry);
-    let skip_verify =
-        request.target == CompileTarget::Jit || crate::config::env_config().skip_verify;
+    let skip_verify = is_rust_source || crate::config::env_config().skip_verify;
     if !is_rust_source && !skip_verify {
         let verify_opts = core_ir_verifier::VerifyOptions {
             entry: effective_entry.clone(),

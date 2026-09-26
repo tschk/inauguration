@@ -247,6 +247,18 @@ fn split_match_pat_args(inner: &str) -> Vec<String> {
     out
 }
 
+/// True when `s` has the shape of an integer literal (optional sign, decimal
+/// digits, or a `0x` hex body). Callers pair this with a failed `i64` parse to
+/// reject out-of-range literals instead of silently treating them as
+/// identifiers or binding patterns.
+pub(crate) fn looks_like_int_literal(s: &str) -> bool {
+    let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        return !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
 impl MatchPattern {
     pub fn parse(s: &str) -> Result<Self, String> {
         let s = trim_match_pat(s).trim_end_matches(':').trim();
@@ -268,6 +280,11 @@ impl MatchPattern {
         }
         if let Ok(n) = s.parse::<i64>() {
             return Ok(MatchPattern::IntPat(n));
+        }
+        // Out-of-range numeric tokens must not fall through to binding or
+        // variant patterns, where they would silently never match.
+        if looks_like_int_literal(s) {
+            return Err(format!(".in: integer pattern `{s}` out of i64 range"));
         }
         if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
             return Ok(MatchPattern::StringPat(s[1..s.len() - 1].to_string()));
