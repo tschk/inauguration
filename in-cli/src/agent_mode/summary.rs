@@ -81,7 +81,52 @@ pub(super) fn summarize_core_ir(module: &UnifiedModule) -> CoreIrSummary {
                         .collect(),
                 });
             }
-            Decl::Class { .. } | Decl::Interface { .. } | Decl::Component { .. } => {}
+            Decl::Class {
+                name,
+                fields,
+                methods,
+                ..
+            } => {
+                // Classes desugar into structs plus `Class_method` functions;
+                // summarize that shape so the graph shows a class's methods
+                // (and its fields as the struct they become).
+                structs.push(StructSummary {
+                    name: name.clone(),
+                    field_count: fields.len(),
+                    fields: fields
+                        .iter()
+                        .map(|(field_name, typ)| FieldSummary {
+                            name: field_name.clone(),
+                            typ: typ_label(typ),
+                        })
+                        .collect(),
+                });
+                for method in methods {
+                    if let Decl::Function {
+                        name: method_name,
+                        params,
+                        ret,
+                        body,
+                        ..
+                    } = method
+                    {
+                        functions.push(FunctionSummary {
+                            name: format!("{name}_{method_name}"),
+                            param_count: params.len(),
+                            return_type: typ_label(ret),
+                            statement_count: stmt_count(body),
+                            params: params
+                                .iter()
+                                .map(|(param_name, typ)| FieldSummary {
+                                    name: param_name.clone(),
+                                    typ: typ_label(typ),
+                                })
+                                .collect(),
+                        });
+                    }
+                }
+            }
+            Decl::Interface { .. } | Decl::Component { .. } => {}
             Decl::Global { .. } => {}
         }
     }
