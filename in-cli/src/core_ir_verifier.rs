@@ -158,6 +158,7 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("invoke1", IntrinsicRet::Int),
     ("invoke2", IntrinsicRet::Int),
     ("print", IntrinsicRet::Void),
+    ("print-int", IntrinsicRet::Void),
     ("display", IntrinsicRet::String),
     ("to-string", IntrinsicRet::String),
     ("to-string-lossy", IntrinsicRet::String),

@@ -1,0 +1,14 @@
+// @expect parse: ok
+// @expect bytecode: executes
+// @expect result: Int(0)
+
+// print / print-int must reach stdout with identical bytes on the JIT and the
+// native runtime, so the backend differential compares this fixture's output.
+fn main() -> Int {
+  print("value:");
+  print-int(42);
+  print-int(-7);
+  print-int(0);
+  print-int(-9223372036854775808);
+  return 0;
+}

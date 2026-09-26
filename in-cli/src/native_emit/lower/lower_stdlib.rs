@@ -60,6 +60,8 @@ fn native_inrt_builtin(wrapper: &str) -> Option<&'static str> {
         "in_str_concat" => Some(crate::inrt::INRT_STR_CONCAT),
         "in_str_eq" => Some(crate::inrt::INRT_STR_EQ),
         "in_str_contains" => Some(crate::inrt::INRT_STR_CONTAINS),
+        "in_print" => Some(crate::inrt::INRT_PRINT),
+        "in_print_int" => Some(crate::inrt::INRT_PRINT_INT),
         _ => None,
     }
 }
@@ -1054,6 +1056,20 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 wrapper,
+                args,
+                rd,
+                functions,
+                pending_calls,
+                fn_name,
+            )?;
+            return Ok(true);
+        }
+        // Named int print: always routes to the int wrapper.
+        "print-int" if args.len() == 1 => {
+            emit_stdlib_wrapper_call(
+                emitter,
+                ctx,
+                "in_print_int",
                 args,
                 rd,
                 functions,

@@ -25,6 +25,7 @@ agree conformance/functions/params.in
 agree conformance/functions/recursion.in
 agree conformance/functions/string-return.in
 agree conformance/runtime/array-ops.in
+agree conformance/runtime/print.in
 agree conformance/runtime/string-ops.in
 agree conformance/types/array-basic.in
 agree conformance/types/bool-ops.in
