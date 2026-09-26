@@ -2184,3 +2184,73 @@ fn main() -> Int {
         .expect("jit load");
     assert_eq!(unsafe { rt.invoke("main", &[]).expect("invoke") }, 1);
 }
+
+/// A function the lowerer cannot compile must be reported, and reaching it must
+/// abort rather than return a fabricated value.
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn skipped_function_traps_instead_of_returning_zero() {
+    let module = crate::in_lang_parse::parse_in_source(
+        r#"
+fn nothing() -> void { return; }
+
+fn bad() -> Int {
+  let v = nothing();
+  return 1;
+}
+
+fn main() -> Int {
+  return bad();
+}
+"#,
+    )
+    .expect("parse");
+
+    let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
+    assert_eq!(lowered.degradations.len(), 1, "{:?}", lowered.degradations);
+    let degradation = &lowered.degradations[0];
+    assert_eq!(degradation.code, DEGRADATION_SKIPPED_FUNCTION);
+    assert_eq!(degradation.function, "bad");
+    assert!(degradation.reachable, "main calls bad, so its trap is live");
+
+    let path = temp_executable("skipped-trap");
+    compile_native_executable(&module, "main", &path).expect("compile");
+    let output = run_native_exe(&path);
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(inrt::INRT_TRAP_EXIT_CODE)),
+        "trapped program must not report a normal exit"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("IN3001"), "stderr was {stderr:?}");
+    assert!(stderr.contains("bad"), "stderr was {stderr:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A trap nothing can reach is dead code, and is reported as such.
+#[test]
+fn unreachable_skipped_function_is_marked_not_reachable() {
+    let module = crate::in_lang_parse::parse_in_source(
+        r#"
+fn nothing() -> void { return; }
+
+fn unused() -> Int {
+  let v = nothing();
+  return 7;
+}
+
+fn main() -> Int {
+  return 3;
+}
+"#,
+    )
+    .expect("parse");
+
+    let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
+    assert_eq!(lowered.degradations.len(), 1, "{:?}", lowered.degradations);
+    assert_eq!(lowered.degradations[0].function, "unused");
+    assert!(
+        !lowered.degradations[0].reachable,
+        "nothing calls unused, so its trap is dead code"
+    );
+}
