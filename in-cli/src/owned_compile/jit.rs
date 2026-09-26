@@ -145,6 +145,7 @@ pub fn compile_jit(
                 .collect(),
             external_refs: Vec::new(),
             degradations: Vec::new(),
+            error_slot_refs: Vec::new(),
         }
     } else {
         let jobs = jobs_for_request(request);

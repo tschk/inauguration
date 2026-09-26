@@ -2254,3 +2254,51 @@ fn main() -> Int {
         "nothing calls unused, so its trap is dead code"
     );
 }
+
+/// throw/try/catch writes the flag and value through x27. The JIT runtime points
+/// x27 at its error page, but a native executable has no runtime, so it used to
+/// write through an unset register and die with a signal. The generated assembly
+/// must declare a writable slot and the artifact must run the catch arm.
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_executable_runs_try_catch_without_crashing() {
+    let module = crate::in_lang_parse::parse_in_source(
+        r#"
+fn might-fail(x: Int) -> Int {
+  if (x < 0) {
+    throw 7;
+  }
+  return 1;
+}
+
+fn main() -> Int {
+  try {
+    might-fail(-1);
+  } catch (e) {
+    return 42;
+  }
+  return 1;
+}
+"#,
+    )
+    .expect("parse");
+
+    let path = temp_executable("try-catch");
+    compile_native_executable(&module, "main", &path).expect("compile");
+
+    let asm = std::fs::read_to_string(path.with_extension("s")).expect("assembly sidecar");
+    assert!(
+        asm.contains("_inrt_error_slot"),
+        "assembly must declare the error slot:\n{asm}"
+    );
+
+    let output = run_native_exe(&path);
+    assert_eq!(
+        output.status.code(),
+        Some(42),
+        "the catch arm must run instead of the process dying: {output:?}"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("s"));
+    let _ = std::fs::remove_file(path.with_extension("o"));
+}

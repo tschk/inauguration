@@ -108,7 +108,13 @@ pub fn compile_native_artifact_with_report(
             .collect();
 
         // Build assembly source from lowered code
-        let asm = build_assembly(&lowered.code, &mapped_exports, &mapped_external_refs, entry);
+        let asm = build_assembly(
+            &lowered.code,
+            &mapped_exports,
+            &mapped_external_refs,
+            &lowered.error_slot_refs,
+            entry,
+        );
         let asm_path = out_path.with_extension("s");
         std::fs::write(&asm_path, &asm).map_err(|e| format!("write assembly: {e}"))?;
 

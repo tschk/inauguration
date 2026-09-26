@@ -8,6 +8,31 @@ use crate::core_ir::{Expr, LoopKind, Stmt, Typ};
 use crate::native_emit::aarch64::{self, CodeEmitter};
 use std::collections::HashMap;
 
+/// Point x27 at the throw/try error slot before it is used.
+///
+/// The JIT runtime sets x27 once for the whole invocation. A native executable
+/// has no such runtime, so the generated assembly names a writable slot; here we
+/// leave a placeholder instruction and record the site for `build_assembly`.
+/// Refusing is the only other option, because writing through an unset x27 is
+/// what used to crash these programs.
+fn emit_error_slot_adr(emitter: &mut CodeEmitter, fn_name: &str) -> Result<(), String> {
+    match super::error_slot_mode() {
+        super::ErrorSlotMode::RuntimeProvided => Ok(()),
+        super::ErrorSlotMode::AssemblyProvided => {
+            // Reserve room for the adrp/add pair the assembler needs to name a
+            // writable slot in another section; a bare `adr` cannot reach it.
+            let site = emitter.len();
+            emitter.emit_u32(aarch64::nop());
+            emitter.emit_u32(aarch64::nop());
+            super::note_error_slot_ref(fn_name, site);
+            Ok(())
+        }
+        super::ErrorSlotMode::Unsupported => Err(format!(
+            "native-lower: `{fn_name}` uses throw/try, which needs a writable error slot that this link path does not provide"
+        )),
+    }
+}
+
 pub(crate) fn lower_stmt(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -198,6 +223,7 @@ pub(crate) fn lower_stmt(
             ret_typ,
         ),
         Stmt::Throw(expr) => {
+            emit_error_slot_adr(emitter, fn_name)?;
             lower_expr::lower_expr_into(emitter, ctx, expr, 0, functions, pending_calls, fn_name)?;
             // Store error value to global location via X27
             emitter.emit_u32(aarch64::str64(0, 27, 8));
@@ -207,6 +233,7 @@ pub(crate) fn lower_stmt(
             Ok(())
         }
         Stmt::Try { body, catches, .. } => {
+            emit_error_slot_adr(emitter, fn_name)?;
             // Save previous error flag from global location to stack
             emitter.emit_u32(aarch64::ldrb(1, 27, 0));
             emitter.emit_u32(aarch64::strb(1, aarch64::REG_SP, ctx.saved_flag_offset));
