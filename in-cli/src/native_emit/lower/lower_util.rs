@@ -45,16 +45,22 @@ pub(crate) fn find_field_offset<'a>(
     })
 }
 
-pub(crate) fn lower_comparison_result(
-    emitter: &mut CodeEmitter,
-    rd: u8,
-    op: &str,
-) -> Result<(), String> {
-    let cond = match op {
+/// Branch condition that tests `op` against flags already set by a compare.
+///
+/// Floats need different codes from integers for `<` and `<=`: `fcmp` reports an
+/// unordered pair (NaN) as `N=0, Z=0, C=1, V=1`, and the integer aliases `LT`
+/// (`N != V`) and `LE` (`Z == 1 || N != V`) are both true for that, while `MI`
+/// (`N == 1`) and `LS` (`C == 0 || Z == 1`) are both false. `>`, `>=`, `==`, and
+/// `!=` agree between the two, so NaN compares false and `!=` true, as IEEE 754
+/// requires.
+fn comparison_cond(op: &str, is_float: bool) -> Result<u8, String> {
+    Ok(match op {
         "==" | "===" => 0,
         "!=" | "!==" => 1,
+        "<" if is_float => 4,
         "<" => 11,
         ">" => 12,
+        "<=" if is_float => 9,
         "<=" => 13,
         ">=" => 10,
         _ => {
@@ -62,7 +68,16 @@ pub(crate) fn lower_comparison_result(
                 "native-lower: unsupported comparison operator `{op}`"
             ));
         }
-    };
+    })
+}
+
+pub(crate) fn lower_comparison_result(
+    emitter: &mut CodeEmitter,
+    rd: u8,
+    op: &str,
+    is_float: bool,
+) -> Result<(), String> {
+    let cond = comparison_cond(op, is_float)?;
     let true_branch = emitter.emit_insn(aarch64::b_cond(cond, 0));
     emitter.emit_insns(&aarch64::load_i64(rd, 0));
     let end_branch = emitter.emit_insn(aarch64::b(0));
@@ -321,5 +336,34 @@ pub(crate) fn expr_contains_call(expr: &Expr) -> bool {
         | Expr::BoolLit(_)
         | Expr::Ident(_)
         | Expr::Closure { .. } => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::comparison_cond;
+
+    /// `fcmp` reports an unordered pair as `N=0, Z=0, C=1, V=1`, so `<` and `<=`
+    /// must use the `MI` and `LS` codes: the integer aliases `LT` (`N != V`) and
+    /// `LE` (`Z == 1 || N != V`) are true for NaN and would make `nan < 1.0` true.
+    #[test]
+    fn float_less_than_uses_the_unordered_safe_codes() {
+        assert_eq!(comparison_cond("<", true).unwrap(), 4, "MI");
+        assert_eq!(comparison_cond("<=", true).unwrap(), 9, "LS");
+        assert_eq!(comparison_cond("<", false).unwrap(), 11, "LT");
+        assert_eq!(comparison_cond("<=", false).unwrap(), 13, "LE");
+    }
+
+    /// The remaining float codes are the integer ones, and they already treat
+    /// NaN as unordered: `>`, `>=`, and `==` false, `!=` true.
+    #[test]
+    fn float_comparisons_agree_with_integers_where_they_should() {
+        for op in ["==", "!=", ">", ">="] {
+            assert_eq!(
+                comparison_cond(op, true).unwrap(),
+                comparison_cond(op, false).unwrap(),
+                "{op}"
+            );
+        }
     }
 }

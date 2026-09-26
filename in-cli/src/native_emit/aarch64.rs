@@ -222,6 +222,15 @@ pub fn fdiv_d(rd: u8, rn: u8, rm: u8) -> u32 {
     0x1E60_1800 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
 }
 
+/// `fcmp dn, dm` — sets the flags the comparison branch conditions read.
+///
+/// The float condition codes coincide with the integer ones (`LT`/`MI` and
+/// `LE`/`LS` share an encoding), and unordered operands (NaN) fall out correctly:
+/// only `!=` is true for them.
+pub fn fcmp_d(rn: u8, rm: u8) -> u32 {
+    0x1E60_2000 | ((rm as u32) << 16) | ((rn as u32) << 5)
+}
+
 pub fn load_i64(rd: u8, value: i64) -> Vec<u32> {
     let uv = value as u64;
     let mut insns = vec![movz64(rd, (uv & 0xFFFF) as u16, 0)];
@@ -333,6 +342,8 @@ mod tests {
         assert_eq!(fsub_d(3, 7, 9), 0x1E6938E3);
         assert_eq!(fmul_d(3, 7, 9), 0x1E6908E3);
         assert_eq!(fdiv_d(3, 7, 9), 0x1E6918E3);
+        assert_eq!(fcmp_d(3, 9), 0x1E692060);
+        assert_eq!(fcmp_d(0, 1), 0x1E612000);
     }
 
 

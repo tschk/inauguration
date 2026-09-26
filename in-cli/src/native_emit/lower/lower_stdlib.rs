@@ -1576,7 +1576,7 @@ pub(crate) fn lower_stdlib_call(
             )?;
             emitter.emit_u32(aarch64::ldr64(rd, rd, 8));
             emitter.emit_u32(aarch64::cmp_reg64(rd, REG_XZR));
-            lower_comparison_result(emitter, rd, "==")?;
+            lower_comparison_result(emitter, rd, "==", false)?;
             Ok(true)
         }
         // String/Path/str::to_string → return the receiver as a slice

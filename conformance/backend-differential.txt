@@ -29,5 +29,6 @@ agree conformance/runtime/string-ops.in
 agree conformance/types/array-basic.in
 agree conformance/types/bool-ops.in
 agree conformance/types/float-arithmetic.in
+agree conformance/types/float-compare.in
 agree conformance/types/primitive-types.in
 agree conformance/types/string-concat.in

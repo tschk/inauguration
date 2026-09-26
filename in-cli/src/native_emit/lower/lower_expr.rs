@@ -530,6 +530,13 @@ pub(crate) fn lower_float_binary(
         "-" => emitter.emit_u32(aarch64::fsub_d(rd, rd, rhs_reg)),
         "*" => emitter.emit_u32(aarch64::fmul_d(rd, rd, rhs_reg)),
         "/" => emitter.emit_u32(aarch64::fdiv_d(rd, rd, rhs_reg)),
+        "==" | "!=" | "<" | ">" | "<=" | ">=" => {
+            // A float comparison yields a Bool, so it produces 0/1 in `rd` like
+            // the integer comparisons; only the flags come from `fcmp`. Without
+            // this arm every float comparison refused to lower.
+            emitter.emit_u32(aarch64::fcmp_d(rd, rhs_reg));
+            return lower_comparison_result(emitter, rd, op, true);
+        }
         _ => {
             return Err(format!(
                 "native-lower: unsupported float op `{op}` in `{fn_name}`"
@@ -643,7 +650,7 @@ pub(crate) fn lower_binary(
         }
         "==" | "!=" | "===" | "!==" | "<" | ">" | "<=" | ">=" => {
             emitter.emit_u32(aarch64::cmp_reg64(lhs_reg, rhs_reg));
-            return lower_comparison_result(emitter, rd, op);
+            return lower_comparison_result(emitter, rd, op, false);
         }
         "&" | "&=" => aarch64::and_reg64(rd, lhs_reg, rhs_reg),
         "|" | "|=" => aarch64::orr_reg64(rd, lhs_reg, rhs_reg),

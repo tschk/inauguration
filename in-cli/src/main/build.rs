@@ -216,8 +216,15 @@ fn run_pipeline_for_path(
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         if !report.success {
             let reason = report.reason_code.as_deref().unwrap_or("unknown");
+            // The reason code alone hides the cause; the report carries the
+            // lowerer's or linker's own message.
+            let detail = report
+                .error
+                .as_deref()
+                .or(report.reason.as_deref())
+                .unwrap_or("no detail reported");
             return Err(InError::Message(format!(
-                "in build: native compilation failed ({reason})"
+                "in build: native compilation failed ({reason}): {detail}"
             )));
         }
         if verbose {

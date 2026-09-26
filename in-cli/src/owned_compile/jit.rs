@@ -333,12 +333,10 @@ pub fn const_eval_entry_exit_code(
         }
         Err(err) => return Err(err),
     };
-    if !(0..=255).contains(&code) {
-        return Err(format!(
-            "native compile entry `{entry}` exit code {code} is outside 0..=255"
-        ));
-    }
-    Ok(code as u8)
+    // An exit status is eight bits: the OS truncates it exactly as it does for
+    // C's `main`. Refusing a larger value made a program returning 1000
+    // impossible to build, and `try_const_answer_entry` above already truncates.
+    Ok((code & 0xff) as u8)
 }
 
 fn eval_entry_via_jit(module: &UnifiedModule, entry: &str) -> Result<i64, String> {
