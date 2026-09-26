@@ -1,4 +1,6 @@
-use crate::core_ir::{Decl, Expr, MethodSig, Stmt, Typ, UnifiedModule};
+use crate::core_ir::{
+    looks_like_int_literal, Decl, Expr, MethodSig, Stmt, Typ, UnifiedModule,
+};
 use std::collections::{HashMap, HashSet};
 
 pub(crate) fn collect_top_level_type_names(module: &UnifiedModule) -> Vec<String> {
@@ -120,8 +122,19 @@ pub(crate) fn validate_expr_shapes(
         Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::StringLit(_)
-        | Expr::BoolLit(_)
-        | Expr::Ident(_) => Ok(()),
+        | Expr::BoolLit(_) => Ok(()),
+        Expr::Ident(name) => {
+            // The expression parser turns tokens it cannot classify into
+            // identifiers. A numeric-looking token that failed the i64 parse
+            // is an out-of-range literal, not a name: refuse it here so it
+            // never lowers to a silent 0.
+            if looks_like_int_literal(name) {
+                return Err(format!(
+                    ".in: integer literal `{name}` out of i64 range in fn {fn_name}"
+                ));
+            }
+            Ok(())
+        }
         Expr::Unary { expr, .. } => validate_expr_shapes(fn_name, structs, expr),
         Expr::Binary { lhs, rhs, .. } => {
             validate_expr_shapes(fn_name, structs, lhs)?;
