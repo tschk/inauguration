@@ -768,7 +768,7 @@ pub fn lower_module_with_jobs(
     }
 
     append_static_arrays(&mut emitter, pending_static_arrays);
-    append_string_table(&mut emitter, &strings, pending_strings);
+    append_string_table(&mut emitter, &strings, pending_strings)?;
 
     // Trap bodies emitted for degraded code call into the runtime blob, so they
     // join the same patch pass as ordinary inrt calls.

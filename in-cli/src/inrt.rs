@@ -10,6 +10,12 @@ pub const INRT_ENTRY_SYMBOL: &str = "_inrt_start";
 /// need the Rust-side `in_str_concat` helper the JIT resolves by dlsym.
 pub const INRT_STR_CONCAT: &str = "__inrt_str_concat";
 
+/// String equality and substring search, embedded for the same reason as
+/// [`INRT_STR_CONCAT`]: `str-eq` and `str-contains` are Rust-side helpers that a
+/// native artifact has no way to link against.
+pub const INRT_STR_EQ: &str = "__inrt_str_eq";
+pub const INRT_STR_CONTAINS: &str = "__inrt_str_contains";
+
 /// Builtin reached when a native program executes code the lowerer could not
 /// compile. It writes the supplied message to stderr and exits with
 /// [`INRT_TRAP_EXIT_CODE`]; it never returns.
@@ -23,6 +29,8 @@ pub const INRT_TRAP_EXIT_CODE: u16 = 70;
 pub const INRT_BUILTINS: &[&str] = &[
     "__inrt_str_len",
     INRT_STR_CONCAT,
+    INRT_STR_EQ,
+    INRT_STR_CONTAINS,
     "__inrt_str_substr",
     "__inrt_array_len",
     "__inrt_array_load",
@@ -41,7 +49,7 @@ pub fn inrt_builtin_param_slots(name: &str) -> Option<usize> {
         "__inrt_array_load" => Some(2),
         "__inrt_array_store" => Some(3),
         "__inrt_array_push" => Some(2),
-        INRT_STR_CONCAT => Some(2),
+        INRT_STR_CONCAT | INRT_STR_EQ | INRT_STR_CONTAINS => Some(2),
         "__inrt_str_substr" => Some(3),
         INRT_TRAP_BUILTIN => Some(2),
         _ => None,
@@ -91,6 +99,9 @@ mod r {
     pub const X7: u8 = 7;
     pub const X8: u8 = 8;
     pub const X9: u8 = 9;
+    pub const X10: u8 = 10;
+    pub const X11: u8 = 11;
+    pub const X12: u8 = 12;
     pub const X16: u8 = 16;
     pub const SP: u8 = 31;
     pub const XZR: u8 = 31;
@@ -210,6 +221,117 @@ fn build_inrt_str_concat() -> Vec<u8> {
         &mut buf,
     );
     buf
+}
+
+/// `__inrt_str_eq(a, b) -> i64` — 1 when both instrings hold the same bytes.
+///
+/// An instring is `[u64 byte length][bytes]` and its payload is *not*
+/// NUL-terminated, so equality is a length check followed by a byte-wise
+/// comparison. `x2` is the remaining count, which doubles as the loop counter.
+fn build_inrt_str_eq() -> Vec<u8> {
+    let mut e = aarch64::CodeEmitter::new();
+    e.emit_u32(aarch64::ldr64(X2, X0, 0)); // len(a)
+    e.emit_u32(aarch64::ldr64(X3, X1, 0)); // len(b)
+    e.emit_u32(aarch64::cmp_reg64(X2, X3));
+    let lengths_differ = e.emit_insn(aarch64::b_cond(aarch64::COND_NE, 0));
+    e.emit_u32(aarch64::add_imm64(X4, X0, 8)); // a payload
+    e.emit_u32(aarch64::add_imm64(X5, X1, 8)); // b payload
+    e.emit_u32(aarch64::cmp_reg64(X2, XZR));
+    let both_empty = e.emit_insn(aarch64::b_cond(aarch64::COND_EQ, 0));
+    let loop_head = e.len();
+    e.emit_u32(aarch64::ldrb(X6, X4, 0));
+    e.emit_u32(aarch64::ldrb(X7, X5, 0));
+    e.emit_u32(aarch64::cmp_reg64(X6, X7));
+    let byte_differs = e.emit_insn(aarch64::b_cond(aarch64::COND_NE, 0));
+    e.emit_u32(aarch64::add_imm64(X4, X4, 1));
+    e.emit_u32(aarch64::add_imm64(X5, X5, 1));
+    e.emit_u32(aarch64::sub_imm64(X2, X2, 1));
+    e.emit_u32(aarch64::cmp_reg64(X2, XZR));
+    let back = loop_head as i32 - e.len() as i32;
+    e.emit_u32(aarch64::b_cond(aarch64::COND_NE, back));
+
+    let equal = e.len();
+    e.emit_u32(aarch64::movz64(X0, 1, 0));
+    e.emit_u32(aarch64::ret());
+    let different = e.len();
+    e.emit_u32(aarch64::mov_zero64(X0));
+    e.emit_u32(aarch64::ret());
+
+    for (site, cond) in [
+        (lengths_differ, aarch64::COND_NE),
+        (byte_differs, aarch64::COND_NE),
+    ] {
+        let offset = different as i32 - site as i32;
+        e.patch_u32(site, aarch64::b_cond(cond, offset));
+    }
+    let offset = equal as i32 - both_empty as i32;
+    e.patch_u32(both_empty, aarch64::b_cond(aarch64::COND_EQ, offset));
+    e.bytes
+}
+
+/// `__inrt_str_contains(haystack, needle) -> i64`.
+///
+/// Matches the JIT's `in_str_contains` for every string the language can build:
+/// instrings come from source literals and concatenation, so both sides are
+/// UTF-8 and a byte-wise substring search is equivalent to Rust's `str::contains`
+/// (which also rejects invalid UTF-8 — unreachable here, and the native
+/// entry point is only ever reached by native artifacts).
+fn build_inrt_str_contains() -> Vec<u8> {
+    let mut e = aarch64::CodeEmitter::new();
+    e.emit_u32(aarch64::ldr64(X2, X0, 0)); // len(haystack)
+    e.emit_u32(aarch64::ldr64(X3, X1, 0)); // len(needle)
+    // An empty needle is contained in every string, including the empty one.
+    e.emit_u32(aarch64::cmp_reg64(X3, XZR));
+    let empty_needle = e.emit_insn(aarch64::b_cond(aarch64::COND_EQ, 0));
+    // A needle longer than the haystack cannot match.
+    e.emit_u32(aarch64::cmp_reg64(X3, X2));
+    let needle_too_long = e.emit_insn(aarch64::b_cond(12, 0)); // B.GT
+    e.emit_u32(aarch64::add_imm64(X4, X0, 8)); // haystack payload
+    e.emit_u32(aarch64::add_imm64(X5, X1, 8)); // needle payload
+    e.emit_u32(aarch64::sub_reg64(X6, X2, X3)); // last start offset
+    e.emit_u32(aarch64::mov_zero64(X7)); // i = 0
+
+    let outer_head = e.len();
+    e.emit_u32(aarch64::mov_zero64(X8)); // j = 0
+    let inner_head = e.len();
+    e.emit_u32(aarch64::add_reg64(X9, X4, X7));
+    e.emit_u32(aarch64::add_reg64(X9, X9, X8));
+    e.emit_u32(aarch64::ldrb(X10, X9, 0));
+    e.emit_u32(aarch64::add_reg64(X11, X5, X8));
+    e.emit_u32(aarch64::ldrb(X12, X11, 0));
+    e.emit_u32(aarch64::cmp_reg64(X10, X12));
+    let byte_differs = e.emit_insn(aarch64::b_cond(aarch64::COND_NE, 0));
+    e.emit_u32(aarch64::add_imm64(X8, X8, 1));
+    e.emit_u32(aarch64::cmp_reg64(X8, X3));
+    let inner_back = inner_head as i32 - e.len() as i32;
+    e.emit_u32(aarch64::b_cond(aarch64::COND_NE, inner_back));
+    // Every byte of the needle matched: the substring is present.
+    let found = e.emit_insn(aarch64::b(0));
+
+    // Mismatch at this start offset: advance one byte and retry while the
+    // window still fits inside the haystack.
+    let next_start = e.len();
+    e.emit_u32(aarch64::add_imm64(X7, X7, 1));
+    e.emit_u32(aarch64::cmp_reg64(X7, X6));
+    let outer_back = outer_head as i32 - e.len() as i32;
+    e.emit_u32(aarch64::b_cond(13, outer_back)); // B.LE
+
+    let missing = e.len();
+    e.emit_u32(aarch64::mov_zero64(X0));
+    e.emit_u32(aarch64::ret());
+    let present = e.len();
+    e.emit_u32(aarch64::movz64(X0, 1, 0));
+    e.emit_u32(aarch64::ret());
+
+    let offset = present as i32 - empty_needle as i32;
+    e.patch_u32(empty_needle, aarch64::b_cond(aarch64::COND_EQ, offset));
+    let offset = missing as i32 - needle_too_long as i32;
+    e.patch_u32(needle_too_long, aarch64::b_cond(12, offset));
+    let offset = next_start as i32 - byte_differs as i32;
+    e.patch_u32(byte_differs, aarch64::b_cond(aarch64::COND_NE, offset));
+    let offset = present as i32 - found as i32;
+    e.patch_u32(found, aarch64::b(offset));
+    e.bytes
 }
 
 fn build_inrt_str_substr() -> Vec<u8> {
@@ -488,6 +610,8 @@ pub fn build_runtime_blob() -> (Vec<u8>, BTreeMap<String, u32>) {
     }
     add_fn!("__inrt_str_len", build_inrt_str_len());
     add_fn!(INRT_STR_CONCAT, build_inrt_str_concat());
+    add_fn!(INRT_STR_EQ, build_inrt_str_eq());
+    add_fn!(INRT_STR_CONTAINS, build_inrt_str_contains());
     add_fn!("__inrt_str_substr", build_inrt_str_substr());
     add_fn!("__inrt_array_len", build_inrt_array_len());
     add_fn!("__inrt_array_load", build_inrt_array_load());
@@ -557,6 +681,8 @@ mod tests {
             let f = match *name {
                 "__inrt_str_len" => build_inrt_str_len(),
                 INRT_STR_CONCAT => build_inrt_str_concat(),
+                INRT_STR_EQ => build_inrt_str_eq(),
+                INRT_STR_CONTAINS => build_inrt_str_contains(),
                 "__inrt_str_substr" => build_inrt_str_substr(),
                 "__inrt_array_len" => build_inrt_array_len(),
                 "__inrt_array_load" => build_inrt_array_load(),

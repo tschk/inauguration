@@ -45,7 +45,8 @@ FILTERED=()
 for f in "${FIXTURES[@]}"; do
   rel="${f#$ROOT/}"
   skip=0
-  for skip_f in "${SKIP_FIXTURES[@]}"; do
+  # An empty skip list must not break the run: it is the goal state.
+  for skip_f in ${SKIP_FIXTURES[@]+"${SKIP_FIXTURES[@]}"}; do
     if [[ "$rel" == "$skip_f" ]]; then
       echo "  skipping known failure: $rel"
       skip=1

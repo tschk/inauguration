@@ -7,7 +7,7 @@
 use super::lower_expr::lower_expr_into;
 use super::lower_stmt::lower_struct_expr_into_slots;
 use super::{
-    FunctionInfo, LocalSlot, LowerCtx, PendingCall, TL_EXTERNAL_REFS, TL_NATIVE_MODE,
+    FunctionInfo, LocalSlot, LowerCtx, PendingCall, TL_NATIVE_MODE,
     find_field_offset, lower_comparison_result, native_param_abi_slots, pick_scratch,
 };
 use crate::core_ir::{Expr, Stmt, Typ};
@@ -42,21 +42,50 @@ fn emit_stdlib_wrapper_call(
             ctx.call_arg_temps[temp_base + i],
         ));
     }
-    let result = emit_stdlib_wrapper_register_call(emitter, wrapper, rd);
+    let result = emit_stdlib_wrapper_register_call(emitter, ctx, wrapper, rd);
     ctx.release_call_arg_temps();
     result
 }
 
+/// Runtime-blob builtin that stands in for a Rust-side wrapper in a native
+/// artifact.
+///
+/// The JIT resolves these wrappers with dlsym, but a native executable links
+/// only against the system libraries, so the wrapper symbol does not exist there.
+/// Wrappers not listed here have no native implementation yet; the caller
+/// refuses them with a coded message instead of emitting a `bl` to a symbol the
+/// linker cannot resolve.
+fn native_inrt_builtin(wrapper: &str) -> Option<&'static str> {
+    match wrapper {
+        "in_str_concat" => Some(crate::inrt::INRT_STR_CONCAT),
+        "in_str_eq" => Some(crate::inrt::INRT_STR_EQ),
+        "in_str_contains" => Some(crate::inrt::INRT_STR_CONTAINS),
+        _ => None,
+    }
+}
+
 fn emit_stdlib_wrapper_register_call(
     emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
     wrapper: &str,
     rd: u8,
 ) -> Result<(), String> {
     let is_native = TL_NATIVE_MODE.with(|m| *m.borrow());
     if is_native {
-        let call_site = emitter.len() as u32;
+        let Some(builtin) = native_inrt_builtin(wrapper) else {
+            return Err(format!(
+                "native-lower: `{wrapper}` has no native runtime yet; it is only \
+                 available under the JIT"
+            ));
+        };
+        // Arguments already sit in x0..x7 in the wrapper's order, which is the
+        // builtin's order too.
+        let call_site = emitter.len();
         emitter.emit_u32(aarch64::bl(0));
-        TL_EXTERNAL_REFS.with(|refs| refs.borrow_mut().push((call_site, wrapper.to_string())));
+        ctx.pending_inrt_calls.push(super::PendingInrtCall {
+            site: call_site,
+            target: builtin.to_string(),
+        });
     } else {
         crate::native_emit::native_link::bootstrap_jit_native();
         if let Some(native_ptr) = crate::native_emit::native_link::resolve_native_fn(wrapper) {
@@ -101,13 +130,14 @@ pub(crate) fn lower_vec_literal_into_slots(
     for item in items {
         lower_expr_into(emitter, ctx, item, 1, functions, pending_calls, fn_name)?;
         emitter.emit_u32(aarch64::add_imm64(0, aarch64::REG_SP, ptr_offset as u16));
-        emit_stdlib_wrapper_register_call(emitter, "in_vec_push", 0)?;
+        emit_stdlib_wrapper_register_call(emitter, ctx, "in_vec_push", 0)?;
     }
     Ok(())
 }
 
 pub(crate) fn emit_vec_push_words(
     emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
     header_offset: u32,
     source_offset: u32,
     words: usize,
@@ -115,7 +145,7 @@ pub(crate) fn emit_vec_push_words(
     emitter.emit_u32(aarch64::add_imm64(0, aarch64::REG_SP, header_offset as u16));
     emitter.emit_u32(aarch64::add_imm64(1, aarch64::REG_SP, source_offset as u16));
     emitter.emit_insns(&aarch64::load_i64(2, words as i64));
-    emit_stdlib_wrapper_register_call(emitter, "in_vec_push_words", 0)
+    emit_stdlib_wrapper_register_call(emitter, ctx, "in_vec_push_words", 0)
 }
 
 fn lower_string_push_str(
@@ -271,12 +301,13 @@ fn lower_vec_extend(
     emitter.emit_u32(aarch64::add_imm64(0, aarch64::REG_SP, offset as u16));
     let is_native = TL_NATIVE_MODE.with(|m| *m.borrow());
     if is_native {
-        let call_site = emitter.len() as u32;
-        emitter.emit_u32(aarch64::bl(0));
-        TL_EXTERNAL_REFS.with(|refs| {
-            refs.borrow_mut()
-                .push((call_site, "in_vec_extend".to_string()))
-        });
+        // No runtime-blob builtin covers `in_vec_extend`, so a native artifact
+        // cannot call it: refuse instead of emitting an unresolvable `bl`.
+        return Err(
+            "native-lower: `in_vec_extend` has no native runtime yet; it is only \
+             available under the JIT"
+                .to_string(),
+        );
     } else if let Some(native_ptr) =
         crate::native_emit::native_link::resolve_native_fn("in_vec_extend")
     {
@@ -310,7 +341,7 @@ fn lower_iter_once(
     }
     lower_expr_into(emitter, ctx, &args[0], 1, functions, pending_calls, fn_name)?;
     emitter.emit_u32(aarch64::add_imm64(0, REG_SP, header_offset as u16));
-    emit_stdlib_wrapper_register_call(emitter, "in_vec_push", 0)?;
+    emit_stdlib_wrapper_register_call(emitter, ctx, "in_vec_push", 0)?;
     for (index, offset) in [header_offset, header_offset + 8, header_offset + 16]
         .into_iter()
         .enumerate()
@@ -400,7 +431,7 @@ fn lower_iter_chain(
         emitter.emit_u32(aarch64::mov_reg64(2, 1));
         emitter.emit_u32(aarch64::mov_reg64(1, 0));
         emitter.emit_u32(aarch64::add_imm64(0, REG_SP, header_offset as u16));
-        emit_stdlib_wrapper_register_call(emitter, "in_vec_extend", 0)?;
+        emit_stdlib_wrapper_register_call(emitter, ctx, "in_vec_extend", 0)?;
     }
     for (index, offset) in [header_offset, header_offset + 8, header_offset + 16]
         .into_iter()
@@ -501,7 +532,7 @@ fn lower_array_map(
         fn_name,
     )
     .and_then(|()| {
-        super::lower_stdlib::emit_vec_push_words(emitter, header_offset, scratch_offset, words)
+        super::lower_stdlib::emit_vec_push_words(emitter, ctx, header_offset, scratch_offset, words)
     });
     if let Some(previous) = previous {
         ctx.locals.insert(binding.clone(), previous);
@@ -706,7 +737,7 @@ fn lower_vec_join(
         pending_calls,
         fn_name,
     )?;
-    emit_stdlib_wrapper_register_call(emitter, "in_vec_join", rd)
+    emit_stdlib_wrapper_register_call(emitter, ctx, "in_vec_join", rd)
 }
 
 fn lower_array_len(
@@ -1348,6 +1379,13 @@ pub(crate) fn lower_stdlib_call(
                 pending_calls,
                 fn_name,
             )?;
+            return Ok(true);
+        }
+        "str-len" if args.len() == 1 => {
+            // An instring's byte length is the first word of its header, so this
+            // needs no runtime call: load the pointer, then the length.
+            lower_expr_into(emitter, ctx, &args[0], rd, functions, pending_calls, fn_name)?;
+            emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
             return Ok(true);
         }
         "str-trim" if args.len() == 1 => {

@@ -408,6 +408,21 @@ impl JitRuntime {
         }
     }
 
+    /// Call a compiled function whose result is a `Float`.
+    ///
+    /// The backend keeps `Float` values in general-purpose registers as their
+    /// `f64` bit pattern: a literal is materialized with `movz`/`movk` and an
+    /// arithmetic result is moved back with `fmov`. The value therefore comes
+    /// out of the integer result register, not the `d` registers.
+    ///
+    /// # Safety
+    /// The function must have been loaded via `load()` and must take no
+    /// arguments.
+    pub unsafe fn invoke_float(&self, name: &str) -> Option<f64> {
+        let bits = unsafe { self.invoke(name, &[]) }?;
+        Some(f64::from_bits(bits as u64))
+    }
+
     /// Returns the number of loaded functions.
     pub fn function_count(&self) -> usize {
         self.functions.read().unwrap().len()

@@ -1078,6 +1078,67 @@ pub(crate) fn lower_loop(
     Ok(())
 }
 
+/// Emit the equality test for one string match arm.
+///
+/// `x2` holds the scrutinee pointer, so the test compares string *contents*:
+/// equal literals are interned to one table entry, but a scrutinee that is
+/// computed at runtime (concatenated, read from a field, passed as a parameter)
+/// has its own allocation. An earlier version loaded the pattern's constant-pool
+/// index into `x1` and compared it against the scrutinee pointer, so a string
+/// pattern could never match and every string `match` fell through to its
+/// default arm.
+///
+/// On return the flags say whether the arm matched: control reaches the arm body
+/// only when the strings are equal, and each returned site is a `b.ne` that must
+/// be patched to the instruction after the arm.
+fn emit_string_match_test(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    string_index: i64,
+) -> Vec<u32> {
+    // x1 = the pattern literal. x9/x12 walk the payloads; x13/x14 hold one byte
+    // from each side. x3/x4 hold the lengths and x3 doubles as the loop counter.
+    let adr_site = emitter.emit_insn(aarch64::adr(1, 0));
+    ctx.pending_strings.push(super::PendingString {
+        adr_site,
+        string_index,
+        rd: 1,
+    });
+    let mut not_equal = Vec::with_capacity(3);
+
+    // Lengths must agree before the payloads are worth comparing, and reading a
+    // length header is safe for every literal now that `""` is a real entry.
+    emitter.emit_u32(aarch64::ldr64(3, 2, 0));
+    emitter.emit_u32(aarch64::ldr64(4, 1, 0));
+    emitter.emit_u32(aarch64::cmp_reg64(3, 4));
+    not_equal.push(emitter.emit_insn(aarch64::b_cond(aarch64::COND_NE, 0)));
+
+    // Equal lengths: empty strings match without entering the loop.
+    emitter.emit_u32(aarch64::cmp_reg64(3, aarch64::REG_XZR));
+    let empty_branch = emitter.emit_insn(aarch64::b_cond(aarch64::COND_EQ, 0));
+
+    emitter.emit_u32(aarch64::add_imm64(9, 2, 8));
+    emitter.emit_u32(aarch64::add_imm64(12, 1, 8));
+    let loop_head = emitter.len();
+    emitter.emit_u32(aarch64::ldrb(13, 9, 0));
+    emitter.emit_u32(aarch64::ldrb(14, 12, 0));
+    emitter.emit_u32(aarch64::cmp_reg64(13, 14));
+    not_equal.push(emitter.emit_insn(aarch64::b_cond(aarch64::COND_NE, 0)));
+    emitter.emit_u32(aarch64::add_imm64(9, 9, 1));
+    emitter.emit_u32(aarch64::add_imm64(12, 12, 1));
+    emitter.emit_u32(aarch64::sub_imm64(3, 3, 1));
+    emitter.emit_u32(aarch64::cmp_reg64(3, aarch64::REG_XZR));
+    let back_offset = loop_head as i32 - emitter.len() as i32;
+    emitter.emit_u32(aarch64::b_cond(aarch64::COND_NE, back_offset));
+
+    let matched_offset = emitter.len() as i32 - empty_branch as i32;
+    emitter.patch_u32(
+        empty_branch,
+        aarch64::b_cond(aarch64::COND_EQ, matched_offset),
+    );
+    not_equal
+}
+
 pub(crate) fn lower_match(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -1125,9 +1186,7 @@ pub(crate) fn lower_match(
             emitter.patch_u32(next_branch, aarch64::b_cond(1, next_offset));
         } else if let Some(value) = parse_string_match_pattern(&arm.pattern) {
             let id = ctx.string_id(&value)?;
-            emitter.emit_insns(&aarch64::load_i64(1, id));
-            emitter.emit_u32(aarch64::cmp_reg64(2, 1));
-            let next_branch = emitter.emit_insn(aarch64::b_cond(1, 0));
+            let not_equal = emit_string_match_test(emitter, ctx, id);
             for stmt in &arm.body {
                 lower_stmt(
                     emitter,
@@ -1140,23 +1199,19 @@ pub(crate) fn lower_match(
                 )?;
             }
             end_branches.push(emitter.emit_insn(aarch64::b(0)));
-            let next_offset = emitter.len() as i32 - next_branch as i32;
-            emitter.patch_u32(next_branch, aarch64::b_cond(1, next_offset));
+            for site in not_equal {
+                let next_offset = emitter.len() as i32 - site as i32;
+                emitter.patch_u32(site, aarch64::b_cond(aarch64::COND_NE, next_offset));
+            }
         } else {
-            // Unsupported pattern: execute arm body (bias toward match).
-            // Semantically wrong but allows the function to lower.
-            for stmt in &arm.body {
-                lower_stmt(
-                    emitter,
-                    ctx,
-                    stmt,
-                    functions,
-                    pending_calls,
-                    fn_name,
-                    ret_typ,
-                )?;
-            }
-            end_branches.push(emitter.emit_insn(aarch64::b(0)));
+            // A pattern the lowerer cannot test (bool, variant, range, ...) used
+            // to fall through to this arm's body unconditionally, which silently
+            // returned the first arm's result for every input. Refusing lowers
+            // the function to a trap that names the pattern instead.
+            return Err(format!(
+                "native-lower: unsupported match pattern `{}` in `{fn_name}`",
+                arm.pattern.trim()
+            ));
         }
     }
     if let Some(body) = default_body {

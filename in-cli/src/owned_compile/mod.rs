@@ -48,6 +48,33 @@ pub enum OwnedEmit {
     Sci { base: u64 },
 }
 
+/// Value an executed entry point produced, in the shape the source declared.
+///
+/// An entry can return a float, which arrives in the floating-point result
+/// register rather than the integer one, and a bool, which is a distinct type
+/// even though it shares a register with an integer. Reporting every result as
+/// an integer meant a `-> Bool` function was reported as `Int(1)` and a
+/// `-> Float` function as `Int(0)`.
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub enum EvalValue {
+    Int(i64),
+    Bool(bool),
+    Float(f64),
+    Str(String),
+}
+
+impl EvalValue {
+    /// Integer form for consumers that can only carry one, such as the daemon's
+    /// response protocol. Non-integer values have no integer form.
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            EvalValue::Int(value) => Some(*value),
+            EvalValue::Bool(value) => Some(i64::from(*value)),
+            EvalValue::Float(_) | EvalValue::Str(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OwnedCompileRequest {
     pub path: PathBuf,
@@ -107,9 +134,7 @@ pub struct OwnedCompileReport {
     pub cache_hit: bool,
     pub frontend_hash: Option<String>,
     pub eval_exit_code: Option<u8>,
-    pub eval_result: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub eval_result_string: Option<String>,
+    pub eval_result: Option<EvalValue>,
     pub error: Option<String>,
 }
 
@@ -495,7 +520,6 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                 report.success = true;
                 report.eval_exit_code = native_result.eval_exit_code;
                 report.eval_result = native_result.eval_result;
-                report.eval_result_string = native_result.eval_result_string;
                 report.executable_path = if request.linkage == NativeLinkage::Executable {
                     Some(native_result.artifact_path.clone())
                 } else {
@@ -550,7 +574,6 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                     report.success = true;
                     report.eval_exit_code = jit_result.eval_exit_code;
                     report.eval_result = jit_result.eval_result;
-                    report.eval_result_string = jit_result.eval_result_string;
                     report.degradations = jit_result.degradations;
                 }
                 Err(err) => {

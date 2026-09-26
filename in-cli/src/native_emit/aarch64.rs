@@ -5,6 +5,10 @@ pub const REG_XZR: u8 = 31;
 pub const REG_LR: u8 = 30;
 pub const REG_FP: u8 = 29;
 
+/// AArch64 condition codes for [`b_cond`], by their conventional names.
+pub const COND_EQ: u8 = 0;
+pub const COND_NE: u8 = 1;
+
 pub fn movz64(rd: u8, imm16: u16, shift: u8) -> u32 {
     assert!(shift.is_multiple_of(16) && shift <= 48);
     let hw = (shift / 16) as u32;
@@ -198,6 +202,26 @@ pub fn fdiv_s(rd: u8, rn: u8, rm: u8) -> u32 {
     0x1E20_1800 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
 }
 
+// The double-precision forms. `Float` values are `f64` and are moved with the
+// 64-bit `fmov` encodings above, so arithmetic on them must be double precision:
+// the single-precision forms read only the low half of the register and produced
+// garbage for every float expression.
+pub fn fadd_d(rd: u8, rn: u8, rm: u8) -> u32 {
+    0x1E60_2800 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
+}
+
+pub fn fsub_d(rd: u8, rn: u8, rm: u8) -> u32 {
+    0x1E60_3800 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
+}
+
+pub fn fmul_d(rd: u8, rn: u8, rm: u8) -> u32 {
+    0x1E60_0800 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
+}
+
+pub fn fdiv_d(rd: u8, rn: u8, rm: u8) -> u32 {
+    0x1E60_1800 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
+}
+
 pub fn load_i64(rd: u8, value: i64) -> Vec<u32> {
     let uv = value as u64;
     let mut insns = vec![movz64(rd, (uv & 0xFFFF) as u16, 0)];
@@ -305,6 +329,10 @@ mod tests {
         assert_eq!(fsub_s(3, 7, 9), 0x1E2938E3);
         assert_eq!(fmul_s(3, 7, 9), 0x1E2908E3);
         assert_eq!(fdiv_s(3, 7, 9), 0x1E2918E3);
+        assert_eq!(fadd_d(3, 7, 9), 0x1E6928E3);
+        assert_eq!(fsub_d(3, 7, 9), 0x1E6938E3);
+        assert_eq!(fmul_d(3, 7, 9), 0x1E6908E3);
+        assert_eq!(fdiv_d(3, 7, 9), 0x1E6918E3);
     }
 
 

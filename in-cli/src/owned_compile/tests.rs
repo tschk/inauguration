@@ -96,7 +96,10 @@ fn jit_executes_snake_case_stdlib_process_run() {
     assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
     // On some environments (like CI runner where `true` has no output), `instring_from_bytes` will return None for empty strings,
     // or Some("") depending on initialization details. We accept both here since the primary goal is executing `process_run("true")`.
-    let eval_res = report.eval_result_string.as_deref();
+    let eval_res = match &report.eval_result {
+        Some(crate::owned_compile::EvalValue::Str(value)) => Some(value.as_str()),
+        _ => None,
+    };
     assert!(eval_res == Some("") || eval_res.is_none());
 
     fs::remove_file(source_path).unwrap();
@@ -762,10 +765,11 @@ fn bare_source_without_entry_keeps_main_through_optimization() {
     fs::remove_file(source_path).unwrap();
 }
 
-/// Only Int and Bool arrive in the register the JIT reads back, so a Float entry
-/// must not report a value that an exit status cannot carry.
+/// A Float entry's value comes back in the integer result register as its `f64`
+/// bit pattern, so the JIT can report it; the exit status still cannot carry it
+/// and stays 0.
 #[test]
-fn float_entry_reports_no_jit_exit_status() {
+fn float_entry_reports_its_value_without_an_exit_status() {
     if !native_backend::native_subset_host_available() {
         return;
     }
@@ -781,7 +785,11 @@ fn float_entry_reports_no_jit_exit_status() {
 
     assert!(report.success, "{report:?}");
     assert_eq!(report.eval_exit_code, Some(0), "{report:?}");
-    assert_eq!(report.eval_result, None, "{report:?}");
+    assert_eq!(
+        report.eval_result,
+        Some(crate::owned_compile::EvalValue::Float(6.0)),
+        "{report:?}"
+    );
     fs::remove_file(source_path).unwrap();
 }
 

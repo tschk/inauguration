@@ -149,7 +149,7 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
     if report.success {
         DaemonResponse {
             success: true,
-            result: report.eval_result,
+            result: report.eval_result.as_ref().and_then(|value| value.as_int()),
             report_json: None,
             output: None,
             error: None,

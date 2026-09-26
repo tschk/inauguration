@@ -14,8 +14,7 @@ use super::util::{artifact_stem, path_extension_is};
 pub struct NativeCompileResult {
     pub artifact_path: String,
     pub eval_exit_code: Option<u8>,
-    pub eval_result: Option<i64>,
-    pub eval_result_string: Option<String>,
+    pub eval_result: Option<super::EvalValue>,
     pub abi_path: Option<String>,
     pub backend_level: String,
     pub runtime_level: String,
@@ -83,7 +82,6 @@ pub fn compile_native(
                 artifact_path: out_path.display().to_string(),
                 eval_exit_code: Some(exit),
                 eval_result: None,
-                eval_result_string: None,
                 abi_path: None,
                 backend_level: "owned-native-subset-aarch64-app".to_string(),
                 runtime_level: "macos-app-bundle".to_string(),
@@ -107,7 +105,6 @@ pub fn compile_native(
                 artifact_path: out_path.display().to_string(),
                 eval_exit_code: Some(exit),
                 eval_result: None,
-                eval_result_string: None,
                 abi_path: None,
                 backend_level: "owned-native-subset-x86_64-appdir".to_string(),
                 runtime_level: "linux-appdir".to_string(),
@@ -147,7 +144,6 @@ pub fn compile_native(
                     None
                 },
                 eval_result: None,
-                eval_result_string: None,
                 abi_path,
                 backend_level: artifact.backend_level.to_string(),
                 runtime_level: artifact.runtime_level.to_string(),
@@ -174,7 +170,6 @@ pub fn compile_native(
         artifact_path: out_path.display().to_string(),
         eval_exit_code: eval_exit,
         eval_result: None,
-        eval_result_string: None,
         abi_path: outcome
             .abi_path
             .map(|path| path.display().to_string()),

@@ -447,6 +447,10 @@ fn cmd_emit_boot(
 #[derive(Debug)]
 pub(crate) enum JitExecution {
     Int(i64),
+    Bool(bool),
+    /// Wrapped so the rendering matches the Core IR value the fixtures pin,
+    /// `Float(FloatVal(6.0))`.
+    Float(inauguration::core_ir::FloatVal),
     String(String),
 }
 
@@ -460,7 +464,7 @@ pub(crate) fn compile_and_run_jit_report(
     JitExecution,
 )> {
     use inauguration::native_emit::NativeLinkage;
-    use inauguration::owned_compile::{CompileTarget, OwnedCompileRequest};
+    use inauguration::owned_compile::{CompileTarget, EvalValue, OwnedCompileRequest};
     let request = OwnedCompileRequest {
         path: source_path.to_path_buf(),
         module_id: module_id.to_string(),
@@ -484,10 +488,17 @@ pub(crate) fn compile_and_run_jit_report(
                 .unwrap_or_else(|| "jit eval failed".to_string()),
         ));
     }
-    let execution = if let Some(s) = report.eval_result_string.clone() {
-        JitExecution::String(s)
-    } else {
-        JitExecution::Int(report.eval_result.unwrap_or(0))
+    // The report carries the result in the type the entry declared, so the CLI
+    // can print it as `Int(42)`, `Bool(true)`, `Float(FloatVal(6.0))`, or
+    // `String("woof")` rather than always as an integer.
+    let execution = match report.eval_result.clone() {
+        Some(EvalValue::Int(value)) => JitExecution::Int(value),
+        Some(EvalValue::Bool(value)) => JitExecution::Bool(value),
+        Some(EvalValue::Float(value)) => {
+            JitExecution::Float(inauguration::core_ir::FloatVal(value))
+        }
+        Some(EvalValue::Str(value)) => JitExecution::String(value),
+        None => JitExecution::Int(0),
     };
     Ok((report, execution))
 }
@@ -535,7 +546,11 @@ pub(crate) fn cmd_execute(
         eprintln!("[jit] Execution completed with result: {:?}", result);
     }
 
-    if let JitExecution::Int(code) = result
+    // The program's status is the entry's value, whatever its type: a `-> Bool`
+    // entry that returns true exits 1 in a native artifact, so the JIT has to
+    // report the same status rather than swallowing it as a value. Using the
+    // report's status keeps Int, Bool, and the value-less types consistent.
+    if let Some(code) = report.eval_exit_code
         && code != 0
     {
         return Err(InError::Message(format!(

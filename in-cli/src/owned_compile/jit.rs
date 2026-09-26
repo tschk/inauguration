@@ -9,7 +9,17 @@ use std::path::PathBuf;
 
 use super::native::NativeCompileResult;
 use super::report::jobs_for_request;
-use super::{CompileTarget, OwnedCompileRequest};
+use super::{CompileTarget, EvalValue, OwnedCompileRequest};
+
+/// Which register or pointer the entry's result has to be read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryResultKind {
+    Int,
+    Bool,
+    Float,
+    String,
+    None,
+}
 
 /// Resolve a JIT entry name against `module`'s function declarations.
 /// Tries: exact match, namespaced (`.<entry>`), suffix match, then falls
@@ -110,37 +120,27 @@ pub fn compile_jit(
 
     native_link::bootstrap_jit_native();
 
-    let entry_returns_string = expanded_module
+    // How to read the entry's result value, which the declared return type
+    // decides: `Int` and `Bool` arrive in x0, `Float` in d0, and `String` as a
+    // pointer to an instring.
+    let entry_result_kind = expanded_module
         .decls
         .iter()
         .find_map(|decl| match decl {
             crate::core_ir::Decl::Function { name, ret, .. }
                 if name == &resolved_entry || name.ends_with(&format!(".{resolved_entry}")) =>
             {
-                Some(ret.canonical() == crate::core_ir::Typ::String)
+                Some(match ret.canonical() {
+                    crate::core_ir::Typ::Int => EntryResultKind::Int,
+                    crate::core_ir::Typ::Bool => EntryResultKind::Bool,
+                    crate::core_ir::Typ::Float => EntryResultKind::Float,
+                    crate::core_ir::Typ::String => EntryResultKind::String,
+                    _ => EntryResultKind::None,
+                })
             }
             _ => None,
         })
-        .unwrap_or(false);
-
-    // The JIT hands back the register a function returns in. Only Int and Bool
-    // arrive in x0, and a reference is not an exit status, so reporting the
-    // register for anything else would invent a value.
-    let entry_returns_int = expanded_module
-        .decls
-        .iter()
-        .find_map(|decl| match decl {
-            crate::core_ir::Decl::Function { name, ret, .. }
-                if name == &resolved_entry || name.ends_with(&format!(".{resolved_entry}")) =>
-            {
-                Some(matches!(
-                    ret.canonical(),
-                    crate::core_ir::Typ::Int | crate::core_ir::Typ::Bool
-                ))
-            }
-            _ => None,
-        })
-        .unwrap_or(false);
+        .unwrap_or(EntryResultKind::None);
 
     // Select lowering based on host architecture
     let lowered = if cfg!(target_arch = "x86_64") {
@@ -215,25 +215,39 @@ pub fn compile_jit(
             first.function, first.code
         ));
     }
-    let (exit_code, eval_result, eval_result_string) = if is_rust {
-        (0, None, None)
+    let (exit_code, eval_result) = if is_rust {
+        (0, None)
     } else {
-        let raw = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
-        if entry_returns_int {
-            (raw as u8, Some(raw), None)
-        } else if entry_returns_string {
-            let decode_string = raw != 0 && request.out.is_none();
-            let string = if decode_string {
-                decode_jit_string(raw).unwrap_or_default()
-            } else {
-                String::new()
-            };
-            // The decoded string is the value; the pointer is not an exit status.
-            (0, None, Some(string))
-        } else {
-            // The entry returns something an exit status cannot carry (Float,
-            // Void, an aggregate). Run it for its effects, report no result.
-            (0, None, None)
+        match entry_result_kind {
+            EntryResultKind::Int => {
+                let raw = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
+                (raw as u8, Some(EvalValue::Int(raw)))
+            }
+            EntryResultKind::Bool => {
+                let raw = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
+                (raw as u8, Some(EvalValue::Bool(raw != 0)))
+            }
+            EntryResultKind::Float => {
+                let value = unsafe { rt.invoke_float(&resolved_entry) };
+                (0, value.map(EvalValue::Float))
+            }
+            EntryResultKind::String => {
+                let raw = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
+                let decode_string = raw != 0 && request.out.is_none();
+                let string = if decode_string {
+                    decode_jit_string(raw).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                // The decoded string is the value; the pointer is not an exit status.
+                (0, Some(EvalValue::Str(string)))
+            }
+            EntryResultKind::None => {
+                // The entry returns something an exit status cannot carry (Void,
+                // an aggregate). Run it for its effects, report no result.
+                let _ = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
+                (0, None)
+            }
         }
     };
 
@@ -252,7 +266,6 @@ pub fn compile_jit(
         artifact_path: String::new(),
         eval_exit_code: Some(exit_code),
         eval_result,
-        eval_result_string,
         abi_path: None,
         backend_level: "owned-native-jit".to_string(),
         runtime_level: "inrt-jit".to_string(),
@@ -353,7 +366,8 @@ fn eval_entry_via_jit(module: &UnifiedModule, entry: &str) -> Result<i64, String
     let result = compile_jit(module, "App", &request)?;
     result
         .eval_result
-        .ok_or_else(|| "jit did not produce a result for entry".to_string())
+        .and_then(|value| value.as_int())
+        .ok_or_else(|| "jit did not produce an integer result for entry".to_string())
 }
 
 #[cfg(test)]

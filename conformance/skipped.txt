@@ -1,10 +1,1 @@
 # One fixture path per line (repo-relative). Lines starting with # are comments.
-# JIT/runtime gaps — tracked for conformance runner only.
-conformance/runtime/string-ops.in
-conformance/runtime/array-ops.in
-conformance/types/string-ops.in
-conformance/classes/class-basic.java
-conformance/control-flow/match-string.in
-conformance/functions/nested-calls.in
-conformance/types/bool-ops.in
-conformance/types/float-arithmetic.in
