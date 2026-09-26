@@ -732,6 +732,37 @@ fn report_has_empty_external_invocations() {
 }
 
 #[test]
+fn bare_source_without_entry_keeps_main_through_optimization() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let source_path = temp_path("bare-main.in");
+    fs::write(
+        &source_path,
+        "fn helper() -> Int { return 3; }\n\nfn main() -> Int { return helper(); }\n",
+    )
+    .unwrap();
+
+    // No entry is named, so the optimizer must not fall back to a kernel entry
+    // name and delete `main` along with everything it calls. A stripped module
+    // fails lowering with "module has no functions" and returns no result.
+    let report = compile_owned(&default_request(
+        source_path.clone(),
+        CompileTarget::Jit,
+        None,
+        None,
+    ));
+
+    assert!(report.success, "{report:?}");
+    assert!(
+        report.typed_function_count >= 1,
+        "optimizer emptied the module: {report:?}"
+    );
+    assert_eq!(report.eval_exit_code, Some(3), "{report:?}");
+    fs::remove_file(source_path).unwrap();
+}
+
+#[test]
 fn report_to_json_roundtrip_fields() {
     if !native_backend::native_subset_host_available() {
         return;
