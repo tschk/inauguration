@@ -120,22 +120,25 @@ pub fn compile_native_artifact_with_report(
 
         // Assemble with system assembler
         let obj_path = out_path.with_extension("o");
-        let as_status = std::process::Command::new("as")
+        let as_output = std::process::Command::new("as")
             .arg("-arch")
             .arg("arm64")
             .arg("-o")
             .arg(&obj_path)
             .arg(&asm_path)
-            .status()
+            .output()
             .map_err(|e| format!("as invocation failed: {e}"))?;
-        if !as_status.success() {
-            return Err("assembly failed".to_string());
+        if !as_output.status.success() {
+            return Err(format!(
+                "assembly failed: {}",
+                String::from_utf8_lossy(&as_output.stderr).trim()
+            ));
         }
 
         // Link with system linker
         let sdk_root = find_sdk_root().unwrap_or_else(|| "/".to_string());
         let entry_name = native_link_name(entry);
-        let ld_status = std::process::Command::new("ld")
+        let ld_output = std::process::Command::new("ld")
             .arg("-o")
             .arg(out_path)
             .arg(&obj_path)
@@ -148,10 +151,15 @@ pub fn compile_native_artifact_with_report(
             .arg("14.0")
             .arg("-e")
             .arg(&entry_name)
-            .status()
+            .output()
             .map_err(|e| format!("ld invocation failed: {e}"))?;
-        if !ld_status.success() {
-            return Err("ld link failed".to_string());
+        if !ld_output.status.success() {
+            // Surface the linker's own diagnosis: "ld link failed" alone hides
+            // which symbol was missing.
+            return Err(format!(
+                "ld link failed: {}",
+                String::from_utf8_lossy(&ld_output.stderr).trim()
+            ));
         }
 
         // Keep .s and .o for debugging; clean up on success

@@ -47,9 +47,7 @@ struct CachedOwnedCompileReport {
     frontend_hash: Option<String>,
     eval_exit_code: Option<u8>,
     #[serde(default)]
-    eval_result: Option<i64>,
-    #[serde(default)]
-    eval_result_string: Option<String>,
+    eval_result: Option<crate::owned_compile::EvalValue>,
     error: Option<String>,
 }
 
@@ -87,8 +85,7 @@ impl From<&OwnedCompileReport> for CachedOwnedCompileReport {
             cache_hit: report.cache_hit,
             frontend_hash: report.frontend_hash.clone(),
             eval_exit_code: report.eval_exit_code,
-            eval_result: report.eval_result,
-            eval_result_string: report.eval_result_string.clone(),
+            eval_result: report.eval_result.clone(),
             error: report.error.clone(),
         }
     }
@@ -129,7 +126,6 @@ impl From<CachedOwnedCompileReport> for OwnedCompileReport {
             frontend_hash: cached.frontend_hash,
             eval_exit_code: cached.eval_exit_code,
             eval_result: cached.eval_result,
-            eval_result_string: cached.eval_result_string,
             error: cached.error,
         }
     }
@@ -306,7 +302,6 @@ mod tests {
             frontend_hash: Some(hash.to_string()),
             eval_exit_code: None,
             eval_result: None,
-            eval_result_string: None,
             error: None,
         };
         write_cached_report(&cwd, hash, &report).unwrap();

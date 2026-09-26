@@ -99,7 +99,6 @@ pub fn base_report(
         frontend_hash: None,
         eval_exit_code: None,
         eval_result: None,
-        eval_result_string: None,
         error: None,
     }
 }

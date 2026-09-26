@@ -32,10 +32,6 @@ pub(crate) fn lower_expr_into(
             Ok(())
         }
         Expr::StringLit(value) => {
-            if value.is_empty() {
-                emitter.emit_insns(&aarch64::load_i64(rd, 0));
-                return Ok(());
-            }
             let id = ctx.string_id(value)?;
             let adr_site = emitter.emit_insn(aarch64::adr(rd, 0));
             ctx.pending_strings.push(super::PendingString {
@@ -530,10 +526,10 @@ pub(crate) fn lower_float_binary(
     emitter.emit_u32(aarch64::fmov_from_gp(rd, rd));
     emitter.emit_u32(aarch64::fmov_from_gp(rhs_reg, rhs_reg));
     match op {
-        "+" => emitter.emit_u32(aarch64::fadd_s(rd, rd, rhs_reg)),
-        "-" => emitter.emit_u32(aarch64::fsub_s(rd, rd, rhs_reg)),
-        "*" => emitter.emit_u32(aarch64::fmul_s(rd, rd, rhs_reg)),
-        "/" => emitter.emit_u32(aarch64::fdiv_s(rd, rd, rhs_reg)),
+        "+" => emitter.emit_u32(aarch64::fadd_d(rd, rd, rhs_reg)),
+        "-" => emitter.emit_u32(aarch64::fsub_d(rd, rd, rhs_reg)),
+        "*" => emitter.emit_u32(aarch64::fmul_d(rd, rd, rhs_reg)),
+        "/" => emitter.emit_u32(aarch64::fdiv_d(rd, rd, rhs_reg)),
         _ => {
             return Err(format!(
                 "native-lower: unsupported float op `{op}` in `{fn_name}`"

@@ -202,9 +202,6 @@ pub(crate) fn lower_inrt_call(
             Expr::BoolLit(v) => {
                 emitter.emit_insns(&aarch64::load_i64(reg, i64::from(*v)));
             }
-            Expr::StringLit(v) if v.is_empty() => {
-                emitter.emit_insns(&aarch64::load_i64(reg, 0));
-            }
             Expr::StringLit(v) => {
                 let id = ctx.string_id(v)?;
                 let adr_site = emitter.emit_insn(aarch64::adr(reg, 0));
@@ -388,7 +385,7 @@ pub(crate) fn lower_aggregate_vector_literal_into_slots(
             pending_calls,
             fn_name,
         )?;
-        lower_stdlib::emit_vec_push_words(emitter, ptr_offset, scratch_offset, words)?;
+        lower_stdlib::emit_vec_push_words(emitter, ctx, ptr_offset, scratch_offset, words)?;
     }
     Ok(())
 }

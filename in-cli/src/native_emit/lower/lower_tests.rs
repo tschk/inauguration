@@ -1936,7 +1936,9 @@ fn lowers_float_add_instruction() {
     let module = return_float_binary_module("+", 3.0, 4.0);
     let lowered =
         lower_module(&module, "main", NativeLinkage::Executable).expect("float add should lower");
-    assert!(code_contains_insn(&lowered.code, aarch64::fadd_s(0, 0, 1)));
+    // Double precision: `Float` is `f64`, so the single-precision form would
+    // read only the low half of the operand registers.
+    assert!(code_contains_insn(&lowered.code, aarch64::fadd_d(0, 0, 1)));
     assert!(code_contains_insn(
         &lowered.code,
         aarch64::fmov_from_gp(0, 0)
@@ -1949,7 +1951,7 @@ fn lowers_float_mul_instruction() {
     let module = return_float_binary_module("*", 2.0, 3.0);
     let lowered =
         lower_module(&module, "main", NativeLinkage::Executable).expect("float mul should lower");
-    assert!(code_contains_insn(&lowered.code, aarch64::fmul_s(0, 0, 1)));
+    assert!(code_contains_insn(&lowered.code, aarch64::fmul_d(0, 0, 1)));
 }
 
 #[test]
@@ -1957,7 +1959,7 @@ fn lowers_float_sub_instruction() {
     let module = return_float_binary_module("-", 5.0, 2.0);
     let lowered =
         lower_module(&module, "main", NativeLinkage::Executable).expect("float sub should lower");
-    assert!(code_contains_insn(&lowered.code, aarch64::fsub_s(0, 0, 1)));
+    assert!(code_contains_insn(&lowered.code, aarch64::fsub_d(0, 0, 1)));
 }
 
 #[test]
@@ -1965,7 +1967,7 @@ fn lowers_float_div_instruction() {
     let module = return_float_binary_module("/", 10.0, 2.0);
     let lowered =
         lower_module(&module, "main", NativeLinkage::Executable).expect("float div should lower");
-    assert!(code_contains_insn(&lowered.code, aarch64::fdiv_s(0, 0, 1)));
+    assert!(code_contains_insn(&lowered.code, aarch64::fdiv_d(0, 0, 1)));
 }
 
 #[test]
@@ -2318,6 +2320,48 @@ fn float_entry_is_not_an_exit_status() {
     assert_eq!(
         entry_return_kind(&crate::core_ir::Typ::Bool),
         EntryReturn::IntLike
+    );
+}
+
+/// The embedded string runtime's equality and search builtins have to agree with
+/// the Rust wrappers the JIT uses, since only native artifacts call the blob.
+/// Each weight below isolates one case: equal, same length but different bytes,
+/// different lengths, a substring in the middle, an absent substring, an empty
+/// needle, an exact match, and a needle longer than the haystack.
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn jit_executes_the_embedded_string_eq_and_contains() {
+    let module = crate::in_lang_parse::parse_in_source(
+        r#"
+fn main() -> Int {
+  let equal: Int = __inrt_str_eq("same", "same");
+  let differing: Int = __inrt_str_eq("same", "samo");
+  let shorter: Int = __inrt_str_eq("same", "sam");
+  let middle: Int = __inrt_str_contains("hello world", "o w");
+  let absent: Int = __inrt_str_contains("hello world", "xyz");
+  let empty: Int = __inrt_str_contains("hello", "");
+  let whole: Int = __inrt_str_contains("hi", "hi");
+  let too_long: Int = __inrt_str_contains("hi", "hihi");
+  return equal + differing * 10 + shorter * 100 + middle * 1000 + absent * 10000 + empty * 100000 + whole * 1000000 + too_long * 10000000;
+}
+"#,
+    )
+    .expect("parse");
+    let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
+    let function_offsets = vec![(
+        "main".into(),
+        ENTRY_STUB_SIZE,
+        lowered.code.len() as u32 - ENTRY_STUB_SIZE,
+    )];
+    let mut rt = crate::jit_runtime::JitRuntime::new();
+    rt.load(&lowered.code, &function_offsets, &lowered.relocations)
+        .expect("jit load");
+    let raw = unsafe { rt.invoke("main", &[]).expect("invoke") };
+    // 1 for equality, 1000 for the substring, 100000 for the empty needle, and
+    // 1000000 for the exact match; every other case must contribute nothing.
+    assert_eq!(
+        raw, 1_101_001,
+        "str_eq/str_contains disagreed with the wrapper semantics"
     );
 }
 

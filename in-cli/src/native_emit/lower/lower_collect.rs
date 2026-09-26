@@ -215,11 +215,15 @@ pub(crate) fn collect_strings(module: &UnifiedModule) -> HashMap<String, i64> {
     }
     values.sort();
     values.dedup();
+    // The empty string keeps index 0 so that `string_id("")` names a real
+    // zero-length table entry instead of a null pointer: an empty literal must
+    // be safe to read a length header from (matching, comparing, `str-len`).
+    // `""` sorts first, so every other literal keeps the index it had while
+    // empty literals were dropped from the pool.
     values
         .into_iter()
-        .filter(|value| !value.is_empty())
         .enumerate()
-        .map(|(idx, value)| (value, idx as i64 + 1))
+        .map(|(idx, value)| (value, idx as i64))
         .collect()
 }
 

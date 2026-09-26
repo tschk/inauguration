@@ -103,6 +103,18 @@ if [[ ! -f "$BASELINE" ]]; then
   exit 1
 fi
 
+# `--update-baseline` rewrites the pin after a deliberate change to what the two
+# backends agree on, so the next run compares against the new set.
+if [[ "${1:-}" == "--update-baseline" ]]; then
+  {
+    echo "# Which fixtures the JIT and the native backend agree on, one per line."
+    echo "# Regenerate with: scripts/check-backend-differential.sh --update-baseline"
+    sort "$actual"
+  } > "$BASELINE"
+  echo "backend differential baseline updated: $BASELINE"
+  exit 0
+fi
+
 # Compare against the pinned baseline in both directions.
 baseline_sorted="$tmp_dir/baseline.sorted"
 sort "$BASELINE" | grep -v '^#' | grep -v '^$' > "$baseline_sorted" || true

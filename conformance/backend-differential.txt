@@ -1,15 +1,5 @@
-# Cross-backend differential baseline: <category> <fixture>
-#
-# Pinned by scripts/check-backend-differential.sh. The check fails when a
-# fixture moves between categories in either direction, so fixing a
-# divergence requires removing its line here — that is the ratchet.
-#
-# Categories:
-#   agree           JIT and native artifact produced the same stdout and status
-#   native-refused  native build refused with a coded reason (smaller native subset)
-#   native-crash    native artifact died by signal (always a bug)
-#   disagree        both ran, results differ (always a bug)
-#   jit-error       JIT path failed without reporting a program status
+# Which fixtures the JIT and the native backend agree on, one per line.
+# Regenerate with: scripts/check-backend-differential.sh --update-baseline
 agree conformance/classes/class-basic.in
 agree conformance/classes/class-extends.in
 agree conformance/classes/class-field-access.in
@@ -20,18 +10,24 @@ agree conformance/classes/class-multiple-fields.in
 agree conformance/classes/interface-basic.in
 agree conformance/control-flow/if-else.in
 agree conformance/control-flow/loop.in
+agree conformance/control-flow/match-string.in
 agree conformance/control-flow/nested-branches.in
 agree conformance/control-flow/nested-if.in
 agree conformance/control-flow/while-counter.in
-agree conformance/functions/expressions.in
-agree conformance/functions/multiple-params.in
-agree conformance/functions/params.in
-agree conformance/functions/recursion.in
-agree conformance/types/array-basic.in
-agree conformance/types/primitive-types.in
 agree conformance/errors/throw-caught.in
 agree conformance/errors/throw-from-function.in
 agree conformance/errors/throw.in
 agree conformance/errors/try-catch.in
+agree conformance/functions/expressions.in
+agree conformance/functions/multiple-params.in
+agree conformance/functions/nested-calls.in
+agree conformance/functions/params.in
+agree conformance/functions/recursion.in
 agree conformance/functions/string-return.in
+agree conformance/runtime/array-ops.in
+agree conformance/runtime/string-ops.in
+agree conformance/types/array-basic.in
+agree conformance/types/bool-ops.in
+agree conformance/types/float-arithmetic.in
+agree conformance/types/primitive-types.in
 agree conformance/types/string-concat.in

@@ -579,7 +579,7 @@ pub(crate) fn compile_and_run_jit_report(
     JitExecution,
 )> {
     use inauguration::native_emit::NativeLinkage;
-    use inauguration::owned_compile::{CompileTarget, OwnedCompileRequest};
+    use inauguration::owned_compile::{CompileTarget, EvalValue, OwnedCompileRequest};
     let request = OwnedCompileRequest {
         path: source_path.to_path_buf(),
         module_id: module_id.to_string(),
@@ -603,16 +603,15 @@ pub(crate) fn compile_and_run_jit_report(
                 .unwrap_or_else(|| "jit eval failed".to_string()),
         ));
     }
-    let execution = if let Some(s) = report.eval_result_string.clone() {
-        JitExecution::String(s)
-    } else {
-        match entry_return_kind(source_path) {
-            EntryReturnKind::Bool => JitExecution::Bool(report.eval_result.unwrap_or(0) != 0),
-            EntryReturnKind::Float => {
-                JitExecution::Float(FloatValFmt(report.eval_result.unwrap_or(0) as f64))
-            }
-            EntryReturnKind::Other => JitExecution::Int(report.eval_result.unwrap_or(0)),
-        }
+    // The report carries the result in the type the entry declared, so the CLI
+    // can print it as `Int(42)`, `Bool(true)`, `Float(FloatVal(6.0))`, or
+    // `String("woof")` rather than always as an integer.
+    let execution = match report.eval_result.clone() {
+        Some(EvalValue::Int(value)) => JitExecution::Int(value),
+        Some(EvalValue::Bool(value)) => JitExecution::Bool(value),
+        Some(EvalValue::Float(value)) => JitExecution::Float(FloatValFmt(value)),
+        Some(EvalValue::Str(value)) => JitExecution::String(value),
+        None => JitExecution::Int(0),
     };
     Ok((report, execution))
 }
@@ -660,19 +659,11 @@ pub(crate) fn cmd_execute(
         eprintln!("[jit] Execution completed with result: {:?}", result);
     }
 
-    if !report.success {
-        return Err(InError::Message(
-            report
-                .error
-                .clone()
-                .unwrap_or_else(|| "jit execution failed".to_string()),
-        ));
-    }
-
-    // Propagate the program's own exit status: a JIT run that returns a
-    // nonzero Int is a failed execution, not a successful no-op. Bool and
-    // String results are values, not exit codes.
-    if let JitExecution::Int(code) = result
+    // The program's status is the entry's value, whatever its type: a `-> Bool`
+    // entry that returns true exits 1 in a native artifact, so the JIT has to
+    // report the same status rather than swallowing it as a value. Using the
+    // report's status keeps Int, Bool, and the value-less types consistent.
+    if let Some(code) = report.eval_exit_code
         && code != 0
     {
         return Err(InError::Message(format!(

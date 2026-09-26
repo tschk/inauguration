@@ -118,51 +118,103 @@ struct FunctionSig<'a> {
     ret: &'a Typ,
 }
 
+/// Return type of an intrinsic, as the verifier needs it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IntrinsicRet {
+    Void,
+    Int,
+    Bool,
+    String,
+    StringArray,
+}
+
+/// Every intrinsic the codegen resolves without a module-level declaration.
+///
+/// This is the single list: the predicate below and the signature table are both
+/// derived from it, so a name the codegen supports cannot be rejected for want of
+/// an entry. Keeping two lists meant `str-len` and `str-concat` were compiled by
+/// the lowering yet failed verification before reaching it.
+const INTRINSICS: &[(&str, IntrinsicRet)] = &[
+    ("outb", IntrinsicRet::Void),
+    ("inb", IntrinsicRet::Int),
+    ("outl", IntrinsicRet::Void),
+    ("inl", IntrinsicRet::Int),
+    ("load8", IntrinsicRet::Int),
+    ("load16", IntrinsicRet::Int),
+    ("load32", IntrinsicRet::Int),
+    ("load64", IntrinsicRet::Int),
+    ("store8", IntrinsicRet::Void),
+    ("store16", IntrinsicRet::Void),
+    ("store32", IntrinsicRet::Void),
+    ("store64", IntrinsicRet::Void),
+    ("hlt", IntrinsicRet::Void),
+    ("cli", IntrinsicRet::Void),
+    ("sti", IntrinsicRet::Void),
+    ("pause", IntrinsicRet::Void),
+    ("lidt", IntrinsicRet::Void),
+    ("invlpg", IntrinsicRet::Void),
+    ("read-cr2", IntrinsicRet::Int),
+    ("invoke", IntrinsicRet::Int),
+    ("invoke1", IntrinsicRet::Int),
+    ("invoke2", IntrinsicRet::Int),
+    ("print", IntrinsicRet::Void),
+    ("display", IntrinsicRet::String),
+    ("to-string", IntrinsicRet::String),
+    ("to-string-lossy", IntrinsicRet::String),
+    ("from-utf8-lossy", IntrinsicRet::String),
+    ("read-file", IntrinsicRet::String),
+    ("write-file", IntrinsicRet::Bool),
+    ("fs-exists", IntrinsicRet::Bool),
+    ("create-dir", IntrinsicRet::Void),
+    ("remove-file", IntrinsicRet::Void),
+    ("env-get", IntrinsicRet::String),
+    ("env-has", IntrinsicRet::Bool),
+    ("env-set", IntrinsicRet::Void),
+    ("env-temp-dir", IntrinsicRet::String),
+    ("env-current-dir", IntrinsicRet::String),
+    ("process-run", IntrinsicRet::Int),
+    ("path-join", IntrinsicRet::String),
+    ("path-dirname", IntrinsicRet::String),
+    ("path-basename", IntrinsicRet::String),
+    ("path-extname", IntrinsicRet::String),
+    ("path-normalize", IntrinsicRet::String),
+    ("str-len", IntrinsicRet::Int),
+    ("str-concat", IntrinsicRet::String),
+    ("str-eq", IntrinsicRet::Bool),
+    ("str-contains", IntrinsicRet::Bool),
+    ("str-starts-with", IntrinsicRet::Bool),
+    ("str-ends-with", IntrinsicRet::Bool),
+    ("str-trim", IntrinsicRet::String),
+    ("str-slice", IntrinsicRet::String),
+    ("str-split-lines", IntrinsicRet::StringArray),
+    ("str-split-spaces", IntrinsicRet::StringArray),
+    ("str-tokenize-expr", IntrinsicRet::StringArray),
+    ("str-to-int", IntrinsicRet::Int),
+    ("str-is-int", IntrinsicRet::Bool),
+    ("str-index-of", IntrinsicRet::Int),
+    ("str-table-has", IntrinsicRet::Bool),
+    ("str-table-get-int", IntrinsicRet::Int),
+    ("array-len", IntrinsicRet::Int),
+    ("array-push", IntrinsicRet::Void),
+    ("json-stringify", IntrinsicRet::String),
+];
+
 /// Return true if `name` is a known intrinsic that doesn't need a module-level declaration.
 pub fn is_intrinsic(name: &str) -> bool {
-    matches!(
-        name,
-        "outb"
-            | "inb"
-            | "outl"
-            | "inl"
-            | "load8"
-            | "load16"
-            | "load32"
-            | "load64"
-            | "store8"
-            | "store16"
-            | "store32"
-            | "store64"
-            | "hlt"
-            | "cli"
-            | "sti"
-            | "pause"
-            | "lidt"
-            | "invlpg"
-            | "read-cr2"
-            | "invoke"
-            | "invoke1"
-            | "invoke2"
-            | "to-string"
-            | "read-file"
-            | "write-file"
-            | "path-join"
-            | "str-eq"
-            | "str-contains"
-            | "str-starts-with"
-            | "str-trim"
-            | "str-split-lines"
-            | "str-tokenize-expr"
-            | "str-to-int"
-            | "str-index-of"
-            | "str-slice"
-            | "str-table-has"
-            | "str-table-get-int"
-            | "array-len"
-            | "str-is-int"
-            | "json-stringify"
-    )
+    intrinsic_ret(name).is_some()
+}
+
+/// Return type of a name the codegen resolves without a module-level
+/// declaration, or `None` when the name must be declared.
+///
+/// Covers both the language-level intrinsics and the runtime-blob builtins the
+/// lowering emits directly (`__inrt_str_eq` and friends): the lowering accepts
+/// those by name, so verification has to accept them too.
+fn intrinsic_ret(name: &str) -> Option<IntrinsicRet> {
+    if let Some((_, ret)) = INTRINSICS.iter().find(|(intrinsic, _)| *intrinsic == name) {
+        return Some(*ret);
+    }
+    crate::inrt::is_inrt_builtin(name).then_some(IntrinsicRet::Int)
 }
 
 fn function_sig<'a>(facts: &ModuleFacts<'a>, name: &str) -> Option<FunctionSig<'a>> {
@@ -182,50 +234,18 @@ fn add_intrinsics<'a>(functions: &mut HashMap<&'a str, FunctionSig<'a>>) {
     static STRING_RET: Typ = Typ::String;
     static BOOL_RET: Typ = Typ::Bool;
     let string_array_ret = Box::leak(Box::new(Typ::Array(Box::new(Typ::String))));
-    let intrinsics: [(&str, &'static Typ); 40] = [
-        ("outb", &VOID_RET),
-        ("inb", &INT_RET),
-        ("outl", &VOID_RET),
-        ("inl", &INT_RET),
-        ("load8", &INT_RET),
-        ("load16", &INT_RET),
-        ("load32", &INT_RET),
-        ("load64", &INT_RET),
-        ("store8", &VOID_RET),
-        ("store16", &VOID_RET),
-        ("store32", &VOID_RET),
-        ("store64", &VOID_RET),
-        ("hlt", &VOID_RET),
-        ("cli", &VOID_RET),
-        ("sti", &VOID_RET),
-        ("pause", &VOID_RET),
-        ("lidt", &VOID_RET),
-        ("invlpg", &VOID_RET),
-        ("read-cr2", &INT_RET),
-        ("invoke", &INT_RET),
-        ("invoke1", &INT_RET),
-        ("invoke2", &INT_RET),
-        ("to-string", &STRING_RET),
-        ("read-file", &STRING_RET),
-        ("write-file", &BOOL_RET),
-        ("path-join", &STRING_RET),
-        ("str-eq", &BOOL_RET),
-        ("str-contains", &BOOL_RET),
-        ("str-starts-with", &BOOL_RET),
-        ("str-trim", &STRING_RET),
-        ("str-split-lines", string_array_ret),
-        ("str-tokenize-expr", string_array_ret),
-        ("str-to-int", &INT_RET),
-        ("str-index-of", &INT_RET),
-        ("str-slice", &STRING_RET),
-        ("str-table-has", &BOOL_RET),
-        ("str-table-get-int", &INT_RET),
-        ("array-len", &INT_RET),
-        ("str-is-int", &BOOL_RET),
-        ("json-stringify", &STRING_RET),
-    ];
-    for (name, ret) in intrinsics {
+    for (name, ret) in INTRINSICS {
+        let ret = match ret {
+            IntrinsicRet::Void => &VOID_RET,
+            IntrinsicRet::Int => &INT_RET,
+            IntrinsicRet::Bool => &BOOL_RET,
+            IntrinsicRet::String => &STRING_RET,
+            IntrinsicRet::StringArray => string_array_ret,
+        };
         functions.insert(name, FunctionSig { params: &[], ret });
+    }
+    for name in crate::inrt::INRT_BUILTINS {
+        functions.insert(name, FunctionSig { params: &[], ret: &INT_RET });
     }
 }
 
