@@ -29,9 +29,9 @@ agree conformance/functions/params.in
 agree conformance/functions/recursion.in
 agree conformance/types/array-basic.in
 agree conformance/types/primitive-types.in
-native-crash conformance/errors/throw-caught.in
-native-crash conformance/errors/throw-from-function.in
-native-crash conformance/errors/throw.in
-native-crash conformance/errors/try-catch.in
+agree conformance/errors/throw-caught.in
+agree conformance/errors/throw-from-function.in
+agree conformance/errors/throw.in
+agree conformance/errors/try-catch.in
 native-refused conformance/functions/string-return.in
 native-refused conformance/types/string-concat.in
