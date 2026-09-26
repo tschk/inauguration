@@ -14,6 +14,14 @@ pub fn count_functions(module: &UnifiedModule) -> usize {
         .count()
 }
 
+/// Whether the module declares a function with this name.
+pub fn module_has_function(module: &UnifiedModule, name: &str) -> bool {
+    module
+        .decls
+        .iter()
+        .any(|decl| matches!(decl, Decl::Function { name: declared, .. } if declared == name))
+}
+
 pub fn count_call_edges(module: &UnifiedModule, module_id: &str) -> usize {
     let sil = crate::compiler::driver::lower_unified_module(
         module,

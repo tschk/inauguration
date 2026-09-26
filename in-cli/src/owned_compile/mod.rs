@@ -26,7 +26,7 @@ mod tests;
 pub use report::report_to_json;
 use report::{
     base_report, count_call_edges, count_functions, finalize_report, jobs_for_request,
-    timing_waves_for_jobs,
+    module_has_function, timing_waves_for_jobs,
 };
 
 use jit::compile_jit;
@@ -470,10 +470,21 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     // those reachable from the entry (e.g. a shared library whose entry is
     // never invoked by the loader).
     {
-        let entry = effective_entry.as_deref();
+        // `remove_dead_functions` drops everything not reachable from the entry,
+        // and falls back to a kernel entry name when it is not told one. A bare
+        // source file with a `main` must not be stripped to nothing, so name the
+        // module's own entry when the caller did not.
+        let entry = effective_entry.clone().or_else(|| {
+            module_has_function(&module, "main").then(|| "main".to_string())
+        });
         let keep_all = request.linkage == crate::native_emit::NativeLinkage::StaticLib
             || matches!(request.emit, Some(OwnedEmit::Sci { .. }));
-        crate::core_opt::optimize_with_linkage(&mut module.decls, entry, request.profile, keep_all);
+        crate::core_opt::optimize_with_linkage(
+            &mut module.decls,
+            entry.as_deref(),
+            request.profile,
+            keep_all,
+        );
         report.typed_function_count = count_functions(&module);
         report.call_edge_count = count_call_edges(&module, &request.module_id);
     }
