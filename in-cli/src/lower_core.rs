@@ -1,7 +1,7 @@
 //! Lower [`crate::core_ir::UnifiedModule`] to textual SIL.
 
 use crate::core_ir::{Decl, MatchPattern, Typ, UnifiedModule};
-use crate::core_ir::{Expr, Stmt};
+use crate::core_ir::{for_each_expr_child, Expr, Stmt};
 use std::collections::{HashMap, HashSet};
 
 pub fn desugar_module(module: &mut UnifiedModule) {
@@ -26,7 +26,7 @@ pub fn desugar_module(module: &mut UnifiedModule) {
                         name: method_name,
                         params,
                         ret,
-                        body,
+                        mut body,
                         ..
                     } = method
                     {
@@ -35,6 +35,14 @@ pub fn desugar_module(module: &mut UnifiedModule) {
                         method_map.insert(format!("{}-{}", name, method_name), mangled.clone());
                         let mut new_params = vec![("self".to_string(), Typ::Named(name.clone()))];
                         new_params.extend(params);
+                        // Bare field references inside methods mean `self.field`
+                        // (Java/Kotlin-style implicit this). Rewrite them before
+                        // verification, which would otherwise refuse the bare
+                        // name as an unresolved symbol. Locals and params that
+                        // shadow a field keep the bare name.
+                        let field_names: HashSet<String> =
+                            fields.iter().map(|(n, _)| n.clone()).collect();
+                        rewrite_field_refs_in_body(&mut body, &field_names);
                         new_decls.push(Decl::Function {
                             name: mangled,
                             params: new_params,
@@ -63,6 +71,218 @@ pub fn desugar_module(module: &mut UnifiedModule) {
     new_decls.extend(extra_decls);
 
     module.decls = new_decls;
+}
+
+/// Rewrite bare field reads and writes inside a class method body to
+/// `self.field` (implicit this). `fields` are the enclosing class's field
+/// names; names bound by locals, params, or closures shadow fields and are
+/// left untouched.
+fn rewrite_field_refs_in_body(body: &mut [Stmt], fields: &HashSet<String>) {
+    let mut bound = HashSet::new();
+    collect_bound_names_in_body(body, &mut bound);
+    for stmt in body {
+        rewrite_field_refs_in_stmt(stmt, fields, &bound);
+    }
+}
+
+fn collect_bound_names_in_body(body: &[Stmt], bound: &mut HashSet<String>) {
+    for stmt in body {
+        match stmt {
+            Stmt::Let(name, _, e) => {
+                collect_bound_names_in_expr(e, bound);
+                bound.insert(name.clone());
+            }
+            Stmt::Assign(_, e)
+            | Stmt::Throw(e)
+            | Stmt::Return(Some(e))
+            | Stmt::Expr(e) => collect_bound_names_in_expr(e, bound),
+            Stmt::IndexAssign {
+                base, index, value, ..
+            } => {
+                collect_bound_names_in_expr(base, bound);
+                collect_bound_names_in_expr(index, bound);
+                collect_bound_names_in_expr(value, bound);
+            }
+            Stmt::FieldAssign { base, value, .. } => {
+                collect_bound_names_in_expr(base, bound);
+                collect_bound_names_in_expr(value, bound);
+            }
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_bound_names_in_expr(cond, bound);
+                collect_bound_names_in_body(then_body, bound);
+                collect_bound_names_in_body(else_body, bound);
+            }
+            Stmt::Loop { cond, body, .. } => {
+                if let Some(c) = cond {
+                    collect_bound_names_in_expr(c, bound);
+                }
+                collect_bound_names_in_body(body, bound);
+            }
+            Stmt::Match {
+                scrutinee, arms, ..
+            } => {
+                collect_bound_names_in_expr(scrutinee, bound);
+                for arm in arms {
+                    collect_bound_names_in_body(&arm.body, bound);
+                }
+            }
+            Stmt::Try { body, catches } => {
+                collect_bound_names_in_body(body, bound);
+                for catch in catches {
+                    collect_bound_names_in_body(&catch.body, bound);
+                }
+            }
+            Stmt::Return(None) | Stmt::Break | Stmt::Propagate => {}
+        }
+    }
+}
+
+fn collect_bound_names_in_expr(expr: &Expr, bound: &mut HashSet<String>) {
+    match expr {
+        Expr::Closure { params, body, .. } => {
+            for (p, _) in params {
+                bound.insert(p.clone());
+            }
+            collect_bound_names_in_body(body, bound);
+        }
+        _ => {
+            for_each_expr_child(expr, &mut |child| collect_bound_names_in_expr(child, bound));
+        }
+    }
+}
+
+fn rewrite_field_refs_in_stmt(stmt: &mut Stmt, fields: &HashSet<String>, bound: &HashSet<String>) {
+    match stmt {
+        Stmt::Let(_, _, e) => rewrite_field_refs_in_expr(e, fields, bound),
+        Stmt::Assign(name, e) => {
+            rewrite_field_refs_in_expr(e, fields, bound);
+            if fields.contains(name) && !bound.contains(name) {
+                let value = std::mem::replace(e, Expr::IntLit(0));
+                let field = std::mem::take(name);
+                *stmt = Stmt::FieldAssign {
+                    base: Expr::Ident("self".into()),
+                    name: field,
+                    value,
+                };
+            }
+        }
+        Stmt::Throw(e) | Stmt::Return(Some(e)) | Stmt::Expr(e) => {
+            rewrite_field_refs_in_expr(e, fields, bound)
+        }
+        Stmt::IndexAssign {
+            base, index, value, ..
+        } => {
+            rewrite_field_refs_in_expr(base, fields, bound);
+            rewrite_field_refs_in_expr(index, fields, bound);
+            rewrite_field_refs_in_expr(value, fields, bound);
+        }
+        Stmt::FieldAssign { base, name, value } => {
+            rewrite_field_refs_in_expr(base, fields, bound);
+            rewrite_field_refs_in_expr(value, fields, bound);
+            // Field names in an explicit `base.name` write are not idents.
+            let _ = name;
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            ..
+        } => {
+            rewrite_field_refs_in_expr(cond, fields, bound);
+            for s in then_body {
+                rewrite_field_refs_in_stmt(s, fields, bound);
+            }
+            for s in else_body {
+                rewrite_field_refs_in_stmt(s, fields, bound);
+            }
+        }
+        Stmt::Loop { cond, body, .. } => {
+            if let Some(c) = cond {
+                rewrite_field_refs_in_expr(c, fields, bound);
+            }
+            for s in body {
+                rewrite_field_refs_in_stmt(s, fields, bound);
+            }
+        }
+        Stmt::Match {
+            scrutinee, arms, ..
+        } => {
+            rewrite_field_refs_in_expr(scrutinee, fields, bound);
+            for arm in arms {
+                for s in &mut arm.body {
+                    rewrite_field_refs_in_stmt(s, fields, bound);
+                }
+            }
+        }
+        Stmt::Try { body, catches } => {
+            for s in body {
+                rewrite_field_refs_in_stmt(s, fields, bound);
+            }
+            for catch in catches {
+                for s in &mut catch.body {
+                    rewrite_field_refs_in_stmt(s, fields, bound);
+                }
+            }
+        }
+        Stmt::Return(None) | Stmt::Break | Stmt::Propagate => {}
+    }
+}
+
+fn rewrite_field_refs_in_expr(expr: &mut Expr, fields: &HashSet<String>, bound: &HashSet<String>) {
+    match expr {
+        Expr::Ident(n) => {
+            if fields.contains(n) && !bound.contains(n) {
+                let field = std::mem::take(n);
+                *expr = Expr::Field {
+                    base: Box::new(Expr::Ident("self".into())),
+                    name: field,
+                };
+            }
+        }
+        Expr::Call { args, .. } => {
+            // The callee is left alone: bare method names resolve through the
+            // method map, and a field name is never a callable here.
+            for a in args {
+                rewrite_field_refs_in_expr(a, fields, bound);
+            }
+        }
+        Expr::Closure { body, .. } => {
+            // Bound names were collected including closure params, so nested
+            // shadowing is already respected.
+            for s in body {
+                rewrite_field_refs_in_stmt(s, fields, bound);
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            rewrite_field_refs_in_expr(lhs, fields, bound);
+            rewrite_field_refs_in_expr(rhs, fields, bound);
+        }
+        Expr::Unary { expr: inner, .. } => rewrite_field_refs_in_expr(inner, fields, bound),
+        Expr::Field { base, .. } => rewrite_field_refs_in_expr(base, fields, bound),
+        Expr::Index { base, index, .. } => {
+            rewrite_field_refs_in_expr(base, fields, bound);
+            rewrite_field_refs_in_expr(index, fields, bound);
+        }
+        Expr::StructInit { fields: init, .. } => {
+            for (_, fe) in init {
+                rewrite_field_refs_in_expr(fe, fields, bound);
+            }
+        }
+        Expr::ArrayLit(items) => {
+            for item in items {
+                rewrite_field_refs_in_expr(item, fields, bound);
+            }
+        }
+        Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::StringLit(_)
+        | Expr::BoolLit(_) => {}
+    }
 }
 
 fn desugar_closures_in_body(body: &mut [Stmt], counter: &mut usize, extra_decls: &mut Vec<Decl>) {

@@ -2,8 +2,8 @@
 // Tests: basic class declaration with fields and methods
 // Expected: parse ok, graph shows Counter class methods
 // @expect parse: ok
-// @expect has-function: increment
-// @expect has-function: getValue
+// @expect has-function: Counter_increment
+// @expect has-function: Counter_getValue
 
 class Counter {
   private int count;
