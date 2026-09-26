@@ -143,7 +143,7 @@ fn owned_native_test_groups(root: &Path) -> Vec<TestGroup> {
         .collect()
 }
 
-pub(crate) fn test_step_names() -> [&'static str; 8] {
+pub(crate) fn test_step_names() -> [&'static str; 9] {
     [
         "polyglot samples (scripts/check-polyglot-sample.sh)",
         "polyglot graph samples (scripts/check-graph-polyglot-sample.sh)",
@@ -152,6 +152,7 @@ pub(crate) fn test_step_names() -> [&'static str; 8] {
         "jit compiler (scripts/check-jit-compiler.sh)",
         "orchestration compiler (scripts/check-orchestration-compiler.sh)",
         "static coverage (scripts/check-coverage.sh)",
+        "backend differential (scripts/check-backend-differential.sh)",
         "conformance suite (scripts/run-conformance.sh)",
     ]
 }
