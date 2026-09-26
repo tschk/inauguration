@@ -600,3 +600,19 @@ fn explain_summarizes_successful_report() {
         explanation.summary
     );
 }
+
+/// Lowerer codes must be explainable through the same registry as the rest, and
+/// the explanation must be keyed on the constant the lowerer emits.
+#[test]
+fn explains_lowerer_degradation_codes() {
+    for code in [
+        crate::native_emit::lower::DEGRADATION_SKIPPED_FUNCTION,
+        crate::native_emit::lower::DEGRADATION_UNRESOLVED_CALL,
+    ] {
+        let rule = explain_diagnostic(code).unwrap_or_else(|| panic!("{code} not explainable"));
+        assert_eq!(rule.code, code);
+        assert!(!rule.meaning.is_empty());
+        assert!(!rule.fix.is_empty());
+    }
+    assert!(explain_diagnostic("IN3999").is_none());
+}
