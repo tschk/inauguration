@@ -1,6 +1,10 @@
 use crate::util::resolve_invocation_path;
 use crate::{InError, Result};
 use inauguration::agent_mode;
+use inauguration::coverage::{CoverageBlocker, CoverageReport, CoverageStatus};
+use inauguration::native_emit::lower::{
+    DEGRADATION_SKIPPED_FUNCTION, DEGRADATION_UNRESOLVED_CALL,
+};
 use inauguration::parser_registry::ParserCli;
 use std::fs;
 use std::path::Path;
@@ -23,6 +27,124 @@ pub(crate) fn cmd_agent(
         Err(InError::Message("agent diagnostics failed".to_string()))
     } else {
         Ok(())
+    }
+}
+
+pub(crate) fn cmd_coverage(
+    invocation_cwd: &Path,
+    path: &str,
+    parser: ParserCli,
+    entry: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let source_path = resolve_invocation_path(invocation_cwd, path);
+    let report = inauguration::coverage::coverage_for_path(&source_path, parser, entry);
+
+    if json {
+        let raw = serde_json::to_string_pretty(&report)
+            .map_err(|err| InError::Message(format!("serialize coverage report: {err}")))?;
+        println!("{raw}");
+        return Ok(());
+    }
+
+    render_coverage(&report);
+    Ok(())
+}
+
+/// Print a coverage report. Counts are withheld when analysis failed, because a
+/// percentage from a partial run would overstate what is known.
+fn render_coverage(report: &CoverageReport) {
+    let parser = report.parser_id.as_deref().unwrap_or("unknown");
+    println!("coverage: {} ({parser})", report.path);
+
+    match report.status {
+        CoverageStatus::Rejected | CoverageStatus::UnsupportedHost => {
+            if let Some(code) = &report.reason_code {
+                println!("  blocked: {code}");
+            }
+            if let Some(reason) = &report.reason {
+                println!("  {reason}");
+            }
+            return;
+        }
+        CoverageStatus::FullyLowered | CoverageStatus::Degraded => {}
+    }
+
+    println!("  entry                 {}", report.entry);
+    println!("  functions in source   {}", report.functions_in_source);
+    println!("  functions analyzed    {}", report.functions_analyzed);
+    match report.lowered_fraction() {
+        Some(fraction) => println!(
+            "  lowered to native     {}  ({:.1}%)",
+            report.functions_lowered,
+            fraction * 100.0
+        ),
+        None => println!("  lowered to native     {}", report.functions_lowered),
+    }
+    println!("  not lowered           {}", report.functions_not_lowered);
+    println!();
+
+    if report.blockers.is_empty() {
+        println!("  fully lowered — nothing was substituted with a trap.");
+        return;
+    }
+
+    // Split the two kinds apart: a construct the lowerer cannot compile is a
+    // coverage gap, while a call with no definition in this unit is a scoping
+    // fact that dependency resolution can still satisfy.
+    let not_lowered: Vec<&CoverageBlocker> = report
+        .blockers
+        .iter()
+        .filter(|blocker| blocker.code == DEGRADATION_SKIPPED_FUNCTION)
+        .collect();
+    if !not_lowered.is_empty() {
+        println!("  not lowered (the lowerer cannot compile these):");
+        for blocker in not_lowered {
+            println!("    x{}  {}", blocker.count, blocker.message);
+        }
+        println!();
+    }
+
+    if report.unresolved_calls > 0 {
+        let mut targets: Vec<&str> = report
+            .degradations
+            .iter()
+            .filter(|degradation| degradation.code == DEGRADATION_UNRESOLVED_CALL)
+            .filter_map(|degradation| degradation.target.as_deref())
+            .collect();
+        targets.sort_unstable();
+        targets.dedup();
+        println!(
+            "  unresolved calls (no definition in this unit): {} site(s) to {} target(s)",
+            report.unresolved_calls,
+            targets.len()
+        );
+        const SHOWN_TARGETS: usize = 12;
+        let shown = targets
+            .iter()
+            .take(SHOWN_TARGETS)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("    {shown}");
+        if targets.len() > SHOWN_TARGETS {
+            println!("    … and {} more", targets.len() - SHOWN_TARGETS);
+        }
+        println!();
+    }
+
+    let reachable: usize = report
+        .degradations
+        .iter()
+        .filter(|degradation| degradation.reachable)
+        .count();
+    if reachable == 0 {
+        println!("  none reachable from the entry — the artifact carries dead trap bodies only.");
+    } else {
+        println!(
+            "  {reachable} reachable from the entry — reaching one aborts the program with exit {}.",
+            inauguration::inrt::INRT_TRAP_EXIT_CODE
+        );
     }
 }
 

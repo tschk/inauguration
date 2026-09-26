@@ -40,6 +40,7 @@ pub mod compiler;
 pub mod config;
 pub mod core_ir;
 pub mod core_ir_verifier;
+pub mod coverage;
 pub mod crate_db;
 #[cfg(unix)]
 pub mod daemon_client;

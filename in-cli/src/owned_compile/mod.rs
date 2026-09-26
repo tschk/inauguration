@@ -24,6 +24,7 @@ mod util;
 mod tests;
 
 pub use report::report_to_json;
+pub use jit::resolve_jit_entry;
 use report::{
     base_report, count_call_edges, count_functions, finalize_report, jobs_for_request,
     module_has_function, timing_waves_for_jobs,
