@@ -144,6 +144,7 @@ pub fn compile_jit(
                 .map(|o| (o, result.codegen_base))
                 .collect(),
             external_refs: Vec::new(),
+            degradations: Vec::new(),
         }
     } else {
         let jobs = jobs_for_request(request);
@@ -155,6 +156,8 @@ pub fn compile_jit(
         )
         .map_err(|e| format!("jit-lowering-failed: {e}"))?
     };
+
+    let degradations = lowered.degradations;
 
     // Build function offset table for all compiled functions
     let function_offsets: Vec<(String, u32, u32)> = lowered
@@ -182,6 +185,16 @@ pub fn compile_jit(
     // code doesn't handle struct layouts correctly and crashes at runtime.
     // Only JIT-execute non-Rust (in-lang, icore) programs.
     let is_rust = request.path.extension().is_some_and(|e| e == "rs");
+    // Code the lowerer replaced with a trap cannot be executed: the trap writes
+    // to stderr and exits, which would take the compiler process down with it.
+    // Only traps the entry can reach matter; unreachable ones are dead code.
+    if !is_rust && let Some(first) = degradations.iter().find(|d| d.reachable) {
+        let live = degradations.iter().filter(|d| d.reachable).count();
+        return Err(format!(
+            "jit-degraded: {live} reachable function(s) could not be compiled to native code, starting with `{}` ({}); refusing to execute code that would trap",
+            first.function, first.code
+        ));
+    }
     let (exit_code, eval_result, eval_result_string) = if is_rust {
         (0, None, None)
     } else {
@@ -224,6 +237,7 @@ pub fn compile_jit(
         runtime_level: "inrt-jit".to_string(),
         reason_code: reason_code.to_string(),
         reason: reason.to_string(),
+        degradations,
     })
 }
 
@@ -274,7 +288,17 @@ pub fn const_eval_entry_exit_code(
     if let Some(code) = try_const_answer_entry(module, entry) {
         return Ok(code);
     }
-    let code = eval_entry_via_jit(module, entry)?;
+    let code = match eval_entry_via_jit(module, entry) {
+        Ok(code) => code,
+        // The program cannot be executed to learn its exit code because it
+        // contains code the lowerer replaced with a trap. The native entry stub
+        // computes the real code at runtime, so a caller that only reports it can
+        // continue with an unknown value instead of a guess.
+        Err(err) if err.starts_with("jit-degraded:") => {
+            return Err(format!("entry-exit-unknown: {err}"));
+        }
+        Err(err) => return Err(err),
+    };
     if !(0..=255).contains(&code) {
         return Err(format!(
             "native compile entry `{entry}` exit code {code} is outside 0..=255"

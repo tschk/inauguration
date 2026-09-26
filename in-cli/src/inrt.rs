@@ -6,6 +6,16 @@ use std::collections::BTreeMap;
 
 pub const INRT_ENTRY_SYMBOL: &str = "_inrt_start";
 
+/// Builtin reached when a native program executes code the lowerer could not
+/// compile. It writes the supplied message to stderr and exits with
+/// [`INRT_TRAP_EXIT_CODE`]; it never returns.
+pub const INRT_TRAP_BUILTIN: &str = "__inrt_unsupported_trap";
+
+/// Exit status reported when [`INRT_TRAP_BUILTIN`] fires. 70 is `EX_SOFTWARE`
+/// from `sysexits.h`, chosen so a trapped program is distinguishable from a
+/// program that genuinely returned a small value.
+pub const INRT_TRAP_EXIT_CODE: u16 = 70;
+
 pub const INRT_BUILTINS: &[&str] = &[
     "__inrt_str_len",
     "__inrt_str_concat",
@@ -14,6 +24,7 @@ pub const INRT_BUILTINS: &[&str] = &[
     "__inrt_array_load",
     "__inrt_array_store",
     "__inrt_array_push",
+    INRT_TRAP_BUILTIN,
 ];
 
 pub fn is_inrt_builtin(name: &str) -> bool {
@@ -28,6 +39,7 @@ pub fn inrt_builtin_param_slots(name: &str) -> Option<usize> {
         "__inrt_array_push" => Some(2),
         "__inrt_str_concat" => Some(2),
         "__inrt_str_substr" => Some(3),
+        INRT_TRAP_BUILTIN => Some(2),
         _ => None,
     }
 }
@@ -422,6 +434,26 @@ fn emit_inline_mmap(buf: &mut Vec<u8>) {
     );
 }
 
+/// Writes `x0` (buffer) for `x1` (length) bytes to stderr, then exits with
+/// [`INRT_TRAP_EXIT_CODE`]. Never returns, so it needs no prologue or epilogue.
+fn build_inrt_unsupported_trap() -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32);
+    emit_insn_blob(
+        &[
+            aarch64::mov_reg64(X2, X1),
+            aarch64::mov_reg64(X1, X0),
+            aarch64::movz64(X0, 2, 0),
+            aarch64::movz64(X16, 4, 0),
+            aarch64::svc(0x80),
+            aarch64::movz64(X0, INRT_TRAP_EXIT_CODE, 0),
+            aarch64::movz64(X16, 1, 0),
+            aarch64::svc(0x80),
+        ],
+        &mut buf,
+    );
+    buf
+}
+
 pub fn build_runtime_blob() -> (Vec<u8>, BTreeMap<String, u32>) {
     let mut blob = Vec::with_capacity(2048);
     let mut offsets = BTreeMap::new();
@@ -440,6 +472,7 @@ pub fn build_runtime_blob() -> (Vec<u8>, BTreeMap<String, u32>) {
     add_fn!("__inrt_array_load", build_inrt_array_load());
     add_fn!("__inrt_array_store", build_inrt_array_store());
     add_fn!("__inrt_array_push", build_inrt_array_push());
+    add_fn!(INRT_TRAP_BUILTIN, build_inrt_unsupported_trap());
     (blob, offsets)
 }
 
@@ -462,6 +495,30 @@ mod tests {
     fn str_len_is_small() {
         assert!(build_inrt_str_len().len() <= 16);
     }
+
+    #[test]
+    fn unsupported_trap_writes_then_exits() {
+        let code = build_inrt_unsupported_trap();
+        let words: Vec<u32> = code
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_le_bytes(*b))
+            .collect();
+        // Two syscalls: write(2, buf, len) then exit(INRT_TRAP_EXIT_CODE).
+        assert_eq!(
+            words.iter().filter(|w| **w == aarch64::svc(0x80)).count(),
+            2
+        );
+        assert!(words.contains(&aarch64::movz64(16, 4, 0)), "missing SYS_write");
+        assert!(
+            words.contains(&aarch64::movz64(16, 1, 0)),
+            "missing SYS_exit"
+        );
+        assert!(words.contains(&aarch64::movz64(0, INRT_TRAP_EXIT_CODE, 0)));
+        assert_eq!(code.len() % 4, 0);
+    }
+
     #[test]
     fn array_load_has_bounds_check() {
         let code = build_inrt_array_load();

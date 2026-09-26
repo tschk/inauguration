@@ -80,6 +80,7 @@ pub fn base_report(
         artifact_path: None,
         executable_path: None,
         abi_path: None,
+        degradations: Vec::new(),
         parsed_function_count: 0,
         typed_function_count: 0,
         call_edge_count: 0,

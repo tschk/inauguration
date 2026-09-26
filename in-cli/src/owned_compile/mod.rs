@@ -7,6 +7,7 @@ use crate::emit_profile::EmitProfile;
 use crate::external_guard::ExternalInvocationGuard;
 use crate::native_backend;
 use crate::native_emit::NativeLinkage;
+use crate::native_emit::lower::LoweringDegradation;
 use crate::parser_registry::{self, ParserCli};
 use serde::Serialize;
 use std::fs;
@@ -91,6 +92,11 @@ pub struct OwnedCompileReport {
     pub artifact_path: Option<String>,
     pub executable_path: Option<String>,
     pub abi_path: Option<String>,
+    /// Functions the lowerer replaced with a runtime trap. Empty means the
+    /// artifact contains no substituted code. Check this rather than `success`
+    /// when a build must be fully compiled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degradations: Vec<LoweringDegradation>,
     pub parsed_function_count: usize,
     pub typed_function_count: usize,
     pub call_edge_count: usize,
@@ -490,6 +496,7 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                 };
                 report.artifact_path = Some(native_result.artifact_path);
                 report.abi_path = native_result.abi_path;
+                report.degradations = native_result.degradations;
             }
             Err(err) if err == "native-host-unsupported" => {
                 let status = native_backend::native_backend_status();
@@ -537,6 +544,7 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                     report.eval_exit_code = jit_result.eval_exit_code;
                     report.eval_result = jit_result.eval_result;
                     report.eval_result_string = jit_result.eval_result_string;
+                    report.degradations = jit_result.degradations;
                 }
                 Err(err) => {
                     report.backend_level = "owned-native-subset".to_string();
@@ -547,6 +555,52 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                 }
             }
         }
+    }
+
+    // Code the lowerer could not compile is trapped rather than miscompiled, so
+    // the artifact is still produced. Callers that require a fully compiled
+    // artifact opt in with `IN_STRICT_LOWERING`.
+    if !report.degradations.is_empty() {
+        let live = report
+            .degradations
+            .iter()
+            .filter(|degradation| degradation.reachable)
+            .count();
+        let total = report.degradations.len();
+        if live == 0 {
+            eprintln!(
+                "in: {total} function(s) were not compiled to native code (none reachable from the entry)"
+            );
+        } else {
+            eprintln!(
+                "in: {total} function(s) were not compiled to native code ({live} reachable from the entry); reaching one aborts the program with exit {}",
+                crate::inrt::INRT_TRAP_EXIT_CODE
+            );
+        }
+        for degradation in &report.degradations {
+            let marker = if degradation.reachable {
+                " [reachable]"
+            } else {
+                ""
+            };
+            eprintln!("in: {}{marker}", degradation.describe());
+        }
+    }
+    if report.success && !report.degradations.is_empty() && crate::config::env_config().strict_lowering
+    {
+        let detail = report
+            .degradations
+            .iter()
+            .map(LoweringDegradation::describe)
+            .collect::<Vec<_>>()
+            .join("; ");
+        report.success = false;
+        report.reason_code = Some("native-lowering-degraded".to_string());
+        report.reason = Some(format!(
+            "{} function(s) were not compiled to native code: {detail}",
+            report.degradations.len()
+        ));
+        report.error = report.reason.clone();
     }
 
     finalize_report(report, started, &cwd, &frontend_hash)

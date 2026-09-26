@@ -29,8 +29,10 @@ pub use elf::{
 };
 pub use linker_layout::{LinkerLayout, MemoryRegion};
 pub use lower::{
-    NativeLinkage, TARGET_TRIPLE, compile_native_artifact, compile_native_artifact_for_host,
-    compile_native_executable, compile_native_executable_for_host, host_supports_native_subset,
+    NativeArtifactOutcome, NativeLinkage, TARGET_TRIPLE, compile_native_artifact,
+    compile_native_artifact_for_host, compile_native_artifact_for_host_with_report,
+    compile_native_artifact_with_report, compile_native_executable,
+    compile_native_executable_for_host, host_supports_native_subset,
 };
 pub use macho::{ExportSymbol, MachOLinkage, write_relocatable_object};
 pub use object::{

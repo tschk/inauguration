@@ -1,5 +1,6 @@
 use crate::core_ir::{Decl, Expr, Stmt, Typ, UnifiedModule};
 use crate::native_backend;
+use crate::native_emit::lower::LoweringDegradation;
 use crate::native_emit::{self, NativeLinkage, antidecomp};
 use std::collections::HashSet;
 use std::fs;
@@ -20,6 +21,8 @@ pub struct NativeCompileResult {
     pub runtime_level: String,
     pub reason_code: String,
     pub reason: String,
+    /// Code the lowerer could not compile and replaced with a runtime trap.
+    pub degradations: Vec<LoweringDegradation>,
 }
 
 pub fn compile_native(
@@ -49,7 +52,15 @@ pub fn compile_native(
     };
     let eval_exit = match request.linkage {
         NativeLinkage::Executable => {
-            Some(native_entry_exit_code(&native_module, module_id, entry)?)
+            match native_entry_exit_code(&native_module, module_id, entry) {
+                Ok(code) => Some(code),
+                // The entry could not be executed to learn its exit code because
+                // it reaches code the lowerer trapped. The executable's entry stub
+                // derives the code at runtime, so report it as unknown rather than
+                // inventing one.
+                Err(err) if err.starts_with("entry-exit-unknown:") => None,
+                Err(err) => return Err(err),
+            }
         }
         NativeLinkage::Dylib | NativeLinkage::StaticLib => None,
     };
@@ -67,7 +78,7 @@ pub fn compile_native(
             && target_triple == "aarch64-apple-darwin"
             && path_extension_is(out_path, "app")
         {
-            emit_macos_app_bundle(&native_module, module_id, entry, out_path)?;
+            let degradations = emit_macos_app_bundle(&native_module, module_id, entry, out_path)?;
             return Ok(NativeCompileResult {
                 artifact_path: out_path.display().to_string(),
                 eval_exit_code: Some(exit),
@@ -78,6 +89,7 @@ pub fn compile_native(
                 runtime_level: "macos-app-bundle".to_string(),
                 reason_code: "native-aarch64-darwin-app-subset".to_string(),
                 reason: "inauguration owns macOS .app bundle emission around its AArch64 Mach-O executable subset".to_string(),
+                degradations,
             });
         }
         if request.linkage == NativeLinkage::Executable
@@ -101,6 +113,7 @@ pub fn compile_native(
                 runtime_level: "linux-appdir".to_string(),
                 reason_code: "native-x86_64-linux-appdir-subset".to_string(),
                 reason: "inauguration owns Linux AppDir emission around its x86_64 ELF executable subset".to_string(),
+                degradations: Vec::new(),
             });
         }
         let object_request = native_emit::NativeObjectRequest {
@@ -140,6 +153,7 @@ pub fn compile_native(
                 runtime_level: artifact.runtime_level.to_string(),
                 reason_code: artifact.reason_code.to_string(),
                 reason: artifact.reason.to_string(),
+                degradations: Vec::new(),
             });
         }
         return Err(format!(
@@ -147,7 +161,7 @@ pub fn compile_native(
             super::util::linkage_label(request.linkage)
         ));
     }
-    let abi_path = native_emit::compile_native_artifact_for_host(
+    let outcome = native_emit::compile_native_artifact_for_host_with_report(
         &native_module,
         module_id,
         entry,
@@ -161,11 +175,14 @@ pub fn compile_native(
         eval_exit_code: eval_exit,
         eval_result: None,
         eval_result_string: None,
-        abi_path: abi_path.map(|path| path.display().to_string()),
+        abi_path: outcome
+            .abi_path
+            .map(|path| path.display().to_string()),
         backend_level: "owned-native-subset".to_string(),
         runtime_level: "inrt-native".to_string(),
         reason_code: status.reason_code.to_string(),
         reason: status.reason.to_string(),
+        degradations: outcome.degradations,
     })
 }
 
@@ -325,14 +342,14 @@ pub fn emit_macos_app_bundle(
     module_id: &str,
     entry: &str,
     out_path: &Path,
-) -> Result<(), String> {
+) -> Result<Vec<LoweringDegradation>, String> {
     let name = artifact_stem(out_path, "App");
     let contents = out_path.join("Contents");
     let macos = contents.join("MacOS");
     fs::create_dir_all(&macos)
         .map_err(|err| format!("create app bundle `{}`: {err}", macos.display()))?;
     let executable = macos.join(&name);
-    native_emit::compile_native_artifact(
+    let outcome = native_emit::compile_native_artifact_with_report(
         module,
         module_id,
         entry,
@@ -346,7 +363,8 @@ pub fn emit_macos_app_bundle(
     fs::write(contents.join("Info.plist"), plist)
         .map_err(|err| format!("write app Info.plist `{}`: {err}", out_path.display()))?;
     fs::write(contents.join("PkgInfo"), "APPL????")
-        .map_err(|err| format!("write app PkgInfo `{}`: {err}", out_path.display()))
+        .map_err(|err| format!("write app PkgInfo `{}`: {err}", out_path.display()))?;
+    Ok(outcome.degradations)
 }
 
 pub fn emit_linux_appdir(exit: u8, out_path: &Path) -> Result<(), String> {

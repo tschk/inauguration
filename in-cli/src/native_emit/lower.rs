@@ -4,8 +4,18 @@ use crate::core_ir::{Expr, Stmt, Typ, UnifiedModule};
 use crate::inrt;
 use crate::native_emit::aarch64::{self, CodeEmitter, REG_FP};
 use crate::native_emit::macho::{ExportSymbol, MachOLinkage};
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
+
+/// Stable code for a function the native lowerer could not compile.
+pub const DEGRADATION_SKIPPED_FUNCTION: &str = "IN3001";
+/// Stable code for a call target the native lowerer could not resolve.
+pub const DEGRADATION_UNRESOLVED_CALL: &str = "IN3002";
+
+/// Longest trap message embedded in a stubbed function body. Keeps the emitted
+/// blob small and the `movz` length immediate exact.
+const MAX_TRAP_MESSAGE: usize = 400;
 
 thread_local! {
     /// Collector for external symbol references during lowering.
@@ -30,8 +40,9 @@ mod lower_stmt;
 mod lower_util;
 
 pub use lower_compile::{
-    compile_native_artifact, compile_native_artifact_for_host, compile_native_executable,
-    compile_native_executable_for_host, host_supports_native_subset,
+    NativeArtifactOutcome, compile_native_artifact, compile_native_artifact_for_host,
+    compile_native_artifact_for_host_with_report, compile_native_artifact_with_report,
+    compile_native_executable, compile_native_executable_for_host, host_supports_native_subset,
 };
 
 pub(crate) use lower_boundary::boundary_from_module;
@@ -221,6 +232,121 @@ pub struct LoweredModule {
     /// External symbol names referenced by the code (for native linking).
     /// Each entry is (instruction_offset, symbol_name).
     pub external_refs: Vec<(u32, String)>,
+    /// Code the lowerer could not compile. Each entry corresponds to a trap
+    /// body in `code`, so an empty list means nothing was substituted.
+    pub degradations: Vec<LoweringDegradation>,
+}
+
+/// A construct the native lowerer could not compile.
+///
+/// The lowerer emits a trap body for every degradation instead of a return-0
+/// stub, so an unlowered function can never be mistaken for one that returned a
+/// real value. Callers should surface these to the user and to machine-readable
+/// reports rather than treating the build as fully compiled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoweringDegradation {
+    /// [`DEGRADATION_SKIPPED_FUNCTION`] or [`DEGRADATION_UNRESOLVED_CALL`].
+    pub code: String,
+    /// Function the degradation is attributed to: the function that could not
+    /// be compiled, or the caller when a call target could not be resolved.
+    pub function: String,
+    /// Unresolved callee name, for [`DEGRADATION_UNRESOLVED_CALL`].
+    pub target: Option<String>,
+    /// Underlying lowerer error.
+    pub reason: String,
+    /// Whether the entry can reach this trap by following calls out of compiled
+    /// code. Unreachable traps are dead code in the artifact; reachable ones
+    /// abort the program when that path runs.
+    #[serde(default)]
+    pub reachable: bool,
+}
+
+impl LoweringDegradation {
+    fn skipped_function(function: &str, reason: &str) -> Self {
+        Self {
+            code: DEGRADATION_SKIPPED_FUNCTION.to_string(),
+            function: function.to_string(),
+            target: None,
+            reason: reason.to_string(),
+            reachable: false,
+        }
+    }
+
+    fn unresolved_call(caller: &str, target: &str) -> Self {
+        Self {
+            code: DEGRADATION_UNRESOLVED_CALL.to_string(),
+            function: caller.to_string(),
+            target: Some(target.to_string()),
+            reason: format!("call to `{target}` was not resolved to a function"),
+            reachable: false,
+        }
+    }
+
+    /// Name the trap body is registered under in the function table.
+    fn trap_site(&self) -> &str {
+        self.target.as_deref().unwrap_or(&self.function)
+    }
+
+    /// One-line rendering used for CLI output.
+    pub fn describe(&self) -> String {
+        match &self.target {
+            Some(target) => format!(
+                "{}: `{}` calls `{}`, which was not resolved",
+                self.code, self.function, target
+            ),
+            None => format!(
+                "{}: `{}` was not compiled to native code ({})",
+                self.code, self.function, self.reason
+            ),
+        }
+    }
+
+    /// Message embedded in the trap body, so a trapped program explains itself.
+    fn trap_message(&self) -> String {
+        format!("{}\n", self.describe())
+    }
+}
+
+/// Names the entry can reach by following calls out of compiled functions.
+///
+/// A trap ends the program, so only lowered functions can pass execution along;
+/// calls out of skipped functions never matter. When there is no entry point
+/// (libraries), every trap is treated as reachable because an external caller
+/// may invoke any exported function.
+fn reachable_trap_sites(
+    buffers: &[FunctionBuffer],
+    entry: &str,
+    executable: bool,
+    degradations: &[LoweringDegradation],
+) -> std::collections::HashSet<String> {
+    if !executable {
+        return degradations
+            .iter()
+            .map(|degradation| degradation.trap_site().to_string())
+            .collect();
+    }
+    let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    for buf in buffers {
+        edges
+            .entry(buf.name.as_str())
+            .or_default()
+            .extend(buf.pending_calls.iter().map(|call| call.target.as_str()));
+    }
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut queue: Vec<&str> = vec![entry];
+    while let Some(name) = queue.pop() {
+        if !seen.insert(name) {
+            continue;
+        }
+        if let Some(next) = edges.get(name) {
+            for target in next {
+                if !seen.contains(target) {
+                    queue.push(target);
+                }
+            }
+        }
+    }
+    seen.into_iter().map(str::to_string).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,6 +424,48 @@ fn lower_function_to_buffer(
         pending_static_arrays,
         pending_strings,
     })
+}
+
+/// Clamp a trap message to [`MAX_TRAP_MESSAGE`] bytes, keeping it line-terminated.
+fn truncate_trap_message(message: &str) -> String {
+    if message.len() <= MAX_TRAP_MESSAGE {
+        return message.to_string();
+    }
+    let mut end = MAX_TRAP_MESSAGE - 1;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n", &message[..end])
+}
+
+/// Emit a trap body standing in for code the lowerer could not compile.
+///
+/// The body writes the degradation message to stderr and exits with
+/// [`inrt::INRT_TRAP_EXIT_CODE`]. It never returns, so it needs no prologue,
+/// epilogue, or return value. Returns the offset of the `bl` site so the
+/// runtime-blob patch pass can point it at the trap routine.
+fn emit_degradation_trap(emitter: &mut CodeEmitter, degradation: &LoweringDegradation) -> u32 {
+    let message = truncate_trap_message(&degradation.trap_message());
+
+    let mut body = Vec::with_capacity(24 + message.len());
+    body.extend_from_slice(&aarch64::adr(0, 0).to_le_bytes());
+    body.extend_from_slice(&aarch64::movz64(1, message.len() as u16, 0).to_le_bytes());
+    body.extend_from_slice(&aarch64::bl(0).to_le_bytes());
+    // The message is data inside the code stream: keep it 8-byte aligned so the
+    // next function body still starts on an instruction boundary.
+    while !body.len().is_multiple_of(8) {
+        body.push(0);
+    }
+    let data_offset = body.len() as i32;
+    body.extend_from_slice(message.as_bytes());
+    while !body.len().is_multiple_of(8) {
+        body.push(0);
+    }
+    body[..4].copy_from_slice(&aarch64::adr(0, data_offset).to_le_bytes());
+
+    let base = emitter.len();
+    emitter.bytes.extend_from_slice(&body);
+    base + 8
 }
 
 pub fn lower_module(
@@ -413,33 +581,30 @@ pub fn lower_module_with_jobs(
             })?
         };
 
-    // Summarize skipped functions: only print individual skips in debug.
-    // In release mode, print a single summary line to avoid log noise.
-    if !skipped.is_empty() {
-        #[cfg(debug_assertions)]
-        for (name, err) in &skipped {
-            eprintln!("native-lower: skipping `{name}`: {err}");
-        }
-        eprintln!(
-            "native-lower: {} functions lowered, {} skipped (unsupported types/calls)",
-            buffers.len(),
-            skipped.len()
-        );
-    }
-    // Each stub: MOV X0, #0; RET — returns 0 for any call.
-    // But if the entry function itself was skipped, fail the entire module.
+    // Every skipped function and unresolved call target becomes a trap body
+    // instead of a return-0 stub, and is recorded so callers can report it.
+    // ponytail: graceful degradation for self-hosting — skip stdlib functions
+    // that use unsupported types rather than failing the entire module.
+    let mut degradations: Vec<LoweringDegradation> = Vec::new();
+    let mut trap_calls: Vec<PendingInrtCall> = Vec::new();
+
+    // If the entry function itself was skipped, fail the entire module.
     if let Some((_, err)) = skipped.iter().find(|(name, _)| name == &resolved_entry) {
         return Err(format!(
             "native-lower: entry function `{resolved_entry}` unsupported: {err}"
         ));
     }
-    for (name, _) in &skipped {
+    for (name, reason) in &skipped {
+        let degradation = LoweringDegradation::skipped_function(name, reason);
         let offset = emitter.len();
         function_offsets.insert(name.clone(), offset);
-        emitter.emit_insns(&aarch64::load_i64(0, 0));
-        emitter.emit_u32(aarch64::ret());
+        let bl_site = emit_degradation_trap(&mut emitter, &degradation);
+        trap_calls.push(PendingInrtCall {
+            site: bl_site,
+            target: inrt::INRT_TRAP_BUILTIN.to_string(),
+        });
+        degradations.push(degradation);
     }
-
     // Append all per-function buffers and record global offsets.
     for buf in &buffers {
         let offset = emitter.len();
@@ -448,8 +613,8 @@ pub fn lower_module_with_jobs(
     }
 
     // Patch internal function calls (BL) using global offsets.
-    // ponytail: calls to skipped/unresolved targets get a return-0 stub
-    // rather than failing the entire module.
+    // ponytail: calls to skipped/unresolved targets trap at runtime rather than
+    // failing the entire module; the trap names the caller and the target.
     for buf in &buffers {
         let base = *function_offsets
             .get(&buf.name)
@@ -459,15 +624,17 @@ pub fn lower_module_with_jobs(
             let target_offset = match target_offset {
                 Some(o) => o,
                 None => {
-                    // Emit a stub for this unresolved target.
+                    // Emit a trap body for this unresolved target.
                     let stub_offset = emitter.len();
                     function_offsets.insert(call.target.clone(), stub_offset);
-                    emitter.emit_insns(&aarch64::load_i64(0, 0));
-                    emitter.emit_u32(aarch64::ret());
-                    eprintln!(
-                        "native-lower: stubbed unresolved call target `{}`",
-                        call.target
-                    );
+                    let degradation =
+                        LoweringDegradation::unresolved_call(&buf.name, &call.target);
+                    let bl_site = emit_degradation_trap(&mut emitter, &degradation);
+                    trap_calls.push(PendingInrtCall {
+                        site: bl_site,
+                        target: inrt::INRT_TRAP_BUILTIN.to_string(),
+                    });
+                    degradations.push(degradation);
                     stub_offset
                 }
             };
@@ -475,6 +642,18 @@ pub fn lower_module_with_jobs(
             let rel = target_offset as i32 - global_site as i32;
             emitter.patch_u32(global_site, aarch64::bl(rel));
         }
+    }
+
+    // Mark which traps the entry can actually reach. Done after the call-patch
+    // pass because unresolved call targets only become degradations there.
+    let reachable = reachable_trap_sites(
+        &buffers,
+        &resolved_entry,
+        linkage == NativeLinkage::Executable,
+        &degradations,
+    );
+    for degradation in &mut degradations {
+        degradation.reachable = reachable.contains(degradation.trap_site());
     }
 
     // Collect pending static arrays, strings, and inrt calls from all buffers,
@@ -502,6 +681,10 @@ pub fn lower_module_with_jobs(
 
     append_static_arrays(&mut emitter, pending_static_arrays);
     append_string_table(&mut emitter, &strings, pending_strings);
+
+    // Trap bodies emitted for degraded code call into the runtime blob, so they
+    // join the same patch pass as ordinary inrt calls.
+    pending_inrt_calls.extend(trap_calls);
 
     if !pending_inrt_calls.is_empty() {
         let (runtime_blob, runtime_offsets) = inrt::build_runtime_blob();
@@ -559,6 +742,7 @@ pub fn lower_module_with_jobs(
         function_offsets,
         relocations: Vec::new(), // AArch64 uses position-independent code
         external_refs,
+        degradations,
     })
 }
 

@@ -170,6 +170,12 @@ pub(crate) fn cmd_compile(
         if let Some(hash) = &report.frontend_hash {
             println!("frontend_hash: {hash}");
         }
+        if !report.degradations.is_empty() {
+            println!("degradations: {}", report.degradations.len());
+            for degradation in &report.degradations {
+                println!("  {}", degradation.describe());
+            }
+        }
     }
 
     if !report.success && !json {

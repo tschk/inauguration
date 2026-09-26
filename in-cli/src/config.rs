@@ -22,6 +22,10 @@ pub fn env_config() -> &'static EnvConfig {
 pub struct EnvConfig {
     /// `IN_SKIP_VERIFY`: skip Core IR verification in the JIT path.
     pub skip_verify: bool,
+    /// `IN_STRICT_LOWERING`: fail the build when the native lowerer replaced any
+    /// function with a runtime trap. Off by default because the self-hosting
+    /// path intentionally degrades a small number of stdlib functions.
+    pub strict_lowering: bool,
     /// `IN_SIL_CALLEE_DRIVEN_HOTRELOAD`: enable experimental callee-driven hotreload.
     pub sil_callee_driven_hotreload: bool,
     /// `IN_NATIVE_SWIFT_SIL`: when present and not equal to `only`, allow native Swift SIL.
@@ -41,6 +45,9 @@ impl EnvConfig {
     pub fn from_env() -> Self {
         Self {
             skip_verify: std::env::var("IN_SKIP_VERIFY").is_ok(),
+            strict_lowering: std::env::var("IN_STRICT_LOWERING")
+                .ok()
+                .is_some_and(|v| parse_env_bool(&v)),
             sil_callee_driven_hotreload: std::env::var("IN_SIL_CALLEE_DRIVEN_HOTRELOAD")
                 .ok()
                 .is_some_and(|v| parse_env_bool(&v)),
