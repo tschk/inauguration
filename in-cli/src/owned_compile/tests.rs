@@ -762,6 +762,29 @@ fn bare_source_without_entry_keeps_main_through_optimization() {
     fs::remove_file(source_path).unwrap();
 }
 
+/// Only Int and Bool arrive in the register the JIT reads back, so a Float entry
+/// must not report a value that an exit status cannot carry.
+#[test]
+fn float_entry_reports_no_jit_exit_status() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let source_path = temp_path("float-main.in");
+    fs::write(&source_path, "fn main() -> Float { return 2.5 + 3.5; }\n").unwrap();
+
+    let report = compile_owned(&default_request(
+        source_path.clone(),
+        CompileTarget::Jit,
+        None,
+        None,
+    ));
+
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.eval_exit_code, Some(0), "{report:?}");
+    assert_eq!(report.eval_result, None, "{report:?}");
+    fs::remove_file(source_path).unwrap();
+}
+
 #[test]
 fn report_to_json_roundtrip_fields() {
     if !native_backend::native_subset_host_available() {

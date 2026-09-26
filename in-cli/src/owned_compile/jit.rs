@@ -123,6 +123,25 @@ pub fn compile_jit(
         })
         .unwrap_or(false);
 
+    // The JIT hands back the register a function returns in. Only Int and Bool
+    // arrive in x0, and a reference is not an exit status, so reporting the
+    // register for anything else would invent a value.
+    let entry_returns_int = expanded_module
+        .decls
+        .iter()
+        .find_map(|decl| match decl {
+            crate::core_ir::Decl::Function { name, ret, .. }
+                if name == &resolved_entry || name.ends_with(&format!(".{resolved_entry}")) =>
+            {
+                Some(matches!(
+                    ret.canonical(),
+                    crate::core_ir::Typ::Int | crate::core_ir::Typ::Bool
+                ))
+            }
+            _ => None,
+        })
+        .unwrap_or(false);
+
     // Select lowering based on host architecture
     let lowered = if cfg!(target_arch = "x86_64") {
         let result = {
@@ -200,21 +219,22 @@ pub fn compile_jit(
         (0, None, None)
     } else {
         let raw = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
-        let decode_string = entry_returns_string && raw != 0 && request.out.is_none();
-        let string = if decode_string {
-            decode_jit_string(raw).unwrap_or_default()
-        } else {
-            String::new()
-        };
-        (
-            raw as u8,
-            Some(raw),
-            if entry_returns_string {
-                Some(string)
+        if entry_returns_int {
+            (raw as u8, Some(raw), None)
+        } else if entry_returns_string {
+            let decode_string = raw != 0 && request.out.is_none();
+            let string = if decode_string {
+                decode_jit_string(raw).unwrap_or_default()
             } else {
-                None
-            },
-        )
+                String::new()
+            };
+            // The decoded string is the value; the pointer is not an exit status.
+            (0, None, Some(string))
+        } else {
+            // The entry returns something an exit status cannot carry (Float,
+            // Void, an aggregate). Run it for its effects, report no result.
+            (0, None, None)
+        }
     };
 
     let reason_code = if is_rust {
