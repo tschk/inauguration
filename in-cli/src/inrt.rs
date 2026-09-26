@@ -16,6 +16,11 @@ pub const INRT_STR_CONCAT: &str = "__inrt_str_concat";
 pub const INRT_STR_EQ: &str = "__inrt_str_eq";
 pub const INRT_STR_CONTAINS: &str = "__inrt_str_contains";
 
+/// Standard-output writers, embedded so a native artifact can print: the JIT's
+/// `in_print` and `in_print_int` wrappers do not exist outside the compiler.
+pub const INRT_PRINT: &str = "__inrt_print";
+pub const INRT_PRINT_INT: &str = "__inrt_print_int";
+
 /// Builtin reached when a native program executes code the lowerer could not
 /// compile. It writes the supplied message to stderr and exits with
 /// [`INRT_TRAP_EXIT_CODE`]; it never returns.
@@ -31,6 +36,8 @@ pub const INRT_BUILTINS: &[&str] = &[
     INRT_STR_CONCAT,
     INRT_STR_EQ,
     INRT_STR_CONTAINS,
+    INRT_PRINT,
+    INRT_PRINT_INT,
     "__inrt_str_substr",
     "__inrt_array_len",
     "__inrt_array_load",
@@ -50,6 +57,7 @@ pub fn inrt_builtin_param_slots(name: &str) -> Option<usize> {
         "__inrt_array_store" => Some(3),
         "__inrt_array_push" => Some(2),
         INRT_STR_CONCAT | INRT_STR_EQ | INRT_STR_CONTAINS => Some(2),
+        INRT_PRINT | INRT_PRINT_INT => Some(1),
         "__inrt_str_substr" => Some(3),
         INRT_TRAP_BUILTIN => Some(2),
         _ => None,
@@ -266,6 +274,79 @@ fn build_inrt_str_eq() -> Vec<u8> {
     }
     let offset = equal as i32 - both_empty as i32;
     e.patch_u32(both_empty, aarch64::b_cond(aarch64::COND_EQ, offset));
+    e.bytes
+}
+
+/// `__inrt_print(instring) -> void` — writes the payload to stdout.
+///
+/// The JIT resolves the Rust `in_print` wrapper; a native artifact has no such
+/// symbol, so without this builtin a native program could not print at all.
+/// `write(2)` is used rather than `printf` because an instring payload is not
+/// NUL-terminated. A null pointer prints nothing, matching the wrapper.
+fn build_inrt_print() -> Vec<u8> {
+    let mut e = aarch64::CodeEmitter::new();
+    e.emit_u32(aarch64::cmp_reg64(X0, XZR));
+    let null_pointer = e.emit_insn(aarch64::b_cond(aarch64::COND_EQ, 0));
+    e.emit_u32(aarch64::ldr64(X2, X0, 0)); // byte length
+    e.emit_u32(aarch64::add_imm64(X1, X0, 8)); // payload
+    e.emit_u32(aarch64::movz64(X0, 1, 0)); // stdout
+    e.emit_u32(aarch64::movz64(X16, 4, 0)); // SYS_write
+    e.emit_u32(aarch64::svc(0x80));
+    let done = e.len();
+    e.emit_u32(aarch64::ret());
+    let offset = done as i32 - null_pointer as i32;
+    e.patch_u32(null_pointer, aarch64::b_cond(aarch64::COND_EQ, offset));
+    e.bytes
+}
+
+/// `__inrt_print_int(i64) -> void` — writes the decimal value to stdout.
+///
+/// Digits are produced by repeated unsigned division into a stack buffer, so no
+/// libc conversion is involved and the payload needs no terminator. The
+/// magnitude is taken as unsigned, which also gets `i64::MIN` right: negating it
+/// yields a value whose unsigned reading is exactly its magnitude.
+fn build_inrt_print_int() -> Vec<u8> {
+    let mut e = aarch64::CodeEmitter::new();
+    e.emit_u32(aarch64::stp_pre(FP, LR, -48));
+    e.emit_u32(aarch64::add_imm64(FP, SP, 0));
+    e.emit_u32(aarch64::add_imm64(X1, SP, 48)); // one past the last digit
+    e.emit_u32(aarch64::movz64(X2, 10, 0)); // divisor
+    e.emit_u32(aarch64::mov_zero64(X7)); // sign: 0 positive, 1 negative
+    e.emit_u32(aarch64::cmp_reg64(X0, XZR));
+    let non_negative = e.emit_insn(aarch64::b_cond(10, 0)); // B.GE, signed
+    e.emit_u32(aarch64::movz64(X7, 1, 0));
+    e.emit_u32(aarch64::sub_reg64(X0, XZR, X0)); // magnitude
+    let digits = e.len();
+    e.patch_u32(
+        non_negative,
+        aarch64::b_cond(10, digits as i32 - non_negative as i32),
+    );
+    e.emit_u32(aarch64::udiv64(X5, X0, X2));
+    e.emit_u32(aarch64::msub64(X6, X5, X2, X0)); // remainder
+    e.emit_u32(aarch64::add_imm64(X6, X6, 48)); // '0'
+    e.emit_u32(aarch64::sub_imm64(X1, X1, 1));
+    e.emit_u32(aarch64::strb(X6, X1, 0));
+    e.emit_u32(aarch64::mov_reg64(X0, X5));
+    e.emit_u32(aarch64::cmp_reg64(X0, XZR));
+    let back = digits as i32 - e.len() as i32;
+    e.emit_u32(aarch64::b_cond(aarch64::COND_NE, back));
+    e.emit_u32(aarch64::cmp_reg64(X7, XZR));
+    let no_sign = e.emit_insn(aarch64::b_cond(aarch64::COND_EQ, 0));
+    e.emit_u32(aarch64::sub_imm64(X1, X1, 1));
+    e.emit_u32(aarch64::movz64(X6, 45, 0)); // '-'
+    e.emit_u32(aarch64::strb(X6, X1, 0));
+    let write = e.len();
+    e.patch_u32(
+        no_sign,
+        aarch64::b_cond(aarch64::COND_EQ, write as i32 - no_sign as i32),
+    );
+    e.emit_u32(aarch64::add_imm64(X2, SP, 48));
+    e.emit_u32(aarch64::sub_reg64(X2, X2, X1)); // length
+    e.emit_u32(aarch64::movz64(X0, 1, 0)); // stdout
+    e.emit_u32(aarch64::movz64(X16, 4, 0)); // SYS_write
+    e.emit_u32(aarch64::svc(0x80));
+    e.emit_u32(aarch64::ldp_post(FP, LR, 48));
+    e.emit_u32(aarch64::ret());
     e.bytes
 }
 
@@ -612,6 +693,8 @@ pub fn build_runtime_blob() -> (Vec<u8>, BTreeMap<String, u32>) {
     add_fn!(INRT_STR_CONCAT, build_inrt_str_concat());
     add_fn!(INRT_STR_EQ, build_inrt_str_eq());
     add_fn!(INRT_STR_CONTAINS, build_inrt_str_contains());
+    add_fn!(INRT_PRINT, build_inrt_print());
+    add_fn!(INRT_PRINT_INT, build_inrt_print_int());
     add_fn!("__inrt_str_substr", build_inrt_str_substr());
     add_fn!("__inrt_array_len", build_inrt_array_len());
     add_fn!("__inrt_array_load", build_inrt_array_load());
@@ -683,6 +766,8 @@ mod tests {
                 INRT_STR_CONCAT => build_inrt_str_concat(),
                 INRT_STR_EQ => build_inrt_str_eq(),
                 INRT_STR_CONTAINS => build_inrt_str_contains(),
+                INRT_PRINT => build_inrt_print(),
+                INRT_PRINT_INT => build_inrt_print_int(),
                 "__inrt_str_substr" => build_inrt_str_substr(),
                 "__inrt_array_len" => build_inrt_array_len(),
                 "__inrt_array_load" => build_inrt_array_load(),
