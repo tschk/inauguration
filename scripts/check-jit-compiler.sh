@@ -28,8 +28,15 @@ fn main() -> Int {
 EOF
 
 echo 'jit compile ok: polyglot sample'
-output="$("${IN_CMD[@]}" execute --verbose "$tmp_dir/sample.in" --module-id App 2>&1)"
+# `in execute` reports a nonzero program status as an error, and this sample's
+# main returns 42, so a nonzero CLI status is expected here. Capture it instead
+# of letting `set -e` abort, then assert on the output and the propagated status.
+status=0
+output="$("${IN_CMD[@]}" execute --verbose "$tmp_dir/sample.in" --module-id App 2>&1)" || status=$?
 printf '%s\n' "$output" | grep -q 'result: Int(42)'
-
-echo 'jit compile ok: agent-native sample'
 printf '%s\n' "$output" | grep -q '^ready'
+printf '%s\n' "$output" | grep -q 'program exited with status 42'
+if [ "$status" -eq 0 ]; then
+  echo "expected in execute to fail on the program's nonzero status" >&2
+  exit 1
+fi
