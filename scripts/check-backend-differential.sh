@@ -68,9 +68,17 @@ classify() {
     return
   fi
 
-  local native_status=0
-  "$bin" >"$tmp_dir/native.out" 2>/dev/null || native_status=$?
-  if [[ $native_status -ge 128 ]]; then
+  # `$?` cannot tell "exited with 191" from "killed by signal 63": both read as
+  # 191. Ask Python for the real termination so a large exit value is not
+  # mistaken for a crash. A negative code means the process died from a signal.
+  local native_status
+  native_status=$(python3 -c '
+import subprocess, sys
+with open(sys.argv[2], "wb") as out:
+    proc = subprocess.run([sys.argv[1]], stdout=out, stderr=subprocess.DEVNULL)
+print(proc.returncode)
+' "$bin" "$tmp_dir/native.out")
+  if [[ $native_status -lt 0 ]]; then
     echo "native-crash"
     return
   fi

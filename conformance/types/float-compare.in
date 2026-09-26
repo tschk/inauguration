@@ -1,0 +1,22 @@
+// @expect parse: ok
+// @expect bytecode: executes
+// @expect result: Int(191)
+
+// Every comparison operator on floats, plus the two unordered cases a NaN
+// operand creates. The weights are powers of two and the total fits in a byte,
+// so the same program is meaningful as a native exit status too.
+fn main() -> Int {
+  let below: Float = -1.5;
+  let above: Float = 2.5;
+  let nan: Float = 0.0 / 0.0;
+  let score: Int = 0;
+  if below < above { score = score + 1; }
+  if above <= 2.5 { score = score + 2; }
+  if above > below { score = score + 4; }
+  if below >= -1.5 { score = score + 8; }
+  if above == 2.5 { score = score + 16; }
+  if below != above { score = score + 32; }
+  if nan < 1.0 { score = score + 64; }
+  if nan != nan { score = score + 128; }
+  return score;
+}
