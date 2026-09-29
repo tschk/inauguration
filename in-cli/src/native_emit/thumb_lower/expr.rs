@@ -816,7 +816,9 @@ mod tests {
         // immediate encodes imm/4. R0 stores: 0x9000 | imm8.
         let str_imm_offsets: Vec<u32> = emitter
             .bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .filter(|hw| hw & 0xF000 == 0x9000 && (hw >> 8) & 0x7 == 0)
             .map(|hw| ((hw & 0xFF) as u32) * 4)

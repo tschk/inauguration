@@ -299,10 +299,10 @@ fn prefix_module_decls(mut decls: Vec<Decl>, module: &str) -> Vec<Decl> {
     }
     for d in &mut decls {
         match d {
-            Decl::Function { name, .. } | Decl::Struct { name, .. } => {
-                if !name.contains("::") || !name.starts_with(module) {
-                    *name = format!("{module}::{name}");
-                }
+            Decl::Function { name, .. } | Decl::Struct { name, .. }
+                if !name.contains("::") || !name.starts_with(module) =>
+            {
+                *name = format!("{module}::{name}");
             }
             _ => {}
         }
