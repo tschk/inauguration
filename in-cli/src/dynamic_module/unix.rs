@@ -103,35 +103,31 @@ pub fn load_dynamic_module(path: &Path) -> Result<Box<dyn DynamicModule>, Dynami
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::process::Command;
 
-    fn compile_c_fixture(c_src: &str, lib_name: &str) -> std::path::PathBuf {
-        let out_dir = std::env::temp_dir().join(format!(
-            "in-dyn-unix-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&out_dir).expect("temp dir");
-        let lib = out_dir.join(lib_name);
-        let src = out_dir.join("src.c");
-        std::fs::write(&src, c_src).expect("write src");
-
-        let status = Command::new("cc")
+    fn compile_dummy_library(c_code: &str, output_path: &Path) {
+        let mut child = Command::new("cc")
             .args([
                 "-shared",
                 "-fPIC",
-                "-O0",
                 "-o",
-                lib.to_str().expect("lib path"),
-                src.to_str().expect("source path"),
+                output_path.to_str().unwrap(),
+                "-xc",
+                "-",
             ])
-            .status()
-            .expect("cc");
-        assert!(status.success(), "cc failed to build fixture");
-        lib
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn cc");
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(c_code.as_bytes())
+                .expect("Failed to write to stdin");
+        }
+
+        let status = child.wait().expect("Failed to wait for cc");
+        assert!(status.success(), "cc failed");
     }
 
     #[test]
@@ -142,22 +138,39 @@ mod tests {
     }
 
     #[test]
-    fn test_load_dynamic_module_entry_missing() {
-        let lib = compile_c_fixture("void some_other_function() {}", "libmissing.so");
-        let result = load_dynamic_module(&lib);
-        assert!(matches!(
-            result,
-            Err(DynamicModuleError::EntryMissing { .. })
-        ));
+    fn test_load_dynamic_module_missing_symbol() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_missing_symbol.so");
+        compile_dummy_library("void dummy() {}", &path);
+
+        let result = load_dynamic_module(&path);
+
+        if let Err(DynamicModuleError::EntryMissing { symbol, .. }) = result {
+            assert_eq!(symbol, super::IN_MODULE_ENTRY_SYMBOL);
+        } else {
+            panic!("Expected EntryMissing error, got: {:?}", result.err());
+        }
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn test_load_dynamic_module_null_vtable() {
-        let lib = compile_c_fixture("void* in_module_vtable() { return 0; }", "libnull.so");
-        let result = load_dynamic_module(&lib);
-        assert!(matches!(
-            result,
-            Err(DynamicModuleError::LoadFailed { ref reason, .. }) if reason == "entry returned null vtable"
-        ));
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_null_vtable.so");
+        compile_dummy_library("void* in_module_vtable() { return 0; }", &path);
+
+        let result = load_dynamic_module(&path);
+
+        if let Err(DynamicModuleError::LoadFailed { reason, .. }) = result {
+            assert_eq!(reason, "entry returned null vtable");
+        } else {
+            panic!(
+                "Expected LoadFailed error with null vtable reason, got: {:?}",
+                result.err()
+            );
+        }
+
+        let _ = std::fs::remove_file(path);
     }
 }
