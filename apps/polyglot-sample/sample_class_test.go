@@ -3,9 +3,15 @@ package main
 import "testing"
 
 func TestNewCalculator(t *testing.T) {
-	calc := NewCalculator()
-	if calc.value != 0 {
-		t.Errorf("Expected Initialized Calculator value to be 0, got %d", calc.value)
+	calc1 := NewCalculator()
+	if calc1.value != 0 {
+		t.Errorf("Expected Initialized Calculator value to be 0, got %d", calc1.value)
+	}
+
+	calc2 := NewCalculator()
+	calc1.Add(5)
+	if calc2.value != 0 {
+		t.Errorf("Expected second Calculator value to remain 0, got %d", calc2.value)
 	}
 }
 
