@@ -129,8 +129,12 @@ pub(crate) fn rename_call_expr(expr: &mut Expr, name_map: &HashMap<String, Strin
 
 pub(crate) fn entry_return_kind(ret: &Typ) -> EntryReturn {
     match canonical_type(ret) {
-        Typ::Int | Typ::Float | Typ::Bool => EntryReturn::IntLike,
-        Typ::String
+        Typ::Int | Typ::Bool => EntryReturn::IntLike,
+        // A Float comes back in v0, not x0, so the entry stub cannot exit with
+        // it; treating it as IntLike made the process exit with whatever the
+        // register happened to hold.
+        Typ::Float
+        | Typ::String
         | Typ::Void
         | Typ::Array(_)
         | Typ::Vector(_)
@@ -211,11 +215,15 @@ pub(crate) fn collect_strings(module: &UnifiedModule) -> HashMap<String, i64> {
     }
     values.sort();
     values.dedup();
+    // The empty string keeps index 0 so that `string_id("")` names a real
+    // zero-length table entry instead of a null pointer: an empty literal must
+    // be safe to read a length header from (matching, comparing, `str-len`).
+    // `""` sorts first, so every other literal keeps the index it had while
+    // empty literals were dropped from the pool.
     values
         .into_iter()
-        .filter(|value| !value.is_empty())
         .enumerate()
-        .map(|(idx, value)| (value, idx as i64 + 1))
+        .map(|(idx, value)| (value, idx as i64))
         .collect()
 }
 

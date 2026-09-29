@@ -1936,7 +1936,9 @@ fn lowers_float_add_instruction() {
     let module = return_float_binary_module("+", 3.0, 4.0);
     let lowered =
         lower_module(&module, "main", NativeLinkage::Executable).expect("float add should lower");
-    assert!(code_contains_insn(&lowered.code, aarch64::fadd_s(0, 0, 1)));
+    // Double precision: `Float` is `f64`, so the single-precision form would
+    // read only the low half of the operand registers.
+    assert!(code_contains_insn(&lowered.code, aarch64::fadd_d(0, 0, 1)));
     assert!(code_contains_insn(
         &lowered.code,
         aarch64::fmov_from_gp(0, 0)
@@ -1949,7 +1951,7 @@ fn lowers_float_mul_instruction() {
     let module = return_float_binary_module("*", 2.0, 3.0);
     let lowered =
         lower_module(&module, "main", NativeLinkage::Executable).expect("float mul should lower");
-    assert!(code_contains_insn(&lowered.code, aarch64::fmul_s(0, 0, 1)));
+    assert!(code_contains_insn(&lowered.code, aarch64::fmul_d(0, 0, 1)));
 }
 
 #[test]
@@ -1957,7 +1959,7 @@ fn lowers_float_sub_instruction() {
     let module = return_float_binary_module("-", 5.0, 2.0);
     let lowered =
         lower_module(&module, "main", NativeLinkage::Executable).expect("float sub should lower");
-    assert!(code_contains_insn(&lowered.code, aarch64::fsub_s(0, 0, 1)));
+    assert!(code_contains_insn(&lowered.code, aarch64::fsub_d(0, 0, 1)));
 }
 
 #[test]
@@ -1965,7 +1967,7 @@ fn lowers_float_div_instruction() {
     let module = return_float_binary_module("/", 10.0, 2.0);
     let lowered =
         lower_module(&module, "main", NativeLinkage::Executable).expect("float div should lower");
-    assert!(code_contains_insn(&lowered.code, aarch64::fdiv_s(0, 0, 1)));
+    assert!(code_contains_insn(&lowered.code, aarch64::fdiv_d(0, 0, 1)));
 }
 
 #[test]
@@ -2183,4 +2185,216 @@ fn main() -> Int {
     rt.load(&lowered.code, &function_offsets, &lowered.relocations)
         .expect("jit load");
     assert_eq!(unsafe { rt.invoke("main", &[]).expect("invoke") }, 1);
+}
+
+/// A function the lowerer cannot compile must be reported, and reaching it must
+/// abort rather than return a fabricated value.
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn skipped_function_traps_instead_of_returning_zero() {
+    let module = crate::in_lang_parse::parse_in_source(
+        r#"
+fn nothing() -> void { return; }
+
+fn bad() -> Int {
+  let v = nothing();
+  return 1;
+}
+
+fn main() -> Int {
+  return bad();
+}
+"#,
+    )
+    .expect("parse");
+
+    let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
+    assert_eq!(lowered.degradations.len(), 1, "{:?}", lowered.degradations);
+    let degradation = &lowered.degradations[0];
+    assert_eq!(degradation.code, DEGRADATION_SKIPPED_FUNCTION);
+    assert_eq!(degradation.function, "bad");
+    assert!(degradation.reachable, "main calls bad, so its trap is live");
+
+    let path = temp_executable("skipped-trap");
+    compile_native_executable(&module, "main", &path).expect("compile");
+    let output = run_native_exe(&path);
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(inrt::INRT_TRAP_EXIT_CODE)),
+        "trapped program must not report a normal exit"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("IN3001"), "stderr was {stderr:?}");
+    assert!(stderr.contains("bad"), "stderr was {stderr:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A trap nothing can reach is dead code, and is reported as such.
+#[test]
+fn unreachable_skipped_function_is_marked_not_reachable() {
+    let module = crate::in_lang_parse::parse_in_source(
+        r#"
+fn nothing() -> void { return; }
+
+fn unused() -> Int {
+  let v = nothing();
+  return 7;
+}
+
+fn main() -> Int {
+  return 3;
+}
+"#,
+    )
+    .expect("parse");
+
+    let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
+    assert_eq!(lowered.degradations.len(), 1, "{:?}", lowered.degradations);
+    assert_eq!(lowered.degradations[0].function, "unused");
+    assert!(
+        !lowered.degradations[0].reachable,
+        "nothing calls unused, so its trap is dead code"
+    );
+}
+
+/// throw/try/catch writes the flag and value through x27. The JIT runtime points
+/// x27 at its error page, but a native executable has no runtime, so it used to
+/// write through an unset register and die with a signal. The generated assembly
+/// must declare a writable slot and the artifact must run the catch arm.
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_executable_runs_try_catch_without_crashing() {
+    let module = crate::in_lang_parse::parse_in_source(
+        r#"
+fn might-fail(x: Int) -> Int {
+  if (x < 0) {
+    throw 7;
+  }
+  return 1;
+}
+
+fn main() -> Int {
+  try {
+    might-fail(-1);
+  } catch (e) {
+    return 42;
+  }
+  return 1;
+}
+"#,
+    )
+    .expect("parse");
+
+    let path = temp_executable("try-catch");
+    compile_native_executable(&module, "main", &path).expect("compile");
+
+    let asm = std::fs::read_to_string(path.with_extension("s")).expect("assembly sidecar");
+    assert!(
+        asm.contains("_inrt_error_slot"),
+        "assembly must declare the error slot:\n{asm}"
+    );
+
+    let output = run_native_exe(&path);
+    assert_eq!(
+        output.status.code(),
+        Some(42),
+        "the catch arm must run instead of the process dying: {output:?}"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("s"));
+    let _ = std::fs::remove_file(path.with_extension("o"));
+}
+
+/// A Float return arrives in v0, so the entry stub must not exit with x0; doing
+/// so made the process exit with whatever that register happened to hold.
+#[test]
+fn float_entry_is_not_an_exit_status() {
+    assert_eq!(
+        entry_return_kind(&crate::core_ir::Typ::Float),
+        EntryReturn::VoidOrReference
+    );
+    assert_eq!(
+        entry_return_kind(&crate::core_ir::Typ::Int),
+        EntryReturn::IntLike
+    );
+    assert_eq!(
+        entry_return_kind(&crate::core_ir::Typ::Bool),
+        EntryReturn::IntLike
+    );
+}
+
+/// The embedded string runtime's equality and search builtins have to agree with
+/// the Rust wrappers the JIT uses, since only native artifacts call the blob.
+/// Each weight below isolates one case: equal, same length but different bytes,
+/// different lengths, a substring in the middle, an absent substring, an empty
+/// needle, an exact match, and a needle longer than the haystack.
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn jit_executes_the_embedded_string_eq_and_contains() {
+    let module = crate::in_lang_parse::parse_in_source(
+        r#"
+fn main() -> Int {
+  let equal: Int = __inrt_str_eq("same", "same");
+  let differing: Int = __inrt_str_eq("same", "samo");
+  let shorter: Int = __inrt_str_eq("same", "sam");
+  let middle: Int = __inrt_str_contains("hello world", "o w");
+  let absent: Int = __inrt_str_contains("hello world", "xyz");
+  let empty: Int = __inrt_str_contains("hello", "");
+  let whole: Int = __inrt_str_contains("hi", "hi");
+  let too_long: Int = __inrt_str_contains("hi", "hihi");
+  return equal + differing * 10 + shorter * 100 + middle * 1000 + absent * 10000 + empty * 100000 + whole * 1000000 + too_long * 10000000;
+}
+"#,
+    )
+    .expect("parse");
+    let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
+    let function_offsets = vec![(
+        "main".into(),
+        ENTRY_STUB_SIZE,
+        lowered.code.len() as u32 - ENTRY_STUB_SIZE,
+    )];
+    let mut rt = crate::jit_runtime::JitRuntime::new();
+    rt.load(&lowered.code, &function_offsets, &lowered.relocations)
+        .expect("jit load");
+    let raw = unsafe { rt.invoke("main", &[]).expect("invoke") };
+    // 1 for equality, 1000 for the substring, 100000 for the empty needle, and
+    // 1000000 for the exact match; every other case must contribute nothing.
+    assert_eq!(
+        raw, 1_101_001,
+        "str_eq/str_contains disagreed with the wrapper semantics"
+    );
+}
+
+/// The embedded string runtime has to actually concatenate. The JIT resolved the
+/// Rust-side wrapper for every string operation, so the blob's copy loops were
+/// never exercised and shipped broken: it copied eight bytes per index, used loop
+/// bounds a syscall had clobbered, and wrote past the frame it saved into.
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn jit_executes_the_embedded_string_concat() {
+    let module = crate::in_lang_parse::parse_in_source(
+        r#"
+fn main() -> String {
+  return __inrt_str_concat("hello", " world");
+}
+"#,
+    )
+    .expect("parse");
+    let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
+    let function_offsets = vec![(
+        "main".into(),
+        ENTRY_STUB_SIZE,
+        lowered.code.len() as u32 - ENTRY_STUB_SIZE,
+    )];
+    let mut rt = crate::jit_runtime::JitRuntime::new();
+    rt.load(&lowered.code, &function_offsets, &lowered.relocations)
+        .expect("jit load");
+    let raw = unsafe { rt.invoke("main", &[]).expect("invoke") };
+    assert_ne!(raw, 0, "concat returned a null string");
+
+    // An instring is an 8-byte length header followed by the bytes.
+    let ptr = raw as *const u8;
+    let len = unsafe { *(ptr as *const u64) as usize };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr.add(8), len) };
+    assert_eq!(String::from_utf8_lossy(bytes), "hello world");
 }

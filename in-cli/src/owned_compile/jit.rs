@@ -9,7 +9,17 @@ use std::path::PathBuf;
 
 use super::native::NativeCompileResult;
 use super::report::jobs_for_request;
-use super::{CompileTarget, OwnedCompileRequest};
+use super::{CompileTarget, EvalValue, OwnedCompileRequest};
+
+/// Which register or pointer the entry's result has to be read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryResultKind {
+    Int,
+    Bool,
+    Float,
+    String,
+    None,
+}
 
 /// Resolve a JIT entry name against `module`'s function declarations.
 /// Tries: exact match, namespaced (`.<entry>`), suffix match, then falls
@@ -114,8 +124,8 @@ pub fn compile_jit(
         return Ok(NativeCompileResult {
             artifact_path: String::new(),
             eval_exit_code: Some(raw as u8),
-            eval_result: Some(raw),
-            eval_result_string: None,
+            eval_result: Some(super::EvalValue::Int(raw)),
+            degradations: Vec::new(),
             abi_path: None,
             backend_level: "owned-inisa-sci".to_string(),
             runtime_level: "inisa-interpreter".to_string(),
@@ -127,18 +137,27 @@ pub fn compile_jit(
 
     native_link::bootstrap_jit_native();
 
-    let entry_returns_string = expanded_module
+    // How to read the entry's result value, which the declared return type
+    // decides: `Int` and `Bool` arrive in x0, `Float` in d0, and `String` as a
+    // pointer to an instring.
+    let entry_result_kind = expanded_module
         .decls
         .iter()
         .find_map(|decl| match decl {
             crate::core_ir::Decl::Function { name, ret, .. }
                 if name == &resolved_entry || name.ends_with(&format!(".{resolved_entry}")) =>
             {
-                Some(ret.canonical() == crate::core_ir::Typ::String)
+                Some(match ret.canonical() {
+                    crate::core_ir::Typ::Int => EntryResultKind::Int,
+                    crate::core_ir::Typ::Bool => EntryResultKind::Bool,
+                    crate::core_ir::Typ::Float => EntryResultKind::Float,
+                    crate::core_ir::Typ::String => EntryResultKind::String,
+                    _ => EntryResultKind::None,
+                })
             }
             _ => None,
         })
-        .unwrap_or(false);
+        .unwrap_or(EntryResultKind::None);
 
     // Data section for the JIT load — only the x86_64 lowering produces one.
     let mut jit_data: Vec<u8> = Vec::new();
@@ -167,6 +186,8 @@ pub fn compile_jit(
                 .map(|o| (o, result.codegen_base))
                 .collect(),
             external_refs: Vec::new(),
+            degradations: Vec::new(),
+            error_slot_refs: Vec::new(),
         }
     } else {
         let jobs = jobs_for_request(request);
@@ -178,6 +199,8 @@ pub fn compile_jit(
         )
         .map_err(|e| format!("jit-lowering-failed: {e}"))?
     };
+
+    let degradations = lowered.degradations;
 
     // Build function offset table for all compiled functions
     let function_offsets: Vec<(String, u32, u32)> = lowered
@@ -211,25 +234,50 @@ pub fn compile_jit(
     // code doesn't handle struct layouts correctly and crashes at runtime.
     // Only JIT-execute non-Rust (in-lang, icore) programs.
     let is_rust = request.path.extension().is_some_and(|e| e == "rs");
-    let (exit_code, eval_result, eval_result_string) = if is_rust {
-        (0, None, None)
+    // Code the lowerer replaced with a trap cannot be executed: the trap writes
+    // to stderr and exits, which would take the compiler process down with it.
+    // Only traps the entry can reach matter; unreachable ones are dead code.
+    if !is_rust && let Some(first) = degradations.iter().find(|d| d.reachable) {
+        let live = degradations.iter().filter(|d| d.reachable).count();
+        return Err(format!(
+            "jit-degraded: {live} reachable function(s) could not be compiled to native code, starting with `{}` ({}); refusing to execute code that would trap",
+            first.function, first.code
+        ));
+    }
+    let (exit_code, eval_result) = if is_rust {
+        (0, None)
     } else {
-        let raw = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
-        let decode_string = entry_returns_string && raw != 0 && request.out.is_none();
-        let string = if decode_string {
-            decode_jit_string(raw).unwrap_or_default()
-        } else {
-            String::new()
-        };
-        (
-            raw as u8,
-            Some(raw),
-            if entry_returns_string {
-                Some(string)
-            } else {
-                None
-            },
-        )
+        match entry_result_kind {
+            EntryResultKind::Int => {
+                let raw = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
+                (raw as u8, Some(EvalValue::Int(raw)))
+            }
+            EntryResultKind::Bool => {
+                let raw = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
+                (raw as u8, Some(EvalValue::Bool(raw != 0)))
+            }
+            EntryResultKind::Float => {
+                let value = unsafe { rt.invoke_float(&resolved_entry) };
+                (0, value.map(EvalValue::Float))
+            }
+            EntryResultKind::String => {
+                let raw = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
+                let decode_string = raw != 0 && request.out.is_none();
+                let string = if decode_string {
+                    decode_jit_string(raw).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                // The decoded string is the value; the pointer is not an exit status.
+                (0, Some(EvalValue::Str(string)))
+            }
+            EntryResultKind::None => {
+                // The entry returns something an exit status cannot carry (Void,
+                // an aggregate). Run it for its effects, report no result.
+                let _ = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
+                (0, None)
+            }
+        }
     };
 
     let reason_code = if is_rust {
@@ -247,12 +295,12 @@ pub fn compile_jit(
         artifact_path: String::new(),
         eval_exit_code: Some(exit_code),
         eval_result,
-        eval_result_string,
         abi_path: None,
         backend_level: "owned-native-jit".to_string(),
         runtime_level: "inrt-jit".to_string(),
         reason_code: reason_code.to_string(),
         reason: reason.to_string(),
+        degradations,
     })
 }
 
@@ -303,13 +351,21 @@ pub fn const_eval_entry_exit_code(
     if let Some(code) = try_const_answer_entry(module, entry) {
         return Ok(code);
     }
-    let code = eval_entry_via_jit(module, entry)?;
-    if !(0..=255).contains(&code) {
-        return Err(format!(
-            "native compile entry `{entry}` exit code {code} is outside 0..=255"
-        ));
-    }
-    Ok(code as u8)
+    let code = match eval_entry_via_jit(module, entry) {
+        Ok(code) => code,
+        // The program cannot be executed to learn its exit code because it
+        // contains code the lowerer replaced with a trap. The native entry stub
+        // computes the real code at runtime, so a caller that only reports it can
+        // continue with an unknown value instead of a guess.
+        Err(err) if err.starts_with("jit-degraded:") => {
+            return Err(format!("entry-exit-unknown: {err}"));
+        }
+        Err(err) => return Err(err),
+    };
+    // An exit status is eight bits: the OS truncates it exactly as it does for
+    // C's `main`. Refusing a larger value made a program returning 1000
+    // impossible to build, and `try_const_answer_entry` above already truncates.
+    Ok((code & 0xff) as u8)
 }
 
 fn eval_entry_via_jit(module: &UnifiedModule, entry: &str) -> Result<i64, String> {
@@ -337,7 +393,8 @@ fn eval_entry_via_jit(module: &UnifiedModule, entry: &str) -> Result<i64, String
     let result = compile_jit(module, "App", &request)?;
     result
         .eval_result
-        .ok_or_else(|| "jit did not produce a result for entry".to_string())
+        .and_then(|value| value.as_int())
+        .ok_or_else(|| "jit did not produce an integer result for entry".to_string())
 }
 
 #[cfg(test)]

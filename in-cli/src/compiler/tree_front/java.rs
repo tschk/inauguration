@@ -80,12 +80,38 @@ pub(super) fn extract_java_with_classes(src: &[u8], root: Node<'_>) -> Result<Ve
     let mut hits = Vec::new();
     collect_kinds(root, &["method_declaration"], &mut hits);
     for m in hits {
+        // Class-nested instance methods are captured by their Decl::Class and
+        // desugared into `Class_method` functions. Re-emitting them as free
+        // functions would duplicate them and leave the copies referencing
+        // undeclared fields. Statics (e.g. `main`) stay top-level.
+        if nested_in_type_decl(m) && !node_is_static(src, m) {
+            continue;
+        }
         if let Some(d) = java_method(src, m) {
             decls.push(d);
         }
     }
 
     Ok(decls)
+}
+
+fn nested_in_type_decl(mut n: Node<'_>) -> bool {
+    while let Some(p) = n.parent() {
+        if p.kind() == "class_declaration" || p.kind() == "interface_declaration" {
+            return true;
+        }
+        n = p;
+    }
+    false
+}
+
+fn node_is_static(src: &[u8], node: Node<'_>) -> bool {
+    // `modifiers` is a child node, not a named field in tree-sitter-java.
+    let mut w = node.walk();
+    node.named_children(&mut w)
+        .find(|ch| ch.kind() == "modifiers")
+        .map(|mods| node_txt(src, mods).contains("static"))
+        .unwrap_or(false)
 }
 
 fn java_visibility<'a>(src: &[u8], node: Node<'a>) -> Visibility {

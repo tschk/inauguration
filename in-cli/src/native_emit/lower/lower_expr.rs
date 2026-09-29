@@ -32,10 +32,6 @@ pub(crate) fn lower_expr_into(
             Ok(())
         }
         Expr::StringLit(value) => {
-            if value.is_empty() {
-                emitter.emit_insns(&aarch64::load_i64(rd, 0));
-                return Ok(());
-            }
             let id = ctx.string_id(value)?;
             let adr_site = emitter.emit_insn(aarch64::adr(rd, 0));
             ctx.pending_strings.push(super::PendingString {
@@ -530,10 +526,17 @@ pub(crate) fn lower_float_binary(
     emitter.emit_u32(aarch64::fmov_from_gp(rd, rd));
     emitter.emit_u32(aarch64::fmov_from_gp(rhs_reg, rhs_reg));
     match op {
-        "+" => emitter.emit_u32(aarch64::fadd_s(rd, rd, rhs_reg)),
-        "-" => emitter.emit_u32(aarch64::fsub_s(rd, rd, rhs_reg)),
-        "*" => emitter.emit_u32(aarch64::fmul_s(rd, rd, rhs_reg)),
-        "/" => emitter.emit_u32(aarch64::fdiv_s(rd, rd, rhs_reg)),
+        "+" => emitter.emit_u32(aarch64::fadd_d(rd, rd, rhs_reg)),
+        "-" => emitter.emit_u32(aarch64::fsub_d(rd, rd, rhs_reg)),
+        "*" => emitter.emit_u32(aarch64::fmul_d(rd, rd, rhs_reg)),
+        "/" => emitter.emit_u32(aarch64::fdiv_d(rd, rd, rhs_reg)),
+        "==" | "!=" | "<" | ">" | "<=" | ">=" => {
+            // A float comparison yields a Bool, so it produces 0/1 in `rd` like
+            // the integer comparisons; only the flags come from `fcmp`. Without
+            // this arm every float comparison refused to lower.
+            emitter.emit_u32(aarch64::fcmp_d(rd, rhs_reg));
+            return lower_comparison_result(emitter, rd, op, true);
+        }
         _ => {
             return Err(format!(
                 "native-lower: unsupported float op `{op}` in `{fn_name}`"
@@ -647,7 +650,7 @@ pub(crate) fn lower_binary(
         }
         "==" | "!=" | "===" | "!==" | "<" | ">" | "<=" | ">=" => {
             emitter.emit_u32(aarch64::cmp_reg64(lhs_reg, rhs_reg));
-            return lower_comparison_result(emitter, rd, op);
+            return lower_comparison_result(emitter, rd, op, false);
         }
         "&" | "&=" => aarch64::and_reg64(rd, lhs_reg, rhs_reg),
         "|" | "|=" => aarch64::orr_reg64(rd, lhs_reg, rhs_reg),
@@ -720,10 +723,15 @@ fn lower_string_concat(
     emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, temp));
     ctx.release_binop_temp();
     if is_native {
-        let call_site = emitter.len() as u32;
+        // A native executable links only against the system libraries, so the
+        // Rust-side wrapper is not there to link against. Call the runtime
+        // builtin embedded in the artifact instead.
+        let call_site = emitter.len();
         emitter.emit_u32(aarch64::bl(0));
-        super::TL_EXTERNAL_REFS
-            .with(|refs| refs.borrow_mut().push((call_site, wrapper.to_string())));
+        ctx.pending_inrt_calls.push(super::PendingInrtCall {
+            site: call_site,
+            target: crate::inrt::INRT_STR_CONCAT.to_string(),
+        });
     } else if let Some(native_ptr) = crate::native_emit::native_link::resolve_native_fn(wrapper) {
         emitter.emit_insns(&aarch64::load_i64(15, native_ptr as usize as i64));
         emitter.emit_u32(0xD63F_01E0u32 | (15 << 5));

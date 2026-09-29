@@ -7,6 +7,7 @@ use crate::emit_profile::EmitProfile;
 use crate::external_guard::ExternalInvocationGuard;
 use crate::native_backend;
 use crate::native_emit::NativeLinkage;
+use crate::native_emit::lower::LoweringDegradation;
 use crate::parser_registry::{self, ParserCli};
 use serde::Serialize;
 use std::fs;
@@ -22,10 +23,11 @@ mod util;
 #[cfg(test)]
 mod tests;
 
+pub use jit::resolve_jit_entry;
 pub use report::report_to_json;
 use report::{
     base_report, count_call_edges, count_functions, finalize_report, jobs_for_request,
-    timing_waves_for_jobs,
+    module_has_function, timing_waves_for_jobs,
 };
 
 use jit::compile_jit;
@@ -44,6 +46,33 @@ pub enum CompileTarget {
 pub enum OwnedEmit {
     /// Emit a raw SCI component binary loaded at the given virtual base address.
     Sci { base: u64 },
+}
+
+/// Value an executed entry point produced, in the shape the source declared.
+///
+/// An entry can return a float, which arrives in the floating-point result
+/// register rather than the integer one, and a bool, which is a distinct type
+/// even though it shares a register with an integer. Reporting every result as
+/// an integer meant a `-> Bool` function was reported as `Int(1)` and a
+/// `-> Float` function as `Int(0)`.
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub enum EvalValue {
+    Int(i64),
+    Bool(bool),
+    Float(f64),
+    Str(String),
+}
+
+impl EvalValue {
+    /// Integer form for consumers that can only carry one, such as the daemon's
+    /// response protocol. Non-integer values have no integer form.
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            EvalValue::Int(value) => Some(*value),
+            EvalValue::Bool(value) => Some(i64::from(*value)),
+            EvalValue::Float(_) | EvalValue::Str(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +120,11 @@ pub struct OwnedCompileReport {
     pub artifact_path: Option<String>,
     pub executable_path: Option<String>,
     pub abi_path: Option<String>,
+    /// Functions the lowerer replaced with a runtime trap. Empty means the
+    /// artifact contains no substituted code. Check this rather than `success`
+    /// when a build must be fully compiled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degradations: Vec<LoweringDegradation>,
     pub parsed_function_count: usize,
     pub typed_function_count: usize,
     pub call_edge_count: usize,
@@ -100,9 +134,7 @@ pub struct OwnedCompileReport {
     pub cache_hit: bool,
     pub frontend_hash: Option<String>,
     pub eval_exit_code: Option<u8>,
-    pub eval_result: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub eval_result_string: Option<String>,
+    pub eval_result: Option<EvalValue>,
     pub error: Option<String>,
 }
 
@@ -429,10 +461,11 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     // ponytail: skip Core IR verification for Rust files (self-hosting demo).
     // The syn-based Rust frontend lowers complex Rust constructs that the verifier
     // can't fully type-check yet (stdlib imports, generics, Result types).
-    // Also skip for JIT (development speed) and when IN_SKIP_VERIFY env var is set.
+    // Every other source verifies on every target, JIT included: the verifier is
+    // what turns unresolved symbols into coded refusals instead of silent wrong
+    // answers from lowering fallbacks. IN_SKIP_VERIFY remains an escape hatch.
     let effective_entry = request.entry.clone().or(pkg_entry);
-    let skip_verify =
-        request.target == CompileTarget::Jit || crate::config::env_config().skip_verify;
+    let skip_verify = is_rust_source || crate::config::env_config().skip_verify;
     if !is_rust_source && !skip_verify {
         let verify_opts = core_ir_verifier::VerifyOptions {
             entry: effective_entry.clone(),
@@ -464,10 +497,21 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     // those reachable from the entry (e.g. a shared library whose entry is
     // never invoked by the loader).
     {
-        let entry = effective_entry.as_deref();
+        // `remove_dead_functions` drops everything not reachable from the entry,
+        // and falls back to a kernel entry name when it is not told one. A bare
+        // source file with a `main` must not be stripped to nothing, so name the
+        // module's own entry when the caller did not.
+        let entry = effective_entry
+            .clone()
+            .or_else(|| module_has_function(&module, "main").then(|| "main".to_string()));
         let keep_all = request.linkage == crate::native_emit::NativeLinkage::StaticLib
             || matches!(request.emit, Some(OwnedEmit::Sci { .. }));
-        crate::core_opt::optimize_with_linkage(&mut module.decls, entry, request.profile, keep_all);
+        crate::core_opt::optimize_with_linkage(
+            &mut module.decls,
+            entry.as_deref(),
+            request.profile,
+            keep_all,
+        );
         report.typed_function_count = count_functions(&module);
         report.call_edge_count = count_call_edges(&module, &request.module_id);
     }
@@ -539,7 +583,6 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                 report.success = true;
                 report.eval_exit_code = native_result.eval_exit_code;
                 report.eval_result = native_result.eval_result;
-                report.eval_result_string = native_result.eval_result_string;
                 report.executable_path = if request.linkage == NativeLinkage::Executable {
                     Some(native_result.artifact_path.clone())
                 } else {
@@ -547,6 +590,7 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                 };
                 report.artifact_path = Some(native_result.artifact_path);
                 report.abi_path = native_result.abi_path;
+                report.degradations = native_result.degradations;
             }
             Err(err) if err == "native-host-unsupported" => {
                 let status = native_backend::native_backend_status();
@@ -593,7 +637,7 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                     report.success = true;
                     report.eval_exit_code = jit_result.eval_exit_code;
                     report.eval_result = jit_result.eval_result;
-                    report.eval_result_string = jit_result.eval_result_string;
+                    report.degradations = jit_result.degradations;
                 }
                 Err(err) => {
                     report.backend_level = "owned-native-subset".to_string();
@@ -604,6 +648,54 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                 }
             }
         }
+    }
+
+    // Code the lowerer could not compile is trapped rather than miscompiled, so
+    // the artifact is still produced. Callers that require a fully compiled
+    // artifact opt in with `IN_STRICT_LOWERING`.
+    if !report.degradations.is_empty() {
+        let live = report
+            .degradations
+            .iter()
+            .filter(|degradation| degradation.reachable)
+            .count();
+        let total = report.degradations.len();
+        if live == 0 {
+            eprintln!(
+                "in: {total} function(s) were not compiled to native code (none reachable from the entry)"
+            );
+        } else {
+            eprintln!(
+                "in: {total} function(s) were not compiled to native code ({live} reachable from the entry); reaching one aborts the program with exit {}",
+                crate::inrt::INRT_TRAP_EXIT_CODE
+            );
+        }
+        for degradation in &report.degradations {
+            let marker = if degradation.reachable {
+                " [reachable]"
+            } else {
+                ""
+            };
+            eprintln!("in: {}{marker}", degradation.describe());
+        }
+    }
+    if report.success
+        && !report.degradations.is_empty()
+        && crate::config::env_config().strict_lowering
+    {
+        let detail = report
+            .degradations
+            .iter()
+            .map(LoweringDegradation::describe)
+            .collect::<Vec<_>>()
+            .join("; ");
+        report.success = false;
+        report.reason_code = Some("native-lowering-degraded".to_string());
+        report.reason = Some(format!(
+            "{} function(s) were not compiled to native code: {detail}",
+            report.degradations.len()
+        ));
+        report.error = report.reason.clone();
     }
 
     finalize_report(report, started, &cwd, &frontend_hash)

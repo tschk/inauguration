@@ -21,10 +21,11 @@
       "params": [],
       "return": "Void",
       "body": [
+        { "kind": "let", "name": "value", "type": "Int", "value": 0 },
         {
           "kind": "assign",
           "target": "value",
-          "value": { "kind": "call", "callee": "helper" }
+          "value": { "kind": "call", "callee": "helper", "args": [] }
         },
         { "kind": "return" }
       ]

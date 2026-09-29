@@ -2,9 +2,9 @@
 // Tests: multiple methods on a class, interface declarations
 // Expected: parse ok, graph shows Calculator methods
 // @expect parse: ok
-// @expect has-function: add
-// @expect has-function: subtract
-// @expect has-function: multiply
+// @expect has-function: Calculator_add
+// @expect has-function: Calculator_subtract
+// @expect has-function: Calculator_multiply
 
 interface MathOp {
   int compute(int a, int b);

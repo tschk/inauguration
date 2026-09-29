@@ -1,8 +1,8 @@
 //! Native executable / artifact compilation helpers.
 
 use super::{
-    NativeLinkage, TL_NATIVE_MODE, boundary_from_module, build_assembly, find_sdk_root,
-    lower_module, native_link_name,
+    LoweringDegradation, NativeLinkage, TL_NATIVE_MODE, boundary_from_module, build_assembly,
+    find_sdk_root, lower_module, native_link_name,
 };
 use crate::boundary_emit;
 use crate::core_ir::UnifiedModule;
@@ -41,6 +41,26 @@ pub fn compile_native_artifact_for_host(
     compile_native_artifact(module, module_id, entry, linkage, out_path)
 }
 
+pub fn compile_native_artifact_for_host_with_report(
+    module: &UnifiedModule,
+    module_id: &str,
+    entry: &str,
+    linkage: NativeLinkage,
+    out_path: &Path,
+) -> Result<NativeArtifactOutcome, String> {
+    if !host_supports_native_subset() {
+        return Err("native-host-unsupported".to_string());
+    }
+    compile_native_artifact_with_report(module, module_id, entry, linkage, out_path)
+}
+
+/// A native artifact plus anything the lowerer could not compile.
+#[derive(Debug)]
+pub struct NativeArtifactOutcome {
+    pub abi_path: Option<PathBuf>,
+    pub degradations: Vec<LoweringDegradation>,
+}
+
 pub fn compile_native_artifact(
     module: &UnifiedModule,
     module_id: &str,
@@ -48,8 +68,23 @@ pub fn compile_native_artifact(
     linkage: NativeLinkage,
     out_path: &Path,
 ) -> Result<Option<PathBuf>, String> {
+    compile_native_artifact_with_report(module, module_id, entry, linkage, out_path)
+        .map(|outcome| outcome.abi_path)
+}
+
+/// Like [`compile_native_artifact`], but also reports code the lowerer replaced
+/// with a runtime trap. Callers that can surface that to the user should prefer
+/// this entry point.
+pub fn compile_native_artifact_with_report(
+    module: &UnifiedModule,
+    module_id: &str,
+    entry: &str,
+    linkage: NativeLinkage,
+    out_path: &Path,
+) -> Result<NativeArtifactOutcome, String> {
     TL_NATIVE_MODE.with(|m| *m.borrow_mut() = true);
     let lowered = lower_module(module, entry, linkage)?;
+    let degradations = lowered.degradations;
 
     if linkage == NativeLinkage::Executable && cfg!(target_os = "macos") {
         eprintln!(
@@ -73,28 +108,37 @@ pub fn compile_native_artifact(
             .collect();
 
         // Build assembly source from lowered code
-        let asm = build_assembly(&lowered.code, &mapped_exports, &mapped_external_refs, entry);
+        let asm = build_assembly(
+            &lowered.code,
+            &mapped_exports,
+            &mapped_external_refs,
+            &lowered.error_slot_refs,
+            entry,
+        );
         let asm_path = out_path.with_extension("s");
         std::fs::write(&asm_path, &asm).map_err(|e| format!("write assembly: {e}"))?;
 
         // Assemble with system assembler
         let obj_path = out_path.with_extension("o");
-        let as_status = std::process::Command::new("as")
+        let as_output = std::process::Command::new("as")
             .arg("-arch")
             .arg("arm64")
             .arg("-o")
             .arg(&obj_path)
             .arg(&asm_path)
-            .status()
+            .output()
             .map_err(|e| format!("as invocation failed: {e}"))?;
-        if !as_status.success() {
-            return Err("assembly failed".to_string());
+        if !as_output.status.success() {
+            return Err(format!(
+                "assembly failed: {}",
+                String::from_utf8_lossy(&as_output.stderr).trim()
+            ));
         }
 
         // Link with system linker
         let sdk_root = find_sdk_root().unwrap_or_else(|| "/".to_string());
         let entry_name = native_link_name(entry);
-        let ld_status = std::process::Command::new("ld")
+        let ld_output = std::process::Command::new("ld")
             .arg("-o")
             .arg(out_path)
             .arg(&obj_path)
@@ -107,14 +151,22 @@ pub fn compile_native_artifact(
             .arg("14.0")
             .arg("-e")
             .arg(&entry_name)
-            .status()
+            .output()
             .map_err(|e| format!("ld invocation failed: {e}"))?;
-        if !ld_status.success() {
-            return Err("ld link failed".to_string());
+        if !ld_output.status.success() {
+            // Surface the linker's own diagnosis: "ld link failed" alone hides
+            // which symbol was missing.
+            return Err(format!(
+                "ld link failed: {}",
+                String::from_utf8_lossy(&ld_output.stderr).trim()
+            ));
         }
 
         // Keep .s and .o for debugging; clean up on success
-        return Ok(None);
+        return Ok(NativeArtifactOutcome {
+            abi_path: None,
+            degradations,
+        });
     }
 
     // No external refs: write standalone Mach-O executable
@@ -153,7 +205,10 @@ pub fn compile_native_artifact(
     macho::write_image(&image, linkage.into(), &install, &mut file_bytes);
     std::fs::write(out_path, &file_bytes)
         .map_err(|err| format!("write native artifact `{}`: {err}", out_path.display()))?;
-    Ok(abi_path)
+    Ok(NativeArtifactOutcome {
+        abi_path,
+        degradations,
+    })
 }
 
 pub fn host_supports_native_subset() -> bool {

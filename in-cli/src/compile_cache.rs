@@ -35,6 +35,8 @@ struct CachedOwnedCompileReport {
     artifact_path: Option<String>,
     executable_path: Option<String>,
     abi_path: Option<String>,
+    #[serde(default)]
+    degradations: Vec<crate::native_emit::lower::LoweringDegradation>,
     parsed_function_count: usize,
     typed_function_count: usize,
     call_edge_count: usize,
@@ -45,9 +47,7 @@ struct CachedOwnedCompileReport {
     frontend_hash: Option<String>,
     eval_exit_code: Option<u8>,
     #[serde(default)]
-    eval_result: Option<i64>,
-    #[serde(default)]
-    eval_result_string: Option<String>,
+    eval_result: Option<crate::owned_compile::EvalValue>,
     error: Option<String>,
 }
 
@@ -75,6 +75,7 @@ impl From<&OwnedCompileReport> for CachedOwnedCompileReport {
             artifact_path: report.artifact_path.clone(),
             executable_path: report.executable_path.clone(),
             abi_path: report.abi_path.clone(),
+            degradations: report.degradations.clone(),
             parsed_function_count: report.parsed_function_count,
             typed_function_count: report.typed_function_count,
             call_edge_count: report.call_edge_count,
@@ -84,8 +85,7 @@ impl From<&OwnedCompileReport> for CachedOwnedCompileReport {
             cache_hit: report.cache_hit,
             frontend_hash: report.frontend_hash.clone(),
             eval_exit_code: report.eval_exit_code,
-            eval_result: report.eval_result,
-            eval_result_string: report.eval_result_string.clone(),
+            eval_result: report.eval_result.clone(),
             error: report.error.clone(),
         }
     }
@@ -115,6 +115,7 @@ impl From<CachedOwnedCompileReport> for OwnedCompileReport {
             artifact_path: cached.artifact_path,
             executable_path: cached.executable_path,
             abi_path: cached.abi_path,
+            degradations: cached.degradations,
             parsed_function_count: cached.parsed_function_count,
             typed_function_count: cached.typed_function_count,
             call_edge_count: cached.call_edge_count,
@@ -125,7 +126,6 @@ impl From<CachedOwnedCompileReport> for OwnedCompileReport {
             frontend_hash: cached.frontend_hash,
             eval_exit_code: cached.eval_exit_code,
             eval_result: cached.eval_result,
-            eval_result_string: cached.eval_result_string,
             error: cached.error,
         }
     }
@@ -291,6 +291,7 @@ mod tests {
             artifact_path: None,
             executable_path: None,
             abi_path: None,
+            degradations: Vec::new(),
             parsed_function_count: 1,
             typed_function_count: 1,
             call_edge_count: 0,
@@ -301,7 +302,6 @@ mod tests {
             frontend_hash: Some(hash.to_string()),
             eval_exit_code: None,
             eval_result: None,
-            eval_result_string: None,
             error: None,
         };
         write_cached_report(&cwd, hash, &report).unwrap();

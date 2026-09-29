@@ -6,14 +6,44 @@ use std::collections::BTreeMap;
 
 pub const INRT_ENTRY_SYMBOL: &str = "_inrt_start";
 
+/// String concatenation, embedded in the artifact so a native executable does not
+/// need the Rust-side `in_str_concat` helper the JIT resolves by dlsym.
+pub const INRT_STR_CONCAT: &str = "__inrt_str_concat";
+
+/// String equality and substring search, embedded for the same reason as
+/// [`INRT_STR_CONCAT`]: `str-eq` and `str-contains` are Rust-side helpers that a
+/// native artifact has no way to link against.
+pub const INRT_STR_EQ: &str = "__inrt_str_eq";
+pub const INRT_STR_CONTAINS: &str = "__inrt_str_contains";
+
+/// Standard-output writers, embedded so a native artifact can print: the JIT's
+/// `in_print` and `in_print_int` wrappers do not exist outside the compiler.
+pub const INRT_PRINT: &str = "__inrt_print";
+pub const INRT_PRINT_INT: &str = "__inrt_print_int";
+
+/// Builtin reached when a native program executes code the lowerer could not
+/// compile. It writes the supplied message to stderr and exits with
+/// [`INRT_TRAP_EXIT_CODE`]; it never returns.
+pub const INRT_TRAP_BUILTIN: &str = "__inrt_unsupported_trap";
+
+/// Exit status reported when [`INRT_TRAP_BUILTIN`] fires. 70 is `EX_SOFTWARE`
+/// from `sysexits.h`, chosen so a trapped program is distinguishable from a
+/// program that genuinely returned a small value.
+pub const INRT_TRAP_EXIT_CODE: u16 = 70;
+
 pub const INRT_BUILTINS: &[&str] = &[
     "__inrt_str_len",
-    "__inrt_str_concat",
+    INRT_STR_CONCAT,
+    INRT_STR_EQ,
+    INRT_STR_CONTAINS,
+    INRT_PRINT,
+    INRT_PRINT_INT,
     "__inrt_str_substr",
     "__inrt_array_len",
     "__inrt_array_load",
     "__inrt_array_store",
     "__inrt_array_push",
+    INRT_TRAP_BUILTIN,
 ];
 
 pub fn is_inrt_builtin(name: &str) -> bool {
@@ -26,8 +56,10 @@ pub fn inrt_builtin_param_slots(name: &str) -> Option<usize> {
         "__inrt_array_load" => Some(2),
         "__inrt_array_store" => Some(3),
         "__inrt_array_push" => Some(2),
-        "__inrt_str_concat" => Some(2),
+        INRT_STR_CONCAT | INRT_STR_EQ | INRT_STR_CONTAINS => Some(2),
+        INRT_PRINT | INRT_PRINT_INT => Some(1),
         "__inrt_str_substr" => Some(3),
+        INRT_TRAP_BUILTIN => Some(2),
         _ => None,
     }
 }
@@ -75,6 +107,9 @@ mod r {
     pub const X7: u8 = 7;
     pub const X8: u8 = 8;
     pub const X9: u8 = 9;
+    pub const X10: u8 = 10;
+    pub const X11: u8 = 11;
+    pub const X12: u8 = 12;
     pub const X16: u8 = 16;
     pub const SP: u8 = 31;
     pub const XZR: u8 = 31;
@@ -96,40 +131,48 @@ fn build_inrt_str_len() -> Vec<u8> {
 }
 
 fn build_inrt_str_concat() -> Vec<u8> {
-    let mut buf = Vec::with_capacity(256);
+    // Layout: [u64 byte length][bytes][padding]. The copy works a word at a time
+    // because the payload is 8-byte aligned on both sides; the header length is
+    // what readers trust, so the trailing padding bytes never surface.
+    //
+    // Frame: the caller's x29/x30 land at 0 and 8, so locals start at 16.
+    let mut buf = Vec::with_capacity(384);
     emit_insn_blob(
         &[
-            aarch64::stp_pre(FP, LR, -32),
+            aarch64::stp_pre(FP, LR, -64),
             aarch64::add_imm64(FP, SP, 0),
-            aarch64::str64(X0, SP, 0),
-            aarch64::str64(X1, SP, 8),
-        ],
-        &mut buf,
-    );
-    emit_insn_blob(
-        &[aarch64::ldr64(X2, X0, 0), aarch64::ldr64(X3, X1, 0)],
-        &mut buf,
-    );
-    emit_insn_blob(
-        &[
+            aarch64::str64(X0, SP, 16), // a
+            aarch64::str64(X1, SP, 24), // b
+            aarch64::ldr64(X2, X0, 0),  // len(a)
+            aarch64::str64(X2, SP, 32),
+            aarch64::ldr64(X3, X1, 0), // len(b)
+            aarch64::str64(X3, SP, 40),
             aarch64::add_reg64(X4, X2, X3),
-            aarch64::add_imm64(X1, X4, 8),
-            aarch64::str64(X4, SP, 16),
+            aarch64::str64(X4, SP, 48), // total bytes
         ],
         &mut buf,
     );
-    emit_insn_blob(&[aarch64::mov_reg64(X0, XZR)], &mut buf);
+    // Header, payload, and one spare word so the word copy below cannot write
+    // past the mapping when the payload length is not a multiple of eight.
+    emit_insn_blob(
+        &[aarch64::add_imm64(X1, X4, 16), aarch64::mov_zero64(X0)],
+        &mut buf,
+    );
     emit_inline_mmap(&mut buf);
     emit_insn_blob(
-        &[aarch64::ldr64(X4, SP, 16), aarch64::str64(X4, X0, 0)],
-        &mut buf,
-    );
-    emit_insn_blob(
         &[
-            aarch64::ldr64(X5, SP, 0),
-            aarch64::add_imm64(X5, X5, 8),
-            aarch64::add_imm64(X6, X0, 8),
-            aarch64::mov_reg64(X7, XZR),
+            aarch64::str64(X0, SP, 56), // out
+            aarch64::ldr64(X4, SP, 48),
+            aarch64::str64(X4, X0, 0), // header = total bytes
+            aarch64::movz64(X9, 3, 0),
+            aarch64::ldr64(X2, SP, 32),
+            aarch64::add_imm64(X2, X2, 7),
+            aarch64::lsr_reg64(X2, X2, X9), // words in a
+            aarch64::ldr64(X5, SP, 16),
+            aarch64::add_imm64(X5, X5, 8), // src = a payload
+            aarch64::ldr64(X6, SP, 56),
+            aarch64::add_imm64(X6, X6, 8), // dst = out payload
+            aarch64::mov_zero64(X7),
         ],
         &mut buf,
     );
@@ -147,22 +190,28 @@ fn build_inrt_str_concat() -> Vec<u8> {
     emit_insn_blob(&[aarch64::b(la as i32 - buf.len() as i32)], &mut buf);
     emit_insn_blob(
         &[
-            aarch64::ldr64(X5, SP, 8),
-            aarch64::add_imm64(X5, X5, 8),
-            aarch64::mov_reg64(X7, X2),
-            aarch64::str64(X0, SP, 16),
+            aarch64::ldr64(X3, SP, 40),
+            aarch64::add_imm64(X3, X3, 7),
+            aarch64::lsr_reg64(X3, X3, X9), // words in b
+            aarch64::ldr64(X5, SP, 24),
+            aarch64::add_imm64(X5, X5, 8), // src = b payload
+            aarch64::ldr64(X6, SP, 56),
+            aarch64::add_imm64(X6, X6, 8),
+            // b's payload starts after a's *byte* length, not after its padded
+            // word count, so the two payloads stay contiguous.
+            aarch64::ldr64(X2, SP, 32),
+            aarch64::add_reg64(X6, X6, X2), // dst = out payload + len(a)
+            aarch64::mov_zero64(X7),
         ],
         &mut buf,
     );
     let lb = buf.len() as u32;
     emit_insn_blob(
         &[
-            aarch64::cmp_reg64(X7, X4),
+            aarch64::cmp_reg64(X7, X3),
             aarch64::b_cond(10, 5 * 4),
             aarch64::ldr64_reg_offset(X8, X5, X7),
-            aarch64::ldr64(X3, SP, 16),
-            aarch64::add_imm64(X3, X3, 8),
-            aarch64::str64_reg_offset(X8, X3, X7),
+            aarch64::str64_reg_offset(X8, X6, X7),
             aarch64::add_imm64(X7, X7, 1),
         ],
         &mut buf,
@@ -170,13 +219,197 @@ fn build_inrt_str_concat() -> Vec<u8> {
     emit_insn_blob(&[aarch64::b(lb as i32 - buf.len() as i32)], &mut buf);
     emit_insn_blob(
         &[
-            aarch64::ldr64(X0, SP, 16),
-            aarch64::ldp_post(FP, LR, 32),
+            aarch64::ldr64(X0, SP, 56),
+            aarch64::ldp_post(FP, LR, 64),
             aarch64::ret(),
         ],
         &mut buf,
     );
     buf
+}
+
+/// `__inrt_str_eq(a, b) -> i64` — 1 when both instrings hold the same bytes.
+///
+/// An instring is `[u64 byte length][bytes]` and its payload is *not*
+/// NUL-terminated, so equality is a length check followed by a byte-wise
+/// comparison. `x2` is the remaining count, which doubles as the loop counter.
+fn build_inrt_str_eq() -> Vec<u8> {
+    let mut e = aarch64::CodeEmitter::new();
+    e.emit_u32(aarch64::ldr64(X2, X0, 0)); // len(a)
+    e.emit_u32(aarch64::ldr64(X3, X1, 0)); // len(b)
+    e.emit_u32(aarch64::cmp_reg64(X2, X3));
+    let lengths_differ = e.emit_insn(aarch64::b_cond(aarch64::COND_NE, 0));
+    e.emit_u32(aarch64::add_imm64(X4, X0, 8)); // a payload
+    e.emit_u32(aarch64::add_imm64(X5, X1, 8)); // b payload
+    e.emit_u32(aarch64::cmp_reg64(X2, XZR));
+    let both_empty = e.emit_insn(aarch64::b_cond(aarch64::COND_EQ, 0));
+    let loop_head = e.len();
+    e.emit_u32(aarch64::ldrb(X6, X4, 0));
+    e.emit_u32(aarch64::ldrb(X7, X5, 0));
+    e.emit_u32(aarch64::cmp_reg64(X6, X7));
+    let byte_differs = e.emit_insn(aarch64::b_cond(aarch64::COND_NE, 0));
+    e.emit_u32(aarch64::add_imm64(X4, X4, 1));
+    e.emit_u32(aarch64::add_imm64(X5, X5, 1));
+    e.emit_u32(aarch64::sub_imm64(X2, X2, 1));
+    e.emit_u32(aarch64::cmp_reg64(X2, XZR));
+    let back = loop_head as i32 - e.len() as i32;
+    e.emit_u32(aarch64::b_cond(aarch64::COND_NE, back));
+
+    let equal = e.len();
+    e.emit_u32(aarch64::movz64(X0, 1, 0));
+    e.emit_u32(aarch64::ret());
+    let different = e.len();
+    e.emit_u32(aarch64::mov_zero64(X0));
+    e.emit_u32(aarch64::ret());
+
+    for (site, cond) in [
+        (lengths_differ, aarch64::COND_NE),
+        (byte_differs, aarch64::COND_NE),
+    ] {
+        let offset = different as i32 - site as i32;
+        e.patch_u32(site, aarch64::b_cond(cond, offset));
+    }
+    let offset = equal as i32 - both_empty as i32;
+    e.patch_u32(both_empty, aarch64::b_cond(aarch64::COND_EQ, offset));
+    e.bytes
+}
+
+/// `__inrt_print(instring) -> void` — writes the payload to stdout.
+///
+/// The JIT resolves the Rust `in_print` wrapper; a native artifact has no such
+/// symbol, so without this builtin a native program could not print at all.
+/// `write(2)` is used rather than `printf` because an instring payload is not
+/// NUL-terminated. A null pointer prints nothing, matching the wrapper.
+fn build_inrt_print() -> Vec<u8> {
+    let mut e = aarch64::CodeEmitter::new();
+    e.emit_u32(aarch64::cmp_reg64(X0, XZR));
+    let null_pointer = e.emit_insn(aarch64::b_cond(aarch64::COND_EQ, 0));
+    e.emit_u32(aarch64::ldr64(X2, X0, 0)); // byte length
+    e.emit_u32(aarch64::add_imm64(X1, X0, 8)); // payload
+    e.emit_u32(aarch64::movz64(X0, 1, 0)); // stdout
+    e.emit_u32(aarch64::movz64(X16, 4, 0)); // SYS_write
+    e.emit_u32(aarch64::svc(0x80));
+    let done = e.len();
+    e.emit_u32(aarch64::ret());
+    let offset = done as i32 - null_pointer as i32;
+    e.patch_u32(null_pointer, aarch64::b_cond(aarch64::COND_EQ, offset));
+    e.bytes
+}
+
+/// `__inrt_print_int(i64) -> void` — writes the decimal value to stdout.
+///
+/// Digits are produced by repeated unsigned division into a stack buffer, so no
+/// libc conversion is involved and the payload needs no terminator. The
+/// magnitude is taken as unsigned, which also gets `i64::MIN` right: negating it
+/// yields a value whose unsigned reading is exactly its magnitude.
+fn build_inrt_print_int() -> Vec<u8> {
+    let mut e = aarch64::CodeEmitter::new();
+    e.emit_u32(aarch64::stp_pre(FP, LR, -48));
+    e.emit_u32(aarch64::add_imm64(FP, SP, 0));
+    e.emit_u32(aarch64::add_imm64(X1, SP, 48)); // one past the last digit
+    e.emit_u32(aarch64::movz64(X2, 10, 0)); // divisor
+    e.emit_u32(aarch64::mov_zero64(X7)); // sign: 0 positive, 1 negative
+    e.emit_u32(aarch64::cmp_reg64(X0, XZR));
+    let non_negative = e.emit_insn(aarch64::b_cond(10, 0)); // B.GE, signed
+    e.emit_u32(aarch64::movz64(X7, 1, 0));
+    e.emit_u32(aarch64::sub_reg64(X0, XZR, X0)); // magnitude
+    let digits = e.len();
+    e.patch_u32(
+        non_negative,
+        aarch64::b_cond(10, digits as i32 - non_negative as i32),
+    );
+    e.emit_u32(aarch64::udiv64(X5, X0, X2));
+    e.emit_u32(aarch64::msub64(X6, X5, X2, X0)); // remainder
+    e.emit_u32(aarch64::add_imm64(X6, X6, 48)); // '0'
+    e.emit_u32(aarch64::sub_imm64(X1, X1, 1));
+    e.emit_u32(aarch64::strb(X6, X1, 0));
+    e.emit_u32(aarch64::mov_reg64(X0, X5));
+    e.emit_u32(aarch64::cmp_reg64(X0, XZR));
+    let back = digits as i32 - e.len() as i32;
+    e.emit_u32(aarch64::b_cond(aarch64::COND_NE, back));
+    e.emit_u32(aarch64::cmp_reg64(X7, XZR));
+    let no_sign = e.emit_insn(aarch64::b_cond(aarch64::COND_EQ, 0));
+    e.emit_u32(aarch64::sub_imm64(X1, X1, 1));
+    e.emit_u32(aarch64::movz64(X6, 45, 0)); // '-'
+    e.emit_u32(aarch64::strb(X6, X1, 0));
+    let write = e.len();
+    e.patch_u32(
+        no_sign,
+        aarch64::b_cond(aarch64::COND_EQ, write as i32 - no_sign as i32),
+    );
+    e.emit_u32(aarch64::add_imm64(X2, SP, 48));
+    e.emit_u32(aarch64::sub_reg64(X2, X2, X1)); // length
+    e.emit_u32(aarch64::movz64(X0, 1, 0)); // stdout
+    e.emit_u32(aarch64::movz64(X16, 4, 0)); // SYS_write
+    e.emit_u32(aarch64::svc(0x80));
+    e.emit_u32(aarch64::ldp_post(FP, LR, 48));
+    e.emit_u32(aarch64::ret());
+    e.bytes
+}
+
+/// `__inrt_str_contains(haystack, needle) -> i64`.
+///
+/// Matches the JIT's `in_str_contains` for every string the language can build:
+/// instrings come from source literals and concatenation, so both sides are
+/// UTF-8 and a byte-wise substring search is equivalent to Rust's `str::contains`
+/// (which also rejects invalid UTF-8 — unreachable here, and the native
+/// entry point is only ever reached by native artifacts).
+fn build_inrt_str_contains() -> Vec<u8> {
+    let mut e = aarch64::CodeEmitter::new();
+    e.emit_u32(aarch64::ldr64(X2, X0, 0)); // len(haystack)
+    e.emit_u32(aarch64::ldr64(X3, X1, 0)); // len(needle)
+    // An empty needle is contained in every string, including the empty one.
+    e.emit_u32(aarch64::cmp_reg64(X3, XZR));
+    let empty_needle = e.emit_insn(aarch64::b_cond(aarch64::COND_EQ, 0));
+    // A needle longer than the haystack cannot match.
+    e.emit_u32(aarch64::cmp_reg64(X3, X2));
+    let needle_too_long = e.emit_insn(aarch64::b_cond(12, 0)); // B.GT
+    e.emit_u32(aarch64::add_imm64(X4, X0, 8)); // haystack payload
+    e.emit_u32(aarch64::add_imm64(X5, X1, 8)); // needle payload
+    e.emit_u32(aarch64::sub_reg64(X6, X2, X3)); // last start offset
+    e.emit_u32(aarch64::mov_zero64(X7)); // i = 0
+
+    let outer_head = e.len();
+    e.emit_u32(aarch64::mov_zero64(X8)); // j = 0
+    let inner_head = e.len();
+    e.emit_u32(aarch64::add_reg64(X9, X4, X7));
+    e.emit_u32(aarch64::add_reg64(X9, X9, X8));
+    e.emit_u32(aarch64::ldrb(X10, X9, 0));
+    e.emit_u32(aarch64::add_reg64(X11, X5, X8));
+    e.emit_u32(aarch64::ldrb(X12, X11, 0));
+    e.emit_u32(aarch64::cmp_reg64(X10, X12));
+    let byte_differs = e.emit_insn(aarch64::b_cond(aarch64::COND_NE, 0));
+    e.emit_u32(aarch64::add_imm64(X8, X8, 1));
+    e.emit_u32(aarch64::cmp_reg64(X8, X3));
+    let inner_back = inner_head as i32 - e.len() as i32;
+    e.emit_u32(aarch64::b_cond(aarch64::COND_NE, inner_back));
+    // Every byte of the needle matched: the substring is present.
+    let found = e.emit_insn(aarch64::b(0));
+
+    // Mismatch at this start offset: advance one byte and retry while the
+    // window still fits inside the haystack.
+    let next_start = e.len();
+    e.emit_u32(aarch64::add_imm64(X7, X7, 1));
+    e.emit_u32(aarch64::cmp_reg64(X7, X6));
+    let outer_back = outer_head as i32 - e.len() as i32;
+    e.emit_u32(aarch64::b_cond(13, outer_back)); // B.LE
+
+    let missing = e.len();
+    e.emit_u32(aarch64::mov_zero64(X0));
+    e.emit_u32(aarch64::ret());
+    let present = e.len();
+    e.emit_u32(aarch64::movz64(X0, 1, 0));
+    e.emit_u32(aarch64::ret());
+
+    let offset = present as i32 - empty_needle as i32;
+    e.patch_u32(empty_needle, aarch64::b_cond(aarch64::COND_EQ, offset));
+    let offset = missing as i32 - needle_too_long as i32;
+    e.patch_u32(needle_too_long, aarch64::b_cond(12, offset));
+    let offset = next_start as i32 - byte_differs as i32;
+    e.patch_u32(byte_differs, aarch64::b_cond(aarch64::COND_NE, offset));
+    let offset = present as i32 - found as i32;
+    e.patch_u32(found, aarch64::b(offset));
+    e.bytes
 }
 
 fn build_inrt_str_substr() -> Vec<u8> {
@@ -185,9 +418,9 @@ fn build_inrt_str_substr() -> Vec<u8> {
         &[
             aarch64::stp_pre(FP, LR, -48),
             aarch64::add_imm64(FP, SP, 0),
-            aarch64::str64(X0, SP, 0),
-            aarch64::str64(X1, SP, 8),
-            aarch64::str64(X2, SP, 16),
+            aarch64::str64(X0, SP, 16),
+            aarch64::str64(X1, SP, 24),
+            aarch64::str64(X2, SP, 32),
         ],
         &mut buf,
     );
@@ -203,32 +436,32 @@ fn build_inrt_str_substr() -> Vec<u8> {
         &mut buf,
     );
     emit_insn_blob(
-        &[aarch64::add_imm64(X1, X2, 8), aarch64::mov_reg64(X0, XZR)],
+        &[aarch64::add_imm64(X1, X2, 8), aarch64::mov_zero64(X0)],
         &mut buf,
     );
     emit_inline_mmap(&mut buf);
     emit_insn_blob(
         &[
-            aarch64::ldr64(X2, SP, 16),
+            aarch64::ldr64(X2, SP, 32),
             aarch64::str64(X2, X0, 0),
-            aarch64::str64(X0, SP, 24),
+            aarch64::str64(X0, SP, 40),
         ],
         &mut buf,
     );
     emit_insn_blob(
         &[
-            aarch64::ldr64(X3, SP, 0),
+            aarch64::ldr64(X3, SP, 16),
             aarch64::add_imm64(X3, X3, 8),
-            aarch64::ldr64(X4, SP, 8),
+            aarch64::ldr64(X4, SP, 24),
             aarch64::add_imm64(X5, X0, 8),
-            aarch64::mov_reg64(X6, XZR),
+            aarch64::mov_zero64(X6),
         ],
         &mut buf,
     );
     let cl = buf.len() as u32;
     emit_insn_blob(
         &[
-            aarch64::ldr64(X7, SP, 16),
+            aarch64::ldr64(X7, SP, 32),
             aarch64::cmp_reg64(X6, X7),
             aarch64::b_cond(10, 5 * 4),
             aarch64::add_reg64(X9, X4, X6),
@@ -241,7 +474,7 @@ fn build_inrt_str_substr() -> Vec<u8> {
     emit_insn_blob(&[aarch64::b(cl as i32 - buf.len() as i32)], &mut buf);
     emit_insn_blob(
         &[
-            aarch64::ldr64(X0, SP, 24),
+            aarch64::ldr64(X0, SP, 40),
             aarch64::ldp_post(FP, LR, 48),
             aarch64::ret(),
         ],
@@ -249,7 +482,7 @@ fn build_inrt_str_substr() -> Vec<u8> {
     );
     emit_insn_blob(
         &[
-            aarch64::mov_reg64(X0, XZR),
+            aarch64::mov_zero64(X0),
             aarch64::ldp_post(FP, LR, 48),
             aarch64::ret(),
         ],
@@ -276,7 +509,7 @@ fn build_inrt_array_load() -> Vec<u8> {
             aarch64::add_imm64(X0, X0, 16),
             aarch64::ldr64_reg_offset(X0, X0, X1),
             aarch64::ret(),
-            aarch64::mov_reg64(X0, XZR),
+            aarch64::mov_zero64(X0),
             aarch64::ret(),
         ],
         &mut buf,
@@ -296,7 +529,7 @@ fn build_inrt_array_store() -> Vec<u8> {
             aarch64::add_imm64(X0, X0, 16),
             aarch64::str64_reg_offset(X2, X0, X1),
             aarch64::ret(),
-            aarch64::mov_reg64(X0, XZR),
+            aarch64::mov_zero64(X0),
             aarch64::ret(),
         ],
         &mut buf,
@@ -310,8 +543,8 @@ fn build_inrt_array_push() -> Vec<u8> {
         &[
             aarch64::stp_pre(FP, LR, -64),
             aarch64::add_imm64(FP, SP, 0),
-            aarch64::str64(X0, SP, 0),
-            aarch64::str64(X1, SP, 8),
+            aarch64::str64(X0, SP, 16),
+            aarch64::str64(X1, SP, 24),
         ],
         &mut buf,
     );
@@ -319,8 +552,8 @@ fn build_inrt_array_push() -> Vec<u8> {
         &[
             aarch64::ldr64(X2, X0, 0),
             aarch64::ldr64(X3, X0, 8),
-            aarch64::str64(X2, SP, 16),
-            aarch64::str64(X3, SP, 24),
+            aarch64::str64(X2, SP, 32),
+            aarch64::str64(X3, SP, 40),
         ],
         &mut buf,
     );
@@ -343,35 +576,35 @@ fn build_inrt_array_push() -> Vec<u8> {
         &[
             aarch64::add_imm64(X5, X3, 2),
             insn_lsl_imm64(X1, X5, 3),
-            aarch64::str64(X3, SP, 24),
+            aarch64::str64(X3, SP, 40),
         ],
         &mut buf,
     );
-    emit_insn_blob(&[aarch64::mov_reg64(X0, XZR)], &mut buf);
+    emit_insn_blob(&[aarch64::mov_zero64(X0)], &mut buf);
     emit_inline_mmap(&mut buf);
     emit_insn_blob(
         &[
-            aarch64::ldr64(X2, SP, 16),
-            aarch64::ldr64(X3, SP, 24),
+            aarch64::ldr64(X2, SP, 32),
+            aarch64::ldr64(X3, SP, 40),
             aarch64::str64(X2, X0, 0),
             aarch64::str64(X3, X0, 8),
-            aarch64::str64(X0, SP, 32),
+            aarch64::str64(X0, SP, 48),
         ],
         &mut buf,
     );
     emit_insn_blob(
         &[
-            aarch64::ldr64(X4, SP, 0),
+            aarch64::ldr64(X4, SP, 16),
             aarch64::add_imm64(X5, X4, 16),
             aarch64::add_imm64(X6, X0, 16),
-            aarch64::mov_reg64(X7, XZR),
+            aarch64::mov_zero64(X7),
         ],
         &mut buf,
     );
     let cl = buf.len() as u32;
     emit_insn_blob(
         &[
-            aarch64::ldr64(X2, SP, 16),
+            aarch64::ldr64(X2, SP, 32),
             aarch64::cmp_reg64(X7, X2),
             aarch64::b_cond(10, 5 * 4),
             aarch64::ldr64_reg_offset(X8, X5, X7),
@@ -382,7 +615,7 @@ fn build_inrt_array_push() -> Vec<u8> {
     );
     emit_insn_blob(&[aarch64::b(cl as i32 - buf.len() as i32)], &mut buf);
     emit_insn_blob(
-        &[aarch64::ldr64(X0, SP, 32), aarch64::str64(X0, SP, 0)],
+        &[aarch64::ldr64(X0, SP, 48), aarch64::str64(X0, SP, 16)],
         &mut buf,
     );
     let ng = buf.len() as u32;
@@ -390,9 +623,9 @@ fn build_inrt_array_push() -> Vec<u8> {
         .copy_from_slice(&aarch64::b_cond(11, ng as i32 - (gs - 4) as i32).to_le_bytes());
     emit_insn_blob(
         &[
-            aarch64::ldr64(X0, SP, 0),
-            aarch64::ldr64(X2, SP, 16),
-            aarch64::ldr64(X1, SP, 8),
+            aarch64::ldr64(X0, SP, 16),
+            aarch64::ldr64(X2, SP, 32),
+            aarch64::ldr64(X1, SP, 24),
             aarch64::add_imm64(X3, X0, 16),
             aarch64::str64_reg_offset(X1, X3, X2),
             aarch64::add_imm64(X2, X2, 1),
@@ -413,13 +646,33 @@ fn emit_inline_mmap(buf: &mut Vec<u8>) {
             aarch64::movz64(X3, 0x1001, 0),
             aarch64::movz64(X4, 1, 0),
             aarch64::sub_reg64(X4, XZR, X4),
-            aarch64::mov_reg64(X5, XZR),
+            aarch64::mov_zero64(X5),
             aarch64::movz64(X16, 0xC5, 0),
             aarch64::movk64(X16, 2, 16),
             aarch64::svc(0x80),
         ],
         buf,
     );
+}
+
+/// Writes `x0` (buffer) for `x1` (length) bytes to stderr, then exits with
+/// [`INRT_TRAP_EXIT_CODE`]. Never returns, so it needs no prologue or epilogue.
+fn build_inrt_unsupported_trap() -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32);
+    emit_insn_blob(
+        &[
+            aarch64::mov_reg64(X2, X1),
+            aarch64::mov_reg64(X1, X0),
+            aarch64::movz64(X0, 2, 0),
+            aarch64::movz64(X16, 4, 0),
+            aarch64::svc(0x80),
+            aarch64::movz64(X0, INRT_TRAP_EXIT_CODE, 0),
+            aarch64::movz64(X16, 1, 0),
+            aarch64::svc(0x80),
+        ],
+        &mut buf,
+    );
+    buf
 }
 
 pub fn build_runtime_blob() -> (Vec<u8>, BTreeMap<String, u32>) {
@@ -434,12 +687,17 @@ pub fn build_runtime_blob() -> (Vec<u8>, BTreeMap<String, u32>) {
         }};
     }
     add_fn!("__inrt_str_len", build_inrt_str_len());
-    add_fn!("__inrt_str_concat", build_inrt_str_concat());
+    add_fn!(INRT_STR_CONCAT, build_inrt_str_concat());
+    add_fn!(INRT_STR_EQ, build_inrt_str_eq());
+    add_fn!(INRT_STR_CONTAINS, build_inrt_str_contains());
+    add_fn!(INRT_PRINT, build_inrt_print());
+    add_fn!(INRT_PRINT_INT, build_inrt_print_int());
     add_fn!("__inrt_str_substr", build_inrt_str_substr());
     add_fn!("__inrt_array_len", build_inrt_array_len());
     add_fn!("__inrt_array_load", build_inrt_array_load());
     add_fn!("__inrt_array_store", build_inrt_array_store());
     add_fn!("__inrt_array_push", build_inrt_array_push());
+    add_fn!(INRT_TRAP_BUILTIN, build_inrt_unsupported_trap());
     (blob, offsets)
 }
 
@@ -462,6 +720,33 @@ mod tests {
     fn str_len_is_small() {
         assert!(build_inrt_str_len().len() <= 16);
     }
+
+    #[test]
+    fn unsupported_trap_writes_then_exits() {
+        let code = build_inrt_unsupported_trap();
+        let words: Vec<u32> = code
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_le_bytes(*b))
+            .collect();
+        // Two syscalls: write(2, buf, len) then exit(INRT_TRAP_EXIT_CODE).
+        assert_eq!(
+            words.iter().filter(|w| **w == aarch64::svc(0x80)).count(),
+            2
+        );
+        assert!(
+            words.contains(&aarch64::movz64(16, 4, 0)),
+            "missing SYS_write"
+        );
+        assert!(
+            words.contains(&aarch64::movz64(16, 1, 0)),
+            "missing SYS_exit"
+        );
+        assert!(words.contains(&aarch64::movz64(0, INRT_TRAP_EXIT_CODE, 0)));
+        assert_eq!(code.len() % 4, 0);
+    }
+
     #[test]
     fn array_load_has_bounds_check() {
         let code = build_inrt_array_load();
@@ -478,7 +763,11 @@ mod tests {
         for name in INRT_BUILTINS {
             let f = match *name {
                 "__inrt_str_len" => build_inrt_str_len(),
-                "__inrt_str_concat" => build_inrt_str_concat(),
+                INRT_STR_CONCAT => build_inrt_str_concat(),
+                INRT_STR_EQ => build_inrt_str_eq(),
+                INRT_STR_CONTAINS => build_inrt_str_contains(),
+                INRT_PRINT => build_inrt_print(),
+                INRT_PRINT_INT => build_inrt_print_int(),
                 "__inrt_str_substr" => build_inrt_str_substr(),
                 "__inrt_array_len" => build_inrt_array_len(),
                 "__inrt_array_load" => build_inrt_array_load(),

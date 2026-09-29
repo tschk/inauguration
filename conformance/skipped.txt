@@ -1,3 +1,1 @@
 # One fixture path per line (repo-relative). Lines starting with # are comments.
-# JIT/runtime gaps — tracked for conformance runner only.
-# (cleared: string/bool/nested/match-string/java class now JIT; float+array-len lowered)

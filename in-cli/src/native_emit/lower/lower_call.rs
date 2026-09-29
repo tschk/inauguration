@@ -83,12 +83,14 @@ pub(crate) fn lower_call(
             emitter.emit_insns(&aarch64::load_i64(15, native_ptr as usize as i64));
             emitter.emit_u32(0xD63F_01E0u32 | (15 << 5)); // BLR X15
         } else {
-            // External call stub: return 0 silently
-            emitter.emit_insns(&aarch64::load_i64(0, 0)); // MOV X0, #0
-            if rd != 0 {
-                emitter.emit_u32(aarch64::mov_reg64(rd, 0));
-            }
-            return Ok(());
+            // JIT mode with no dlsym'd symbol. Record the call so the patch pass
+            // emits a trap and reports it, rather than fabricating a return 0.
+            let call_site = emitter.len() as u32;
+            emitter.emit_u32(aarch64::bl(0));
+            pending_calls.push(PendingCall {
+                site: call_site,
+                target: target.clone(),
+            });
         }
         if rd != 0 {
             emitter.emit_u32(aarch64::mov_reg64(rd, 0));
@@ -199,9 +201,6 @@ pub(crate) fn lower_inrt_call(
             }
             Expr::BoolLit(v) => {
                 emitter.emit_insns(&aarch64::load_i64(reg, i64::from(*v)));
-            }
-            Expr::StringLit(v) if v.is_empty() => {
-                emitter.emit_insns(&aarch64::load_i64(reg, 0));
             }
             Expr::StringLit(v) => {
                 let id = ctx.string_id(v)?;
@@ -386,7 +385,7 @@ pub(crate) fn lower_aggregate_vector_literal_into_slots(
             pending_calls,
             fn_name,
         )?;
-        lower_stdlib::emit_vec_push_words(emitter, ptr_offset, scratch_offset, words)?;
+        lower_stdlib::emit_vec_push_words(emitter, ctx, ptr_offset, scratch_offset, words)?;
     }
     Ok(())
 }

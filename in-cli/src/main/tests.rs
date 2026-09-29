@@ -1731,3 +1731,21 @@ fn swift_products_internal_skip_patterns() {
         true
     ));
 }
+
+#[test]
+fn in_test_includes_backend_differential_gate() {
+    assert!(
+        crate::cli_test::test_step_names()
+            .iter()
+            .any(|step| step.contains("check-backend-differential.sh"))
+    );
+}
+
+#[test]
+fn in_test_includes_coverage_gate() {
+    assert!(
+        crate::cli_test::test_step_names()
+            .iter()
+            .any(|step| step.contains("check-coverage.sh"))
+    );
+}

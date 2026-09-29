@@ -45,6 +45,12 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
         && !trim(rest).is_empty()
         && rest.parse::<i64>().is_err()
     {
+        // -9223372036854775808 is i64::MIN: its positive magnitude overflows
+        // i64, so fold it into a single literal instead of a Unary over a
+        // numeric-looking identifier.
+        if trim(rest) == "9223372036854775808" {
+            return Expr::IntLit(i64::MIN);
+        }
         return Expr::Unary {
             op: "-".into(),
             expr: Box::new(parse_expr(rest)),

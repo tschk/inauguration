@@ -24,9 +24,9 @@ pub(crate) fn append_string_table(
     emitter: &mut CodeEmitter,
     strings: &HashMap<String, i64>,
     pending: Vec<super::PendingString>,
-) {
+) -> Result<(), String> {
     if pending.is_empty() {
-        return;
+        return Ok(());
     }
     while !emitter.len().is_multiple_of(8) {
         emitter.bytes.push(0);
@@ -57,12 +57,21 @@ pub(crate) fn append_string_table(
     }
 
     for p in pending {
-        let Some(header_offset) = index_offsets.get(&p.string_index) else {
-            continue;
-        };
+        // Every `PendingString` comes from `LowerCtx::string_id`, which only
+        // hands out indices present in the pool, so a miss here is a compiler
+        // bug. Failing loudly beats leaving the `adr` unpatched: an unpatched
+        // `adr rd, 0` yields a self-referential pointer and the program would
+        // read garbage instead of the literal.
+        let header_offset = index_offsets.get(&p.string_index).ok_or_else(|| {
+            format!(
+                "native-lower: string table is missing pool index {} (internal invariant)",
+                p.string_index
+            )
+        })?;
         let adr_delta = (*header_offset - p.adr_site as i64) as i32;
         emitter.patch_u32(p.adr_site, aarch64::adr(p.rd, adr_delta));
     }
+    Ok(())
 }
 
 pub(crate) fn alloc_declared_locals(
@@ -757,9 +766,9 @@ impl<'a> LowerCtx<'a> {
     }
 
     pub(crate) fn string_id(&self, value: &str) -> Result<i64, String> {
-        if value.is_empty() {
-            return Ok(0);
-        }
+        // The empty string is a real pool entry at index 0, not a null-pointer
+        // sentinel: code that reads a length header or compares payloads must be
+        // able to treat every literal uniformly.
         self.strings.get(value).copied().ok_or_else(|| {
             format!("native-lower: string literal not found in constant pool: `{value}`")
         })
