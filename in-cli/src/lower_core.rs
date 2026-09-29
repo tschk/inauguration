@@ -1843,6 +1843,69 @@ mod tests {
     use crate::core_ir::{Expr, Stmt};
 
     #[test]
+    fn test_lower_to_textual_sil() {
+        let module = UnifiedModule {
+            identity: Default::default(),
+            decls: vec![
+                Decl::Function {
+                    name: "main".into(),
+                    params: vec![],
+                    ret: Typ::Void,
+                    body: vec![Stmt::Return(Some(Expr::IntLit(0)))],
+                    type_params: vec![],
+                },
+                Decl::Function {
+                    name: "helper".into(),
+                    params: vec![],
+                    ret: Typ::Int,
+                    body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                    type_params: vec![],
+                },
+            ],
+        };
+        let sil = lower_to_textual_sil(module, "App");
+
+        // Check header
+        assert!(sil.starts_with("// inauguration core → textual SIL (multi-front v0)\n"));
+
+        // Helper should be processed first because of alphabetical sort
+        assert!(sil.contains("sil @helper"));
+        assert!(sil.contains("sil @main"));
+
+        // Ensure main logic correctly handles non-empty body
+        assert!(sil.contains("integer_literal $Builtin.Int64, 42"));
+        assert!(sil.contains("integer_literal $Builtin.Int64, 0"));
+    }
+
+    #[test]
+    fn test_lower_to_textual_sil_empty_bodies() {
+        let module = UnifiedModule {
+            identity: Default::default(),
+            decls: vec![
+                Decl::Function {
+                    name: "main".into(),
+                    params: vec![],
+                    ret: Typ::Void,
+                    body: vec![],
+                    type_params: vec![],
+                },
+                Decl::Function {
+                    name: "helper".into(),
+                    params: vec![],
+                    ret: Typ::Void,
+                    body: vec![],
+                    type_params: vec![],
+                },
+            ],
+        };
+        let sil = lower_to_textual_sil(module, "App");
+
+        assert!(sil.contains("sil @helper\nbb0:\n%0 = integer_literal $Builtin.Int64, 0\nbb1:\nreturn %0 : $Builtin.Int64"));
+        // main should be emitted last and use the ssa which was updated by helper
+        assert!(sil.contains("sil @main\nbb0:\n%1 = integer_literal $Builtin.Int64, 0"));
+    }
+
+    #[test]
     fn lower_orders_helpers_and_main() {
         let module = UnifiedModule {
             identity: Default::default(),
