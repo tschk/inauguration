@@ -1,6 +1,4 @@
-use crate::core_ir::{
-    looks_like_int_literal, Decl, Expr, MethodSig, Stmt, Typ, UnifiedModule,
-};
+use crate::core_ir::{Decl, Expr, MethodSig, Stmt, Typ, UnifiedModule, looks_like_int_literal};
 use std::collections::{HashMap, HashSet};
 
 pub(crate) fn collect_top_level_type_names(module: &UnifiedModule) -> Vec<String> {
@@ -119,10 +117,7 @@ pub(crate) fn validate_expr_shapes(
     expr: &Expr,
 ) -> Result<(), String> {
     match expr {
-        Expr::IntLit(_)
-        | Expr::FloatLit(_)
-        | Expr::StringLit(_)
-        | Expr::BoolLit(_) => Ok(()),
+        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => Ok(()),
         Expr::Ident(name) => {
             // The expression parser turns tokens it cannot classify into
             // identifiers. A numeric-looking token that failed the i64 parse

@@ -12,11 +12,11 @@
 
 use crate::core_ir::UnifiedModule;
 use crate::native_emit::lower::{
-    DEGRADATION_SKIPPED_FUNCTION, DEGRADATION_UNRESOLVED_CALL, LoweringDegradation, LoweredModule,
+    DEGRADATION_SKIPPED_FUNCTION, DEGRADATION_UNRESOLVED_CALL, LoweredModule, LoweringDegradation,
     NativeLinkage, host_supports_native_subset, lower_module_with_jobs,
 };
-use crate::parser_registry::{self, ParserCli};
 use crate::owned_compile::resolve_jit_entry;
+use crate::parser_registry::{self, ParserCli};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -353,10 +353,7 @@ fn main() -> Int {
         if !host_supports_native_subset() {
             return;
         }
-        let path = temp_source(
-            "unresolved.in",
-            "fn main() -> Int { return missing(1); }\n",
-        );
+        let path = temp_source("unresolved.in", "fn main() -> Int { return missing(1); }\n");
         let report = coverage_for_path(&path, ParserCli::Auto, None);
         fs::remove_file(&path).unwrap();
 
@@ -364,8 +361,7 @@ fn main() -> Int {
         assert_eq!(report.unresolved_calls, 1, "{report:?}");
         assert_eq!(report.functions_not_lowered, 0, "{report:?}");
         assert_eq!(
-            report.blockers[0].code,
-            DEGRADATION_UNRESOLVED_CALL,
+            report.blockers[0].code, DEGRADATION_UNRESOLVED_CALL,
             "{report:?}"
         );
     }

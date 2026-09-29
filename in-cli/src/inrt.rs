@@ -155,10 +155,7 @@ fn build_inrt_str_concat() -> Vec<u8> {
     // Header, payload, and one spare word so the word copy below cannot write
     // past the mapping when the payload length is not a multiple of eight.
     emit_insn_blob(
-        &[
-            aarch64::add_imm64(X1, X4, 16),
-            aarch64::mov_zero64(X0),
-        ],
+        &[aarch64::add_imm64(X1, X4, 16), aarch64::mov_zero64(X0)],
         &mut buf,
     );
     emit_inline_mmap(&mut buf);
@@ -738,7 +735,10 @@ mod tests {
             words.iter().filter(|w| **w == aarch64::svc(0x80)).count(),
             2
         );
-        assert!(words.contains(&aarch64::movz64(16, 4, 0)), "missing SYS_write");
+        assert!(
+            words.contains(&aarch64::movz64(16, 4, 0)),
+            "missing SYS_write"
+        );
         assert!(
             words.contains(&aarch64::movz64(16, 1, 0)),
             "missing SYS_exit"

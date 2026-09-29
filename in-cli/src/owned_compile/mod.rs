@@ -23,8 +23,8 @@ mod util;
 #[cfg(test)]
 mod tests;
 
-pub use report::report_to_json;
 pub use jit::resolve_jit_entry;
+pub use report::report_to_json;
 use report::{
     base_report, count_call_edges, count_functions, finalize_report, jobs_for_request,
     module_has_function, timing_waves_for_jobs,
@@ -501,9 +501,9 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         // and falls back to a kernel entry name when it is not told one. A bare
         // source file with a `main` must not be stripped to nothing, so name the
         // module's own entry when the caller did not.
-        let entry = effective_entry.clone().or_else(|| {
-            module_has_function(&module, "main").then(|| "main".to_string())
-        });
+        let entry = effective_entry
+            .clone()
+            .or_else(|| module_has_function(&module, "main").then(|| "main".to_string()));
         let keep_all = request.linkage == crate::native_emit::NativeLinkage::StaticLib
             || matches!(request.emit, Some(OwnedEmit::Sci { .. }));
         crate::core_opt::optimize_with_linkage(
@@ -679,7 +679,9 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
             eprintln!("in: {}{marker}", degradation.describe());
         }
     }
-    if report.success && !report.degradations.is_empty() && crate::config::env_config().strict_lowering
+    if report.success
+        && !report.degradations.is_empty()
+        && crate::config::env_config().strict_lowering
     {
         let detail = report
             .degradations

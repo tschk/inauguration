@@ -124,8 +124,8 @@ pub fn compile_jit(
         return Ok(NativeCompileResult {
             artifact_path: String::new(),
             eval_exit_code: Some(raw as u8),
-            eval_result: Some(raw),
-            eval_result_string: None,
+            eval_result: Some(super::EvalValue::Int(raw)),
+            degradations: Vec::new(),
             abi_path: None,
             backend_level: "owned-inisa-sci".to_string(),
             runtime_level: "inisa-interpreter".to_string(),

@@ -77,8 +77,8 @@ pub fn compile_native(
         return Ok(NativeCompileResult {
             artifact_path: out_path.display().to_string(),
             eval_exit_code: eval.map(|v| v as u8),
-            eval_result: eval,
-            eval_result_string: None,
+            eval_result: eval.map(super::EvalValue::Int),
+            degradations: Vec::new(),
             abi_path: None,
             backend_level: "owned-inisa-elf-bundle".to_string(),
             runtime_level: "inisa-bundled-interpreter".to_string(),
@@ -189,9 +189,7 @@ pub fn compile_native(
         artifact_path: out_path.display().to_string(),
         eval_exit_code: eval_exit,
         eval_result: None,
-        abi_path: outcome
-            .abi_path
-            .map(|path| path.display().to_string()),
+        abi_path: outcome.abi_path.map(|path| path.display().to_string()),
         backend_level: "owned-native-subset".to_string(),
         runtime_level: "inrt-native".to_string(),
         reason_code: status.reason_code.to_string(),

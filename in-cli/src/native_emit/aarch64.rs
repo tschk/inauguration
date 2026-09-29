@@ -352,7 +352,6 @@ mod tests {
         assert_eq!(msub64(6, 5, 2, 0), 0x9B0280A6);
     }
 
-
     /// A pre-index store must be a store: bit 22 selects load over store.
     #[test]
     fn stp_pre_is_a_store_not_a_load() {

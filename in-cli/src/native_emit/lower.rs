@@ -693,11 +693,7 @@ pub fn lower_module_with_jobs(
         .with(|refs| std::mem::take(&mut *refs.borrow_mut()))
         .into_iter()
         .filter(|(name, _)| lowered_names.contains(name.as_str()))
-        .filter_map(|(name, local_site)| {
-            function_offsets
-                .get(&name)
-                .map(|base| base + local_site)
-        })
+        .filter_map(|(name, local_site)| function_offsets.get(&name).map(|base| base + local_site))
         .collect();
 
     // Patch internal function calls (BL) using global offsets.
@@ -715,8 +711,7 @@ pub fn lower_module_with_jobs(
                     // Emit a trap body for this unresolved target.
                     let stub_offset = emitter.len();
                     function_offsets.insert(call.target.clone(), stub_offset);
-                    let degradation =
-                        LoweringDegradation::unresolved_call(&buf.name, &call.target);
+                    let degradation = LoweringDegradation::unresolved_call(&buf.name, &call.target);
                     let bl_site = emit_degradation_trap(&mut emitter, &degradation);
                     trap_calls.push(PendingInrtCall {
                         site: bl_site,

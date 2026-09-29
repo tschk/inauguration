@@ -1,7 +1,7 @@
 //! Lower [`crate::core_ir::UnifiedModule`] to textual SIL.
 
 use crate::core_ir::{Decl, LoopKind, MatchPattern, Typ, UnifiedModule};
-use crate::core_ir::{for_each_expr_child, Expr, Stmt};
+use crate::core_ir::{Expr, Stmt, for_each_expr_child};
 use std::collections::{HashMap, HashSet};
 
 pub fn desugar_module(module: &mut UnifiedModule) {
@@ -226,10 +226,9 @@ fn collect_bound_names_in_body(body: &[Stmt], bound: &mut HashSet<String>) {
                 collect_bound_names_in_expr(e, bound);
                 bound.insert(name.clone());
             }
-            Stmt::Assign(_, e)
-            | Stmt::Throw(e)
-            | Stmt::Return(Some(e))
-            | Stmt::Expr(e) => collect_bound_names_in_expr(e, bound),
+            Stmt::Assign(_, e) | Stmt::Throw(e) | Stmt::Return(Some(e)) | Stmt::Expr(e) => {
+                collect_bound_names_in_expr(e, bound)
+            }
             Stmt::IndexAssign {
                 base, index, value, ..
             } => {
@@ -271,7 +270,7 @@ fn collect_bound_names_in_body(body: &[Stmt], bound: &mut HashSet<String>) {
                     collect_bound_names_in_body(&catch.body, bound);
                 }
             }
-            Stmt::Return(None) | Stmt::Break | Stmt::Propagate => {}
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
         }
     }
 }
@@ -363,7 +362,7 @@ fn rewrite_field_refs_in_stmt(stmt: &mut Stmt, fields: &HashSet<String>, bound: 
                 }
             }
         }
-        Stmt::Return(None) | Stmt::Break | Stmt::Propagate => {}
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
     }
 }
 
@@ -412,10 +411,7 @@ fn rewrite_field_refs_in_expr(expr: &mut Expr, fields: &HashSet<String>, bound: 
                 rewrite_field_refs_in_expr(item, fields, bound);
             }
         }
-        Expr::IntLit(_)
-        | Expr::FloatLit(_)
-        | Expr::StringLit(_)
-        | Expr::BoolLit(_) => {}
+        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => {}
     }
 }
 

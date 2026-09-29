@@ -189,9 +189,7 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
-    #[command(
-        about = "Report what compiles to native code and what blocks the rest"
-    )]
+    #[command(about = "Report what compiles to native code and what blocks the rest")]
     Coverage {
         #[arg(
             long,

@@ -2,9 +2,7 @@ use crate::util::resolve_invocation_path;
 use crate::{InError, Result};
 use inauguration::agent_mode;
 use inauguration::coverage::{CoverageBlocker, CoverageReport, CoverageStatus};
-use inauguration::native_emit::lower::{
-    DEGRADATION_SKIPPED_FUNCTION, DEGRADATION_UNRESOLVED_CALL,
-};
+use inauguration::native_emit::lower::{DEGRADATION_SKIPPED_FUNCTION, DEGRADATION_UNRESOLVED_CALL};
 use inauguration::parser_registry::ParserCli;
 use std::fs;
 use std::path::Path;

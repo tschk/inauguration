@@ -7,8 +7,8 @@
 use super::lower_expr::lower_expr_into;
 use super::lower_stmt::lower_struct_expr_into_slots;
 use super::{
-    FunctionInfo, LocalSlot, LowerCtx, PendingCall, TL_NATIVE_MODE,
-    find_field_offset, lower_comparison_result, native_param_abi_slots, pick_scratch,
+    FunctionInfo, LocalSlot, LowerCtx, PendingCall, TL_NATIVE_MODE, find_field_offset,
+    lower_comparison_result, native_param_abi_slots, pick_scratch,
 };
 use crate::core_ir::{Expr, Stmt, Typ};
 use crate::native_emit::aarch64::{self, CodeEmitter, REG_SP, REG_XZR};
@@ -1400,7 +1400,15 @@ pub(crate) fn lower_stdlib_call(
         "str-len" if args.len() == 1 => {
             // An instring's byte length is the first word of its header, so this
             // needs no runtime call: load the pointer, then the length.
-            lower_expr_into(emitter, ctx, &args[0], rd, functions, pending_calls, fn_name)?;
+            lower_expr_into(
+                emitter,
+                ctx,
+                &args[0],
+                rd,
+                functions,
+                pending_calls,
+                fn_name,
+            )?;
             emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
             return Ok(true);
         }

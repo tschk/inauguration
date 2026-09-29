@@ -545,30 +545,6 @@ impl std::fmt::Display for FloatValFmt {
     }
 }
 
-enum EntryReturnKind {
-    Bool,
-    Float,
-    Other,
-}
-
-fn entry_return_kind(path: &Path) -> EntryReturnKind {
-    let Ok(src) = std::fs::read_to_string(path) else {
-        return EntryReturnKind::Other;
-    };
-    for line in src.lines() {
-        let t = line.trim();
-        if t.contains("fn main") && t.contains("->") {
-            if t.contains("Bool") || t.contains("bool") {
-                return EntryReturnKind::Bool;
-            }
-            if t.contains("Float") || t.contains("float") {
-                return EntryReturnKind::Float;
-            }
-        }
-    }
-    EntryReturnKind::Other
-}
-
 pub(crate) fn compile_and_run_jit_report(
     source_path: &Path,
     module_id: &str,

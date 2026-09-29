@@ -255,7 +255,10 @@ fn split_match_pat_args(inner: &str) -> Vec<String> {
 /// identifiers or binding patterns.
 pub(crate) fn looks_like_int_literal(s: &str) -> bool {
     let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
-    if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+    if let Some(hex) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
         return !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit());
     }
     !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())

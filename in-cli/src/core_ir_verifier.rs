@@ -246,7 +246,13 @@ fn add_intrinsics<'a>(functions: &mut HashMap<&'a str, FunctionSig<'a>>) {
         functions.insert(name, FunctionSig { params: &[], ret });
     }
     for name in crate::inrt::INRT_BUILTINS {
-        functions.insert(name, FunctionSig { params: &[], ret: &INT_RET });
+        functions.insert(
+            name,
+            FunctionSig {
+                params: &[],
+                ret: &INT_RET,
+            },
+        );
     }
 }
 
