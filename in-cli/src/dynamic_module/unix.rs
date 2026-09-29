@@ -173,4 +173,110 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn test_load_dynamic_module_abi_mismatch() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_abi_mismatch.so");
+        let c_code = r#"
+            #include <stdint.h>
+            struct RawModuleVTable {
+                uint32_t abi_version;
+                uint32_t pointer_width;
+                uint32_t endian;
+                uint32_t layout_hash;
+                void* alloc;
+                void* dealloc;
+                void* init;
+                void* shutdown;
+                void* symbol;
+                void* manifest;
+            };
+            static struct RawModuleVTable vtable = {
+                .abi_version = 999,
+                .pointer_width = 64,
+                .endian = 0,
+                .layout_hash = 0,
+                .alloc = 0,
+                .dealloc = 0,
+                .init = 0,
+                .shutdown = 0,
+                .symbol = 0,
+                .manifest = 0,
+            };
+            void* in_module_vtable() {
+                return &vtable;
+            }
+        "#;
+        compile_dummy_library(c_code, &path);
+
+        let result = load_dynamic_module(&path);
+
+        if let Err(DynamicModuleError::AbiVersionMismatch { expected, found }) = result {
+            assert_eq!(expected, crate::boundary_ir::IN_ABI_VERSION);
+            assert_eq!(found, 999);
+        } else {
+            panic!("Expected AbiVersionMismatch error, got: {:?}", result.err());
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_load_dynamic_module_success() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_success.so");
+        let c_code = format!(
+            r#"
+            #include <stdint.h>
+            struct RawModuleVTable {{
+                uint32_t abi_version;
+                uint32_t pointer_width;
+                uint32_t endian;
+                uint32_t layout_hash;
+                void* alloc;
+                void* dealloc;
+                void* init;
+                void* shutdown;
+                void* symbol;
+                void* manifest;
+            }};
+            static struct RawModuleVTable vtable = {{
+                .abi_version = {},
+                .pointer_width = 64,
+                .endian = 0,
+                .layout_hash = 0,
+                .alloc = 0,
+                .dealloc = 0,
+                .init = 0,
+                .shutdown = 0,
+                .symbol = 0,
+                .manifest = 0,
+            }};
+            void* in_module_vtable() {{
+                return &vtable;
+            }}
+        "#,
+            crate::boundary_ir::IN_ABI_VERSION
+        );
+        compile_dummy_library(&c_code, &path);
+
+        let result = load_dynamic_module(&path);
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
+
+        let module = result.unwrap();
+        let descriptor = module.descriptor();
+        assert_eq!(descriptor.abi_version, crate::boundary_ir::IN_ABI_VERSION);
+
+        let init_status = module.init(std::ptr::null());
+        assert!(init_status.is_ok());
+
+        let shutdown_status = module.shutdown();
+        assert!(shutdown_status.is_ok());
+
+        let symbol = module.symbol("nonexistent");
+        assert!(symbol.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
 }
