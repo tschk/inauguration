@@ -3112,6 +3112,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn optimize_empty_decls() {
+        let mut decls: Vec<Decl> = vec![];
+        optimize(&mut decls);
+        assert!(decls.is_empty());
+    }
+
     // ─── has_cf ────────────────────────────────────────────────────────
 
     #[test]
