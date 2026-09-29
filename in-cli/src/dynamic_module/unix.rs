@@ -226,7 +226,8 @@ mod tests {
     fn test_load_dynamic_module_success() {
         let dir = std::env::temp_dir();
         let path = dir.join("test_success.so");
-        let c_code = format!(r#"
+        let c_code = format!(
+            r#"
             #include <stdint.h>
             struct RawModuleVTable {{
                 uint32_t abi_version;
@@ -255,7 +256,9 @@ mod tests {
             void* in_module_vtable() {{
                 return &vtable;
             }}
-        "#, crate::boundary_ir::IN_ABI_VERSION);
+        "#,
+            crate::boundary_ir::IN_ABI_VERSION
+        );
         compile_dummy_library(&c_code, &path);
 
         let result = load_dynamic_module(&path);
