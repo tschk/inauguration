@@ -149,6 +149,25 @@ mod tests {
         validate_descriptor(&descriptor).expect("current abi");
     }
 
+    #[test]
+    fn validate_descriptor_error_message() {
+        let descriptor = ModuleDescriptor {
+            abi_version: IN_ABI_VERSION + 1,
+            pointer_width: 64,
+            endian: 0,
+            layout_hash: 0,
+        };
+        let err = validate_descriptor(&descriptor).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "abi_version mismatch: expected {}, got {}",
+                IN_ABI_VERSION,
+                IN_ABI_VERSION + 1
+            )
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_loader_is_stub() {
