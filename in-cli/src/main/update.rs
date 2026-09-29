@@ -47,14 +47,31 @@ pub(crate) fn cmd_update_remote() -> Result<()> {
         let url = format!("https://raw.githubusercontent.com/{repo}/v{version}/install.sh");
         println!("No local inauguration checkout found; running remote install.sh ...");
         println!("Fetching: {url}");
-        let snippet = "set -euo pipefail; tmp=$(mktemp); curl -fsSL \"$1\" -o \"$tmp\"; bash \"$tmp\"; rm -f \"$tmp\"";
-        run_cmd(
-            Command::new("bash")
-                .arg("-c")
-                .arg(snippet)
-                .arg("--")
-                .arg(&url),
-        )
+
+        let response = reqwest::blocking::get(&url)
+            .map_err(|e| InError::Message(format!("Failed to fetch install.sh: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(InError::Message(format!(
+                "Failed to fetch install.sh: HTTP {}",
+                status
+            )));
+        }
+
+        let script = response
+            .text()
+            .map_err(|e| InError::Message(format!("Failed to read install.sh: {}", e)))?;
+
+        let mut tmp_file = tempfile::NamedTempFile::new()
+            .map_err(|e| InError::Message(format!("Failed to create temp file: {}", e)))?;
+
+        use std::io::Write;
+        tmp_file
+            .write_all(script.as_bytes())
+            .map_err(|e| InError::Message(format!("Failed to write to temp file: {}", e)))?;
+
+        run_cmd(Command::new("bash").arg(tmp_file.path()))
     }
     #[cfg(not(unix))]
     {
