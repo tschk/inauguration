@@ -24,7 +24,9 @@
 use std::fmt;
 use std::time::Instant;
 
-use super::backend::{BackendKind, BackendOutput, placeholder_output, select_backend};
+#[cfg(test)]
+use super::backend::BackendKind;
+use super::backend::{BackendOutput, placeholder_output, select_backend};
 use super::core::{IrBasicBlock, IrFunction, IrInstruction, IrModule, IrOpcode, IrType};
 use super::metadata::{ComponentMetadata, ComponentSpec, OptimizationLevel};
 use super::passes::PassManager;
@@ -113,9 +115,7 @@ pub struct CompileResult {
 pub struct Compiler {
     config: super::metadata::ComponentSpec,
     pass_manager: PassManager,
-    // Only read from `#[cfg(test)]` assertions (see `compiler_resolves_backend_kind`); the
-    // non-test lib artifact never reads it, so rustc's per-artifact dead-code pass flags it.
-    #[allow(dead_code)]
+    #[cfg(test)]
     backend: BackendKind,
     timings: CompileTimings,
     last_unified: Option<UnifiedModule>,
@@ -134,11 +134,13 @@ impl Compiler {
 
         // Validate backend
         let _kind = select_backend(&spec).map_err(|e| CompileError::Backend(format!("{e}")))?;
+        #[cfg(test)]
         let backend = _kind;
 
         Ok(Self {
             config: spec,
             pass_manager,
+            #[cfg(test)]
             backend,
             timings: CompileTimings::default(),
             last_unified: None,
