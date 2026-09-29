@@ -201,4 +201,22 @@ mod tests {
         let err = emit_rust_layout(&mut out, &layout).expect_err("expected error");
         assert!(err.contains("layout name is empty"));
     }
+
+    #[test]
+    fn test_emit_layout_probes_success() {
+        let module = sample_module();
+        let probes = emit_layout_probes(&module).expect("emit_layout_probes");
+
+        assert!(probes.rust.contains("assert!(size_of::<Person>() == 24);"));
+        assert!(probes.zig.contains("@sizeOf(Person) != 24"));
+    }
+
+    #[test]
+    fn test_emit_layout_probes_propagates_rust_error() {
+        let mut module = sample_module();
+        module.layouts[0].name.clear();
+
+        let err = emit_layout_probes(&module).expect_err("expected error");
+        assert!(err.contains("layout name is empty"));
+    }
 }
