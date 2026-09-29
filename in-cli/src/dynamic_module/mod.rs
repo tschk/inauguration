@@ -149,6 +149,33 @@ mod tests {
         validate_descriptor(&descriptor).expect("current abi");
     }
 
+    #[test]
+    fn validate_descriptor_rejects_older_abi() {
+        let descriptor = ModuleDescriptor {
+            abi_version: 0,
+            pointer_width: 64,
+            endian: 0,
+            layout_hash: 0,
+        };
+        let err = validate_descriptor(&descriptor).expect_err("older abi");
+        assert!(matches!(
+            err,
+            DynamicModuleError::AbiVersionMismatch { expected, found }
+            if expected == IN_ABI_VERSION && found == 0
+        ));
+    }
+
+    #[test]
+    fn validate_descriptor_accepts_varying_metadata_fields() {
+        let descriptor = ModuleDescriptor {
+            abi_version: IN_ABI_VERSION,
+            pointer_width: 32,
+            endian: 1,
+            layout_hash: 12345,
+        };
+        validate_descriptor(&descriptor).expect("current abi with varying fields");
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_loader_is_stub() {
