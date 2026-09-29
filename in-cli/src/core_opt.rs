@@ -830,21 +830,13 @@ fn simplify_binary_expr(original: Expr, op: &str, lhs: &Expr, rhs: &Expr) -> Exp
             }
         }
         "==" => {
-            if lhs == rhs
-                && matches!(
-                    lhs,
-                    Expr::Ident(_) | Expr::IntLit(_) | Expr::BoolLit(_) | Expr::StringLit(_)
-                )
+            if lhs == rhs && matches!(lhs, Expr::IntLit(_) | Expr::BoolLit(_) | Expr::StringLit(_))
             {
                 return Expr::BoolLit(true);
             }
         }
         "!=" => {
-            if lhs == rhs
-                && matches!(
-                    lhs,
-                    Expr::Ident(_) | Expr::IntLit(_) | Expr::BoolLit(_) | Expr::StringLit(_)
-                )
+            if lhs == rhs && matches!(lhs, Expr::IntLit(_) | Expr::BoolLit(_) | Expr::StringLit(_))
             {
                 return Expr::BoolLit(false);
             }
@@ -855,7 +847,7 @@ fn simplify_binary_expr(original: Expr, op: &str, lhs: &Expr, rhs: &Expr) -> Exp
             }
         }
         ">=" | "<=" | "ge" | "le" => {
-            if lhs == rhs && matches!(lhs, Expr::Ident(_) | Expr::IntLit(_)) {
+            if lhs == rhs && matches!(lhs, Expr::IntLit(_)) {
                 return Expr::BoolLit(true);
             }
         }
@@ -3317,12 +3309,28 @@ mod tests {
         });
         assert_eq!(self_sub, Expr::IntLit(0));
 
+        // `a == a` must NOT fold when `a`'s type is unknown: a Float NaN
+        // operand makes `==` false and `!=` true (IEEE 754), so only
+        // type-known literals qualify for the tautology fold.
         let self_eq = simplify_expr(Expr::Binary {
             op: "==".into(),
             lhs: Box::new(ident("a")),
             rhs: Box::new(ident("a")),
         });
-        assert_eq!(self_eq, Expr::BoolLit(true));
+        assert_eq!(
+            self_eq,
+            Expr::Binary {
+                op: "==".into(),
+                lhs: Box::new(ident("a")),
+                rhs: Box::new(ident("a")),
+            }
+        );
+        let lit_eq = simplify_expr(Expr::Binary {
+            op: "==".into(),
+            lhs: Box::new(Expr::IntLit(2)),
+            rhs: Box::new(Expr::IntLit(2)),
+        });
+        assert_eq!(lit_eq, Expr::BoolLit(true));
     }
 
     #[test]
