@@ -136,7 +136,7 @@ fn is_safe_path(path_str: &str) -> bool {
         return false;
     };
 
-    if let Ok(c) = std::env::current_dir().and_then(|p| std::fs::canonicalize(p)) {
+    if let Ok(c) = std::env::current_dir().and_then(std::fs::canonicalize) {
         if canonical_ancestor.starts_with(c) {
             return true;
         }
