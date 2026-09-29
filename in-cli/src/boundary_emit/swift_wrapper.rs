@@ -194,6 +194,30 @@ mod tests {
     }
 
     #[test]
+    fn wrapper_rejects_empty_module_id() {
+        let mut module = sample_module();
+        module.module.clear();
+        let err = emit_swift_wrapper(&module).unwrap_err();
+        assert_eq!(err, "module id is empty");
+    }
+
+    #[test]
+    fn wrapper_rejects_empty_layout_name() {
+        let mut module = sample_module();
+        module.layouts[0].name.clear();
+        let err = emit_swift_wrapper(&module).unwrap_err();
+        assert_eq!(err, "layout name is empty");
+    }
+
+    #[test]
+    fn wrapper_rejects_empty_symbol_name() {
+        let mut module = sample_module();
+        module.symbols[0].name.clear();
+        let err = emit_swift_wrapper(&module).unwrap_err();
+        assert_eq!(err, "symbol name is empty");
+    }
+
+    #[test]
     fn layout_probes_emit_memory_layout_xctest() {
         let module = sample_module();
         let probes = emit_swift_layout_probes(&module).expect("probes");
