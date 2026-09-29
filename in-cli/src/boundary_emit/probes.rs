@@ -22,7 +22,6 @@ pub fn emit_layout_probes(module: &BoundaryModule) -> Result<LayoutProbes, Strin
 
 fn emit_rust_probes(module: &BoundaryModule) -> Result<String, String> {
     let mut out = String::new();
-    out.push_str("#![allow(dead_code)]\n");
     out.push_str("use std::mem::{align_of, offset_of, size_of};\n\n");
     emit_rust_abi_types(&mut out);
 
@@ -34,10 +33,14 @@ fn emit_rust_probes(module: &BoundaryModule) -> Result<String, String> {
 }
 
 fn emit_rust_abi_types(out: &mut String) {
-    out.push_str("#[repr(C)]\nstruct InSliceU8 {\n    ptr: *const u8,\n    len: u64,\n}\n\n");
-    out.push_str("#[repr(C)]\nstruct InBufU8 {\n    ptr: *mut u8,\n    len: u64,\n    cap: u64,\n    allocator_id: u64,\n}\n\n");
-    out.push_str("#[repr(C)]\nstruct InBorrowToken {\n    arena_id: u64,\n    generation: u64,\n    start: u64,\n    len: u64,\n    flags: u64,\n}\n\n");
-    out.push_str("#[repr(C)]\nstruct InArenaHandle {\n    id: u64,\n    generation: u64,\n}\n\n");
+    out.push_str(
+        "#[repr(C)]\npub struct InSliceU8 {\n    pub ptr: *const u8,\n    pub len: u64,\n}\n\n",
+    );
+    out.push_str("#[repr(C)]\npub struct InBufU8 {\n    pub ptr: *mut u8,\n    pub len: u64,\n    pub cap: u64,\n    pub allocator_id: u64,\n}\n\n");
+    out.push_str("#[repr(C)]\npub struct InBorrowToken {\n    pub arena_id: u64,\n    pub generation: u64,\n    pub start: u64,\n    pub len: u64,\n    pub flags: u64,\n}\n\n");
+    out.push_str(
+        "#[repr(C)]\npub struct InArenaHandle {\n    pub id: u64,\n    pub generation: u64,\n}\n\n",
+    );
 }
 
 fn emit_rust_layout(out: &mut String, layout: &BoundaryLayout) -> Result<(), String> {
@@ -46,10 +49,10 @@ fn emit_rust_layout(out: &mut String, layout: &BoundaryLayout) -> Result<(), Str
     }
 
     let repr = super::repr_attribute(layout.repr.as_ref());
-    out.push_str(&format!("#[repr({repr})]\nstruct {} {{\n", layout.name));
+    out.push_str(&format!("#[repr({repr})]\npub struct {} {{\n", layout.name));
     for field in &layout.fields {
         let rust_type = super::rust_type_name(&field.typ);
-        out.push_str(&format!("    {}: {},\n", field.name, rust_type));
+        out.push_str(&format!("    pub {}: {},\n", field.name, rust_type));
     }
     out.push_str("}\n\n");
 
@@ -179,9 +182,9 @@ mod tests {
         let mut out = String::new();
         emit_rust_layout(&mut out, layout).expect("emit_rust_layout");
 
-        assert!(out.contains("#[repr(c)]\nstruct Person {"));
-        assert!(out.contains("name: InSliceU8"));
-        assert!(out.contains("age: u32"));
+        assert!(out.contains("#[repr(c)]\npub struct Person {"));
+        assert!(out.contains("pub name: InSliceU8"));
+        assert!(out.contains("pub age: u32"));
         assert!(out.contains("assert!(size_of::<Person>() == 24);"));
         assert!(out.contains("assert!(align_of::<Person>() == 8);"));
         assert!(out.contains("assert!(offset_of!(Person, name) == 0);"));
