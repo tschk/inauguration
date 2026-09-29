@@ -15,9 +15,12 @@ use std::time::Instant;
 pub const DEFAULT_SOCKET_NAME: &str = "inauguration-daemon.sock";
 
 pub fn default_socket_path() -> PathBuf {
-    crate::config::env_config()
-        .daemon_socket
-        .clone()
+    resolve_socket_path(crate::config::env_config().daemon_socket.as_ref())
+}
+
+pub(crate) fn resolve_socket_path(daemon_socket: Option<&PathBuf>) -> PathBuf {
+    daemon_socket
+        .cloned()
         .unwrap_or_else(|| std::env::temp_dir().join(DEFAULT_SOCKET_NAME))
 }
 
@@ -335,6 +338,19 @@ mod tests {
     fn test_default_socket_path() {
         let path = default_socket_path();
         assert!(path.ends_with(DEFAULT_SOCKET_NAME));
+    }
+
+    #[test]
+    fn test_resolve_socket_path_default() {
+        let path = resolve_socket_path(None);
+        assert_eq!(path, std::env::temp_dir().join(DEFAULT_SOCKET_NAME));
+    }
+
+    #[test]
+    fn test_resolve_socket_path_custom() {
+        let custom_path = PathBuf::from("/tmp/custom.sock");
+        let path = resolve_socket_path(Some(&custom_path));
+        assert_eq!(path, custom_path);
     }
 
     #[test]
