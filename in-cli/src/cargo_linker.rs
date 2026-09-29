@@ -654,11 +654,21 @@ direct_dep = { path = "direct_dep" }
 
         let modules = compile_cargo_dependencies(&temp.path);
 
-        assert_eq!(modules.len(), 2, "Expected both direct and transitive dependencies to be compiled");
+        assert_eq!(
+            modules.len(),
+            2,
+            "Expected both direct and transitive dependencies to be compiled"
+        );
         let has_direct = modules.iter().any(|(name, _)| name == "direct_dep");
         let has_transitive = modules.iter().any(|(name, _)| name == "transitive_dep");
-        assert!(has_direct, "Expected 'direct_dep' to be in the compiled dependencies");
-        assert!(has_transitive, "Expected 'transitive_dep' to be in the compiled dependencies");
+        assert!(
+            has_direct,
+            "Expected 'direct_dep' to be in the compiled dependencies"
+        );
+        assert!(
+            has_transitive,
+            "Expected 'transitive_dep' to be in the compiled dependencies"
+        );
 
         Ok(())
     }
