@@ -1900,7 +1900,11 @@ mod tests {
             }],
         };
         desugar_module(&mut module);
-        assert_eq!(module.decls.len(), 2, "should split class into struct and function");
+        assert_eq!(
+            module.decls.len(),
+            2,
+            "should split class into struct and function"
+        );
         assert!(
             matches!(module.decls[0], Decl::Struct { ref name, .. } if name == "TestClass"),
             "first decl should be struct TestClass"
