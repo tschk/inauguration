@@ -254,6 +254,10 @@ pub unsafe extern "C" fn in_process_run(command_ptr: *const u8) -> *const u8 {
             Ok(s) => s,
             Err(_) => return instring_empty(),
         };
+        let forbidden_chars = ['|', '&', ';', '<', '>', '$', '`'];
+        if cmd_str.chars().any(|c| forbidden_chars.contains(&c)) {
+            return instring_empty();
+        }
         let args = parse_command_args(cmd_str);
         if args.is_empty() {
             return instring_empty();
