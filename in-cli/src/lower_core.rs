@@ -1843,6 +1843,75 @@ mod tests {
     use crate::core_ir::{Expr, Stmt};
 
     #[test]
+    fn test_desugar_module_basic() {
+        let mut module = UnifiedModule {
+            identity: Default::default(),
+            decls: vec![Decl::Component {
+                name: "TestComponent".into(),
+                target: "wasm".into(),
+                deterministic: true,
+                checkpoint: "".into(),
+                imports: vec![],
+                exports: vec![],
+                capabilities: vec![],
+            }],
+        };
+        desugar_module(&mut module);
+        assert_eq!(module.decls.len(), 1, "should have one declaration");
+        assert!(
+            matches!(module.decls[0], Decl::Component { .. }),
+            "should keep component declaration"
+        );
+    }
+
+    #[test]
+    fn test_desugar_module_interface_skipped() {
+        let mut module = UnifiedModule {
+            identity: Default::default(),
+            decls: vec![Decl::Interface {
+                name: "TestInterface".into(),
+                methods: vec![],
+                visibility: crate::core_ir::Visibility::Pub,
+                type_params: vec![],
+            }],
+        };
+        desugar_module(&mut module);
+        assert_eq!(module.decls.len(), 0, "should skip interface declaration");
+    }
+
+    #[test]
+    fn test_desugar_module_class_desugaring() {
+        let mut module = UnifiedModule {
+            identity: Default::default(),
+            decls: vec![Decl::Class {
+                name: "TestClass".into(),
+                fields: vec![("x".into(), Typ::Int)],
+                methods: vec![Decl::Function {
+                    name: "method".into(),
+                    params: vec![],
+                    ret: Typ::Void,
+                    body: vec![],
+                    type_params: vec![],
+                }],
+                visibility: crate::core_ir::Visibility::Pub,
+                extends: None,
+                implements: vec![],
+                type_params: vec![],
+            }],
+        };
+        desugar_module(&mut module);
+        assert_eq!(module.decls.len(), 2, "should split class into struct and function");
+        assert!(
+            matches!(module.decls[0], Decl::Struct { ref name, .. } if name == "TestClass"),
+            "first decl should be struct TestClass"
+        );
+        assert!(
+            matches!(module.decls[1], Decl::Function { ref name, .. } if name == "TestClass_method"),
+            "second decl should be mangled function TestClass_method"
+        );
+    }
+
+    #[test]
     fn lower_orders_helpers_and_main() {
         let module = UnifiedModule {
             identity: Default::default(),
