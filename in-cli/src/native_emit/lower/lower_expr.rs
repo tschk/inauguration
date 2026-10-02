@@ -559,6 +559,23 @@ pub(crate) fn lower_binary(
     fn_name: &str,
 ) -> Result<(), String> {
     let op = op.trim();
+    if matches!(op, "&&" | "||") {
+        // Normalize before the branch so the skipped path already has its result.
+        lower_expr_into(emitter, ctx, lhs, rd, functions, pending_calls, fn_name)?;
+        lower_truthy_result(emitter, rd);
+        emitter.emit_u32(aarch64::cmp_reg64(rd, aarch64::REG_XZR));
+        let condition = if op == "&&" {
+            aarch64::COND_EQ
+        } else {
+            aarch64::COND_NE
+        };
+        let skip_rhs = emitter.emit_insn(aarch64::b_cond(condition, 0));
+        lower_expr_into(emitter, ctx, rhs, rd, functions, pending_calls, fn_name)?;
+        lower_truthy_result(emitter, rd);
+        let delta = emitter.len() as i32 - skip_rhs as i32;
+        emitter.patch_u32(skip_rhs, aarch64::b_cond(condition, delta));
+        return Ok(());
+    }
     let is_float = matches!(native_expr_type(lhs, ctx, functions), Some(Typ::Float))
         || matches!(native_expr_type(rhs, ctx, functions), Some(Typ::Float));
     if is_float {
@@ -635,12 +652,12 @@ pub(crate) fn lower_binary(
         "%" => {
             return lower_checked_div_or_mod(emitter, ctx, rd, lhs_reg, rhs_reg, true);
         }
-        "&&" | "||" | "??" | "and" => {
+        "??" | "and" => {
             lower_truthy_result(emitter, lhs_reg);
             lower_truthy_result(emitter, rhs_reg);
             match op {
-                "&&" | "and" => aarch64::and_reg64(rd, lhs_reg, rhs_reg),
-                "||" | "??" => aarch64::orr_reg64(rd, lhs_reg, rhs_reg),
+                "and" => aarch64::and_reg64(rd, lhs_reg, rhs_reg),
+                "??" => aarch64::orr_reg64(rd, lhs_reg, rhs_reg),
                 _ => {
                     return Err(format!(
                         "native-lower: unsupported logical operator `{op}` in `{fn_name}`"

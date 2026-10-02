@@ -770,7 +770,27 @@ fn simplify_binary_expr(original: Expr, op: &str, lhs: &Expr, rhs: &Expr) -> Exp
                 return lhs.clone();
             }
         }
-        "land" | "&&" => {
+        "&&" | "||" => {
+            // Only the LHS can suppress evaluation. Preserve other expressions:
+            // replacing them with an operand can lose effects or 0/1 normalization.
+            let truth = |e: &Expr| match e {
+                Expr::BoolLit(v) => Some(*v),
+                Expr::IntLit(v) => Some(*v != 0),
+                _ => None,
+            };
+            if let Some(left) = truth(lhs) {
+                let decided = (op == "&&" && !left) || (op == "||" && left);
+                let value = if decided { Some(left) } else { truth(rhs) };
+                if let Some(value) = value {
+                    return if matches!(lhs, Expr::BoolLit(_)) || matches!(rhs, Expr::BoolLit(_)) {
+                        Expr::BoolLit(value)
+                    } else {
+                        Expr::IntLit(i64::from(value))
+                    };
+                }
+            }
+        }
+        "land" => {
             if is_false(lhs) || is_false(rhs) {
                 return Expr::BoolLit(false);
             }
@@ -790,7 +810,7 @@ fn simplify_binary_expr(original: Expr, op: &str, lhs: &Expr, rhs: &Expr) -> Exp
                 return lhs.clone();
             }
         }
-        "lor" | "||" => {
+        "lor" => {
             if is_true(lhs) || is_true(rhs) {
                 return Expr::BoolLit(true);
             }
@@ -3362,7 +3382,7 @@ mod tests {
     fn simplify_boolean() {
         assert_eq!(
             simplify_expr(bin("&&", ident("x"), Expr::BoolLit(true))),
-            ident("x")
+            bin("&&", ident("x"), Expr::BoolLit(true))
         );
     }
 

@@ -362,6 +362,26 @@ fn compile_expr(
                 _ => return Err(format!("inisa: unary `{op}`")),
             }
         }
+        Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&&" | "||") => {
+            compile_expr(c, lhs, slots)?;
+            // JZ consumes its condition. Invert OR to jump on a deciding true LHS.
+            if op == "||" {
+                c.code.push(OP_NOT);
+            }
+            c.code.push(OP_JZ);
+            let decided = c.code.len();
+            c.code.extend_from_slice(&0i32.to_le_bytes());
+            compile_expr(c, rhs, slots)?;
+            c.code.extend_from_slice(&[OP_NOT, OP_NOT]); // canonical 0/1
+            c.code.push(OP_JMP);
+            let end = c.code.len();
+            c.code.extend_from_slice(&0i32.to_le_bytes());
+            let decided_pc = c.code.len() as i32;
+            patch_i32(&mut c.code, decided, decided_pc);
+            emit_pushi(&mut c.code, i64::from(op == "||"));
+            let end_pc = c.code.len() as i32;
+            patch_i32(&mut c.code, end, end_pc);
+        }
         Expr::Binary { op, lhs, rhs } => {
             compile_expr(c, lhs, slots)?;
             compile_expr(c, rhs, slots)?;
