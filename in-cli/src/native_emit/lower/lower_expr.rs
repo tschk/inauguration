@@ -514,6 +514,23 @@ pub(crate) fn lower_float_binary(
 ) -> Result<(), String> {
     lower_expr_into(emitter, ctx, lhs, rd, functions, pending_calls, fn_name)?;
     let rhs_reg = if rd == 1 { 2 } else { 1 };
+    // Floats live as f64 bit patterns in general-purpose registers until fmov.
+    // A composite RHS can overwrite the LHS just as in integer lowering.
+    let temp = if matches!(
+        rhs,
+        Expr::IntLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::StringLit(_)
+            | Expr::Ident(_)
+    ) {
+        None
+    } else {
+        Some(ctx.acquire_binop_temp(fn_name)?)
+    };
+    if let Some(offset) = temp {
+        emitter.emit_u32(aarch64::str64(rd, aarch64::REG_SP, offset));
+    }
     lower_expr_into(
         emitter,
         ctx,
@@ -523,6 +540,10 @@ pub(crate) fn lower_float_binary(
         pending_calls,
         fn_name,
     )?;
+    if let Some(offset) = temp {
+        emitter.emit_u32(aarch64::ldr64(rd, aarch64::REG_SP, offset));
+        ctx.release_binop_temp();
+    }
     emitter.emit_u32(aarch64::fmov_from_gp(rd, rd));
     emitter.emit_u32(aarch64::fmov_from_gp(rhs_reg, rhs_reg));
     match op {
