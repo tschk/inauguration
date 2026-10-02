@@ -2,7 +2,7 @@
 
 use super::lower_call;
 use super::{
-    FunctionInfo, LocalSlot, LowerCtx, PendingCall, contains_call, emit_failure_return, expr_type,
+    FunctionInfo, LocalSlot, LowerCtx, PendingCall, emit_failure_return, expr_type,
     find_field_offset, lower_comparison_result, pick_scratch,
 };
 use crate::core_ir::{Expr, FloatVal, Typ};
@@ -609,20 +609,25 @@ pub(crate) fn lower_binary(
     lower_expr_into(emitter, ctx, lhs, rd, functions, pending_calls, fn_name)?;
     let lhs_reg = rd;
     let rhs_reg = if rd == 1 { 2 } else { 1 };
-    // ponytail: if rhs contains a function call, its arg loading overwrites
-    // the lhs result. Save lhs to the fixed binop_temp stack slot.
-    let rhs_has_call = contains_call(rhs);
-    let temp = if rhs_has_call {
+    // Composite expressions may use registers besides their result register,
+    // including index operands and nested binary expressions with no calls.
+    // Preserve the LHS before the RHS. The existing 64-live-spill limit also
+    // applies to composite expressions without calls; overflow is diagnosed.
+    let preserve_lhs = !matches!(
+        rhs,
+        Expr::IntLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::StringLit(_)
+            | Expr::Ident(_)
+    );
+    let temp = if preserve_lhs {
         Some(ctx.acquire_binop_temp(fn_name)?)
     } else {
         None
     };
-    if rhs_has_call {
-        emitter.emit_u32(aarch64::str64(
-            lhs_reg,
-            aarch64::REG_SP,
-            temp.expect("binary temp"),
-        ));
+    if let Some(offset) = temp {
+        emitter.emit_u32(aarch64::str64(lhs_reg, aarch64::REG_SP, offset));
     }
     lower_expr_into(
         emitter,
@@ -633,12 +638,8 @@ pub(crate) fn lower_binary(
         pending_calls,
         fn_name,
     )?;
-    if rhs_has_call {
-        emitter.emit_u32(aarch64::ldr64(
-            lhs_reg,
-            aarch64::REG_SP,
-            temp.expect("binary temp"),
-        ));
+    if let Some(offset) = temp {
+        emitter.emit_u32(aarch64::ldr64(lhs_reg, aarch64::REG_SP, offset));
         ctx.release_binop_temp();
     }
     let insn = match op {
