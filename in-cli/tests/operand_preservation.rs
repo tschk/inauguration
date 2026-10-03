@@ -191,10 +191,10 @@ fn operand_supported_references() {
             continue;
         }
         for decl in &mut module.decls {
-            if let Decl::Function { name, .. } = decl {
-                if name == "main" {
-                    *name = "case_main".into();
-                }
+            if let Decl::Function { name, .. } = decl
+                && name == "main"
+            {
+                *name = "case_main".into();
             }
         }
         let code = inauguration::native_emit::c_backend::emit_c_module(&module).unwrap();
@@ -257,8 +257,7 @@ fn operand_existing_temporary_pool_boundary() {
     // Composite non-call RHS expressions now reach the existing 64-slot bound.
     // Fail with its diagnostic rather than silently emitting incorrect code.
     let error = lower::lower_module(&right_nested_module(66), "main", NativeLinkage::Executable)
-        .err()
-        .expect("excessive nesting in the entry must be rejected");
+        .expect_err("excessive nesting in the entry must be rejected");
     assert!(
         error.contains("entry function `main` unsupported"),
         "{error}"

@@ -153,6 +153,14 @@ pub(crate) fn lower_stmt(
             ret_typ,
         ),
         Stmt::Assign(name, expr) => {
+            if !ctx.locals.contains_key(name)
+                && !ctx.params.contains_key(name)
+                && ctx.globals.names.contains(name)
+            {
+                return Err(format!(
+                    "native-lower: assignment to global `{name}` is unsupported in `{fn_name}`"
+                ));
+            }
             if !ctx.locals.contains_key(name) {
                 let offset = ctx.alloc_slot();
                 ctx.locals.insert(name.clone(), LocalSlot::Scalar(offset));
@@ -440,6 +448,35 @@ pub(crate) fn lower_field_assign(
         lower_expr::lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
         emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, off));
         return Ok(());
+    }
+    if ctx.params.contains_key(base_name) {
+        return Err(format!(
+            "native-lower: field assignment base `{base_name}` is a scalar parameter in `{fn_name}`"
+        ));
+    }
+    if !ctx.locals.contains_key(base_name) {
+        if let Some(field) = ctx.globals.fields.get(&format!("{base_name}.{name}")) {
+            if !field.mutable {
+                return Err(format!(
+                    "native-lower: cannot assign to immutable global `{base_name}.{name}` in `{fn_name}`"
+                ));
+            }
+            let offset = field.offset;
+            lower_expr::lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
+            ctx.emit_global_address(emitter, 9, offset);
+            emitter.emit_u32(aarch64::str64(0, 9, 0));
+            return Ok(());
+        }
+        if ctx.globals.structs.contains_key(base_name) {
+            return Err(format!(
+                "native-lower: unknown field `{name}` on struct global `{base_name}` in `{fn_name}`"
+            ));
+        }
+        if ctx.globals.names.contains(base_name) {
+            return Err(format!(
+                "native-lower: field assignment to global `{base_name}` is unsupported in `{fn_name}`"
+            ));
+        }
     }
     let Some(LocalSlot::Struct { fields, .. }) = ctx.locals.get(base_name) else {
         return Err(format!(

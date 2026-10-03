@@ -83,7 +83,9 @@ pub fn compile_native_artifact_with_report(
     out_path: &Path,
 ) -> Result<NativeArtifactOutcome, String> {
     TL_NATIVE_MODE.with(|m| *m.borrow_mut() = true);
-    let lowered = lower_module(module, entry, linkage)?;
+    let lower_result = lower_module(module, entry, linkage);
+    TL_NATIVE_MODE.with(|m| *m.borrow_mut() = false);
+    let lowered = lower_result?;
     let degradations = lowered.degradations;
 
     if linkage == NativeLinkage::Executable && cfg!(target_os = "macos") {

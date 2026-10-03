@@ -7,6 +7,34 @@ use super::{
 };
 
 #[test]
+fn top_level_globals_parse_initializers_with_optional_semicolons() {
+    let module = parse_in_source(
+        "var count: Int = 42;\nconst limit: Int = 7\nvar label: String = \"a;b\";\nfn main() -> Int { return count; }\n",
+    )
+    .expect("parse top-level globals");
+    let globals = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global {
+                name,
+                init,
+                mutable,
+                ..
+            } => Some((name.as_str(), init.as_deref(), *mutable)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(globals.len(), 3);
+    assert_eq!(globals[0], ("count", Some(&Expr::IntLit(42)), true));
+    assert_eq!(globals[1], ("limit", Some(&Expr::IntLit(7)), false));
+    assert_eq!(
+        globals[2],
+        ("label", Some(&Expr::StringLit("a;b".into())), true)
+    );
+}
+
+#[test]
 fn test_split_top_level_decl_blocks_empty() {
     let src = "";
     let blocks = split_top_level_decl_blocks(src);

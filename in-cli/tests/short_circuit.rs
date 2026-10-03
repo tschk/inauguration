@@ -240,10 +240,10 @@ fn short_circuit_c_backend_reference() {
         let mut module = parse_in_source(&source).unwrap();
         // Give C a standard int main wrapper while retaining the emitted entry signature.
         for decl in &mut module.decls {
-            if let inauguration::core_ir::Decl::Function { name, .. } = decl {
-                if name == "main" {
-                    *name = "case_main".into();
-                }
+            if let inauguration::core_ir::Decl::Function { name, .. } = decl
+                && name == "main"
+            {
+                *name = "case_main".into();
             }
         }
         let code = inauguration::native_emit::c_backend::emit_c_module(&module).unwrap();

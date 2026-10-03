@@ -1,6 +1,6 @@
 use crate::boundary_emit;
 use crate::boundary_ir::{BoundaryModule, IN_ABI_VERSION};
-use crate::core_ir::UnifiedModule;
+use crate::core_ir::{Decl, UnifiedModule};
 use crate::native_emit::NativeLinkage;
 use crate::native_emit::coff::{COFF_WINDOWS_TRIPLE, write_exit_process_exe};
 use crate::native_emit::elf::{
@@ -40,6 +40,20 @@ pub struct NativeObjectArtifact {
 }
 
 pub fn emit_native_object(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
+    // These AArch64 object paths contain code only. In particular, the
+    // freestanding fallback must not turn a failed global-data lowering into
+    // a successful fixed-result object.
+    if matches!(
+        request.target_triple,
+        AARCH64_LINUX_TRIPLE | AARCH64_NONE_TRIPLE | "aarch64-apple-darwin"
+    ) && request
+        .module
+        .decls
+        .iter()
+        .any(|decl| matches!(decl, Decl::Global { mutable: true, .. }))
+    {
+        return None;
+    }
     match (request.target_triple, request.linkage) {
         (ELF_LINUX_TRIPLE, NativeLinkage::StaticLib) => emit_x86_64_elf_object(request),
         (ELF_LINUX_TRIPLE, NativeLinkage::Executable) => Some(emit_x86_64_elf_executable(request)),

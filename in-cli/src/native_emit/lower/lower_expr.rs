@@ -66,6 +66,14 @@ pub(crate) fn lower_expr_into(
                         emitter.emit_u32(aarch64::add_imm64(rd, aarch64::REG_SP, addr as u16));
                     }
                 }
+            } else if ctx.globals.structs.contains_key(name) {
+                return Err(format!(
+                    "native-lower: struct global `{name}` requires a field access in `{fn_name}`"
+                ));
+            } else if ctx.globals.names.contains(name) {
+                return Err(format!(
+                    "native-lower: direct access to global `{name}` is unsupported in `{fn_name}`"
+                ));
             } else {
                 // Unknown identifier — enum variant, constant, or ZST used as value.
                 // Emit 0 so the function can lower; correct at runtime for None/NULL-like values.
@@ -414,13 +422,41 @@ pub(crate) fn lower_field(
                             return Ok(());
                         }
                     }
+                    return Err(format!(
+                        "native-lower: unknown field `{name}` on struct local `{local}` in `{fn_name}`"
+                    ));
                 }
                 Some(LocalSlot::Scalar(offset)) => {
                     // Opaque struct field: load scalar value
                     emitter.emit_u32(aarch64::ldr64(rd, aarch64::REG_SP, *offset));
                     return Ok(());
                 }
-                _ => {}
+                Some(_) => {
+                    return Err(format!(
+                        "native-lower: field access base `{local}` is not a struct local in `{fn_name}`"
+                    ));
+                }
+                None => {}
+            }
+            if ctx.params.contains_key(local) {
+                return Err(format!(
+                    "native-lower: field access base `{local}` is a scalar parameter in `{fn_name}`"
+                ));
+            }
+            if let Some(field) = ctx.globals.fields.get(&format!("{local}.{name}")) {
+                ctx.emit_global_address(emitter, rd, field.offset);
+                emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
+                return Ok(());
+            }
+            if ctx.globals.structs.contains_key(local) {
+                return Err(format!(
+                    "native-lower: unknown field `{name}` on struct global `{local}` in `{fn_name}`"
+                ));
+            }
+            if ctx.globals.names.contains(local) {
+                return Err(format!(
+                    "native-lower: field access on global `{local}` is unsupported in `{fn_name}`"
+                ));
             }
             emitter.emit_insns(&aarch64::load_i64(rd, 0));
             Ok(())
