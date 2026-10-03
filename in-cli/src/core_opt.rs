@@ -379,6 +379,12 @@ fn fold_body_to_expr(body: &[Stmt]) -> Option<Expr> {
     let mut env: HashMap<String, Expr> = HashMap::new();
     for stmt in &body[..body.len() - 1] {
         match stmt {
+            // Arrays need a materialized local slot for native bounds checks.
+            // Substituting a literal into `arr[index]` leaves an Index whose
+            // base the native backend cannot lower, silently producing zero.
+            Stmt::Let(_, Some(Typ::Array(_)), _) | Stmt::Let(_, _, Expr::ArrayLit(_)) => {
+                return None;
+            }
             Stmt::Let(name, _, e) if !expr_has_call(e) => {
                 let e = replace_in_expr(e.clone(), &env);
                 env.insert(name.clone(), e);

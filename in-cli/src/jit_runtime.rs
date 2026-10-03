@@ -360,6 +360,7 @@ impl JitRuntime {
     /// # Safety
     /// The function must have been loaded via `load()`. The caller is
     /// responsible for ensuring the function signature matches the arguments.
+    /// At most six integer arguments are supported; larger calls return `None`.
     pub unsafe fn invoke(&self, name: &str, _args: &[i64]) -> Option<i64> {
         let funcs = self.functions.read().unwrap();
         let func = funcs.get(name)?;
@@ -439,7 +440,79 @@ impl JitRuntime {
                     }
                     r
                 }
-                _ => 0,
+                4 => {
+                    let a0 = _args[0];
+                    let a1 = _args[1];
+                    let a2 = _args[2];
+                    let a3 = _args[3];
+                    let r: i64;
+                    unsafe {
+                        std::arch::asm!(
+                            "mov x27, {e}",
+                            "blr {f}",
+                            e = in(reg) ep,
+                            f = in(reg) entry,
+                            in("x0") a0,
+                            in("x1") a1,
+                            in("x2") a2,
+                            in("x3") a3,
+                            lateout("x0") r,
+                            clobber_abi("C"),
+                        );
+                    }
+                    r
+                }
+                5 => {
+                    let a0 = _args[0];
+                    let a1 = _args[1];
+                    let a2 = _args[2];
+                    let a3 = _args[3];
+                    let a4 = _args[4];
+                    let r: i64;
+                    unsafe {
+                        std::arch::asm!(
+                            "mov x27, {e}",
+                            "blr {f}",
+                            e = in(reg) ep,
+                            f = in(reg) entry,
+                            in("x0") a0,
+                            in("x1") a1,
+                            in("x2") a2,
+                            in("x3") a3,
+                            in("x4") a4,
+                            lateout("x0") r,
+                            clobber_abi("C"),
+                        );
+                    }
+                    r
+                }
+                6 => {
+                    let a0 = _args[0];
+                    let a1 = _args[1];
+                    let a2 = _args[2];
+                    let a3 = _args[3];
+                    let a4 = _args[4];
+                    let a5 = _args[5];
+                    let r: i64;
+                    unsafe {
+                        std::arch::asm!(
+                            "mov x27, {e}",
+                            "blr {f}",
+                            e = in(reg) ep,
+                            f = in(reg) entry,
+                            in("x0") a0,
+                            in("x1") a1,
+                            in("x2") a2,
+                            in("x3") a3,
+                            in("x4") a4,
+                            in("x5") a5,
+                            lateout("x0") r,
+                            clobber_abi("C"),
+                        );
+                    }
+                    r
+                }
+                _ => return None,
             };
             Some(result)
         }
@@ -455,7 +528,10 @@ impl JitRuntime {
                 1 => unsafe { f(_args[0], 0, 0, 0, 0, 0) },
                 2 => unsafe { f(_args[0], _args[1], 0, 0, 0, 0) },
                 3 => unsafe { f(_args[0], _args[1], _args[2], 0, 0, 0) },
-                _ => 0,
+                4 => unsafe { f(_args[0], _args[1], _args[2], _args[3], 0, 0) },
+                5 => unsafe { f(_args[0], _args[1], _args[2], _args[3], _args[4], 0) },
+                6 => unsafe { f(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5]) },
+                _ => return None,
             };
             Some(result)
         }

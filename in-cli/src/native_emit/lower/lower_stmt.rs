@@ -58,6 +58,7 @@ pub(crate) fn lower_stmt(
                         )?;
                     }
                     Typ::Array(elem) => {
+                        reject_array_return_with_unproven_lifetime(ctx, expr, functions, fn_name)?;
                         lower_array_expr_into_regs(
                             emitter,
                             ctx,
@@ -878,6 +879,107 @@ pub(crate) fn lower_struct_expr_into_regs(
     }
 }
 
+fn array_binding_reassigned(body: &[Stmt], name: &str) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Let(local, ..) | Stmt::Assign(local, _) => local == name,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => array_binding_reassigned(then_body, name) || array_binding_reassigned(else_body, name),
+        Stmt::Loop { body, .. } => array_binding_reassigned(body, name),
+        Stmt::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| array_binding_reassigned(&arm.body, name)),
+        Stmt::Try { body, catches, .. } => {
+            array_binding_reassigned(body, name)
+                || catches
+                    .iter()
+                    .any(|arm| array_binding_reassigned(&arm.body, name))
+        }
+        _ => false,
+    })
+}
+
+fn array_param_has_caller_lifetime(
+    ctx: &LowerCtx<'_>,
+    functions: &HashMap<String, FunctionInfo>,
+    fn_name: &str,
+    local: &str,
+) -> bool {
+    ctx._params_src
+        .iter()
+        .any(|(name, typ)| name == local && matches!(typ, Typ::Array(_)))
+        && functions
+            .get(fn_name)
+            .is_some_and(|func| !array_binding_reassigned(&func.body, local))
+}
+
+fn reject_array_return_with_unproven_lifetime(
+    ctx: &LowerCtx<'_>,
+    expr: &Expr,
+    functions: &HashMap<String, FunctionInfo>,
+    fn_name: &str,
+) -> Result<(), String> {
+    if let Expr::Ident(local) = expr {
+        if matches!(ctx.locals.get(local), Some(LocalSlot::ArrayParam { .. }))
+            && !array_param_has_caller_lifetime(ctx, functions, fn_name, local)
+        {
+            return Err(format!(
+                "native-lower: returning array alias `{local}` from `{fn_name}` has unproven storage lifetime"
+            ));
+        }
+        return Ok(());
+    }
+    let Expr::Call { callee, args, .. } = expr else {
+        return Ok(());
+    };
+    let Expr::Ident(target) = callee.as_ref() else {
+        return Ok(());
+    };
+    let Some(called) = functions.get(target) else {
+        return Ok(());
+    };
+    // A returned array may borrow an array argument. Only an unmodified
+    // parameter is known to refer to storage in our caller's live frame.
+    for (arg, (_, param_typ)) in args.iter().zip(&called.params) {
+        if !matches!(param_typ, Typ::Array(_)) {
+            continue;
+        }
+        let local = match arg {
+            Expr::Ident(local) => match ctx.locals.get(local) {
+                Some(LocalSlot::Array { .. }) => Some((local.as_str(), true)),
+                Some(LocalSlot::ArrayParam { .. })
+                    if !array_param_has_caller_lifetime(ctx, functions, fn_name, local) =>
+                {
+                    Some((local.as_str(), false))
+                }
+                _ => None,
+            },
+            Expr::Field { base, .. } => match base.as_ref() {
+                Expr::Ident(local)
+                    if matches!(ctx.locals.get(local), Some(LocalSlot::Struct { .. })) =>
+                {
+                    Some((local.as_str(), true))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((local, stack_local)) = local {
+            let kind = if stack_local {
+                "stack-local array argument"
+            } else {
+                "array argument with unproven storage lifetime"
+            };
+            return Err(format!(
+                "native-lower: returning array call from `{fn_name}` may outlive {kind} `{local}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn lower_array_expr_into_regs(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -912,6 +1014,9 @@ pub(crate) fn lower_array_expr_into_regs(
                     emitter.emit_u32(aarch64::ldr64(1, aarch64::REG_SP, *len_offset));
                     Ok(())
                 }
+                LocalSlot::Array { .. } => Err(format!(
+                    "native-lower: returning local array `{local}` from `{fn_name}` would outlive its stack storage"
+                )),
                 _ => {
                     emitter.emit_insns(&crate::native_emit::aarch64::load_i64(0, 0));
                     Ok(())

@@ -107,6 +107,22 @@ fn cases() -> Vec<Case> {
             inisa_reference: false,
         });
     }
+    for (name, index, expected) in [
+        ("helper_rhs_valid_index", 0, 33),
+        ("helper_rhs_bounds_failure", 2, 1),
+        ("helper_rhs_negative_index", -1, 1),
+    ] {
+        cases.push(Case {
+            name,
+            source: format!(
+                "fn combine(a: Int, b: Int, index: Int) -> Int {{\n let arr: [Int] = [3];\n return a + (b + arr[index]);\n}}\nfn main() -> Int {{ return combine(10, 20, {index}); }}"
+            ),
+            expected,
+            markers: "",
+            c_reference: false,
+            inisa_reference: false,
+        });
+    }
     cases
 }
 
