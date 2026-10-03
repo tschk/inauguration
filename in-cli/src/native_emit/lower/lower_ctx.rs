@@ -227,6 +227,15 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) aggregate_vector_scratch: Option<(u32, usize)>,
     pub(crate) iterator_chain_header_offset: Option<u32>,
     pub(crate) iterator_map_slots: Option<IteratorMapSlots>,
+    pub(crate) loop_branches: Vec<LoopBranchSites>,
+    pub(crate) try_depth: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct LoopBranchSites {
+    pub(crate) breaks: Vec<u32>,
+    pub(crate) continues: Vec<u32>,
+    pub(crate) try_depth: usize,
 }
 
 #[allow(clippy::only_used_in_recursion)]
@@ -416,6 +425,8 @@ impl<'a> LowerCtx<'a> {
             aggregate_vector_scratch: None,
             iterator_chain_header_offset: None,
             iterator_map_slots: None,
+            loop_branches: Vec::new(),
+            try_depth: 0,
         };
         let mut abi_idx = 0usize;
         for (name, typ) in params {

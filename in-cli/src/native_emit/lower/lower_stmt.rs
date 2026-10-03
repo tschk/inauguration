@@ -1,3 +1,4 @@
+use super::lower_ctx::LoopBranchSites;
 use super::lower_expr;
 use super::lower_util::{
     array_item_matches, emit_epilogue, emit_failure_return, expr_contains_call, expr_type,
@@ -235,6 +236,7 @@ pub(crate) fn lower_stmt(
         }
         Stmt::Try { body, catches, .. } => {
             emit_error_slot_adr(emitter, fn_name)?;
+            ctx.try_depth += 1;
             // Save previous error flag from global location to stack
             emitter.emit_u32(aarch64::ldrb(1, 27, 0));
             emitter.emit_u32(aarch64::strb(1, aarch64::REG_SP, ctx.saved_flag_offset));
@@ -291,6 +293,7 @@ pub(crate) fn lower_stmt(
             // Restore previous error flag from stack to global location
             emitter.emit_u32(aarch64::ldrb(1, aarch64::REG_SP, ctx.saved_flag_offset));
             emitter.emit_u32(aarch64::strb(1, 27, 0));
+            ctx.try_depth -= 1;
 
             Ok(())
         }
@@ -303,8 +306,25 @@ pub(crate) fn lower_stmt(
             emitter.patch_u32(continue_branch, aarch64::cbz_w(0, end_offset));
             Ok(())
         }
-        Stmt::Break => Ok(()),
-        Stmt::Continue => Ok(()),
+        Stmt::Break | Stmt::Continue => {
+            let Some(loop_sites) = ctx.loop_branches.last_mut() else {
+                return Err(format!(
+                    "native-lower: loop control outside a loop in `{fn_name}`"
+                ));
+            };
+            if ctx.try_depth != loop_sites.try_depth {
+                return Err(format!(
+                    "native-lower: loop control exiting a try block is unsupported in `{fn_name}`"
+                ));
+            }
+            let site = emitter.emit_insn(aarch64::b(0));
+            if matches!(stmt, Stmt::Break) {
+                loop_sites.breaks.push(site);
+            } else {
+                loop_sites.continues.push(site);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1164,6 +1184,10 @@ pub(crate) fn lower_loop(
     } else {
         None
     };
+    ctx.loop_branches.push(LoopBranchSites {
+        try_depth: ctx.try_depth,
+        ..Default::default()
+    });
     for stmt in body {
         lower_stmt(
             emitter,
@@ -1175,11 +1199,19 @@ pub(crate) fn lower_loop(
             ret_typ,
         )?;
     }
+    let loop_sites = ctx.loop_branches.pop().expect("loop branch scope");
+    for site in loop_sites.continues {
+        emitter.patch_u32(site, aarch64::b(head as i32 - site as i32));
+    }
     let back_offset = head as i32 - emitter.len() as i32;
     emitter.emit_u32(aarch64::b(back_offset));
+    let after = emitter.len();
     if let Some(end_branch) = end_branch {
-        let end_offset = emitter.len() as i32 - end_branch as i32;
+        let end_offset = after as i32 - end_branch as i32;
         emitter.patch_u32(end_branch, aarch64::b_cond(0, end_offset));
+    }
+    for site in loop_sites.breaks {
+        emitter.patch_u32(site, aarch64::b(after as i32 - site as i32));
     }
     Ok(())
 }
