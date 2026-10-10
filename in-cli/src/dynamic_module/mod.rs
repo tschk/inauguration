@@ -175,7 +175,18 @@ mod tests {
             "libecho_module.so"
         };
         let lib = out_dir.join(lib_name);
-        let status = Command::new("cc")
+        let mut cc = Command::new("cc");
+        if cfg!(target_os = "macos") {
+            cc.args([
+                "-arch",
+                if cfg!(target_arch = "x86_64") {
+                    "x86_64"
+                } else {
+                    "arm64"
+                },
+            ]);
+        }
+        let status = cc
             .args([
                 "-shared",
                 "-fPIC",

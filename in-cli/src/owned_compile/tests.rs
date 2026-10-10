@@ -92,6 +92,19 @@ fn jit_executes_snake_case_stdlib_process_run() {
         None,
     ));
 
+    if !crate::native_emit::lower::host_supports_native_subset() {
+        assert!(!report.success, "{report:?}");
+        assert!(
+            report
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("jit-host-unsupported:")),
+            "{report:?}"
+        );
+        fs::remove_file(source_path).unwrap();
+        return;
+    }
+
     assert!(report.success, "{report:?}");
     assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
     // On some environments (like CI runner where `true` has no output), `instring_from_bytes` will return None for empty strings,

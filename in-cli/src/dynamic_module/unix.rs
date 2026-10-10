@@ -119,7 +119,18 @@ mod tests {
         let src = out_dir.join("src.c");
         std::fs::write(&src, c_src).expect("write src");
 
-        let status = Command::new("cc")
+        let mut cc = Command::new("cc");
+        if cfg!(target_os = "macos") {
+            cc.args([
+                "-arch",
+                if cfg!(target_arch = "x86_64") {
+                    "x86_64"
+                } else {
+                    "arm64"
+                },
+            ]);
+        }
+        let status = cc
             .args([
                 "-shared",
                 "-fPIC",
