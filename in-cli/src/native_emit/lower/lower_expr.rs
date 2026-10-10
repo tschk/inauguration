@@ -2,7 +2,7 @@
 
 use super::lower_call;
 use super::{
-    FunctionInfo, LocalSlot, LowerCtx, PendingCall, contains_call, emit_failure_return, expr_type,
+    FunctionInfo, LocalSlot, LowerCtx, PendingCall, emit_failure_return, expr_type,
     find_field_offset, lower_comparison_result, pick_scratch,
 };
 use crate::core_ir::{Expr, FloatVal, Typ};
@@ -501,6 +501,50 @@ pub(crate) fn lower_unary(
     }
 }
 
+fn lower_binary_operands(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    lhs: &Expr,
+    rhs: &Expr,
+    rd: u8,
+    functions: &HashMap<String, FunctionInfo>,
+    pending_calls: &mut Vec<PendingCall>,
+    fn_name: &str,
+) -> Result<(u8, u8), String> {
+    lower_expr_into(emitter, ctx, lhs, rd, functions, pending_calls, fn_name)?;
+    let lhs_reg = rd;
+    let rhs_reg = if rd == 1 { 2 } else { 1 };
+    // Compound RHS expressions may reuse the register holding the LHS.
+    let temp = if matches!(
+        rhs,
+        Expr::IntLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::StringLit(_)
+            | Expr::Ident(_)
+    ) {
+        None
+    } else {
+        let offset = ctx.acquire_binop_temp(fn_name)?;
+        emitter.emit_u32(aarch64::str64(lhs_reg, aarch64::REG_SP, offset));
+        Some(offset)
+    };
+    lower_expr_into(
+        emitter,
+        ctx,
+        rhs,
+        rhs_reg,
+        functions,
+        pending_calls,
+        fn_name,
+    )?;
+    if let Some(offset) = temp {
+        emitter.emit_u32(aarch64::ldr64(lhs_reg, aarch64::REG_SP, offset));
+        ctx.release_binop_temp();
+    }
+    Ok((lhs_reg, rhs_reg))
+}
+
 pub(crate) fn lower_float_binary(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -512,18 +556,17 @@ pub(crate) fn lower_float_binary(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
-    lower_expr_into(emitter, ctx, lhs, rd, functions, pending_calls, fn_name)?;
-    let rhs_reg = if rd == 1 { 2 } else { 1 };
-    lower_expr_into(
+    let (lhs_reg, rhs_reg) = lower_binary_operands(
         emitter,
         ctx,
+        lhs,
         rhs,
-        rhs_reg,
+        rd,
         functions,
         pending_calls,
         fn_name,
     )?;
-    emitter.emit_u32(aarch64::fmov_from_gp(rd, rd));
+    emitter.emit_u32(aarch64::fmov_from_gp(rd, lhs_reg));
     emitter.emit_u32(aarch64::fmov_from_gp(rhs_reg, rhs_reg));
     match op {
         "+" => emitter.emit_u32(aarch64::fadd_d(rd, rd, rhs_reg)),
@@ -589,41 +632,16 @@ pub(crate) fn lower_binary(
             fn_name,
         );
     }
-    lower_expr_into(emitter, ctx, lhs, rd, functions, pending_calls, fn_name)?;
-    let lhs_reg = rd;
-    let rhs_reg = if rd == 1 { 2 } else { 1 };
-    // ponytail: if rhs contains a function call, its arg loading overwrites
-    // the lhs result. Save lhs to the fixed binop_temp stack slot.
-    let rhs_has_call = contains_call(rhs);
-    let temp = if rhs_has_call {
-        Some(ctx.acquire_binop_temp(fn_name)?)
-    } else {
-        None
-    };
-    if rhs_has_call {
-        emitter.emit_u32(aarch64::str64(
-            lhs_reg,
-            aarch64::REG_SP,
-            temp.expect("binary temp"),
-        ));
-    }
-    lower_expr_into(
+    let (lhs_reg, rhs_reg) = lower_binary_operands(
         emitter,
         ctx,
+        lhs,
         rhs,
-        rhs_reg,
+        rd,
         functions,
         pending_calls,
         fn_name,
     )?;
-    if rhs_has_call {
-        emitter.emit_u32(aarch64::ldr64(
-            lhs_reg,
-            aarch64::REG_SP,
-            temp.expect("binary temp"),
-        ));
-        ctx.release_binop_temp();
-    }
     let insn = match op {
         "+" | "+=" => aarch64::add_reg64(rd, lhs_reg, rhs_reg),
         "-" | "-=" => aarch64::sub_reg64(rd, lhs_reg, rhs_reg),

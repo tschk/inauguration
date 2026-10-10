@@ -991,6 +991,46 @@ fn jit_executes_loop_break_and_continue() {
 }
 
 #[test]
+#[cfg(target_arch = "aarch64")]
+fn jit_preserves_nested_binary_operands() {
+    let cases = [
+        (
+            include_str!("../../../../conformance/control-flow/compound-ops.in"),
+            25,
+        ),
+        (
+            "fn main() -> Int { let a = 10; let b = 2; let c = 3; return a + (b + c); }",
+            15,
+        ),
+        (
+            "fn main() -> Float { let a = 10.0; let b = 2.0; let c = 3.0; return a + (b + c); }",
+            15.0_f64.to_bits() as i64,
+        ),
+        (
+            "fn value() -> Float { return 5.0; }\nfn main() -> Float { let a = 10.0; return a + value(); }",
+            15.0_f64.to_bits() as i64,
+        ),
+    ];
+    for (source, expected) in cases {
+        let module = crate::in_lang_parse::parse_in_source(source).expect("parse");
+        let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
+        let offsets = lowered
+            .function_offsets
+            .iter()
+            .map(|(name, offset)| (name.clone(), *offset, 0))
+            .collect::<Vec<_>>();
+        let mut rt = crate::jit_runtime::JitRuntime::new();
+        rt.load(&lowered.code, &offsets, &lowered.relocations)
+            .expect("load");
+        assert_eq!(
+            unsafe { rt.invoke("main", &[]).expect("invoke") },
+            expected,
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn lower_rejects_loop_jump_outside_loop() {
     for jump in ["break", "continue"] {
         let module = crate::in_lang_parse::parse_in_source(&format!(

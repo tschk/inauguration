@@ -93,9 +93,9 @@ pub(crate) use lower_ctx::{
 pub(crate) use lower_iterator::lower_vec_for;
 pub(crate) use lower_stmt::{lower_stmt, lower_struct_expr_into_regs};
 pub(crate) use lower_util::{
-    base_struct_name, contains_call, emit_epilogue, emit_failure_return, ensure_return_type,
-    expr_type, find_field_offset, is_native_scalar_type, lower_comparison_result,
-    native_param_abi_slots, native_struct_fields, pick_scratch, reject_unsupported_function,
+    base_struct_name, emit_epilogue, emit_failure_return, ensure_return_type, expr_type,
+    find_field_offset, is_native_scalar_type, lower_comparison_result, native_param_abi_slots,
+    native_struct_fields, pick_scratch, reject_unsupported_function,
 };
 
 pub const TARGET_TRIPLE: &str = "aarch64-apple-darwin";
