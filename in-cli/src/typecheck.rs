@@ -83,6 +83,17 @@ impl TypeChecker {
     pub fn check_module(&self, module: &UnifiedModule) -> Result<(), Vec<TypeError>> {
         let mut errors = Vec::new();
         let facts = self.collect_facts(module);
+        let globals: HashMap<String, Typ> = module
+            .decls
+            .iter()
+            .filter_map(|decl| {
+                if let Decl::Global { name, typ, .. } = decl {
+                    Some((name.clone(), typ.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         self.check_interface_conformance(module, &mut errors);
 
@@ -95,7 +106,8 @@ impl TypeChecker {
                     body,
                     ..
                 } => {
-                    let mut env: HashMap<String, Typ> = params.iter().cloned().collect();
+                    let mut env = globals.clone();
+                    env.extend(params.iter().cloned());
                     self.check_stmts(name, ret, body, &facts, &mut env, &mut errors);
                 }
                 Decl::Class { .. } => {}
@@ -1087,7 +1099,12 @@ fn typecheck_polyglot_entrypoints(module: &UnifiedModule) -> Result<(), String> 
     let mut checked_decls: Vec<Decl> = module
         .decls
         .iter()
-        .filter(|decl| matches!(decl, Decl::Struct { .. } | Decl::Class { .. }))
+        .filter(|decl| {
+            matches!(
+                decl,
+                Decl::Struct { .. } | Decl::Class { .. } | Decl::Global { .. }
+            )
+        })
         .cloned()
         .collect();
     let functions: Vec<Decl> = module
@@ -1312,6 +1329,47 @@ mod tests {
     }
     use super::*;
     use crate::core_ir::{Decl, Expr, MethodSig, Stmt, Typ, UnifiedModule, Visibility};
+
+    #[test]
+    fn globals_are_visible_and_locals_shadow_them() {
+        for source in [
+            "var count: Int = 3;\nfn main() -> Int { count = count + 5; return count; }",
+            "var count: Int = 3;\nfn read(count: String) -> String { return count; }\nfn main() -> Bool { let count = true; return count; }",
+            "var count: Int = 3;\nfn main() -> Int { return count; }",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            assert!(TypeChecker::new().check_module(&module).is_ok(), "{source}");
+        }
+    }
+
+    #[test]
+    fn global_assignments_check_the_declared_type() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "var count: Int = 3;\nfn main() { count = true; }",
+        )
+        .unwrap();
+        let errors = TypeChecker::new().check_module(&module).unwrap_err();
+        assert!(
+            errors.iter().any(|error| matches!(
+                error,
+                TypeError::TypeMismatch {
+                    expected: Typ::Int,
+                    got: Typ::Bool,
+                    ..
+                }
+            )),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn polyglot_entrypoint_typechecking_retains_globals() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "var count: Int = 3;\nfn main() -> Int { return count; }",
+        )
+        .unwrap();
+        assert!(typecheck_for_parser(ParserId::JavaScript, &module).is_ok());
+    }
 
     fn function(name: &str, ret: Typ, params: Vec<(String, Typ)>, body: Vec<Stmt>) -> Decl {
         Decl::Function {

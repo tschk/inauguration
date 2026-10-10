@@ -557,21 +557,29 @@ mod tests {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn host_pipeline_emits_runnable_native_program() {
-        let mut compiler =
-            Compiler::new(ComponentSpec::host_executable("test_app", Some("main"))).unwrap();
-        let result = compiler.compile("fn main() -> Int { return 11; }").unwrap();
-        assert_eq!(&result.output.data[..4], &[0xcf, 0xfa, 0xed, 0xfe]);
-        let path =
-            std::env::temp_dir().join(format!("in-pipeline-execution-{}", std::process::id()));
-        std::fs::write(&path, result.output.data).unwrap();
-        crate::owned_compile::set_native_artifact_permissions(
-            &path,
-            crate::native_emit::NativeLinkage::Executable,
-        )
-        .unwrap();
-        let status = std::process::Command::new(&path).status();
-        std::fs::remove_file(path).unwrap();
-        assert_eq!(status.unwrap().code(), Some(11));
+        for (source, expected) in [
+            ("fn main() -> Int { return 11; }", 11),
+            (
+                include_str!("../../../conformance/types/mutable-global.in"),
+                13,
+            ),
+        ] {
+            let mut compiler =
+                Compiler::new(ComponentSpec::host_executable("test_app", Some("main"))).unwrap();
+            let result = compiler.compile(source).unwrap();
+            assert_eq!(&result.output.data[..4], &[0xcf, 0xfa, 0xed, 0xfe]);
+            let path =
+                std::env::temp_dir().join(format!("in-pipeline-execution-{}", std::process::id()));
+            std::fs::write(&path, result.output.data).unwrap();
+            crate::owned_compile::set_native_artifact_permissions(
+                &path,
+                crate::native_emit::NativeLinkage::Executable,
+            )
+            .unwrap();
+            let status = std::process::Command::new(&path).status();
+            std::fs::remove_file(path).unwrap();
+            assert_eq!(status.unwrap().code(), Some(expected), "{source}");
+        }
     }
 
     #[test]
