@@ -1161,3 +1161,16 @@ fn cross_target_exit_stubs_reject_observable_entry_bodies() {
         assert!(!out.exists(), "{target} wrote an incomplete artifact");
     }
 }
+
+#[test]
+fn resolve_jit_entry_empty_name_uses_library_fallback() {
+    let module = UnifiedModule::new(vec![Decl::Function {
+        name: "answer".into(),
+        params: vec![],
+        ret: Typ::Int,
+        body: vec![],
+        type_params: vec![],
+    }]);
+    assert_eq!(resolve_jit_entry(&module, ""), "answer");
+    assert_eq!(resolve_jit_entry(&UnifiedModule::new(vec![]), ""), "");
+}

@@ -20,7 +20,7 @@ enum EntryResultKind {
 }
 
 /// Resolve a JIT entry name against `module`'s function declarations.
-/// Tries: exact match, namespaced (`.<entry>`), suffix match, then falls
+/// Tries: exact match, namespaced (`.<entry>`), then falls
 /// back to the first function so library crates without main can compile.
 pub fn resolve_jit_entry(module: &UnifiedModule, entry: &str) -> String {
     let mut func_names = module.decls.iter().filter_map(|d| match d {
@@ -33,12 +33,6 @@ pub fn resolve_jit_entry(module: &UnifiedModule, entry: &str) -> String {
     }
     let dot_entry = format!(".{entry}");
     if let Some(found) = func_names.clone().find(|n| n.ends_with(&dot_entry)) {
-        return found.to_string();
-    }
-    // Suffix match: entry is a suffix of a function name (beyond a dot)
-    if let Some(found) = func_names.clone().find(|n| {
-        n.ends_with(entry) && n.as_bytes().get(n.len() - entry.len().wrapping_sub(1)) == Some(&b'.')
-    }) {
         return found.to_string();
     }
     // Entry not found — use first non-closure function so libs compile
