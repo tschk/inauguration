@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# inauguration `in` installer — clone: cargo build release in in-cli; else GitHub tarballs.
+# inauguration `in` installer — checkout: staged Cargo install; else GitHub tarballs.
 # Usage:
-#   ./install.sh                    # checkout → cargo build --release (in-cli)
+#   ./install.sh                    # checkout → build and verify a staged compiler
 #   IN_USE_RELEASE=1 ./install.sh   # checkout → still fetch release binary
 #
 set -euo pipefail
@@ -28,16 +28,32 @@ path_hint() {
   esac
 }
 
+install_verified() {
+  local binary="$1" expected="$2" actual candidate
+  actual="$("$binary" --version)" || die "Compiler candidate cannot execute: $binary"
+  [[ "$actual" == "in $expected" ]] || die "Compiler candidate version mismatch: expected in $expected, got $actual"
+  mkdir -p "$INSTALL_DIR"
+  candidate="$(mktemp "$INSTALL_DIR/.in-install.XXXXXX")"
+  if ! install -m 0755 "$binary" "$candidate" || ! mv -f "$candidate" "$INSTALL_DIR/in"; then
+    rm -f "$candidate"
+    die "Could not install verified compiler into $INSTALL_DIR"
+  fi
+}
+
 install_from_repo() {
   local root="$1"
   if ! command -v cargo &>/dev/null; then
     die "cargo not in PATH — install Rust from https://rustup.rs/ or set IN_USE_RELEASE=1 to download a binary."
   fi
   info "Building \`in\` from local checkout (${root})…"
-  (cd "${root}/in-cli" && cargo build --release --features extended)
-  mkdir -p "$INSTALL_DIR"
-  cp "${root}/in-cli/target/release/in" "${INSTALL_DIR}/in"
-  chmod +x "${INSTALL_DIR}/in"
+  local stage package_id
+  stage="$(mktemp -d)"
+  trap 'rm -rf "${stage:-}"' EXIT
+  package_id="$(cargo pkgid --manifest-path "${root}/in-cli/Cargo.toml" --locked)"
+  cargo install --path "${root}/in-cli" --locked --features extended --bin in --root "$stage"
+  install_verified "$stage/bin/in" "${package_id##*@}"
+  rm -rf "$stage"
+  trap - EXIT
   ok "Built and installed ${INSTALL_DIR}/in"
   path_hint
 }
@@ -117,7 +133,8 @@ install_from_release() {
   if [[ ! -f "${extract}/${BIN_NAME}" ]]; then
     die "Release tarball missing \`${BIN_NAME}\` binary at archive root."
   fi
-  install -m 0755 "${extract}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
+  chmod +x "${extract}/${BIN_NAME}"
+  install_verified "${extract}/${BIN_NAME}" "${VERSION#v}"
 
   ok "${BIN_NAME} ${VERSION} → ${INSTALL_DIR}/${BIN_NAME}"
   path_hint
