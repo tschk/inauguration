@@ -136,7 +136,22 @@ data = Path(sys.argv[1]).read_bytes()
 report = json.loads(Path(sys.argv[2]).read_text())
 if data[:8] != b"!<arch>\n":
     raise SystemExit("mach-o staticlib missing ar magic")
-offset = 82
+offset = 8
+while offset + 60 <= len(data):
+    header = data[offset:offset + 60]
+    if header[58:60] != b"`\n":
+        raise SystemExit("mach-o archive member has invalid header")
+    size = int(header[48:58])
+    payload = offset + 60
+    name = header[:16].decode("ascii").strip()
+    if name.startswith("#1/"):
+        payload += int(name[3:])
+    if data[payload:payload + 4] == bytes.fromhex("cffaedfe"):
+        offset = payload
+        break
+    offset += 60 + size + size % 2
+else:
+    raise SystemExit("mach-o archive has no Mach-O member")
 if int.from_bytes(data[offset:offset + 4], "little") != 0xFEEDFACF:
     raise SystemExit("mach-o staticlib missing Mach-O magic")
 if int.from_bytes(data[offset + 4:offset + 8], "little", signed=True) != 0x0100000C:

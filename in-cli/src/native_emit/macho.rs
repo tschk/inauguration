@@ -65,8 +65,7 @@ pub fn write_image(
 }
 
 fn write_static_archive(image: &MachOImage, member_name: &str, out: &mut Vec<u8>) {
-    let mut object = Vec::new();
-    write_macho_image(image, MachOLinkage::StaticLib, "", &mut object);
+    let object = write_relocatable_object(image);
     let name = if member_name.is_empty() {
         "object.o".to_string()
     } else if member_name.ends_with(".o") {
@@ -74,6 +73,43 @@ fn write_static_archive(image: &MachOImage, member_name: &str, out: &mut Vec<u8>
     } else {
         format!("{member_name}.o")
     };
+    let mut symbols: Vec<String> = image
+        .exports
+        .iter()
+        .map(|export| symbol_name(&export.name))
+        .collect();
+    symbols.sort();
+    let mut strings = Vec::new();
+    let mut offsets = Vec::new();
+    for symbol in &symbols {
+        offsets.push(u32::try_from(strings.len()).expect("archive symbol table exceeds 4 GiB"));
+        strings.extend_from_slice(symbol.as_bytes());
+        strings.push(0);
+    }
+    while !strings.len().is_multiple_of(8) {
+        strings.push(0);
+    }
+    let table_size = offsets.len() * 8;
+    let toc_size = 4 + table_size + 4 + strings.len();
+    let object_offset =
+        u32::try_from(8 + 60 + toc_size + toc_size % 2).expect("archive index exceeds 4 GiB");
+    let mut toc = Vec::new();
+    toc.extend_from_slice(
+        &u32::try_from(table_size)
+            .expect("archive table exceeds 4 GiB")
+            .to_le_bytes(),
+    );
+    for offset in offsets {
+        toc.extend_from_slice(&offset.to_le_bytes());
+        toc.extend_from_slice(&object_offset.to_le_bytes());
+    }
+    toc.extend_from_slice(
+        &u32::try_from(strings.len())
+            .expect("archive strings exceed 4 GiB")
+            .to_le_bytes(),
+    );
+    toc.extend_from_slice(&strings);
+    write_ar_member(out, "__.SYMDEF SORTED", &toc);
     write_ar_member(out, &name, &object);
 }
 
@@ -81,24 +117,26 @@ fn write_ar_member(out: &mut Vec<u8>, name: &str, payload: &[u8]) {
     if out.is_empty() {
         out.extend_from_slice(b"!<arch>\n");
     }
-    let header_name = if name.len() <= 16 {
+    let name_size = if name.len() > 16 {
+        name.len().next_multiple_of(8)
+    } else {
+        0
+    };
+    let header_name = if name_size == 0 {
         let mut buf = [b' '; 16];
         buf[..name.len()].copy_from_slice(name.as_bytes());
         buf
     } else {
         let mut buf = [b' '; 16];
-        let marker = format!("#1/{}", name.len());
+        let marker = format!("#1/{name_size}");
         buf[..marker.len()].copy_from_slice(marker.as_bytes());
         buf
     };
     let timestamp = b"0           ";
-    let uid = b"0           ";
-    let gid = b"0           ";
-    let mode: &[u8] = b"644       ";
-    let size_field = format!(
-        "{:10}",
-        payload.len() + if name.len() > 16 { name.len() } else { 0 }
-    );
+    let uid = b"0     ";
+    let gid = b"0     ";
+    let mode: &[u8] = b"644     ";
+    let size_field = format!("{:10}", payload.len() + name_size);
     out.extend_from_slice(&header_name);
     out.extend_from_slice(timestamp);
     out.extend_from_slice(uid);
@@ -106,8 +144,9 @@ fn write_ar_member(out: &mut Vec<u8>, name: &str, payload: &[u8]) {
     out.extend_from_slice(mode);
     out.extend_from_slice(size_field.as_bytes());
     out.extend_from_slice(b"`\n");
-    if name.len() > 16 {
+    if name_size > 0 {
         out.extend_from_slice(name.as_bytes());
+        out.resize(out.len() + name_size - name.len(), 0);
     }
     out.extend_from_slice(payload);
     if out.len() % 2 == 1 {
@@ -271,11 +310,19 @@ impl LinkEditTables {
     }
 }
 
+fn symbol_name(name: &str) -> String {
+    if name.starts_with('_') {
+        name.to_string()
+    } else {
+        format!("_{name}")
+    }
+}
+
 fn build_linkedit(image: &MachOImage, text_vmaddr: u64) -> LinkEditTables {
     let mut strtab = vec![0u8];
     let mut symtab = Vec::new();
     for export in &image.exports {
-        let sym_name = format!("_{}", export.name);
+        let sym_name = symbol_name(&export.name);
         let strx = strtab.len() as u32;
         strtab.extend_from_slice(sym_name.as_bytes());
         strtab.push(0);
@@ -451,7 +498,7 @@ pub fn write_relocatable_object(image: &MachOImage) -> Vec<u8> {
     exports_sorted.sort_by(|a, b| a.name.cmp(&b.name));
     for export in &exports_sorted {
         let off = strtab.len() as u32;
-        strtab.extend_from_slice(export.name.as_bytes());
+        strtab.extend_from_slice(symbol_name(&export.name).as_bytes());
         strtab.push(0);
         str_offsets.push((export.name.clone(), off));
     }
@@ -460,13 +507,16 @@ pub fn write_relocatable_object(image: &MachOImage) -> Vec<u8> {
     for (_, name) in &image.external_refs {
         if !ext_str_offsets.iter().any(|(n, _)| n == name) {
             let off = strtab.len() as u32;
-            strtab.extend_from_slice(name.as_bytes());
+            strtab.extend_from_slice(symbol_name(name).as_bytes());
             strtab.push(0);
             ext_str_offsets.push((name.clone(), off));
         }
     }
 
-    let num_syms: u32 = 1 + num_def_syms as u32 + ext_str_offsets.len() as u32;
+    while !strtab.len().is_multiple_of(8) {
+        strtab.push(0);
+    }
+    let num_syms: u32 = num_def_syms as u32 + ext_str_offsets.len() as u32;
     let num_def_syms_u32 = num_def_syms as u32;
     let num_undef_syms = ext_str_offsets.len() as u32;
     let num_cmds: u32 = 4; // segment + symtab + build_version + dysymtab
@@ -491,8 +541,7 @@ pub fn write_relocatable_object(image: &MachOImage) -> Vec<u8> {
         .external_refs
         .iter()
         .map(|(site, name)| {
-            let undef_idx = 1
-                + num_def_syms_u32
+            let undef_idx = num_def_syms_u32
                 + ext_str_offsets
                     .iter()
                     .position(|(n, _)| n == name)
@@ -557,8 +606,8 @@ pub fn write_relocatable_object(image: &MachOImage) -> Vec<u8> {
     out.extend_from_slice(&(strtab.len() as u32).to_le_bytes());
 
     // LC_DYSYMTAB — tells linker symbol counts and relocation layout
-    // Symbol counts: sym 0=local, 1..num_def_syms=defined, rest=undefined
-    let nlocalsym: u32 = 1;
+    // Defined exports precede undefined symbols; no synthetic locals are needed.
+    let nlocalsym: u32 = 0;
     let iextdefsym: u32 = nlocalsym;
     let iundefsym: u32 = nlocalsym + num_def_syms_u32;
     out.extend_from_slice(&LC_DYSYMTAB.to_le_bytes());
@@ -579,8 +628,8 @@ pub fn write_relocatable_object(image: &MachOImage) -> Vec<u8> {
     out.extend_from_slice(&0u32.to_le_bytes()); // nextrefsyms
     out.extend_from_slice(&0u32.to_le_bytes()); // indirectsymoff
     out.extend_from_slice(&0u32.to_le_bytes()); // nindirectsyms
-    out.extend_from_slice(&reloc_off.to_le_bytes()); // extreloff (all relocs are external)
-    out.extend_from_slice(&reloc_count.to_le_bytes()); // nextrel
+    out.extend_from_slice(&0u32.to_le_bytes()); // section owns the relocation table
+    out.extend_from_slice(&0u32.to_le_bytes()); // nextrel
     out.extend_from_slice(&0u32.to_le_bytes()); // locreloff
     out.extend_from_slice(&0u32.to_le_bytes()); // nlocrel
 
@@ -595,11 +644,6 @@ pub fn write_relocatable_object(image: &MachOImage) -> Vec<u8> {
     out.extend_from_slice(&strtab);
 
     // Symbol table — each nlist_64 entry is 16 bytes: n_strx(4) + n_type(1) + n_sect(1) + n_desc(2) + n_value(8)
-    // sym 0: local __text start
-    out.extend_from_slice(&0u32.to_le_bytes()); // n_strx
-    out.extend_from_slice(&[N_SECT, 1u8, 0u8, 0u8]); // n_type, n_sect, n_desc (2 bytes)
-    out.extend_from_slice(&0u64.to_le_bytes()); // n_value
-
     // Defined exports
     for export in &exports_sorted {
         let &s_off = str_offsets
@@ -679,32 +723,59 @@ mod tests {
 
     #[test]
     fn staticlib_writes_ar_archive() {
-        let image = sample_image();
-        let mut out = Vec::new();
-        write_image(&image, MachOLinkage::StaticLib, "sample", &mut out);
-        assert_eq!(&out[..8], b"!<arch>\n");
-        let object_offset = 82;
-        assert_eq!(
-            u32::from_le_bytes(out[object_offset..object_offset + 4].try_into().unwrap()),
-            MH_MAGIC_64
-        );
-        assert_eq!(
-            i32::from_le_bytes(
-                out[object_offset + 4..object_offset + 8]
-                    .try_into()
-                    .unwrap()
-            ),
-            CPU_TYPE_ARM64
-        );
-        assert_eq!(
-            u32::from_le_bytes(
-                out[object_offset + 12..object_offset + 16]
-                    .try_into()
-                    .unwrap()
-            ),
-            MH_OBJECT
-        );
-        assert!(String::from_utf8_lossy(&out).contains("_answer"));
+        for (member, export) in [
+            ("sample", "answer"),
+            ("a-long-static-library-object-name", "_answer"),
+        ] {
+            let mut image = sample_image();
+            image.exports[0].name = export.into();
+            let mut out = Vec::new();
+            write_image(&image, MachOLinkage::StaticLib, member, &mut out);
+            assert_eq!(&out[..8], b"!<arch>\n");
+            assert_eq!(&out[66..68], b"`\n");
+            let toc_size = std::str::from_utf8(&out[56..66])
+                .unwrap()
+                .trim()
+                .parse::<usize>()
+                .unwrap();
+            let object_header = 68 + toc_size + toc_size % 2;
+            let header_name = std::str::from_utf8(&out[object_header..object_header + 16])
+                .unwrap()
+                .trim();
+            let name_size = header_name
+                .strip_prefix("#1/")
+                .map(|size| size.parse::<usize>().unwrap())
+                .unwrap_or(0);
+            let object_offset = object_header + 60 + name_size;
+            assert!(object_offset.is_multiple_of(8));
+            assert_eq!(&out[object_header + 58..object_header + 60], b"`\n");
+            assert_eq!(
+                u32::from_le_bytes(out[76..80].try_into().unwrap()) as usize,
+                object_header
+            );
+            assert_eq!(
+                u32::from_le_bytes(out[object_offset..object_offset + 4].try_into().unwrap()),
+                MH_MAGIC_64
+            );
+            assert_eq!(
+                i32::from_le_bytes(
+                    out[object_offset + 4..object_offset + 8]
+                        .try_into()
+                        .unwrap()
+                ),
+                CPU_TYPE_ARM64
+            );
+            assert_eq!(
+                u32::from_le_bytes(
+                    out[object_offset + 12..object_offset + 16]
+                        .try_into()
+                        .unwrap()
+                ),
+                MH_OBJECT
+            );
+            assert!(String::from_utf8_lossy(&out).contains("_answer"));
+            assert!(!String::from_utf8_lossy(&out).contains("__answer"));
+        }
     }
 
     #[test]
