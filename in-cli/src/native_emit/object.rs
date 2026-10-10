@@ -5,11 +5,11 @@ use crate::native_emit::NativeLinkage;
 use crate::native_emit::coff::{COFF_WINDOWS_TRIPLE, write_exit_process_exe};
 use crate::native_emit::elf::{
     AARCH64_LINUX_TRIPLE, ARMV7_LINUX_GNUEABIHF_TRIPLE, ELF_LINUX_TRIPLE, ElfExecutable, ElfObject,
-    THUMBV8M_MAIN_NONE_EABI_TRIPLE, aarch64_linux_exit_code, aarch64_return_i32_object_code,
-    arm32_linux_exit_code, arm32_return_i32_object_code, write_aarch64_executable,
-    write_aarch64_relocatable_object, write_arm32_executable, write_arm32_relocatable_object,
-    write_executable, write_i386_relocatable_object, write_x86_64_relocatable_object,
-    x86_64_linux_exit_code, x86_64_return_i32_object_code,
+    THUMBV8M_MAIN_NONE_EABI_TRIPLE, aarch64_linux_exit_code, arm32_linux_exit_code,
+    arm32_return_i32_object_code, write_aarch64_executable, write_aarch64_relocatable_object,
+    write_arm32_executable, write_arm32_relocatable_object, write_executable,
+    write_i386_relocatable_object, write_x86_64_relocatable_object, x86_64_linux_exit_code,
+    x86_64_return_i32_object_code,
 };
 use crate::native_emit::macho::{MachOImage, MachOLinkage, write_image};
 use crate::native_emit::target::AARCH64_NONE_TRIPLE;
@@ -46,7 +46,7 @@ pub fn emit_native_object(request: &NativeObjectRequest<'_>) -> Option<NativeObj
         (COFF_WINDOWS_TRIPLE, NativeLinkage::Executable) => {
             Some(emit_x86_64_pe_executable(request))
         }
-        (AARCH64_LINUX_TRIPLE, NativeLinkage::StaticLib) => Some(emit_aarch64_elf_object(request)),
+        (AARCH64_LINUX_TRIPLE, NativeLinkage::StaticLib) => emit_aarch64_elf_object(request),
         (AARCH64_LINUX_TRIPLE, NativeLinkage::Executable) => {
             Some(emit_aarch64_elf_executable(request))
         }
@@ -63,9 +63,7 @@ pub fn emit_native_object(request: &NativeObjectRequest<'_>) -> Option<NativeObj
         | (X86_64_TRIPLE, NativeLinkage::StaticLib) => {
             Some(emit_x86_64_freestanding_object(request))
         }
-        (AARCH64_NONE_TRIPLE, NativeLinkage::StaticLib) => {
-            Some(emit_aarch64_freestanding_object(request))
-        }
+        (AARCH64_NONE_TRIPLE, NativeLinkage::StaticLib) => emit_aarch64_elf_object(request),
         (THUMBV8M_MAIN_NONE_EABI_TRIPLE, NativeLinkage::StaticLib) => {
             match emit_thumbv8m_freestanding_object(request) {
                 Ok(artifact) => Some(artifact),
@@ -170,11 +168,34 @@ fn emit_x86_64_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeObj
     })
 }
 
-fn emit_aarch64_elf_object(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
+fn emit_aarch64_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
+    let mut lowered = crate::native_emit::lower::lower_native_module(
+        request.module,
+        request.entry,
+        NativeLinkage::StaticLib,
+    )
+    .ok()?;
+    // ponytail: add data and CALL26 relocations before accepting globals or external calls.
+    if !lowered.global_relocs.is_empty()
+        || !lowered.external_refs.is_empty()
+        || !lowered.degradations.is_empty()
+    {
+        return None;
+    }
+    let first = lowered.exports.iter().min_by_key(|export| export.offset)?;
+    let base = first.offset;
+    let export_name = first.name.clone();
+    // ELF's primary export starts at zero; remove the unused executable-entry prefix.
+    // All remaining references are PC-relative, so a uniform shift preserves them.
     let object = ElfObject {
-        code: aarch64_return_i32_object_code(request.exit_code),
-        export_name: request.entry.to_string(),
-        exports: vec![],
+        code: lowered.code.split_off(base as usize),
+        export_name: export_name.clone(),
+        exports: lowered
+            .exports
+            .into_iter()
+            .filter(|export| export.name != export_name)
+            .map(|export| (export.name, export.offset - base))
+            .collect(),
         undefs: vec![],
         thumb_calls: vec![],
         thumb_addr_refs: vec![],
@@ -182,15 +203,28 @@ fn emit_aarch64_elf_object(request: &NativeObjectRequest<'_>) -> NativeObjectArt
     };
     let mut bytes = Vec::new();
     write_aarch64_relocatable_object(&object, &mut bytes);
-    NativeObjectArtifact {
+    let freestanding = request.target_triple == AARCH64_NONE_TRIPLE;
+    Some(NativeObjectArtifact {
         bytes,
         artifact_kind: "elf-relocatable-object",
-        backend_level: "owned-object-subset",
-        runtime_level: "none",
-        reason_code: NATIVE_OBJECT_SUBSET,
-        reason: "inauguration owns ELF64 AArch64 relocatable object emission for const-evaluable scalar entry functions on this target",
+        backend_level: if freestanding {
+            "owned-native-subset-freestanding"
+        } else {
+            "owned-native-subset-aarch64-static"
+        },
+        runtime_level: if freestanding {
+            "freestanding-none"
+        } else {
+            "none"
+        },
+        reason_code: if freestanding {
+            "native-aarch64-unknown-none-freestanding"
+        } else {
+            NATIVE_OBJECT_SUBSET
+        },
+        reason: "inauguration emits ELF64 AArch64 relocatable objects with real Core IR function bodies and every function exported",
         abi_manifest: Some(object_abi_manifest(request)),
-    }
+    })
 }
 
 fn emit_aarch64_elf_executable(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
@@ -300,61 +334,6 @@ fn emit_x86_64_elf_executable(request: &NativeObjectRequest<'_>) -> NativeObject
         reason_code: "native-x86_64-linux-exit-subset",
         reason: "inauguration owns ELF64 Linux executable emission for const-evaluable scalar entry functions on this target",
         abi_manifest: None,
-    }
-}
-
-fn emit_aarch64_freestanding_object(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
-    // Use real AArch64 lowering for freestanding targets
-    match crate::native_emit::lower::lower_module(
-        request.module,
-        request.entry,
-        NativeLinkage::StaticLib,
-    ) {
-        Ok(result) if result.global_relocs.is_empty() => {
-            let mut bytes = Vec::new();
-            let object = ElfObject {
-                code: result.code,
-                export_name: request.entry.to_string(),
-                exports: vec![],
-                undefs: vec![],
-                x86_plt_relocs: vec![],
-                thumb_calls: vec![],
-                thumb_addr_refs: vec![],
-            };
-            write_aarch64_relocatable_object(&object, &mut bytes);
-            NativeObjectArtifact {
-                bytes,
-                artifact_kind: "elf-relocatable-object",
-                backend_level: "owned-native-subset-freestanding",
-                runtime_level: "freestanding-none",
-                reason_code: "native-aarch64-unknown-none-freestanding",
-                reason: "inauguration owns ELF64 relocatable object emission for real AArch64 freestanding function bodies",
-                abi_manifest: Some(object_abi_manifest(request)),
-            }
-        }
-        _ => {
-            // Fallback to const-evaluated exit code for trivial functions
-            let object = ElfObject {
-                code: aarch64_return_i32_object_code(request.exit_code),
-                export_name: request.entry.to_string(),
-                exports: vec![],
-                undefs: vec![],
-                x86_plt_relocs: vec![],
-                thumb_calls: vec![],
-                thumb_addr_refs: vec![],
-            };
-            let mut bytes = Vec::new();
-            write_aarch64_relocatable_object(&object, &mut bytes);
-            NativeObjectArtifact {
-                bytes,
-                artifact_kind: "elf-relocatable-object",
-                backend_level: "owned-object-subset",
-                runtime_level: "freestanding-none",
-                reason_code: "native-object-subset",
-                reason: "inauguration owns ELF64 AArch64 relocatable object emission for const-evaluable scalar entry functions on freestanding target",
-                abi_manifest: Some(object_abi_manifest(request)),
-            }
-        }
     }
 }
 
@@ -562,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn macho_archive_rejects_empty_degraded_and_writable_global_modules() {
+    fn aarch64_static_objects_reject_empty_degraded_and_writable_global_modules() {
         let mut degraded = scalar_answer_module();
         degraded.decls.push(Decl::Function {
             name: "unsupported".into(),
@@ -579,16 +558,22 @@ mod tests {
             )
             .unwrap(),
         ] {
-            let request = NativeObjectRequest {
-                target_triple: "aarch64-apple-darwin",
-                linkage: NativeLinkage::StaticLib,
-                entry: "answer",
-                exit_code: 0,
-                module: &module,
-                module_id: "App",
-                base: None,
-            };
-            assert!(emit_native_object(&request).is_none());
+            for target in [
+                "aarch64-apple-darwin",
+                AARCH64_LINUX_TRIPLE,
+                AARCH64_NONE_TRIPLE,
+            ] {
+                let request = NativeObjectRequest {
+                    target_triple: target,
+                    linkage: NativeLinkage::StaticLib,
+                    entry: "answer",
+                    exit_code: 0,
+                    module: &module,
+                    module_id: "App",
+                    base: None,
+                };
+                assert!(emit_native_object(&request).is_none(), "{target}");
+            }
         }
     }
 
@@ -682,8 +667,96 @@ mod tests {
     }
 
     #[test]
+    fn aarch64_elf_objects_reject_modules_needing_external_or_data_relocations() {
+        for source in [
+            "fn answer() -> Int { return labs(-42); }",
+            "var count: Int = 3;\nfn answer() -> Int { return count; }",
+        ] {
+            let module = crate::in_lang_parse::parse_in_library_source(source).unwrap();
+            for target in [AARCH64_LINUX_TRIPLE, AARCH64_NONE_TRIPLE] {
+                let request = NativeObjectRequest {
+                    target_triple: target,
+                    linkage: NativeLinkage::StaticLib,
+                    entry: "answer",
+                    exit_code: 0,
+                    module: &module,
+                    module_id: "App",
+                    base: None,
+                };
+                assert!(emit_native_object(&request).is_none(), "{target}: {source}");
+            }
+        }
+    }
+
+    #[test]
+    fn aarch64_elf_objects_export_real_function_bodies() {
+        let module = crate::in_lang_parse::parse_in_library_source(
+            "fn a_add(a: Int, b: Int) -> Int { return a + b; }\nfn z_answer() -> Int { return a_add(5, 37); }",
+        ).unwrap();
+        for target in [AARCH64_LINUX_TRIPLE, AARCH64_NONE_TRIPLE] {
+            let request = NativeObjectRequest {
+                target_triple: target,
+                linkage: NativeLinkage::StaticLib,
+                entry: "z_answer",
+                exit_code: 0,
+                module: &module,
+                module_id: "App",
+                base: None,
+            };
+            let artifact = emit_native_object(&request).expect("real object");
+            let bytes = artifact.bytes;
+            let u64_at = |offset: usize| {
+                u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize
+            };
+            let shoff = u64_at(40);
+            let text_offset = u64_at(shoff + 64 + 24);
+            let text_size = u64_at(shoff + 64 + 32);
+            let symtab_offset = u64_at(shoff + 128 + 24);
+            let symtab_size = u64_at(shoff + 128 + 32);
+            let strtab_offset = u64_at(shoff + 192 + 24);
+            let mut exports = Vec::new();
+            for symbol in (symtab_offset + 24..symtab_offset + symtab_size).step_by(24) {
+                let name_offset =
+                    u32::from_le_bytes(bytes[symbol..symbol + 4].try_into().unwrap()) as usize;
+                let name = bytes[strtab_offset + name_offset..]
+                    .split(|byte| *byte == 0)
+                    .next()
+                    .unwrap();
+                exports.push((
+                    std::str::from_utf8(name).unwrap().to_string(),
+                    u64_at(symbol + 8) as u32,
+                    0,
+                ));
+            }
+            assert_eq!(
+                exports.len(),
+                2,
+                "{target}: every function must be exported"
+            );
+            assert_eq!(exports[0].0, "a_add");
+            assert_eq!(exports[0].1, 0);
+            assert_eq!(exports[1].0, "z_answer");
+            assert!(exports[1].1 > 0);
+            let text = &bytes[text_offset..text_offset + text_size];
+            assert_ne!(
+                &text[..4],
+                &[0, 0, 0, 0],
+                "export points at the unused entry prefix"
+            );
+            #[cfg(target_arch = "aarch64")]
+            {
+                // Execute the emitted ISA on the host; this does not claim Linux runtime coverage.
+                let mut rt = crate::jit_runtime::JitRuntime::new();
+                rt.load(text, &exports, &[]).unwrap();
+                assert_eq!(unsafe { rt.invoke("a_add", &[-5, 47]).unwrap() }, 42);
+                assert_eq!(unsafe { rt.invoke("z_answer", &[]).unwrap() }, 42);
+            }
+        }
+    }
+
+    #[test]
     fn dispatches_aarch64_linux_staticlib_object() {
-        let module = UnifiedModule::new(Vec::new());
+        let module = scalar_answer_module();
         let request = NativeObjectRequest {
             target_triple: "aarch64-unknown-linux-gnu",
             linkage: NativeLinkage::StaticLib,
@@ -745,7 +818,7 @@ mod tests {
 
     #[test]
     fn dispatches_aarch64_freestanding_object() {
-        let module = UnifiedModule::new(Vec::new());
+        let module = scalar_answer_module();
         let request = NativeObjectRequest {
             target_triple: AARCH64_NONE_TRIPLE,
             linkage: NativeLinkage::StaticLib,
@@ -757,8 +830,10 @@ mod tests {
         };
         let artifact = emit_native_object(&request).expect("aarch64 freestanding artifact");
         assert_eq!(artifact.artifact_kind, "elf-relocatable-object");
-        // Empty module falls back to const-evaluated exit code path
-        assert_eq!(artifact.reason_code, NATIVE_OBJECT_SUBSET);
+        assert_eq!(
+            artifact.reason_code,
+            "native-aarch64-unknown-none-freestanding"
+        );
         assert_eq!(
             u16::from_le_bytes([artifact.bytes[18], artifact.bytes[19]]),
             183
