@@ -261,30 +261,7 @@ impl Compiler {
         let out = dir.join("artifact");
         let host_macho = self.backend == BackendKind::AArch64MachO
             && cfg!(all(target_os = "macos", target_arch = "aarch64"));
-        // ponytail: cross-target writers only emit an exit stub; require a pure scalar entry until they lower bodies.
-        if !host_macho
-            && !unified.decls.iter().any(|decl| {
-                let crate::core_ir::Decl::Function {
-                    name,
-                    params,
-                    ret,
-                    body,
-                    ..
-                } = decl
-                else {
-                    return false;
-                };
-                name == entry
-                    && params.is_empty()
-                    && ((*ret == crate::core_ir::Typ::Void && body.is_empty())
-                        || matches!(
-                            body.as_slice(),
-                            [crate::core_ir::Stmt::Return(Some(
-                                crate::core_ir::Expr::IntLit(_) | crate::core_ir::Expr::BoolLit(_)
-                            ))]
-                        ))
-            })
-        {
+        if !host_macho && crate::owned_compile::pure_entry_exit_code(&unified, entry).is_none() {
             return Err(CompileError::Backend(
                 "cross-target executable emission requires a pure scalar exit entry".into(),
             ));

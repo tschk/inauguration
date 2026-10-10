@@ -7,7 +7,6 @@ use std::fs;
 use std::path::Path;
 
 use super::OwnedCompileRequest;
-use super::jit::const_eval_entry_exit_code;
 use super::metadata::emit_component_metadata_sidecar;
 use super::util::{artifact_stem, path_extension_is};
 
@@ -42,20 +41,9 @@ pub fn compile_native(
         NativeLinkage::StaticLib => module.clone(),
         _ => native_entry_module(module, entry),
     };
-    let eval_exit = match request.linkage {
-        NativeLinkage::Executable => {
-            match native_entry_exit_code(&native_module, module_id, entry) {
-                Ok(code) => Some(code),
-                // The entry could not be executed to learn its exit code because
-                // it reaches code the lowerer trapped. The executable's entry stub
-                // derives the code at runtime, so report it as unknown rather than
-                // inventing one.
-                Err(err) if err.starts_with("entry-exit-unknown:") => None,
-                Err(err) => return Err(err),
-            }
-        }
-        NativeLinkage::Dylib | NativeLinkage::StaticLib => None,
-    };
+    let eval_exit = (request.linkage == NativeLinkage::Executable)
+        .then(|| native_entry_exit_code(&native_module, entry))
+        .flatten();
     let out_path = request
         .out
         .as_ref()
@@ -66,11 +54,10 @@ pub fn compile_native(
             .map_err(|err| format!("native inisa write `{}`: {err}", out_path.display()))?;
         set_native_artifact_permissions(out_path, NativeLinkage::Executable)?;
         let _meta_path = emit_component_metadata_sidecar(module, entry, out_path);
-        let eval = crate::native_emit::inisa::eval_module(&native_module, entry).ok();
         return Ok(NativeCompileResult {
             artifact_path: out_path.display().to_string(),
-            eval_exit_code: eval.map(|v| v as u8),
-            eval_result: eval.map(super::EvalValue::Int),
+            eval_exit_code: eval_exit,
+            eval_result: None,
             degradations: Vec::new(),
             abi_path: None,
             backend_level: "owned-inisa-elf-bundle".to_string(),
@@ -80,10 +67,20 @@ pub fn compile_native(
         });
     }
     if let Some(target_triple) = request.target_triple.as_deref() {
-        let exit = if request.linkage == NativeLinkage::StaticLib {
-            0
+        // ponytail: these executable writers emit only an exit stub until they lower bodies.
+        let exit = if request.linkage == NativeLinkage::Executable
+            && matches!(
+                target_triple,
+                "x86_64-unknown-linux-gnu"
+                    | "aarch64-unknown-linux-gnu"
+                    | "armv7-unknown-linux-gnueabihf"
+                    | "x86_64-pc-windows-msvc"
+            ) {
+            pure_entry_exit_code(&native_module, entry).ok_or_else(|| {
+                "cross-target executable emission requires a pure scalar exit entry".to_string()
+            })?
         } else {
-            native_entry_exit_code(&native_module, module_id, entry)?
+            eval_exit.unwrap_or(0)
         };
         if request.linkage == NativeLinkage::Executable
             && target_triple == "aarch64-apple-darwin"
@@ -92,7 +89,7 @@ pub fn compile_native(
             let degradations = emit_macos_app_bundle(&native_module, module_id, entry, out_path)?;
             return Ok(NativeCompileResult {
                 artifact_path: out_path.display().to_string(),
-                eval_exit_code: Some(exit),
+                eval_exit_code: eval_exit,
                 eval_result: None,
                 abi_path: None,
                 backend_level: "owned-native-subset-aarch64-app".to_string(),
@@ -191,18 +188,38 @@ pub fn compile_native(
     })
 }
 
-fn native_entry_exit_code(
-    module: &UnifiedModule,
-    module_id: &str,
-    entry: &str,
-) -> Result<u8, String> {
+pub(crate) fn pure_entry_exit_code(module: &UnifiedModule, entry: &str) -> Option<u8> {
+    module.decls.iter().find_map(|decl| {
+        let Decl::Function {
+            name,
+            params,
+            ret,
+            body,
+            ..
+        } = decl
+        else {
+            return None;
+        };
+        if name != entry || !params.is_empty() {
+            return None;
+        }
+        match (ret.canonical(), body.as_slice()) {
+            (Typ::Int, [Stmt::Return(Some(Expr::IntLit(value)))]) => Some(*value as u8),
+            (Typ::Bool, [Stmt::Return(Some(Expr::BoolLit(value)))]) => Some(u8::from(*value)),
+            (Typ::Void, [] | [Stmt::Return(None)]) => Some(0),
+            _ => None,
+        }
+    })
+}
+
+fn native_entry_exit_code(module: &UnifiedModule, entry: &str) -> Option<u8> {
     let returns_exit_code = module.decls.iter().any(|decl| {
         matches!(decl, Decl::Function { name, ret, .. } if name == entry && matches!(ret.canonical(), Typ::Int | Typ::Bool))
     });
     if returns_exit_code {
-        const_eval_entry_exit_code(module, module_id, entry)
+        pure_entry_exit_code(module, entry)
     } else {
-        Ok(0)
+        Some(0)
     }
 }
 
@@ -418,6 +435,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_exit_metadata_does_not_execute_nonconstant_entries() {
+        let module =
+            crate::in_lang_parse::parse_in_source("fn main() -> Int { while true {} return 42; }")
+                .unwrap();
+        assert_eq!(native_entry_exit_code(&module, "main"), None);
+        assert_eq!(pure_entry_exit_code(&module, "main"), None);
+        for (source, expected) in [
+            ("fn main() -> Int { return 1000; }", Some(232)),
+            ("fn main() -> Bool { return true; }", Some(1)),
+            ("fn main() -> Void { return; }", Some(0)),
+            ("fn main(x: Int) -> Int { return 42; }", None),
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            assert_eq!(pure_entry_exit_code(&module, "main"), expected, "{source}");
+        }
+    }
+
+    #[test]
     fn reference_entry_uses_zero_exit_code_without_jit_execution() {
         let module = UnifiedModule {
             identity: Default::default(),
@@ -430,6 +465,6 @@ mod tests {
             }],
         };
 
-        assert_eq!(native_entry_exit_code(&module, "App", "main"), Ok(0));
+        assert_eq!(native_entry_exit_code(&module, "main"), Some(0));
     }
 }

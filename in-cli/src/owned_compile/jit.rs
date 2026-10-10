@@ -1,15 +1,13 @@
-use crate::core_ir::{Decl, Expr, Stmt, UnifiedModule};
+use crate::core_ir::{Decl, UnifiedModule};
 use crate::crate_db;
 use crate::dep_resolver;
 use crate::jit_runtime;
 use crate::native_emit::native_link;
 use crate::native_emit::{self, NativeLinkage, antidecomp, lower, x86_64_lower};
-use crate::parser_registry::ParserCli;
-use std::path::PathBuf;
 
 use super::native::NativeCompileResult;
 use super::report::jobs_for_request;
-use super::{CompileTarget, EvalValue, OwnedCompileRequest};
+use super::{EvalValue, OwnedCompileRequest};
 
 /// Which register or pointer the entry's result has to be read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,84 +304,6 @@ fn decode_jit_string(raw: i64) -> Option<String> {
     let data = unsafe { ptr.add(8) };
     let bytes = unsafe { std::slice::from_raw_parts(data, len) };
     Some(String::from_utf8_lossy(bytes).to_string())
-}
-
-fn try_const_answer_entry(module: &UnifiedModule, entry: &str) -> Option<u8> {
-    for decl in &module.decls {
-        if let Decl::Function {
-            name, body, ret, ..
-        } = decl
-        {
-            if name != entry {
-                continue;
-            }
-            if *ret != crate::core_ir::Typ::Int {
-                return None;
-            }
-            if body.len() != 1 {
-                return None;
-            }
-            if let Stmt::Return(Some(Expr::IntLit(val))) = &body[0] {
-                let code = (*val & 0xff) as u8;
-                return Some(code);
-            }
-        }
-    }
-    None
-}
-
-pub fn const_eval_entry_exit_code(
-    module: &UnifiedModule,
-    _module_id: &str,
-    entry: &str,
-) -> Result<u8, String> {
-    if let Some(code) = try_const_answer_entry(module, entry) {
-        return Ok(code);
-    }
-    let code = match eval_entry_via_jit(module, entry) {
-        Ok(code) => code,
-        // The program cannot be executed to learn its exit code because it
-        // contains code the lowerer replaced with a trap. The native entry stub
-        // computes the real code at runtime, so a caller that only reports it can
-        // continue with an unknown value instead of a guess.
-        Err(err) if err.starts_with("jit-degraded:") => {
-            return Err(format!("entry-exit-unknown: {err}"));
-        }
-        Err(err) => return Err(err),
-    };
-    // An exit status is eight bits: the OS truncates it exactly as it does for
-    // C's `main`. Refusing a larger value made a program returning 1000
-    // impossible to build, and `try_const_answer_entry` above already truncates.
-    Ok((code & 0xff) as u8)
-}
-
-fn eval_entry_via_jit(module: &UnifiedModule, entry: &str) -> Result<i64, String> {
-    if !lower::host_supports_native_subset() {
-        return Err(
-            "jit-host-unsupported: JIT currently requires macOS AArch64 or Linux x86_64"
-                .to_string(),
-        );
-    }
-    let request = OwnedCompileRequest {
-        path: PathBuf::from("const_eval.in"),
-        module_id: "App".to_string(),
-        parser: ParserCli::Auto,
-        target: CompileTarget::Jit,
-        entry: Some(entry.to_string()),
-        out: None,
-        linkage: NativeLinkage::Executable,
-        target_triple: None,
-        jobs: 1,
-        debug: false,
-        profile: crate::emit_profile::EmitProfile::Default,
-        emit: None,
-        base: None,
-    };
-    let result = compile_jit(module, "App", &request)?;
-    result
-        .eval_result
-        .and_then(|value| value.as_int())
-        .ok_or_else(|| "jit did not produce an integer result for entry".to_string())
 }
 
 #[cfg(test)]

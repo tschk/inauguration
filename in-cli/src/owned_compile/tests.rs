@@ -1102,7 +1102,7 @@ fn compilation_restores_the_callers_emission_profile() {
         Some("main"),
         None,
     );
-    // Missing output fails after the nested JIT exit-code evaluation on supported hosts.
+    // Missing output fails without executing the entry.
     assert!(super::native::compile_native(&module, "App", &request).is_err());
     let actual = antidecomp::current_profile();
     antidecomp::set_profile(previous);
@@ -1130,5 +1130,34 @@ fn compilation_restores_the_callers_emission_profile() {
             }
             assert_eq!(actual, EmitProfile::Lean, "{entry}");
         }
+    }
+}
+
+#[test]
+fn cross_target_exit_stubs_reject_observable_entry_bodies() {
+    let module = crate::in_lang_parse::parse_in_source(
+        "fn main() -> Int { print(\"runtime-only\"); return 42; }",
+    )
+    .unwrap();
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "armv7-unknown-linux-gnueabihf",
+        "x86_64-pc-windows-msvc",
+    ] {
+        let out = temp_path("side-effect-native");
+        let mut request = default_request(
+            PathBuf::from("effects.in"),
+            CompileTarget::Native,
+            Some("main"),
+            Some(out.clone()),
+        );
+        request.target_triple = Some(target.into());
+        let result = super::native::compile_native(&module, "App", &request);
+        assert!(
+            matches!(result, Err(ref error) if error.contains("pure scalar exit entry")),
+            "{target}"
+        );
+        assert!(!out.exists(), "{target} wrote an incomplete artifact");
     }
 }
