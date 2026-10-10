@@ -1065,6 +1065,13 @@ fn collect_calls_in_expr(e: &Expr, out: &mut HashSet<String>) {
 
 /// Evaluate compile-time integer expressions: `3 + 4` → `7`.
 fn fold_constants_in_decls(decls: &mut [Decl]) {
+    for decl in decls.iter_mut() {
+        if let Decl::Global { init, .. } = decl {
+            *init = init
+                .take()
+                .map(|expr| Box::new(map_expr(*expr, &mut fold_expr)));
+        }
+    }
     for body in fn_bodies_mut(decls) {
         let old = std::mem::take(body);
         *body = old
@@ -1187,8 +1194,8 @@ fn fold_expr(e: Expr) -> Expr {
         Expr::Unary { op, expr, .. } => {
             if let Expr::IntLit(n) = expr.as_ref() {
                 let result = match op.as_str() {
-                    "neg" => Some(-n),
-                    "not" => Some(if *n == 0 { 1 } else { 0 }),
+                    "neg" | "-" => n.checked_neg(),
+                    "not" | "!" => Some(if *n == 0 { 1 } else { 0 }),
                     _ => None,
                 };
                 if let Some(v) = result {
@@ -2475,6 +2482,36 @@ mod tests {
     }
 
     #[test]
+    fn fold_negation_overflow_unchanged() {
+        for op in ["neg", "-"] {
+            let original = unary(op, Expr::IntLit(i64::MIN));
+            assert_eq!(fold_expr(original.clone()), original);
+        }
+    }
+
+    #[test]
+    fn fold_globals_preserves_nonconstant_initializers() {
+        let mut decls: Vec<_> = [
+            None,
+            Some(call("init", vec![])),
+            Some(bin("/", Expr::IntLit(1), Expr::IntLit(0))),
+            Some(ident("other")),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, init)| Decl::Global {
+            name: format!("value{i}"),
+            typ: Typ::Int,
+            init: init.map(Box::new),
+            mutable: true,
+        })
+        .collect();
+        let original = decls.clone();
+        fold_constants_in_decls(&mut decls);
+        assert_eq!(decls, original);
+    }
+
+    #[test]
     fn fold_mod() {
         let e = fold_expr(bin("mod", Expr::IntLit(17), Expr::IntLit(5)));
         assert_eq!(e, Expr::IntLit(2));
@@ -2798,6 +2835,32 @@ mod tests {
     }
 
     // ─── Constant Propagation ──────────────────────────────────────────
+
+    #[test]
+    fn optimize_folds_global_initializers_in_every_profile() {
+        let source = "var sentinel: Int = -1\nvar nested: Int = -(2 + 3)\nconst mask = (1 << 5) | 3\nfn main() -> Int { sentinel = 7; return sentinel; }";
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).expect("parse");
+            optimize_with_profile(&mut module.decls, Some("main"), profile);
+            let values: Vec<_> = module
+                .decls
+                .iter()
+                .filter_map(|decl| match decl {
+                    Decl::Global { name, init, .. } => Some((name.as_str(), init.as_deref())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                values,
+                vec![
+                    ("sentinel", Some(&Expr::IntLit(-1))),
+                    ("nested", Some(&Expr::IntLit(-5))),
+                    ("mask", Some(&Expr::IntLit(35))),
+                ],
+                "profile {profile:?}"
+            );
+        }
+    }
 
     #[test]
     fn propagate_single_use_constant() {

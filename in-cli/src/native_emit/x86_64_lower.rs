@@ -2898,6 +2898,29 @@ mod tests {
     use super::*;
     use crate::core_ir::UnifiedModule;
 
+    #[test]
+    fn optimized_global_expressions_emit_initialized_data() {
+        let source = "var difference: Int = 20 - (3 * 4)\nvar negative: Int = -(2 + 3)\nvar mask: Int = (1 << 5) | 3\nfn main() -> Int { return difference; }";
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).expect("parse");
+            crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            let result = lower_module(&module, "main").expect("lower");
+            let expected: Vec<_> = [8i64, -5, 35]
+                .into_iter()
+                .flat_map(i64::to_le_bytes)
+                .collect();
+            assert_eq!(
+                &result.data[..24],
+                expected.as_slice(),
+                "profile {profile:?}"
+            );
+        }
+    }
+
     fn make_simple_fn_module() -> UnifiedModule {
         let src = r#"
 fn answer() -> Int {

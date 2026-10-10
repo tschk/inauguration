@@ -27,6 +27,12 @@ Status matrix: **`in languages`** / **`in languages --json`**. Roadmap: [univers
 | CLI | `in-cli` | `build`, `compile`, `execute`, `graph`, `test` |
 | Docs hub | `docs-site/` | `crepus web build` / `web serve` (crepuscularity) |
 
+Core IR constant folding covers global initializers as well as function bodies
+in every emit profile. Integer expressions such as `-(2 + 3)` and `(1 << 5) | 3`
+therefore reach native data emission as initialized scalar values. Calls,
+unresolved names, division by zero, and overflowing negation remain expressions;
+this pass does not execute runtime initializers.
+
 ## inlang + crepuscularity
 
 - **inlang** (`.in`): orchestration, capabilities, polyglot driver, JIT programs.
