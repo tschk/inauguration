@@ -2191,7 +2191,7 @@ fn harden_junk_stmts(decls: &mut [Decl]) {
 ///
 /// Nested `if` is allowed (then/else stay inside a state). Skips loops /
 /// breaks / try / match / throw / propagate so we do not fight real control
-/// flow or rely on `Break` (native lower currently treats break as a no-op).
+/// flow or redirect loop jumps into the synthetic dispatcher.
 fn stmts_forbid_cfg_dispatch(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
         match stmt {

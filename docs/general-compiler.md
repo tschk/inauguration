@@ -33,6 +33,12 @@ therefore reach native data emission as initialized scalar values. Calls,
 unresolved names, division by zero, and overflowing negation remain expressions;
 this pass does not execute runtime initializers.
 
+AArch64 lowering branches `break` and `continue` to the innermost loop's exit
+and next iteration, including vector loops. `.in` range-loop expansion advances the
+binding before `continue` on both native backends. AArch64 rejects loop jumps
+outside a loop or across a `try` scope; error-flag unwind for those jumps remains
+unsupported.
+
 ## inlang + crepuscularity
 
 - **inlang** (`.in`): orchestration, capabilities, polyglot driver, JIT programs.

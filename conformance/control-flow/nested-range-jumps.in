@@ -1,0 +1,17 @@
+// @expect parse: ok
+// @expect bytecode: executes
+// @expect result: 6
+
+fn main() -> Int {
+    let count = 0;
+    for i in 0..4 {
+        if i == 2 { continue; }
+        for j in 0..4 {
+            if j == 2 { continue; }
+            if j == 3 { break; }
+            count = count + 1;
+        }
+        if i == 3 { break; }
+    }
+    return count;
+}

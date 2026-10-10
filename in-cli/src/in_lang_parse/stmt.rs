@@ -421,15 +421,16 @@ pub(crate) fn parse_for_expanded(s: &str) -> Result<Vec<Stmt>, String> {
     let (inner, _) = brace_content_bounds_after_open(rest, open)
         .ok_or_else(|| ".in: unclosed `for` body".to_string())?;
     let mut body = parse_function_body(inner)?;
-    // Add i = i + 1 at end of body
-    body.push(Stmt::Assign(
+    let increment = Stmt::Assign(
         var_name.to_string(),
         Expr::Binary {
             op: "+".to_string(),
             lhs: Box::new(Expr::Ident(var_name.to_string())),
             rhs: Box::new(Expr::IntLit(1)),
         },
-    ));
+    );
+    insert_continue_updates(&mut body, &increment);
+    body.push(increment);
     let while_loop = Stmt::Loop {
         kind: LoopKind::While,
         cond: Some(Expr::Binary {
@@ -443,4 +444,38 @@ pub(crate) fn parse_for_expanded(s: &str) -> Result<Vec<Stmt>, String> {
         Stmt::Let(var_name, Some(Typ::Int), start_expr),
         while_loop,
     ])
+}
+
+// A desugared range must advance before a continue, but nested loops own theirs.
+fn insert_continue_updates(body: &mut Vec<Stmt>, increment: &Stmt) {
+    let mut index = 0;
+    while index < body.len() {
+        match &mut body[index] {
+            Stmt::Continue => {
+                body.insert(index, increment.clone());
+                index += 1;
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                insert_continue_updates(then_body, increment);
+                insert_continue_updates(else_body, increment);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    insert_continue_updates(&mut arm.body, increment);
+                }
+            }
+            Stmt::Try { body, catches } => {
+                insert_continue_updates(body, increment);
+                for catch in catches {
+                    insert_continue_updates(&mut catch.body, increment);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
 }

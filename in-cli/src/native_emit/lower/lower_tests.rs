@@ -969,6 +969,66 @@ fn jit_executes_vec_for() {
 
 #[test]
 #[cfg(target_arch = "aarch64")]
+fn jit_executes_loop_break_and_continue() {
+    let cases = [
+        (crate::in_lang_parse::parse_in_source("fn main() -> Int { let i = 0; let n = 0; while i < 4 { i = i + 1; if i == 2 { continue; } let j = 0; while j < 4 { j = j + 1; if j == 2 { continue; } if j == 4 { break; } n = n + 1; } if i == 3 { break; } n = n + 10; } return n; }").expect("parse while"), 14),
+        (crate::in_lang_parse::parse_in_source("fn main() -> Int { let n = 0; for i in 0..4 { if i == 2 { continue; } for j in 0..4 { if j == 2 { continue; } if j == 3 { break; } n = n + 1; } if i == 3 { break; } } return n; }").expect("parse range"), 6),
+        (crate::compiler::rust_front::parse_rust_source("fn main() -> i64 { let values: Vec<i64> = vec![2, 3, 5]; let mut sum = 0; for value in values { if value == 3 { continue; } if value == 5 { break; } sum = sum + value; } return sum; }").expect("parse Vec"), 2),
+        (crate::in_lang_parse::parse_in_source("fn main() -> Int { let n = 0; try { while n < 3 { n = n + 1; if n == 2 { break; } } } catch (e) { return 0; } return n; }").expect("parse try loop"), 2),
+    ];
+    for (module, expected) in cases {
+        let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
+        let offsets = lowered
+            .function_offsets
+            .iter()
+            .map(|(name, offset)| (name.clone(), *offset, 0))
+            .collect::<Vec<_>>();
+        let mut rt = crate::jit_runtime::JitRuntime::new();
+        rt.load(&lowered.code, &offsets, &lowered.relocations)
+            .expect("load");
+        assert_eq!(unsafe { rt.invoke("main", &[]).expect("invoke") }, expected);
+    }
+}
+
+#[test]
+fn lower_rejects_loop_jump_outside_loop() {
+    for jump in ["break", "continue"] {
+        let module = crate::in_lang_parse::parse_in_source(&format!(
+            "fn main() -> Int {{ {jump}; return 0; }}"
+        ))
+        .expect("parse");
+        let error =
+            lower_module(&module, "main", NativeLinkage::Executable).expect_err("reject jump");
+        assert!(error.contains("outside a loop"), "{error}");
+    }
+}
+
+#[test]
+fn lower_rejects_loop_jump_across_try_scope() {
+    for jump in ["break", "continue"] {
+        let module = crate::in_lang_parse::parse_in_source(&format!("fn main() -> Int {{ let i = 0; while i < 1 {{ try {{ {jump}; }} catch (e) {{ }} i = i + 1; }} return i; }}")).expect("parse");
+        let error =
+            lower_module(&module, "main", NativeLinkage::Executable).expect_err("reject unwind");
+        assert!(error.contains("across a try scope"), "{error}");
+    }
+}
+
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_executable_executes_continue() {
+    let module = crate::in_lang_parse::parse_in_source(include_str!(
+        "../../../../conformance/control-flow/continue-compound.in"
+    ))
+    .expect("parse");
+    let path = temp_executable("continue");
+    compile_native_executable(&module, "main", &path).expect("compile");
+    let output = run_native_exe(&path);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
 fn jit_executes_scalar_vec_literal() {
     let module = crate::compiler::rust_front::parse_rust_source(
         "fn main() -> i64 { let values: Vec<i64> = vec![2, 3, 5]; let mut sum = 0; for value in values { sum = sum + value; } return sum; }",

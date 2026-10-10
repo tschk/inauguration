@@ -234,6 +234,8 @@ pub(crate) fn lower_stmt(
         }
         Stmt::Try { body, catches, .. } => {
             emit_error_slot_adr(emitter, fn_name)?;
+            // ponytail: reject jumps across try scopes until error-flag unwind is lowered.
+            let outer_loops = std::mem::take(&mut ctx.loop_branches);
             // Save previous error flag from global location to stack
             emitter.emit_u32(aarch64::ldrb(1, 27, 0));
             emitter.emit_u32(aarch64::strb(1, aarch64::REG_SP, ctx.saved_flag_offset));
@@ -291,6 +293,7 @@ pub(crate) fn lower_stmt(
             emitter.emit_u32(aarch64::ldrb(1, aarch64::REG_SP, ctx.saved_flag_offset));
             emitter.emit_u32(aarch64::strb(1, 27, 0));
 
+            ctx.loop_branches = outer_loops;
             Ok(())
         }
         Stmt::Propagate => {
@@ -302,8 +305,20 @@ pub(crate) fn lower_stmt(
             emitter.patch_u32(continue_branch, aarch64::cbz_w(0, end_offset));
             Ok(())
         }
-        Stmt::Break => Ok(()),
-        Stmt::Continue => Ok(()),
+        Stmt::Break | Stmt::Continue => {
+            let Some(branches) = ctx.loop_branches.last_mut() else {
+                return Err(format!(
+                    "native-lower: loop jump outside a loop or across a try scope in `{fn_name}`"
+                ));
+            };
+            let site = emitter.emit_insn(aarch64::b(0));
+            if matches!(stmt, Stmt::Break) {
+                branches.breaks.push(site);
+            } else {
+                branches.continues.push(site);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1059,6 +1074,7 @@ pub(crate) fn lower_loop(
     } else {
         None
     };
+    ctx.loop_branches.push(Default::default());
     for stmt in body {
         lower_stmt(
             emitter,
@@ -1075,6 +1091,24 @@ pub(crate) fn lower_loop(
     if let Some(end_branch) = end_branch {
         let end_offset = emitter.len() as i32 - end_branch as i32;
         emitter.patch_u32(end_branch, aarch64::b_cond(0, end_offset));
+    }
+    patch_loop_branches(emitter, ctx, head)
+}
+
+pub(crate) fn patch_loop_branches(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    continue_target: u32,
+) -> Result<(), String> {
+    let Some(branches) = ctx.loop_branches.pop() else {
+        return Err("native-lower: missing loop branch state".into());
+    };
+    let end = emitter.len();
+    for site in branches.breaks {
+        emitter.patch_u32(site, aarch64::b(end as i32 - site as i32));
+    }
+    for site in branches.continues {
+        emitter.patch_u32(site, aarch64::b(continue_target as i32 - site as i32));
     }
     Ok(())
 }

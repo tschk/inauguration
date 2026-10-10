@@ -197,6 +197,12 @@ impl VecForPlan {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct LoopBranches {
+    pub(crate) breaks: Vec<u32>,
+    pub(crate) continues: Vec<u32>,
+}
+
 pub(crate) struct LowerCtx<'a> {
     /// Parameter name → stack offset (params fully spilled, no register residency)
     pub(crate) params: HashMap<String, u32>,
@@ -214,6 +220,7 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) pending_strings: &'a mut Vec<super::PendingString>,
     pub(crate) stack_size: u32,
     pub(crate) emitted_return: bool,
+    pub(crate) loop_branches: Vec<LoopBranches>,
     pub(crate) _params_src: &'a [(String, Typ)],
     pub(crate) saved_flag_offset: u32,
     pub(crate) prologue_stack_reserve: u32,
@@ -404,6 +411,7 @@ impl<'a> LowerCtx<'a> {
             pending_strings,
             stack_size: 0,
             emitted_return: false,
+            loop_branches: Vec::new(),
             _params_src: params,
             saved_flag_offset: 0,
             prologue_stack_reserve: 0,

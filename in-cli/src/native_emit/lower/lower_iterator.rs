@@ -108,6 +108,7 @@ pub(crate) fn lower_vec_for(
     }
     emitter.emit_u32(aarch64::add_imm64(2, 2, 1));
     emitter.emit_u32(aarch64::str64(2, aarch64::REG_SP, slots.index));
+    ctx.loop_branches.push(Default::default());
     for stmt in body {
         lower_stmt(
             emitter,
@@ -123,5 +124,5 @@ pub(crate) fn lower_vec_for(
     emitter.emit_u32(aarch64::b(back_offset));
     let end_offset = emitter.len() as i32 - end_branch as i32;
     emitter.patch_u32(end_branch, aarch64::b_cond(10, end_offset));
-    Ok(())
+    super::lower_stmt::patch_loop_branches(emitter, ctx, head)
 }
