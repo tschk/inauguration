@@ -1997,3 +1997,17 @@ fn main() -> void {}
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn parses_typed_local_var_and_rejects_missing_initializer() {
+    let module =
+        parse_in_source("fn main(a: Int) -> Int { var value: Int = a; value /= 4; return value; }")
+            .unwrap();
+    let crate::core_ir::Decl::Function { body, .. } = &module.decls[0] else {
+        panic!("function");
+    };
+    assert!(
+        matches!(&body[0], crate::core_ir::Stmt::Let(name, Some(crate::core_ir::Typ::Int), crate::core_ir::Expr::Ident(value)) if name == "value" && value == "a")
+    );
+    assert!(parse_in_source("fn main() -> Int { var value: Int; return 0; }").is_err());
+}

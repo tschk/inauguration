@@ -4,25 +4,27 @@ use super::util::*;
 use crate::core_ir::{Expr, LoopKind, Stmt, Typ};
 
 pub(crate) fn parse_let_stmt(s: &str) -> Result<Stmt, String> {
-    let rest = trim(s)
+    let declaration = trim(s);
+    let rest = declaration
         .strip_prefix("let ")
-        .ok_or_else(|| ".in: internal let parse".to_string())?;
+        .or_else(|| declaration.strip_prefix("var "))
+        .ok_or_else(|| ".in: internal binding parse".to_string())?;
     let rest = trim(rest);
     let eq_pos = rest
         .find('=')
-        .ok_or_else(|| ".in: `let` needs `=`".to_string())?;
+        .ok_or_else(|| ".in: local binding needs `=`".to_string())?;
     let lhs = trim(&rest[..eq_pos]);
     let rhs = trim(&rest[eq_pos + 1..]);
     let (name, typ) = if let Some(colon) = lhs.rfind(':') {
         let name_part = trim(&lhs[..colon]);
         let ty_part = trim(&lhs[colon + 1..]);
         if name_part.is_empty() {
-            return Err(".in: `let` binding name missing".into());
+            return Err(".in: local binding name missing".into());
         }
         (name_part.to_string(), Some(parse_in_type(ty_part)))
     } else {
         if lhs.is_empty() {
-            return Err(".in: `let` binding name missing".into());
+            return Err(".in: local binding name missing".into());
         }
         (lhs.to_string(), None)
     };
@@ -325,7 +327,7 @@ pub(crate) fn parse_stmt_line(line: &str) -> Result<Stmt, String> {
     if s.is_empty() {
         return Err(".in: empty statement".into());
     }
-    if s.starts_with("let ") {
+    if s.starts_with("let ") || s.starts_with("var ") {
         return parse_let_stmt(s);
     }
     if s.starts_with("if ") {

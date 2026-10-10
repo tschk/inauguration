@@ -48,6 +48,7 @@ pub(crate) fn normalize_human_stmt(line: &str) -> String {
         || trimmed.contains('=')
         || trimmed.starts_with("return")
         || trimmed.starts_with("let ")
+        || trimmed.starts_with("var ")
         || trimmed.starts_with("if ")
         || trimmed.starts_with("while ")
         || trimmed.starts_with("match ")
