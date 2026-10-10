@@ -1994,15 +1994,31 @@ fn bin_expr(op: &str, lhs: Expr, rhs: Expr) -> Expr {
 /// `x ^ y` → `(x | y) - (x & y)`
 /// `x | y` → `(x & y) + (x ^ y)`
 fn harden_mba_arithmetic(decls: &mut [Decl]) {
-    for body in fn_bodies_mut(decls) {
+    for decl in decls {
+        let Decl::Function { params, body, .. } = decl else {
+            continue;
+        };
+        // ponytail: prove parameter types only in binding-free returns; extend with scoped facts before rewriting locals.
+        let unshadowed = match body.as_slice() {
+            [Stmt::Return(Some(expr))] => {
+                let mut closure = false;
+                walk_expr(expr, &mut |e| closure |= matches!(e, Expr::Closure { .. }));
+                !closure
+            }
+            _ => false,
+        };
+        let integer_leaf = |e: &Expr| match e {
+            Expr::IntLit(_) => true,
+            Expr::Ident(name) if unshadowed => params
+                .iter()
+                .any(|(param, typ)| param == name && *typ == Typ::Int),
+            _ => false,
+        };
         for stmt in body.iter_mut() {
             map_stmt_mut(stmt, &mut |e| {
                 if let Expr::Binary { op, lhs, rhs } = e {
-                    // One MBA layer on leaf operands only — nested binaries would
-                    // explode after the bottom-up walk rewrote the children.
-                    if matches!(&**lhs, Expr::Binary { .. })
-                        || matches!(&**rhs, Expr::Binary { .. })
-                    {
+                    // MBA duplicates operands and requires integer bit operations.
+                    if !integer_leaf(lhs) || !integer_leaf(rhs) {
                         return;
                     }
                     let l = *lhs.clone();
@@ -3707,6 +3723,47 @@ mod tests {
             !src.contains("Ident(\"helper\")"),
             "default should inline 3-stmt helper: {src}"
         );
+    }
+
+    #[test]
+    fn harden_mba_preserves_unproven_and_effectful_operands() {
+        for (params, prefix, lhs) in [
+            (
+                vec![("x".into(), Typ::Float)],
+                vec![],
+                Expr::Ident("x".into()),
+            ),
+            (
+                vec![],
+                vec![],
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("next".into())),
+                    args: vec![],
+                },
+            ),
+            (
+                vec![("x".into(), Typ::Int)],
+                vec![Stmt::Let(
+                    "x".into(),
+                    Some(Typ::Float),
+                    Expr::FloatLit(crate::core_ir::FloatVal(1.25)),
+                )],
+                Expr::Ident("x".into()),
+            ),
+        ] {
+            let mut body = prefix;
+            body.push(Stmt::Return(Some(bin_expr("+", lhs, Expr::IntLit(2)))));
+            let mut decls = vec![Decl::Function {
+                name: "main".into(),
+                params,
+                ret: Typ::Int,
+                body,
+                type_params: vec![],
+            }];
+            let before = decls.clone();
+            harden_mba_arithmetic(&mut decls);
+            assert_eq!(decls, before);
+        }
     }
 
     #[test]

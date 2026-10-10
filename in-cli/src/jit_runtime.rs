@@ -493,6 +493,7 @@ mod tests {
                 "fn main() -> Float { let x = 1.25 + 2.5; let y: Float = 0.5; return x * y; }",
                 "fn scale(x: Float) -> Float { return x * 0.5; }\nfn main() -> Float { return scale(3.75); }",
                 "var x: Float = 3.75;\nfn main() -> Float { return x * 0.5; }",
+                "var x: Float = 1.25;\nfn main() -> Float { return x + 0.625; }",
                 "fn main() -> Float { var x: Float = 3.75; x *= 0.5; return x; }",
                 "struct Value { Float amount }\nfn main() -> Float { let value = Value { amount: 3.75 }; return value.amount * 0.5; }",
             ] {
