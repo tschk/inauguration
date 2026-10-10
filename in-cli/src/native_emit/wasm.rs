@@ -2,7 +2,7 @@ pub const WASM32_UNKNOWN_TRIPLE: &str = "wasm32-unknown-unknown";
 
 pub struct WasmModule {
     pub export_name: String,
-    pub value: u8,
+    pub value: i32,
 }
 
 pub fn write_scalar_i32_module(module: &WasmModule, out: &mut Vec<u8>) {
@@ -18,7 +18,9 @@ pub fn write_scalar_i32_module(module: &WasmModule, out: &mut Vec<u8>) {
     let mut exports = vec![0x01];
     exports.extend_from_slice(&export);
     write_section(out, 7, &exports);
-    let body = [0x00, 0x41, module.value, 0x0B];
+    let mut body = vec![0x00, 0x41];
+    write_leb_i32(&mut body, module.value);
+    body.push(0x0b);
     let mut code = vec![0x01];
     write_leb_u32(&mut code, body.len() as u32);
     code.extend_from_slice(&body);
@@ -34,6 +36,18 @@ fn write_section(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
 fn write_name(out: &mut Vec<u8>, name: &str) {
     write_leb_u32(out, name.len() as u32);
     out.extend_from_slice(name.as_bytes());
+}
+
+fn write_leb_i32(out: &mut Vec<u8>, mut value: i32) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
+        out.push(if done { byte } else { byte | 0x80 });
+        if done {
+            break;
+        }
+    }
 }
 
 fn write_leb_u32(out: &mut Vec<u8>, mut value: u32) {
@@ -53,6 +67,38 @@ fn write_leb_u32(out: &mut Vec<u8>, mut value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_constants_use_signed_leb128() {
+        for (value, encoding) in [
+            (63, vec![0x3f]),
+            (64, vec![0xc0, 0x00]),
+            (127, vec![0xff, 0x00]),
+            (128, vec![0x80, 0x01]),
+            (255, vec![0xff, 0x01]),
+            (-1, vec![0x7f]),
+            (-65, vec![0xbf, 0x7f]),
+            (1000, vec![0xe8, 0x07]),
+            (i32::MAX, vec![0xff, 0xff, 0xff, 0xff, 0x07]),
+            (i32::MIN, vec![0x80, 0x80, 0x80, 0x80, 0x78]),
+        ] {
+            let mut bytes = Vec::new();
+            write_scalar_i32_module(
+                &WasmModule {
+                    export_name: "answer".into(),
+                    value,
+                },
+                &mut bytes,
+            );
+            let mut expected = vec![0x41];
+            expected.extend(encoding);
+            expected.push(0x0b);
+            assert!(
+                bytes.windows(expected.len()).any(|w| w == expected),
+                "{value}: {bytes:?}"
+            );
+        }
+    }
 
     #[test]
     fn writes_wasm_module_with_export() {

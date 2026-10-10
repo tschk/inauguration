@@ -57,7 +57,7 @@ pub fn emit_native_object(request: &NativeObjectRequest<'_>) -> Option<NativeObj
         (ARMV7_LINUX_GNUEABIHF_TRIPLE, NativeLinkage::Executable) => {
             Some(emit_arm32_elf_executable(request))
         }
-        (WASM32_UNKNOWN_TRIPLE, NativeLinkage::StaticLib) => Some(emit_wasm32_module(request)),
+        (WASM32_UNKNOWN_TRIPLE, NativeLinkage::StaticLib) => emit_wasm32_module(request),
         ("i386-unknown-none", NativeLinkage::StaticLib)
         | ("i686-unknown-none", NativeLinkage::StaticLib)
         | (X86_64_TRIPLE, NativeLinkage::StaticLib) => {
@@ -431,14 +431,20 @@ fn emit_x86_64_freestanding_object(request: &NativeObjectRequest<'_>) -> NativeO
     }
 }
 
-fn emit_wasm32_module(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
+fn emit_wasm32_module(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
+    // ponytail: this writer only lowers a pure scalar entry until it gains general body lowering.
+    let value = i32::try_from(crate::owned_compile::pure_entry_scalar_value(
+        request.module,
+        request.entry,
+    )?)
+    .ok()?;
     let module = WasmModule {
         export_name: request.entry.to_string(),
-        value: request.exit_code,
+        value,
     };
     let mut bytes = Vec::new();
     write_scalar_i32_module(&module, &mut bytes);
-    NativeObjectArtifact {
+    Some(NativeObjectArtifact {
         bytes,
         artifact_kind: "wasm-module",
         backend_level: "owned-object-subset",
@@ -446,7 +452,7 @@ fn emit_wasm32_module(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact
         reason_code: NATIVE_OBJECT_SUBSET,
         reason: "inauguration owns WebAssembly module emission for const-evaluable scalar entry functions on this target",
         abi_manifest: None,
-    }
+    })
 }
 
 fn object_abi_manifest(request: &NativeObjectRequest<'_>) -> String {
@@ -636,12 +642,12 @@ mod tests {
 
     #[test]
     fn dispatches_wasm32_staticlib_module() {
-        let module = UnifiedModule::new(Vec::new());
+        let module = scalar_answer_module();
         let request = NativeObjectRequest {
             target_triple: WASM32_UNKNOWN_TRIPLE,
             linkage: NativeLinkage::StaticLib,
             entry: "answer",
-            exit_code: 42,
+            exit_code: 0,
             module: &module,
             module_id: "App",
             base: None,
@@ -651,6 +657,42 @@ mod tests {
         assert_eq!(artifact.reason_code, NATIVE_OBJECT_SUBSET);
         assert!(artifact.bytes.windows(6).any(|window| window == b"answer"));
         assert!(artifact.abi_manifest.is_none());
+        assert!(
+            artifact
+                .bytes
+                .windows(3)
+                .any(|bytes| bytes == [0x41, 42, 0x0b])
+        );
+    }
+
+    #[test]
+    fn wasm_constant_writer_rejects_missing_effectful_and_out_of_range_entries() {
+        for module in [
+            UnifiedModule::new(vec![]),
+            crate::in_lang_parse::parse_in_library_source(
+                "fn answer() -> Int { print(\"effect\"); return 42; }",
+            )
+            .unwrap(),
+            crate::in_lang_parse::parse_in_library_source(
+                "fn answer(x: Int) -> Int { return 42; }",
+            )
+            .unwrap(),
+            crate::in_lang_parse::parse_in_library_source(
+                "fn answer() -> Int { return 2147483648; }",
+            )
+            .unwrap(),
+        ] {
+            let request = NativeObjectRequest {
+                target_triple: WASM32_UNKNOWN_TRIPLE,
+                linkage: NativeLinkage::StaticLib,
+                entry: "answer",
+                exit_code: 0,
+                module: &module,
+                module_id: "App",
+                base: None,
+            };
+            assert!(emit_native_object(&request).is_none());
+        }
     }
 
     #[test]

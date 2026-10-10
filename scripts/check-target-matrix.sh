@@ -310,6 +310,11 @@ if b"answer" not in data:
 if report.get("reason_code") != "native-object-subset":
     raise SystemExit("wasm32 module report has wrong reason_code")
 PY
+if command -v bun >/dev/null 2>&1; then
+  bun -e 'const {instance} = await WebAssembly.instantiate(await Bun.file(process.argv.at(-1)).arrayBuffer()); if (instance.exports.answer() !== 42) throw new Error("wasm answer did not return 42");' "$tmpdir/object.wasm"
+else
+  echo "wasm runtime check: skip (Bun unavailable)"
+fi
 env in compile \
   --path "$tmpdir/object.in" \
   --target native \

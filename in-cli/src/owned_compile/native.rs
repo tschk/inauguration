@@ -189,6 +189,10 @@ pub fn compile_native(
 }
 
 pub(crate) fn pure_entry_exit_code(module: &UnifiedModule, entry: &str) -> Option<u8> {
+    pure_entry_scalar_value(module, entry).map(|value| value as u8)
+}
+
+pub(crate) fn pure_entry_scalar_value(module: &UnifiedModule, entry: &str) -> Option<i64> {
     module.decls.iter().find_map(|decl| {
         let Decl::Function {
             name,
@@ -204,8 +208,8 @@ pub(crate) fn pure_entry_exit_code(module: &UnifiedModule, entry: &str) -> Optio
             return None;
         }
         match (ret.canonical(), body.as_slice()) {
-            (Typ::Int, [Stmt::Return(Some(Expr::IntLit(value)))]) => Some(*value as u8),
-            (Typ::Bool, [Stmt::Return(Some(Expr::BoolLit(value)))]) => Some(u8::from(*value)),
+            (Typ::Int, [Stmt::Return(Some(Expr::IntLit(value)))]) => Some(*value),
+            (Typ::Bool, [Stmt::Return(Some(Expr::BoolLit(value)))]) => Some(i64::from(*value)),
             (Typ::Void, [] | [Stmt::Return(None)]) => Some(0),
             _ => None,
         }
