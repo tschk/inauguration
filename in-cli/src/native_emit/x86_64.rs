@@ -595,6 +595,24 @@ pub fn div_reg(reg: u8) -> Vec<u8> {
     code
 }
 
+/// Sign-extend EAX/RAX into the dividend pair (CDQ/CQO).
+pub fn sign_extend_dividend() -> Vec<u8> {
+    if is_32bit() {
+        vec![0x99]
+    } else {
+        vec![0x48, 0x99]
+    }
+}
+
+/// Signed divide the accumulator pair by reg (IDIV).
+pub fn idiv_reg(reg: u8) -> Vec<u8> {
+    let mut code = Vec::new();
+    push_rex_w(&mut code, reg);
+    code.push(0xF7);
+    code.push(modrm(3, 7, reg & 7));
+    code
+}
+
 /// setcc reg (8-bit). condition is the second opcode byte (e.g. 0x94 sete, 0x95 setne).
 pub fn setcc(condition: u8, reg: u8) -> Vec<u8> {
     let mut code = vec![0x0F, condition];
@@ -850,6 +868,18 @@ mod tests {
             &em.bytes[site as usize..site as usize + 4],
             &[0xEF, 0xBE, 0xAD, 0xDE]
         );
+    }
+
+    #[test]
+    fn signed_division_encodings_follow_the_operand_width() {
+        let previous = is_32bit();
+        set_32bit(false);
+        let wide = (sign_extend_dividend(), idiv_reg(RCX));
+        set_32bit(true);
+        let narrow = (sign_extend_dividend(), idiv_reg(RCX));
+        set_32bit(previous);
+        assert_eq!(wide, (vec![0x48, 0x99], vec![0x48, 0xF7, 0xF9]));
+        assert_eq!(narrow, (vec![0x99], vec![0xF7, 0xF9]));
     }
 
     #[test]

@@ -510,8 +510,59 @@ impl Drop for JitRuntime {
 mod tests {
     use super::*;
 
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn invoke_source(source: &str, profile: crate::emit_profile::EmitProfile, args: &[i64]) -> i64 {
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        let _profile = crate::native_emit::antidecomp::ProfileGuard::new(profile);
+        #[cfg(target_arch = "aarch64")]
+        let result = crate::native_emit::lower::lower_module(
+            &module,
+            "main",
+            crate::native_emit::NativeLinkage::Executable,
+        );
+        #[cfg(target_arch = "x86_64")]
+        let result = crate::native_emit::x86_64_lower::lower_module(&module, "main");
+        let lowered = result.unwrap();
+        #[cfg(target_arch = "aarch64")]
+        assert!(
+            lowered.degradations.is_empty(),
+            "{:?}",
+            lowered.degradations
+        );
+        #[cfg(target_arch = "aarch64")]
+        let offsets = lowered
+            .function_offsets
+            .iter()
+            .map(|(name, offset)| (name.clone(), *offset, 0))
+            .collect::<Vec<_>>();
+        #[cfg(target_arch = "x86_64")]
+        let offsets = lowered
+            .exports
+            .iter()
+            .map(|(name, offset)| (name.clone(), *offset, 0))
+            .collect::<Vec<_>>();
+        #[cfg(target_arch = "aarch64")]
+        let relocations = lowered.relocations;
+        #[cfg(target_arch = "x86_64")]
+        let relocations = lowered
+            .relocations
+            .iter()
+            .map(|site| (*site, lowered.codegen_base))
+            .collect::<Vec<_>>();
+        let mut rt = JitRuntime::new();
+        rt.load_with_globals(
+            &lowered.code,
+            &offsets,
+            &relocations,
+            &lowered.data,
+            &lowered.global_relocs,
+        )
+        .unwrap();
+        unsafe { rt.invoke("main", args).unwrap() }
+    }
+
     #[test]
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,
@@ -532,52 +583,42 @@ mod tests {
                 let source = format!(
                     "var calls: Int = 0;\nfn side() -> Bool {{ calls += 1; return true; }}\nfn main() -> Int {{ let value: Bool = {expression}; if value {{ return calls * 10 + 1; }} return calls * 10; }}"
                 );
-                let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
-                let previous = crate::native_emit::antidecomp::current_profile();
-                crate::native_emit::antidecomp::set_profile(profile);
-                #[cfg(target_arch = "aarch64")]
-                let result = crate::native_emit::lower::lower_module(
-                    &module,
-                    "main",
-                    crate::native_emit::NativeLinkage::Executable,
-                );
-                #[cfg(target_arch = "x86_64")]
-                let result = crate::native_emit::x86_64_lower::lower_module(&module, "main");
-                crate::native_emit::antidecomp::set_profile(previous);
-                let lowered = result.unwrap();
-                #[cfg(target_arch = "aarch64")]
-                let offsets = lowered
-                    .function_offsets
-                    .iter()
-                    .map(|(name, offset)| (name.clone(), *offset, 0))
-                    .collect::<Vec<_>>();
-                #[cfg(target_arch = "x86_64")]
-                let offsets = lowered
-                    .exports
-                    .iter()
-                    .map(|(name, offset)| (name.clone(), *offset, 0))
-                    .collect::<Vec<_>>();
-                #[cfg(target_arch = "aarch64")]
-                let relocations = lowered.relocations;
-                #[cfg(target_arch = "x86_64")]
-                let relocations = lowered
-                    .relocations
-                    .iter()
-                    .map(|site| (*site, lowered.codegen_base))
-                    .collect::<Vec<_>>();
-                let mut rt = JitRuntime::new();
-                rt.load_with_globals(
-                    &lowered.code,
-                    &offsets,
-                    &relocations,
-                    &lowered.data,
-                    &lowered.global_relocs,
-                )
-                .unwrap();
                 assert_eq!(
-                    unsafe { rt.invoke("main", &[]).unwrap() },
+                    invoke_source(&source, profile, &[]),
                     expected,
                     "{profile:?}: {expression}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn signed_integer_division_and_remainder() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (body, a, b, expected) in [
+                ("return a / b;", -9, 4, -2),
+                ("return a / b;", 9, -4, -2),
+                ("return a / b;", -9, -4, 2),
+                ("return a % b;", -9, 4, -1),
+                ("return a % b;", 9, -4, 1),
+                ("return a % b;", -9, -4, -1),
+                ("return a / b;", i64::MIN, -1, i64::MIN),
+                ("return a % b;", i64::MIN, -1, 0),
+                ("return 100 + a / b;", 9, 0, 1),
+                ("return 100 + a % b;", 9, 0, 1),
+                ("var value: Int = a; value /= b; return value;", -9, 4, -2),
+                ("var value: Int = a; value %= b; return value;", -9, 4, -1),
+            ] {
+                let source = format!("fn main(a: Int, b: Int) -> Int {{ {body} }}");
+                assert_eq!(
+                    invoke_source(&source, profile, &[a, b]),
+                    expected,
+                    "{profile:?}: {body}, {a}, {b}"
                 );
             }
         }

@@ -13,7 +13,7 @@
 use crate::core_ir::{Decl, Expr, LoopKind, MatchArm, Stmt, Typ, UnifiedModule};
 use crate::native_emit::antidecomp;
 use crate::native_emit::global_data::{build_data_section, collect_globals};
-use crate::native_emit::x86_64::{self, CodeEmitter, RAX, RBP, RBX, RCX, RDI, RDX, REG_SP, RSI};
+use crate::native_emit::x86_64::{self, CodeEmitter, RAX, RBP, RBX, RCX, RDI, RDX, RSI};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -83,6 +83,22 @@ fn emit_profile_epilogue() -> Vec<u8> {
         antidecomp::harden_epilogue()
     } else {
         x86_64::epilogue()
+    }
+}
+
+// Restoring SP from the frame pointer also discards transient operand spills.
+fn emit_function_epilogue(emitter: &mut CodeEmitter, is_interrupt: bool) {
+    if is_interrupt {
+        emitter.emit_insns(&x86_64::mov_rr(x86_64::REG_SP, x86_64::REG_FP));
+        emitter.emit_insns(&x86_64::pop_r(x86_64::REG_FP));
+        for &reg in &[
+            15u8, 14, 13, 12, 11, 10, 9, 8, RDI, RSI, RBP, RBX, RDX, RCX, RAX,
+        ] {
+            emitter.emit_insns(&x86_64::pop_r(reg));
+        }
+        emitter.emit_width(&[0xCF], &[0x48, 0xCF]);
+    } else {
+        emitter.emit_insns(&emit_profile_epilogue());
     }
 }
 
@@ -951,26 +967,7 @@ fn lower_function(
         } else if func.ret == Typ::Void {
             emitter.emit_insns(&x86_64::zero_reg(RAX));
         }
-        // Epilogue
-        if frame_size > 0 {
-            emitter.emit_insns(&x86_64::add_rmi8(REG_SP, frame_size as u8));
-        }
-        if is_interrupt {
-            // Interrupt epilogue: restore frame, pop all GPRs in reverse, iretq.
-            // Epilogue from asm: mov rsp, rbp; pop rbp (but NOT ret)
-            emitter.emit_insns(&x86_64::mov_rr(x86_64::REG_SP, x86_64::REG_FP));
-            emitter.emit_insns(&x86_64::pop_r(x86_64::REG_FP));
-            // Pop all saved GPRs (reverse of push order)
-            for &reg in &[
-                15u8, 14, 13, 12, 11, 10, 9, 8, RDI, RSI, RBP, RBX, RDX, RCX, RAX,
-            ] {
-                emitter.emit_insns(&x86_64::pop_r(reg));
-            }
-            // iret/iretq pops RIP/CS/RFLAGS from interrupt stack frame
-            emitter.emit_width(&[0xCF], &[0x48, 0xCF]);
-        } else {
-            emitter.emit_insns(&emit_profile_epilogue());
-        }
+        emit_function_epilogue(emitter, is_interrupt);
     }
 
     Ok(pending_globals)
@@ -1046,26 +1043,7 @@ fn lower_stmt(
             } else {
                 emitter.emit_insns(&x86_64::zero_reg(RAX));
             }
-            // Epilogue
-            let frame_size = ctx.frame_reserve();
-            if frame_size > 0x7F {
-                emitter.emit_insns(&x86_64::add_rmi8(REG_SP, frame_size as u8));
-            } else if frame_size > 0 {
-                emitter.emit_insns(&x86_64::add_rmi8(REG_SP, frame_size as u8));
-            }
-            if ctx.is_interrupt {
-                // Interrupt epilogue: leave, pop all GPRs, iretq
-                emitter.emit_insns(&x86_64::mov_rr(x86_64::REG_SP, x86_64::REG_FP));
-                emitter.emit_insns(&x86_64::pop_r(x86_64::REG_FP));
-                for &reg in &[
-                    15u8, 14, 13, 12, 11, 10, 9, 8, RDI, RSI, RBP, RBX, RDX, RCX, RAX,
-                ] {
-                    emitter.emit_insns(&x86_64::pop_r(reg));
-                }
-                emitter.emit_width(&[0xCF], &[0x48, 0xCF]); // iret/iretq
-            } else {
-                emitter.emit_insns(&emit_profile_epilogue());
-            }
+            emit_function_epilogue(emitter, ctx.is_interrupt);
             ctx.emitted_return = true;
             Ok(())
         }
@@ -1393,22 +1371,7 @@ fn lower_stmt(
             } else {
                 load_error_global(emitter, ctx, "__inrt_err_val")?;
             }
-            let frame_size = ctx.frame_reserve();
-            if frame_size > 0 {
-                emitter.emit_insns(&x86_64::add_rmi8(REG_SP, frame_size as u8));
-            }
-            if ctx.is_interrupt {
-                emitter.emit_insns(&x86_64::mov_rr(x86_64::REG_SP, x86_64::REG_FP));
-                emitter.emit_insns(&x86_64::pop_r(x86_64::REG_FP));
-                for &reg in &[
-                    15u8, 14, 13, 12, 11, 10, 9, 8, RDI, RSI, RBP, RBX, RDX, RCX, RAX,
-                ] {
-                    emitter.emit_insns(&x86_64::pop_r(reg));
-                }
-                emitter.emit_width(&[0xCF], &[0x48, 0xCF]);
-            } else {
-                emitter.emit_insns(&emit_profile_epilogue());
-            }
+            emit_function_epilogue(emitter, ctx.is_interrupt);
 
             let continue_offset = emitter.len();
             let continue_delta = continue_offset as i32 - continue_branch as i32 - 6;
@@ -1860,6 +1823,51 @@ fn lower_ident_ref(
     Ok(())
 }
 
+fn lower_checked_div_or_mod(emitter: &mut CodeEmitter, is_interrupt: bool, modulo: bool) {
+    emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
+    emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
+    emitter.emit_insns(&x86_64::test_rr(RCX, RCX));
+    let nonzero = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(5, 0));
+    emitter.emit_insns(&x86_64::load_i64(RAX, 1));
+    emit_function_epilogue(emitter, is_interrupt);
+    let valid = emitter.len();
+    emitter.patch_u32(nonzero + 2, (valid as i32 - nonzero as i32 - 6) as u32);
+
+    // Match AArch64's wrapping MIN/-1 result without an x86 hardware fault.
+    emitter.emit_insns(&x86_64::cmp_rmi8(RCX, 0xff));
+    let ordinary_divisor = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(5, 0));
+    let minimum = if x86_64::is_32bit() {
+        i32::MIN as i64
+    } else {
+        i64::MIN
+    };
+    emitter.emit_insns(&x86_64::load_i64(RDX, minimum));
+    emitter.emit_insns(&x86_64::cmp_rr(RAX, RDX));
+    let ordinary_dividend = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(5, 0));
+    if modulo {
+        emitter.emit_insns(&x86_64::zero_reg(RAX));
+    }
+    let overflow_done = emitter.len();
+    emitter.emit_insns(&x86_64::jmp_rel32(0));
+    let divide = emitter.len();
+    for branch in [ordinary_divisor, ordinary_dividend] {
+        emitter.patch_u32(branch + 2, (divide as i32 - branch as i32 - 6) as u32);
+    }
+    emitter.emit_insns(&x86_64::sign_extend_dividend());
+    emitter.emit_insns(&x86_64::idiv_reg(RCX));
+    if modulo {
+        emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
+    }
+    let end = emitter.len();
+    emitter.patch_u32(
+        overflow_done + 1,
+        (end as i32 - overflow_done as i32 - 5) as u32,
+    );
+}
+
 fn lower_binary_expr(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -1917,11 +1925,8 @@ fn lower_binary_expr(
             emitter.emit_insns(&x86_64::setcc(0x9E, RAX)); // setle al
             emitter.emit_insns(&x86_64::movzx_r8(RAX, RAX));
         }
-        "/" => {
-            emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
-            emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
-            emitter.emit_insns(&x86_64::zero_reg(RDX));
-            emitter.emit_insns(&x86_64::div_reg(RCX));
+        "/" | "/=" | "%" | "%=" => {
+            lower_checked_div_or_mod(emitter, ctx.is_interrupt, matches!(op, "%" | "%="));
         }
         "<" => {
             emitter.emit_insns(&x86_64::cmp_rr(RDX, RAX));
@@ -1978,19 +1983,7 @@ fn lower_binary_expr(
             emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
             emitter.emit_insns(&x86_64::imul_rr(RAX, RCX));
         }
-        "/=" => {
-            emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
-            emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
-            emitter.emit_insns(&x86_64::zero_reg(RDX));
-            emitter.emit_insns(&x86_64::div_reg(RCX));
-        }
-        "%=" => {
-            emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
-            emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
-            emitter.emit_insns(&x86_64::zero_reg(RDX));
-            emitter.emit_insns(&x86_64::div_reg(RCX));
-            emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
-        }
+
         "&=" => {
             emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
             emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
@@ -2016,13 +2009,7 @@ fn lower_binary_expr(
             emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
             emitter.emit_insns(&x86_64::shr_reg_cl(RAX));
         }
-        "%" => {
-            emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
-            emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
-            emitter.emit_insns(&x86_64::zero_reg(RDX));
-            emitter.emit_insns(&x86_64::div_reg(RCX));
-            emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
-        }
+
         _ => {
             return Err(format!(
                 "x86_64-lower: unsupported operator `{op}` in `{}`",
