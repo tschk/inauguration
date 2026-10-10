@@ -312,6 +312,13 @@ pub fn parse_in_source(source: &str) -> Result<UnifiedModule, String> {
     Ok(module)
 }
 
+/// Parse library source without requiring a `main` entry point.
+pub fn parse_in_library_source(source: &str) -> Result<UnifiedModule, String> {
+    let module = parse_in_module_without_validation(&normalize_human_in_source(source), None)?;
+    validate_module(&module, false)?;
+    Ok(module)
+}
+
 pub(crate) fn local_in_import_path(base: &Path, raw: &str) -> Option<PathBuf> {
     let import = normalize_import_path(raw);
     if !(import.ends_with(".in") || import.starts_with("./") || import.starts_with("../")) {

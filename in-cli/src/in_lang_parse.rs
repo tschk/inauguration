@@ -12,7 +12,7 @@ pub mod types;
 pub mod util;
 pub mod validate;
 
-pub use module::{parse_in_file, parse_in_library_file, parse_in_source};
+pub use module::{parse_in_file, parse_in_library_file, parse_in_library_source, parse_in_source};
 pub use surface::{
     InAnnotationFact, InExternBinding, InOrchestrationFacts, InParallelTaskFact, InSemanticBinding,
     InSurfaceInfo, in_standard_import_bindings, parse_in_surface_info,

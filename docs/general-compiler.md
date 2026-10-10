@@ -27,6 +27,13 @@ Status matrix: **`in languages`** / **`in languages --json`**. Roadmap: [univers
 | CLI | `in-cli` | `build`, `compile`, `execute`, `graph`, `test` |
 | Docs hub | `docs-site/` | `crepus web build` / `web serve` (crepuscularity) |
 
+The component `Compiler` API emits executables through the same owned native
+emitter used by the CLI. It reports parse errors and unsupported artifact kinds
+instead of fabricating a successful placeholder. Host macOS AArch64 emission
+produces linked machine code; cross-target executables inherit the existing
+pure scalar exit-code subset; entries with runtime side effects are rejected. The analysis `IrModule` passes do not replace Core IR
+native lowering.
+
 Core IR constant folding covers global initializers as well as function bodies
 in every emit profile. Integer expressions such as `-(2 + 3)` and `(1 << 5) | 3`
 therefore reach native data emission as initialized scalar values. Calls,

@@ -10,13 +10,13 @@
 //!   │  Stage 2: typecheck
 //!   ▼
 //! Lower
-//!   │  Stage 3: lower_core (UnifiedModule → textual SIL → IrModule)
+//!   │  Stage 3: lower_core (UnifiedModule → analysis IrModule)
 //!   ▼
 //! Optimize
 //!   │  Stage 4: PassManager (SimplifyCFG, ConstantFold, DCE, SROA, Cleanup)
 //!   ▼
 //! Codegen
-//!   │  Stage 5: CodegenBackend → native_emit/* → artifact bytes
+//!   │  Stage 5: Core IR → owned native emission → artifact bytes
 //!   ▼
 //! Output + Metadata JSON sidecar
 //! ```
@@ -24,7 +24,7 @@
 use std::fmt;
 use std::time::Instant;
 
-use super::backend::{BackendKind, BackendOutput, placeholder_output, select_backend};
+use super::backend::{BackendKind, BackendOutput, select_backend};
 use super::core::{IrBasicBlock, IrFunction, IrInstruction, IrModule, IrOpcode, IrType};
 use super::metadata::{ComponentMetadata, ComponentSpec, OptimizationLevel};
 use super::passes::PassManager;
@@ -113,9 +113,6 @@ pub struct CompileResult {
 pub struct Compiler {
     config: super::metadata::ComponentSpec,
     pass_manager: PassManager,
-    // Only read from `#[cfg(test)]` assertions (see `compiler_resolves_backend_kind`); the
-    // non-test lib artifact never reads it, so rustc's per-artifact dead-code pass flags it.
-    #[allow(dead_code)]
     backend: BackendKind,
     timings: CompileTimings,
     last_unified: Option<UnifiedModule>,
@@ -147,37 +144,15 @@ impl Compiler {
 
     // ─── Stage 1: Frontend ─────────────────────────────────────────────
 
-    /// Parse source into an [`IrModule`].
-    /// For now creates a minimal module from the component spec.
-    /// Real frontend reads `.in` source through `in_lang_parse` + `lower_core`.
+    /// Parse source into an analysis module while retaining Core IR for codegen.
     pub fn parse_source(&mut self, source: &str) -> Result<IrModule, CompileError> {
         let start = Instant::now();
-        let mut module = IrModule::new(&self.config.name);
-
-        let entry_name = self
-            .config
-            .entry_point
-            .clone()
-            .unwrap_or_else(|| "main".to_string());
-
-        // Try parsing as .in source first
-        match crate::in_lang_parse::parse_in_source(source) {
-            Ok(unified) => {
-                // Cache for type_check stage
-                self.last_unified = Some(unified.clone());
-                // We have a parsed UnifiedModule — lower it to IrModule
-                let lowered = lower_unified_to_ir(&unified, &entry_name)?;
-                module = lowered;
-            }
-            Err(_e) => {
-                // Fall back to minimal module
-                let mut func = IrFunction::new(&entry_name, vec![], IrType::Void);
-                let mut block = IrBasicBlock::new("entry");
-                block.terminator = Some(IrInstruction::new(IrOpcode::Return, IrType::Void, vec![]));
-                func.add_block(block);
-                module.functions.push(func);
-            }
-        }
+        self.last_unified = None;
+        let mut unified = crate::in_lang_parse::parse_in_library_source(source)
+            .map_err(CompileError::Frontend)?;
+        crate::lower_core::desugar_module(&mut unified);
+        let mut module = lower_unified_to_ir(&unified)?;
+        self.last_unified = Some(unified);
 
         module.component = Some(self.config.clone());
 
@@ -235,6 +210,14 @@ impl Compiler {
         self.pass_manager
             .run_all(module)
             .map_err(CompileError::Pass)?;
+        if self.config.optimization_level != OptimizationLevel::None
+            && let Some(unified) = &mut self.last_unified
+        {
+            crate::core_opt::optimize_with_entry(
+                &mut unified.decls,
+                self.config.entry_point.as_deref().or(Some("main")),
+            );
+        }
         self.timings.stages.push(StageTime {
             stage: Stage::Optimize,
             elapsed_us: start.elapsed().as_micros() as u64,
@@ -246,7 +229,103 @@ impl Compiler {
 
     pub fn codegen(&mut self, _module: &IrModule) -> Result<BackendOutput, CompileError> {
         let start = Instant::now();
-        let output = placeholder_output();
+        if self.config.artifact_kind != super::metadata::ArtifactKind::Executable {
+            return Err(CompileError::Backend(
+                "component driver currently supports executable emission only".into(),
+            ));
+        }
+        let unified = self
+            .last_unified
+            .as_ref()
+            .ok_or_else(|| CompileError::Backend("parse source before codegen".into()))?;
+        let entry = self.config.entry_point.as_deref().unwrap_or("main");
+        if !unified.decls.iter().any(
+            |decl| matches!(decl, crate::core_ir::Decl::Function { name, .. } if name == entry),
+        ) {
+            return Err(CompileError::Backend(format!(
+                "entry point `{entry}` not found"
+            )));
+        }
+        static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("in-component-{}-{id}", std::process::id()));
+        std::fs::create_dir(&dir)
+            .map_err(|e| CompileError::Backend(format!("create emission directory: {e}")))?;
+        struct TempDir(std::path::PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _temp = TempDir(dir.clone());
+        let out = dir.join("artifact");
+        let host_macho = self.backend == BackendKind::AArch64MachO
+            && cfg!(all(target_os = "macos", target_arch = "aarch64"));
+        // ponytail: cross-target writers only emit an exit stub; require a pure scalar entry until they lower bodies.
+        if !host_macho
+            && !unified.decls.iter().any(|decl| {
+                let crate::core_ir::Decl::Function {
+                    name,
+                    params,
+                    ret,
+                    body,
+                    ..
+                } = decl
+                else {
+                    return false;
+                };
+                name == entry
+                    && params.is_empty()
+                    && ((*ret == crate::core_ir::Typ::Void && body.is_empty())
+                        || matches!(
+                            body.as_slice(),
+                            [crate::core_ir::Stmt::Return(Some(
+                                crate::core_ir::Expr::IntLit(_) | crate::core_ir::Expr::BoolLit(_)
+                            ))]
+                        ))
+            })
+        {
+            return Err(CompileError::Backend(
+                "cross-target executable emission requires a pure scalar exit entry".into(),
+            ));
+        }
+        let request = crate::owned_compile::OwnedCompileRequest {
+            path: dir.join("source.in"),
+            module_id: self.config.name.clone(),
+            parser: crate::parser_registry::ParserCli::In,
+            target: crate::owned_compile::CompileTarget::Native,
+            entry: self.config.entry_point.clone(),
+            out: Some(out.clone()),
+            linkage: crate::native_emit::NativeLinkage::Executable,
+            target_triple: (!host_macho).then(|| self.config.target.clone()),
+            jobs: 1,
+            debug: self.config.debug_info,
+            profile: crate::emit_profile::EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+        let result = crate::owned_compile::compile_native(unified, &self.config.name, &request)
+            .map_err(CompileError::Backend)?;
+        if !result.degradations.is_empty() {
+            return Err(CompileError::Backend(format!(
+                "native lowering degraded: {:?}",
+                result.degradations
+            )));
+        }
+        let output = BackendOutput {
+            data: std::fs::read(&out)
+                .map_err(|e| CompileError::Backend(format!("read emitted artifact: {e}")))?,
+            extension: if matches!(
+                self.backend,
+                BackendKind::X86_64Coff | BackendKind::AArch64Coff
+            ) {
+                "exe"
+            } else {
+                "bin"
+            },
+            entry_offset: None,
+            symbol_table: Vec::new(),
+        };
         self.timings.stages.push(StageTime {
             stage: Stage::Codegen,
             elapsed_us: start.elapsed().as_micros() as u64,
@@ -258,6 +337,7 @@ impl Compiler {
 
     /// Run the full compilation pipeline.
     pub fn compile(&mut self, source: &str) -> Result<CompileResult, CompileError> {
+        self.timings = CompileTimings::default();
         let total_start = Instant::now();
 
         // Stage 1: Frontend
@@ -311,10 +391,7 @@ impl Compiler {
 /// Lower a [`crate::core_ir::UnifiedModule`] to an [`IrModule`].
 /// Extracts functions, structs, and strings from the AST-level representation
 /// into the SSA-like compiler IR.
-fn lower_unified_to_ir(
-    unified: &crate::core_ir::UnifiedModule,
-    entry_name: &str,
-) -> Result<IrModule, CompileError> {
+fn lower_unified_to_ir(unified: &crate::core_ir::UnifiedModule) -> Result<IrModule, CompileError> {
     let mut module = IrModule::new(unified.identity.module.as_deref().unwrap_or("module"));
 
     // Extract struct types
@@ -367,15 +444,6 @@ fn lower_unified_to_ir(
         }
     }
 
-    // If no functions found, create an entry stub
-    if module.functions.is_empty() {
-        let mut func = IrFunction::new(entry_name, vec![], IrType::Void);
-        let mut block = IrBasicBlock::new("entry");
-        block.terminator = Some(IrInstruction::new(IrOpcode::Return, IrType::Void, vec![]));
-        func.add_block(block);
-        module.functions.push(func);
-    }
-
     Ok(module)
 }
 
@@ -399,38 +467,22 @@ mod tests {
     use super::*;
 
     fn test_spec() -> ComponentSpec {
-        ComponentSpec::host_executable("test_app", Some("main"))
+        let mut spec = ComponentSpec::host_executable("test_app", Some("main"));
+        spec.target = "x86_64-unknown-linux-gnu".to_string();
+        spec
     }
 
     #[test]
     fn compiler_resolves_backend_kind() {
         let compiler = Compiler::new(test_spec()).unwrap();
-        // The host backend must match the actual host triple: macOS (arm64)
-        // selects Mach-O, Linux (x86_64/aarch64) selects ELF, anything else
-        // (e.g. an unrecognized arch) falls back to RawBinary. This mirrors
-        // `select_backend`/`ComponentSpec::host_triple` so the assertion
-        // stays correct on every CI/host platform instead of only macOS.
-        let expected = if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-            BackendKind::AArch64MachO
-        } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
-            BackendKind::X86_64Elf
-        } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
-            BackendKind::AArch64Elf
-        } else if cfg!(target_os = "windows") && cfg!(target_arch = "x86_64") {
-            BackendKind::X86_64Coff
-        } else if cfg!(target_os = "windows") && cfg!(target_arch = "aarch64") {
-            BackendKind::AArch64Coff
-        } else {
-            BackendKind::RawBinary
-        };
-        assert_eq!(compiler.backend, expected);
+        assert_eq!(compiler.backend, BackendKind::X86_64Elf);
     }
 
     #[test]
     fn compiler_runs_full_pipeline() {
         let mut compiler = Compiler::new(test_spec()).unwrap();
-        let result = compiler.compile("fn main() {}").unwrap();
-        assert!(!result.output.data.is_empty());
+        let result = compiler.compile("fn main() -> Int { return 11; }").unwrap();
+        assert_eq!(&result.output.data[..4], b"\x7fELF");
         assert_eq!(result.timings.stages.len(), 5);
     }
 
@@ -440,20 +492,93 @@ mod tests {
         let source = "fn greet() -> Int { return 42; }";
         let module = compiler.parse_source(source).unwrap();
         assert_eq!(module.functions.len(), 1);
+        assert_eq!(module.functions[0].name, "greet");
     }
 
     #[test]
     fn compiler_returns_timing_report() {
         let mut compiler = Compiler::new(test_spec()).unwrap();
-        let _result = compiler.compile("fn main() {}").unwrap();
+        let _result = compiler.compile("fn main() -> Int { return 11; }").unwrap();
         compiler.print_timings();
+    }
+
+    #[test]
+    fn malformed_source_clears_previous_module() {
+        let mut compiler = Compiler::new(test_spec()).unwrap();
+        compiler.parse_source("fn main() {}").unwrap();
+        assert!(matches!(
+            compiler.parse_source("fn main( {"),
+            Err(CompileError::Frontend(_))
+        ));
+        assert!(compiler.last_unified.is_none());
+    }
+
+    #[test]
+    fn repeated_compilation_resets_stage_timings() {
+        let mut compiler = Compiler::new(test_spec()).unwrap();
+        compiler.compile("fn main() -> Int { return 11; }").unwrap();
+        assert_eq!(
+            compiler
+                .compile("fn main() {}")
+                .unwrap()
+                .timings
+                .stages
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn codegen_rejects_missing_entry_and_unsupported_artifact() {
+        let mut compiler = Compiler::new(test_spec()).unwrap();
+        assert!(matches!(
+            compiler.compile("fn greet() {}"),
+            Err(CompileError::Backend(_))
+        ));
+        compiler.config.artifact_kind = super::super::metadata::ArtifactKind::StaticLibrary;
+        assert!(matches!(
+            compiler.compile("fn main() {}"),
+            Err(CompileError::Backend(_))
+        ));
+    }
+
+    #[test]
+    fn cross_target_codegen_rejects_entry_side_effects() {
+        let mut compiler = Compiler::new(test_spec()).unwrap();
+        let module = compiler
+            .parse_source("var count: Int = 0;\nfn main() -> Int { count = 1; return 11; }")
+            .unwrap();
+        assert!(matches!(
+            compiler.codegen(&module),
+            Err(CompileError::Backend(_))
+        ));
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn host_pipeline_emits_runnable_native_program() {
+        let mut compiler =
+            Compiler::new(ComponentSpec::host_executable("test_app", Some("main"))).unwrap();
+        let result = compiler.compile("fn main() -> Int { return 11; }").unwrap();
+        assert_eq!(&result.output.data[..4], &[0xcf, 0xfa, 0xed, 0xfe]);
+        let path =
+            std::env::temp_dir().join(format!("in-pipeline-execution-{}", std::process::id()));
+        std::fs::write(&path, result.output.data).unwrap();
+        crate::owned_compile::set_native_artifact_permissions(
+            &path,
+            crate::native_emit::NativeLinkage::Executable,
+        )
+        .unwrap();
+        let status = std::process::Command::new(&path).status();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(status.unwrap().code(), Some(11));
     }
 
     #[test]
     fn lower_unified_module_produces_ir() {
         let source = "fn main() {}\nfn add(a: Int, b: Int) -> Int { return a + b; }";
         let unified = crate::in_lang_parse::parse_in_source(source).unwrap();
-        let module = lower_unified_to_ir(&unified, "main").unwrap();
+        let module = lower_unified_to_ir(&unified).unwrap();
         assert!(module.functions.len() >= 1);
         assert_eq!(module.functions[0].name, "main");
     }

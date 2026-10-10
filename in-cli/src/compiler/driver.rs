@@ -47,6 +47,13 @@ pub fn compile_in_file(
     let output_path = source_path.with_extension(ext);
     std::fs::write(&output_path, &result.output.data).map_err(|e| format!("write output: {e}"))?;
 
+    if spec.artifact_kind == ArtifactKind::Executable {
+        crate::owned_compile::set_native_artifact_permissions(
+            &output_path,
+            crate::native_emit::NativeLinkage::Executable,
+        )?;
+    }
+
     println!(
         "  Compiled `{}` → {} ({} bytes, target: {})",
         source_name,

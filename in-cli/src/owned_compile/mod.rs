@@ -31,7 +31,7 @@ use report::{
 };
 
 use jit::compile_jit;
-use native::compile_native;
+pub(crate) use native::{compile_native, set_native_artifact_permissions};
 use util::{default_linkage_label, emit_label, linkage_label, target_label};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
