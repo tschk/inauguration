@@ -27,7 +27,7 @@ All languages including Swift go through the unified Core IR pipeline. The old `
 | Host | `implemented` | `stage` | `reason_code` | `artifact_kind` |
 |------|---------------|---------|---------------|-----------------|
 | `aarch64-apple-darwin` host executable | `true` | `owned-native-subset` | `native-aarch64-subset` | `mach-o-executable` |
-| `aarch64-apple-darwin` staticlib | `true` | `owned-object-subset` | `native-object-subset` | `mach-o-static-archive` |
+| `aarch64-apple-darwin` staticlib | `true` | `owned-native-subset-aarch64-static` | `native-object-subset` | `mach-o-static-archive` |
 | `aarch64-apple-darwin` app bundle | `true` | `owned-native-subset-aarch64-app` | `native-aarch64-darwin-app-subset` | `.app` bundle |
 | `x86_64-unknown-linux-gnu` staticlib | `true` | `owned-object-subset` | `native-object-subset` | `elf-relocatable-object` |
 | `x86_64-unknown-linux-gnu` executable | `true` | `owned-native-subset-x86_64` | `native-x86_64-linux-exit-subset` | `elf-executable` |
@@ -48,7 +48,7 @@ The target registry also carries checked-in In target equivalents for the Rust t
 
 The first non-host object backends are `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`, and `wasm32-unknown-unknown` for const-evaluable scalar entry functions. `in compile --target native --target-triple x86_64-unknown-linux-gnu --linkage static-lib --entry answer --out target/answer.o` emits an ELF64 relocatable object with x86_64 machine code returning the evaluated scalar value. `aarch64-unknown-linux-gnu` emits an ELF64 AArch64 relocatable object for the same scalar subset. `armv7-unknown-linux-gnueabihf` emits an ELF32 ARM relocatable object for the same scalar subset. `wasm32-unknown-unknown` emits a WebAssembly module exporting the scalar function.
 
-`in compile --target native --target-triple aarch64-apple-darwin --linkage static-lib --entry answer --out target/libanswer.a` emits an `ar` archive containing a Mach-O ARM64 object member with an exported `_answer` symbol. This is a static archive route, not a bare Mach-O object route.
+`in compile --target native --target-triple aarch64-apple-darwin --linkage static-lib --entry answer --out target/libanswer.a` emits an `ar` archive containing a Mach-O ARM64 object member with an exported `_answer` symbol. The archive contains real Core IR function bodies, a linker index, and external call relocations. Integer parameters, multiple exports, and libc calls are verified by linking and running C callers. Writable-global references and degraded exports are rejected until the object writer can represent them.
 
 `in compile --target native --target-triple x86_64-unknown-linux-gnu --linkage executable --entry answer --out target/answer` emits a minimal ELF64 Linux executable that exits with the const-evaluated scalar value through the Linux `exit` syscall. This is not general x86_64 native lowering: it has no linker, libc, dynamic loader, relocations, argv/envp contract, heap, imports, or general function ABI support.
 

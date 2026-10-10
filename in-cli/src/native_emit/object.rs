@@ -11,7 +11,7 @@ use crate::native_emit::elf::{
     write_executable, write_i386_relocatable_object, write_x86_64_relocatable_object,
     x86_64_linux_exit_code, x86_64_return_i32_object_code,
 };
-use crate::native_emit::macho::{ExportSymbol, MachOImage, MachOLinkage, write_image};
+use crate::native_emit::macho::{MachOImage, MachOLinkage, write_image};
 use crate::native_emit::target::AARCH64_NONE_TRIPLE;
 use crate::native_emit::thumb_lower;
 use crate::native_emit::wasm::{WASM32_UNKNOWN_TRIPLE, WasmModule, write_scalar_i32_module};
@@ -50,9 +50,7 @@ pub fn emit_native_object(request: &NativeObjectRequest<'_>) -> Option<NativeObj
         (AARCH64_LINUX_TRIPLE, NativeLinkage::Executable) => {
             Some(emit_aarch64_elf_executable(request))
         }
-        ("aarch64-apple-darwin", NativeLinkage::StaticLib) => {
-            Some(emit_aarch64_macho_archive(request))
-        }
+        ("aarch64-apple-darwin", NativeLinkage::StaticLib) => emit_aarch64_macho_archive(request),
         (ARMV7_LINUX_GNUEABIHF_TRIPLE, NativeLinkage::StaticLib) => {
             Some(emit_arm32_elf_object(request))
         }
@@ -254,27 +252,37 @@ fn emit_arm32_elf_executable(request: &NativeObjectRequest<'_>) -> NativeObjectA
     }
 }
 
-fn emit_aarch64_macho_archive(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
+fn emit_aarch64_macho_archive(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
+    let lowered = crate::native_emit::lower::lower_native_module(
+        request.module,
+        request.entry,
+        NativeLinkage::StaticLib,
+    )
+    .ok()?;
+    // The object writer has no writable data section; every export must be fully lowered.
+    if lowered.exports.is_empty()
+        || !lowered.global_relocs.is_empty()
+        || !lowered.degradations.is_empty()
+    {
+        return None;
+    }
     let image = MachOImage {
-        code: aarch64_return_i32_object_code(request.exit_code),
+        code: lowered.code,
         entry_offset: None,
-        exports: vec![ExportSymbol {
-            name: request.entry.to_string(),
-            offset: 0,
-        }],
-        external_refs: Vec::new(),
+        exports: lowered.exports,
+        external_refs: lowered.external_refs,
     };
     let mut bytes = Vec::new();
     write_image(&image, MachOLinkage::StaticLib, request.entry, &mut bytes);
-    NativeObjectArtifact {
+    Some(NativeObjectArtifact {
         bytes,
         artifact_kind: "mach-o-static-archive",
-        backend_level: "owned-object-subset",
+        backend_level: "owned-native-subset-aarch64-static",
         runtime_level: "none",
         reason_code: NATIVE_OBJECT_SUBSET,
-        reason: "inauguration owns Mach-O static archive emission for const-evaluable scalar entry functions on this target",
+        reason: "inauguration emits Mach-O static archives containing real AArch64 Core IR function bodies and external call relocations",
         abi_manifest: Some(object_abi_manifest(request)),
-    }
+    })
 }
 
 fn emit_x86_64_elf_executable(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
@@ -498,6 +506,92 @@ mod tests {
         )
     }
 
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn macho_archive_links_and_executes_its_function_body() {
+        for (module, caller) in [
+            (scalar_answer_module(), "long long answer(void); int main(void) { return (int)answer(); }"),
+            (crate::in_lang_parse::parse_in_library_source("fn add(a: Int, b: Int) -> Int { return a + b; }\nfn answer() -> Int { return add(5, 37); }").unwrap(), "long long add(long long, long long); int main(void) { return (int)add(-5, 47); }"),
+            (crate::in_lang_parse::parse_in_library_source("fn answer() -> Int { return labs(-42); }").unwrap(), "long long answer(void); int main(void) { return (int)answer(); }"),
+            (crate::in_lang_parse::parse_in_library_source("fn helper(value: Int) -> Int { return labs(value); }\nfn answer() -> Int { return helper(-42); }").unwrap(), "long long answer(void); int main(void) { return (int)answer(); }"),
+        ] {
+        let request = NativeObjectRequest {
+            target_triple: "aarch64-apple-darwin",
+            linkage: NativeLinkage::StaticLib,
+            entry: "answer",
+            exit_code: 0,
+            module: &module,
+            module_id: "App",
+            base: None,
+        };
+        let artifact = emit_native_object(&request).expect("archive");
+        let dir = std::env::temp_dir().join(format!(
+            "in-archive-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let lib = dir.join("libanswer.a");
+        let c = dir.join("caller.c");
+        let exe = dir.join("caller");
+        std::fs::write(&lib, artifact.bytes).unwrap();
+        std::fs::write(&c, caller).unwrap();
+        let output = std::process::Command::new("cc")
+            .args(["-arch", "arm64"])
+            .arg(&c)
+            .arg(&lib)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .unwrap();
+        let status = output
+            .status
+            .success()
+            .then(|| std::process::Command::new(&exe).status().unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(status.unwrap().code(), Some(42));
+        }
+    }
+
+    #[test]
+    fn macho_archive_rejects_empty_degraded_and_writable_global_modules() {
+        let mut degraded = scalar_answer_module();
+        degraded.decls.push(Decl::Function {
+            name: "unsupported".into(),
+            params: vec![],
+            ret: Typ::Array(Box::new(Typ::Array(Box::new(Typ::Int)))),
+            body: vec![Stmt::Return(Some(Expr::ArrayLit(vec![])))],
+            type_params: vec![],
+        });
+        for module in [
+            UnifiedModule::new(Vec::new()),
+            degraded,
+            crate::in_lang_parse::parse_in_library_source(
+                "var count: Int = 3;\nfn answer() -> Int { return count; }",
+            )
+            .unwrap(),
+        ] {
+            let request = NativeObjectRequest {
+                target_triple: "aarch64-apple-darwin",
+                linkage: NativeLinkage::StaticLib,
+                entry: "answer",
+                exit_code: 0,
+                module: &module,
+                module_id: "App",
+                base: None,
+            };
+            assert!(emit_native_object(&request).is_none());
+        }
+    }
+
     #[test]
     fn dispatches_x86_64_staticlib_object() {
         let module = scalar_answer_module();
@@ -610,7 +704,7 @@ mod tests {
 
     #[test]
     fn dispatches_aarch64_apple_darwin_staticlib_archive() {
-        let module = UnifiedModule::new(Vec::new());
+        let module = scalar_answer_module();
         let request = NativeObjectRequest {
             target_triple: "aarch64-apple-darwin",
             linkage: NativeLinkage::StaticLib,

@@ -364,7 +364,7 @@ fn native_staticlib_emits_aarch64_macho_archive() {
     let report = compile_owned(&request);
 
     assert!(report.success, "{:?}", report);
-    assert_eq!(report.backend_level, "owned-object-subset");
+    assert_eq!(report.backend_level, "owned-native-subset-aarch64-static");
     assert_eq!(report.runtime_level, "none");
     assert_eq!(report.reason_code.as_deref(), Some("native-object-subset"));
     let bytes = fs::read(&out_path).expect("archive bytes");
