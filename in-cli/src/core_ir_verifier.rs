@@ -56,6 +56,36 @@ pub fn verify_module(module: &UnifiedModule, options: &VerifyOptions) -> VerifyR
     }
 
     for decl in &module.decls {
+        if let Decl::Global {
+            name,
+            typ,
+            init: Some(init),
+            ..
+        } = decl
+        {
+            let env = HashMap::new();
+            if let Err((code, reason)) = check_expr(name, init, &facts, &env, &mut call_edges) {
+                return fail_report(parsed_function_count, call_edges, &code, reason);
+            }
+            // Struct globals use zero as a request for zero-filled aggregate storage.
+            let zeroed_struct = matches!(init.as_ref(), Expr::IntLit(0))
+                && matches!(typ, Typ::Named(name) if facts.structs.contains_key(name.as_str()));
+            if let Some(actual) = expr_type(init, &facts, &env)
+                && !zeroed_struct
+                && canonical_type(typ) != canonical_type(&actual)
+            {
+                return fail_report(
+                    parsed_function_count,
+                    call_edges,
+                    "type-mismatch",
+                    format!(
+                        "global `{name}` initializer expected {}, got {}",
+                        type_name(typ),
+                        type_name(&actual)
+                    ),
+                );
+            }
+        }
         if let Decl::Function {
             name,
             params,
@@ -943,6 +973,45 @@ mod tests {
         VerifyOptions {
             entry: None,
             require_entry: false,
+        }
+    }
+
+    #[test]
+    fn struct_global_zero_initialization_remains_valid() {
+        for (value, valid) in [(0, true), (1, false)] {
+            let report = verify_module(
+                &module(vec![
+                    point_struct(),
+                    Decl::Global {
+                        name: "point".into(),
+                        typ: Typ::Named("Point".into()),
+                        init: Some(Box::new(Expr::IntLit(value))),
+                        mutable: true,
+                    },
+                ]),
+                &default_options(),
+            );
+            assert_eq!(report.ok, valid, "{report:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_global_initializers() {
+        for (value, reason) in [
+            (Expr::StringLit("wrong".into()), "type-mismatch"),
+            (Expr::Ident("missing".into()), "unresolved-symbol"),
+        ] {
+            let report = verify_module(
+                &module(vec![Decl::Global {
+                    name: "value".into(),
+                    typ: Typ::Float,
+                    init: Some(Box::new(value)),
+                    mutable: true,
+                }]),
+                &default_options(),
+            );
+            assert!(!report.ok, "{report:?}");
+            assert_eq!(report.reason_code.as_deref(), Some(reason));
         }
     }
 
