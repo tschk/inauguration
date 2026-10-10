@@ -114,16 +114,6 @@ impl CoverageReport {
 /// Mirrors the owned build's pre-lowering pipeline (parse, desugar, family
 /// typecheck, profile optimize) so the numbers match what a build would produce.
 pub fn coverage_for_path(path: &Path, parser: ParserCli, entry: Option<&str>) -> CoverageReport {
-    if !host_supports_native_subset() {
-        let mut report = CoverageReport::rejected(
-            path,
-            "coverage-host-unsupported",
-            "native lowering needs a macOS AArch64 or Linux x86_64 host".to_string(),
-        );
-        report.status = CoverageStatus::UnsupportedHost;
-        return report;
-    }
-
     let resolved = parser_registry::resolve_parser_id(path, parser);
     let mut module = match parser_registry::parse_with_resolved(resolved, path) {
         Ok(Some(module)) => module,
@@ -152,6 +142,16 @@ pub fn coverage_for_path(path: &Path, parser: ParserCli, entry: Option<&str>) ->
             }
         }
     };
+
+    if !host_supports_native_subset() {
+        let mut report = CoverageReport::rejected(
+            path,
+            "coverage-host-unsupported",
+            "native lowering needs a macOS AArch64 or Linux x86_64/AArch64 host".to_string(),
+        );
+        report.status = CoverageStatus::UnsupportedHost;
+        return report;
+    }
 
     let parser_id = match resolved {
         parser_registry::ResolvedBuildParser::CoreIr(id) => Some(id.as_str().to_string()),
