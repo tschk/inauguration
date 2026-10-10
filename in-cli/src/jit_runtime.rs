@@ -369,109 +369,59 @@ impl JitRuntime {
         Ok(())
     }
 
-    /// Call a compiled function by name.
+    /// Call a compiled function by name. Returns `None` for a missing symbol or
+    /// more than eight scalar arguments on AArch64 or six on x86_64.
     ///
     /// # Safety
     /// The function must have been loaded via `load()`. The caller is
     /// responsible for ensuring the function signature matches the arguments.
-    pub unsafe fn invoke(&self, name: &str, _args: &[i64]) -> Option<i64> {
+    pub unsafe fn invoke(&self, name: &str, args: &[i64]) -> Option<i64> {
         let funcs = self.functions.read().unwrap();
         let func = funcs.get(name)?;
         let entry = func.entry as *const ();
 
         #[cfg(target_arch = "aarch64")]
         {
-            // Set X27 to error page for throw/try/catch, then call through blr.
-            // JIT functions no longer emit adr x27 in prologue.
-            let ep = self.error_page as usize;
-            let result = match _args.len() {
-                0 => {
-                    let r: i64;
-                    unsafe {
-                        std::arch::asm!(
-                            "mov x27, {e}",
-                            "blr {f}",
-                            e = in(reg) ep,
-                            f = in(reg) entry,
-                            lateout("x0") r,
-                            clobber_abi("C"),
-                        );
-                    }
-                    r
-                }
-                1 => {
-                    let a0 = _args[0];
-                    let r: i64;
-                    unsafe {
-                        std::arch::asm!(
-                            "mov x27, {e}",
-                            "blr {f}",
-                            e = in(reg) ep,
-                            f = in(reg) entry,
-                            in("x0") a0,
-                            lateout("x0") r,
-                            clobber_abi("C"),
-                        );
-                    }
-                    r
-                }
-                2 => {
-                    let a0 = _args[0];
-                    let a1 = _args[1];
-                    let r: i64;
-                    unsafe {
-                        std::arch::asm!(
-                            "mov x27, {e}",
-                            "blr {f}",
-                            e = in(reg) ep,
-                            f = in(reg) entry,
-                            in("x0") a0,
-                            in("x1") a1,
-                            lateout("x0") r,
-                            clobber_abi("C"),
-                        );
-                    }
-                    r
-                }
-                3 => {
-                    let a0 = _args[0];
-                    let a1 = _args[1];
-                    let a2 = _args[2];
-                    let r: i64;
-                    unsafe {
-                        std::arch::asm!(
-                            "mov x27, {e}",
-                            "blr {f}",
-                            e = in(reg) ep,
-                            f = in(reg) entry,
-                            in("x0") a0,
-                            in("x1") a1,
-                            in("x2") a2,
-                            lateout("x0") r,
-                            clobber_abi("C"),
-                        );
-                    }
-                    r
-                }
-                _ => 0,
-            };
+            // ponytail: marshal stack arguments before supporting more than eight scalars.
+            if args.len() > 8 {
+                return None;
+            }
+            let mut values = [0_i64; 8];
+            values[..args.len()].copy_from_slice(args);
+            let result: i64;
+            unsafe {
+                std::arch::asm!(
+                    "mov x27, x17", "blr x16",
+                    in("x16") entry, in("x17") self.error_page as usize,
+                    in("x0") values[0], in("x1") values[1], in("x2") values[2], in("x3") values[3],
+                    in("x4") values[4], in("x5") values[5], in("x6") values[6], in("x7") values[7],
+                    lateout("x0") result, out("x27") _, clobber_abi("C"),
+                );
+            }
             Some(result)
         }
 
         #[cfg(target_arch = "x86_64")]
         {
-            // System V AMD64 ABI: args in rdi, rsi, rdx, rcx, r8, r9; return in rax.
-            // x86_64 JIT uses stack-based error handling — no register setup needed.
-            type JitFn = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64;
+            // The lowerer uses SysV registers, including when the Rust host has another C ABI.
+            // ponytail: marshal stack arguments before supporting more than six scalars.
+            if args.len() > 6 {
+                return None;
+            }
+            let mut values = [0_i64; 6];
+            values[..args.len()].copy_from_slice(args);
+            type JitFn = unsafe extern "sysv64" fn(i64, i64, i64, i64, i64, i64) -> i64;
             let f: JitFn = unsafe { std::mem::transmute(entry) };
-            let result = match _args.len() {
-                0 => unsafe { f(0, 0, 0, 0, 0, 0) },
-                1 => unsafe { f(_args[0], 0, 0, 0, 0, 0) },
-                2 => unsafe { f(_args[0], _args[1], 0, 0, 0, 0) },
-                3 => unsafe { f(_args[0], _args[1], _args[2], 0, 0, 0) },
-                _ => 0,
-            };
-            Some(result)
+            Some(unsafe {
+                f(
+                    values[0], values[1], values[2], values[3], values[4], values[5],
+                )
+            })
+        }
+
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            None
         }
     }
 
@@ -511,7 +461,11 @@ mod tests {
     use super::*;
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
-    fn invoke_source(source: &str, profile: crate::emit_profile::EmitProfile, args: &[i64]) -> i64 {
+    fn invoke_source(
+        source: &str,
+        profile: crate::emit_profile::EmitProfile,
+        args: &[i64],
+    ) -> Option<i64> {
         let module = crate::in_lang_parse::parse_in_source(source).unwrap();
         let _profile = crate::native_emit::antidecomp::ProfileGuard::new(profile);
         #[cfg(target_arch = "aarch64")]
@@ -558,7 +512,7 @@ mod tests {
             &lowered.global_relocs,
         )
         .unwrap();
-        unsafe { rt.invoke("main", args).unwrap() }
+        unsafe { rt.invoke("main", args) }
     }
 
     #[test]
@@ -585,7 +539,7 @@ mod tests {
                 );
                 assert_eq!(
                     invoke_source(&source, profile, &[]),
-                    expected,
+                    Some(expected),
                     "{profile:?}: {expression}"
                 );
             }
@@ -617,11 +571,79 @@ mod tests {
                 let source = format!("fn main(a: Int, b: Int) -> Int {{ {body} }}");
                 assert_eq!(
                     invoke_source(&source, profile, &[a, b]),
-                    expected,
+                    Some(expected),
                     "{profile:?}: {body}, {a}, {b}"
                 );
             }
         }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn jit_invocation_passes_all_register_arguments() {
+        let limit = if cfg!(target_arch = "aarch64") { 8 } else { 6 };
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for count in 1..=limit + 1 {
+                let parameters = (0..count)
+                    .map(|i| format!("a{i}: Int"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let expression = (0..count)
+                    .map(|i| format!("a{i} * {}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join(" + ");
+                let source = format!("fn main({parameters}) -> Int {{ return {expression}; }}");
+                let args = (1..=count as i64).collect::<Vec<_>>();
+                let expected = (count <= limit).then(|| args.iter().map(|a| a * a).sum());
+                assert_eq!(
+                    invoke_source(&source, profile, &args),
+                    expected,
+                    "{profile:?}: {count} arguments"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, target_arch = "aarch64"))]
+    fn jit_invocation_preserves_the_callers_error_register() {
+        #[inline(never)]
+        unsafe extern "C" fn invoke_rt(rt: *const JitRuntime) -> i64 {
+            unsafe { (*rt).invoke("main", &[]).unwrap() }
+        }
+        let module =
+            crate::in_lang_parse::parse_in_source("fn main() -> Int { return 42; }").unwrap();
+        let lowered = crate::native_emit::lower::lower_module(
+            &module,
+            "main",
+            crate::native_emit::NativeLinkage::Executable,
+        )
+        .unwrap();
+        let offsets = lowered
+            .function_offsets
+            .iter()
+            .map(|(name, offset)| (name.clone(), *offset, 0))
+            .collect::<Vec<_>>();
+        let mut rt = JitRuntime::new();
+        rt.load(&lowered.code, &offsets, &lowered.relocations)
+            .unwrap();
+        let result: i64;
+        let preserved: u64;
+        unsafe {
+            // Restore the host register even when the boundary violates its ABI.
+            std::arch::asm!(
+                "str x27, [sp, #-16]!", "mov x27, #0x1234", "blr x16",
+                "mov x9, x27", "ldr x27, [sp], #16",
+                in("x16") invoke_rt as *const (), in("x0") &rt as *const JitRuntime,
+                lateout("x0") result, lateout("x9") preserved, clobber_abi("C"),
+            );
+        }
+        assert_eq!(result, 42);
+        assert_eq!(preserved, 0x1234);
     }
 
     #[test]
