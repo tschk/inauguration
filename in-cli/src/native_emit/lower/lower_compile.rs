@@ -1,8 +1,8 @@
 //! Native executable / artifact compilation helpers.
 
 use super::{
-    LoweringDegradation, NativeLinkage, TL_NATIVE_MODE, boundary_from_module, build_assembly,
-    find_sdk_root, lower_module, native_link_name,
+    LoweringDegradation, NativeLinkage, boundary_from_module, build_assembly, find_sdk_root,
+    lower_native_module, native_link_name,
 };
 use crate::boundary_emit;
 use crate::core_ir::UnifiedModule;
@@ -82,10 +82,7 @@ pub fn compile_native_artifact_with_report(
     linkage: NativeLinkage,
     out_path: &Path,
 ) -> Result<NativeArtifactOutcome, String> {
-    let previous_mode = TL_NATIVE_MODE.with(|mode| mode.replace(true));
-    let lowered = lower_module(module, entry, linkage);
-    TL_NATIVE_MODE.with(|mode| *mode.borrow_mut() = previous_mode);
-    let lowered = lowered?;
+    let lowered = lower_native_module(module, entry, linkage)?;
     let degradations = lowered.degradations;
 
     if linkage == NativeLinkage::Executable && cfg!(target_os = "macos") {
@@ -232,6 +229,7 @@ pub fn host_supports_native_subset() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::TL_NATIVE_MODE;
     use super::*;
 
     #[test]

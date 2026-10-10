@@ -466,6 +466,7 @@ pub(crate) struct FunctionBuffer {
     pub(crate) pending_static_arrays: Vec<PendingStaticArray>,
     pub(crate) pending_strings: Vec<PendingString>,
     pub(crate) pending_globals: Vec<(u32, u64)>,
+    pub(crate) external_refs: Vec<(u32, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -490,7 +491,7 @@ fn lower_function_to_buffer(
     let mut pending_static_arrays = Vec::new();
     let mut pending_strings = Vec::new();
     let mut pending_globals = Vec::new();
-    lower_function(
+    let lowered = lower_function(
         &mut emitter,
         func,
         functions,
@@ -504,7 +505,9 @@ fn lower_function_to_buffer(
         global_types,
         &mut pending_globals,
         0,
-    )?;
+    );
+    let external_refs = TL_EXTERNAL_REFS.with(|refs| std::mem::take(&mut *refs.borrow_mut()));
+    lowered?;
     Ok(FunctionBuffer {
         name: func.name.clone(),
         bytes: emitter.bytes,
@@ -513,6 +516,7 @@ fn lower_function_to_buffer(
         pending_static_arrays,
         pending_strings,
         pending_globals,
+        external_refs,
     })
 }
 
@@ -556,6 +560,17 @@ fn emit_degradation_trap(emitter: &mut CodeEmitter, degradation: &LoweringDegrad
     let base = emitter.len();
     emitter.bytes.extend_from_slice(&body);
     base + 8
+}
+
+pub(crate) fn lower_native_module(
+    module: &UnifiedModule,
+    entry: &str,
+    linkage: NativeLinkage,
+) -> Result<LoweredModule, String> {
+    let previous_mode = TL_NATIVE_MODE.with(|mode| mode.replace(true));
+    let lowered = lower_module(module, entry, linkage);
+    TL_NATIVE_MODE.with(|mode| *mode.borrow_mut() = previous_mode);
+    lowered
 }
 
 pub fn lower_module(
@@ -627,6 +642,7 @@ pub fn lower_module_with_jobs(
     let mut emitter = CodeEmitter::new();
     emitter.bytes.resize(ENTRY_STUB_SIZE as usize, 0);
     let mut function_offsets = HashMap::new();
+    let mut external_refs = Vec::new();
     let mut pending_inrt_calls = Vec::new();
     let mut pending_static_arrays = Vec::new();
     let mut pending_strings = Vec::new();
@@ -802,6 +818,11 @@ pub fn lower_module_with_jobs(
         let base = *function_offsets
             .get(&buf.name)
             .ok_or_else(|| format!("native-lower: missing function offset for `{}`", buf.name))?;
+        external_refs.extend(
+            buf.external_refs
+                .into_iter()
+                .map(|(site, name)| (base + site, name)),
+        );
         global_relocs.extend(
             buf.pending_globals
                 .into_iter()
@@ -879,7 +900,6 @@ pub fn lower_module_with_jobs(
         })
         .collect::<Result<_, String>>()?;
 
-    let external_refs = TL_EXTERNAL_REFS.with(|refs| std::mem::take(&mut *refs.borrow_mut()));
     Ok(LoweredModule {
         code: emitter.bytes,
         entry_offset,
