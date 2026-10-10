@@ -47,6 +47,10 @@ shadow globals. AArch64 boot images and standalone library writers still lack
 global data relocations; they do not emit unresolved global addresses as code.
 Runtime initializers and aggregate initializers are not executed by this layout.
 
+x86_64 lowering uses caller-saved scratch registers for binary operands and
+array addresses. Port-output operands are spilled across value evaluation,
+so normal generated functions preserve the caller's `RBX` without extra saves.
+
 ## inlang + crepuscularity
 
 - **inlang** (`.in`): orchestration, capabilities, polyglot driver, JIT programs.

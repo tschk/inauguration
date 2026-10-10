@@ -511,6 +511,67 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn generated_functions_preserve_callee_saved_registers() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (source, expected) in [
+                ("fn main(a: Int, b: Int) -> Int { return a + b; }", 13),
+                ("fn main(a: Int, b: Int) -> Int { return a / b; }", 2),
+                ("fn main(a: Bool, b: Bool) -> Bool { return a && b; }", 1),
+                (
+                    "fn main(a: Int, b: Int) -> Int { let values = [1, 2]; let index = 1; values[index] = a + b; return values[index]; }",
+                    13,
+                ),
+            ] {
+                let module = crate::in_lang_parse::parse_in_source(source).expect("parse");
+                let previous = crate::native_emit::antidecomp::current_profile();
+                crate::native_emit::antidecomp::set_profile(profile);
+                let lowered = crate::native_emit::x86_64_lower::lower_module(&module, "main");
+                crate::native_emit::antidecomp::set_profile(previous);
+                let lowered = lowered.expect("lower");
+                let offsets = lowered
+                    .exports
+                    .iter()
+                    .map(|(name, offset)| (name.clone(), *offset, 0))
+                    .collect::<Vec<_>>();
+                let relocations = lowered
+                    .relocations
+                    .iter()
+                    .map(|site| (*site, lowered.codegen_base))
+                    .collect::<Vec<_>>();
+                let mut rt = JitRuntime::new();
+                rt.load_with_globals(
+                    &lowered.code,
+                    &offsets,
+                    &relocations,
+                    &lowered.data,
+                    &lowered.global_relocs,
+                )
+                .expect("load");
+                let entry = rt.functions.read().unwrap()["main"].entry;
+                let result: i64;
+                let preserved: u64;
+                unsafe {
+                    // Restore the host's RBX even when the generated function violates its ABI.
+                    std::arch::asm!(
+                        "push rbx", "sub rsp, 8", "mov rbx, 0x12345678", "call r11",
+                        "mov rdx, rbx", "add rsp, 8", "pop rbx",
+                        in("r11") entry, in("rdi") 9_i64, in("rsi") 4_i64,
+                        lateout("rax") result, lateout("rdx") preserved,
+                        clobber_abi("C"),
+                    );
+                }
+                assert_eq!(result, expected, "{source}");
+                assert_eq!(preserved, 0x12345678, "{source}");
+            }
+        }
+    }
+
+    #[test]
     fn jit_runtime_new_is_empty() {
         let rt = JitRuntime::new();
         assert_eq!(rt.function_count(), 0);
