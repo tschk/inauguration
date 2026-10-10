@@ -665,30 +665,9 @@ impl<'a> LowerCtx<'a> {
         if self.locals.contains_key(name) {
             return Ok(());
         }
-        let resolved = typ.cloned().or_else(|| match expr {
-            Expr::Ident(source) => self.locals.get(source).and_then(|slot| match slot {
-                LocalSlot::Struct { typ, .. } => Some(Typ::Named(typ.clone())),
-                _ => None,
-            }),
-            Expr::Call { callee, .. } => {
-                if let Expr::Ident(target) = callee.as_ref() {
-                    functions
-                        .get(target)
-                        .map(|func| func.ret.clone())
-                        .or_else(|| {
-                            if let Some(idx) = target.rfind("::") {
-                                let last = &target[idx + 2..];
-                                functions.get(last).map(|func| func.ret.clone())
-                            } else {
-                                None
-                            }
-                        })
-                } else {
-                    None
-                }
-            }
-            _ => expr_type(expr),
-        });
+        let resolved = typ
+            .cloned()
+            .or_else(|| super::lower_expr::native_expr_type(expr, self, functions));
         if let Some(Typ::Array(elem)) = resolved.as_ref() {
             ensure_native_array_element(elem, fn_name, "local")?;
             let Expr::ArrayLit(items) = expr else {

@@ -1015,26 +1015,66 @@ fn jit_preserves_nested_binary_operands() {
             15.0_f64.to_bits() as i64,
         ),
         (
+            "fn main() -> Float { let a = 10.0; let b = 2.0; let c = 3.0; return (a - b) * (b - c); }",
+            (-8.0_f64).to_bits() as i64,
+        ),
+        (
+            "fn main() -> Float { let a = 3.5; return -a; }",
+            (-3.5_f64).to_bits() as i64,
+        ),
+        (
+            "fn main() -> Float { let a = 3.5; let b = 2; return a * b; }",
+            7.0_f64.to_bits() as i64,
+        ),
+        (
+            "fn main() -> Bool { let a = 1.5; let b = 2; return a < b; }",
+            1,
+        ),
+        (
+            "fn main() -> Float { let a = 0.0; return -a; }",
+            (-0.0_f64).to_bits() as i64,
+        ),
+        (
+            "fn main() -> Float { let a = 3.5; a *= 2; return a; }",
+            7.0_f64.to_bits() as i64,
+        ),
+        (
+            "fn main() -> Float { let a = 10.0; let b = 2.0; let c = 3.0; let total = (a - b) * (b - c); return total * 2.0; }",
+            (-16.0_f64).to_bits() as i64,
+        ),
+        (
+            "fn main() -> Float { let a = 3.5; let b = a; return b * 2.0; }",
+            7.0_f64.to_bits() as i64,
+        ),
+        (
             "fn value() -> Float { return 5.0; }\nfn main() -> Float { let a = 10.0; return a + value(); }",
             15.0_f64.to_bits() as i64,
         ),
     ];
     for (source, expected) in cases {
-        let module = crate::in_lang_parse::parse_in_source(source).expect("parse");
-        let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
-        let offsets = lowered
-            .function_offsets
-            .iter()
-            .map(|(name, offset)| (name.clone(), *offset, 0))
-            .collect::<Vec<_>>();
-        let mut rt = crate::jit_runtime::JitRuntime::new();
-        rt.load(&lowered.code, &offsets, &lowered.relocations)
-            .expect("load");
-        assert_eq!(
-            unsafe { rt.invoke("main", &[]).expect("invoke") },
-            expected,
-            "{source}"
-        );
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            crate::native_emit::antidecomp::set_profile(profile);
+            let module = crate::in_lang_parse::parse_in_source(source).expect("parse");
+            let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
+            crate::native_emit::antidecomp::clear_profile();
+            let offsets = lowered
+                .function_offsets
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect::<Vec<_>>();
+            let mut rt = crate::jit_runtime::JitRuntime::new();
+            rt.load(&lowered.code, &offsets, &lowered.relocations)
+                .expect("load");
+            assert_eq!(
+                unsafe { rt.invoke("main", &[]).expect("invoke") },
+                expected,
+                "{source}"
+            );
+        }
     }
 }
 

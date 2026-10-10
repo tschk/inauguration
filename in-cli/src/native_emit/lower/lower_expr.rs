@@ -483,7 +483,13 @@ pub(crate) fn lower_unary(
     lower_expr_into(emitter, ctx, expr, rd, functions, pending_calls, fn_name)?;
     match op {
         "-" => {
-            emitter.emit_u32(aarch64::sub_reg64(rd, aarch64::REG_XZR, rd));
+            if matches!(native_expr_type(expr, ctx, functions), Some(Typ::Float)) {
+                emitter.emit_u32(aarch64::fmov_from_gp(rd, rd));
+                emitter.emit_u32(aarch64::fneg_d(rd, rd));
+                emitter.emit_u32(aarch64::fmov_to_gp(rd, rd));
+            } else {
+                emitter.emit_u32(aarch64::sub_reg64(rd, aarch64::REG_XZR, rd));
+            }
             Ok(())
         }
         "*" => {
@@ -576,13 +582,25 @@ pub(crate) fn lower_float_binary(
         pending_calls,
         fn_name,
     )?;
-    emitter.emit_u32(aarch64::fmov_from_gp(rd, lhs_reg));
-    emitter.emit_u32(aarch64::fmov_from_gp(rhs_reg, rhs_reg));
+    emitter.emit_u32(
+        if matches!(native_expr_type(lhs, ctx, functions), Some(Typ::Int)) {
+            aarch64::scvtf_d(rd, lhs_reg)
+        } else {
+            aarch64::fmov_from_gp(rd, lhs_reg)
+        },
+    );
+    emitter.emit_u32(
+        if matches!(native_expr_type(rhs, ctx, functions), Some(Typ::Int)) {
+            aarch64::scvtf_d(rhs_reg, rhs_reg)
+        } else {
+            aarch64::fmov_from_gp(rhs_reg, rhs_reg)
+        },
+    );
     match op {
-        "+" => emitter.emit_u32(aarch64::fadd_d(rd, rd, rhs_reg)),
-        "-" => emitter.emit_u32(aarch64::fsub_d(rd, rd, rhs_reg)),
-        "*" => emitter.emit_u32(aarch64::fmul_d(rd, rd, rhs_reg)),
-        "/" => emitter.emit_u32(aarch64::fdiv_d(rd, rd, rhs_reg)),
+        "+" | "+=" => emitter.emit_u32(aarch64::fadd_d(rd, rd, rhs_reg)),
+        "-" | "-=" => emitter.emit_u32(aarch64::fsub_d(rd, rd, rhs_reg)),
+        "*" | "*=" => emitter.emit_u32(aarch64::fmul_d(rd, rd, rhs_reg)),
+        "/" | "/=" => emitter.emit_u32(aarch64::fdiv_d(rd, rd, rhs_reg)),
         "==" | "!=" | "<" | ">" | "<=" | ">=" => {
             // A float comparison yields a Bool, so it produces 0/1 in `rd` like
             // the integer comparisons; only the flags come from `fcmp`. Without
@@ -706,7 +724,7 @@ pub(crate) fn lower_binary(
     Ok(())
 }
 
-fn native_expr_type(
+pub(crate) fn native_expr_type(
     expr: &Expr,
     ctx: &LowerCtx<'_>,
     functions: &HashMap<String, FunctionInfo>,
@@ -735,16 +753,38 @@ fn native_expr_type(
             Some(typ)
         }
         Expr::Call { callee, .. } => match callee.as_ref() {
-            Expr::Ident(name) => functions.get(name).map(|function| function.ret.clone()),
+            Expr::Ident(name) => functions
+                .get(name)
+                .or_else(|| {
+                    name.rsplit_once("::")
+                        .and_then(|(_, short)| functions.get(short))
+                })
+                .map(|function| function.ret.clone()),
             _ => None,
         },
-        Expr::Binary { op, lhs, rhs, .. } if op == "+" => {
+        Expr::Unary { op, expr } if op == "-" => native_expr_type(expr, ctx, functions),
+        Expr::Binary { op, .. }
+            if matches!(
+                op.as_str(),
+                "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+            ) =>
+        {
+            Some(Typ::Bool)
+        }
+        Expr::Binary { op, lhs, rhs, .. }
+            if matches!(
+                op.as_str(),
+                "+" | "-" | "*" | "/" | "%" | "+=" | "-=" | "*=" | "/="
+            ) =>
+        {
             let lhs = native_expr_type(lhs, ctx, functions);
             let rhs = native_expr_type(rhs, ctx, functions);
-            if matches!(lhs, Some(Typ::String)) || matches!(rhs, Some(Typ::String)) {
+            if op == "+" && (matches!(lhs, Some(Typ::String)) || matches!(rhs, Some(Typ::String))) {
                 Some(Typ::String)
             } else if matches!(lhs, Some(Typ::Float)) || matches!(rhs, Some(Typ::Float)) {
                 Some(Typ::Float)
+            } else if matches!(lhs, Some(Typ::Int)) && matches!(rhs, Some(Typ::Int)) {
+                Some(Typ::Int)
             } else {
                 None
             }
