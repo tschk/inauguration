@@ -1085,3 +1085,50 @@ fn resolve_jit_entry_non_dot_suffix_not_matched() {
     // Falls through to first non-closure function for library mode
     assert_eq!(resolve_jit_entry(&module, "main"), "also_main");
 }
+
+#[test]
+fn compilation_restores_the_callers_emission_profile() {
+    use crate::emit_profile::EmitProfile;
+    use crate::native_emit::antidecomp;
+    let module = crate::in_lang_parse::parse_in_source(
+        "fn add(a: Int, b: Int) -> Int { return a + b; }\nfn main() -> Int { return add(5, 37); }",
+    )
+    .unwrap();
+    let previous = antidecomp::current_profile();
+    antidecomp::set_profile(EmitProfile::Lean);
+    let request = default_request(
+        PathBuf::from("profile.in"),
+        CompileTarget::Native,
+        Some("main"),
+        None,
+    );
+    // Missing output fails after the nested JIT exit-code evaluation on supported hosts.
+    assert!(super::native::compile_native(&module, "App", &request).is_err());
+    let actual = antidecomp::current_profile();
+    antidecomp::set_profile(previous);
+    assert_eq!(actual, EmitProfile::Lean);
+    if crate::native_emit::lower::host_supports_native_subset() {
+        for entry in ["main", "absent"] {
+            antidecomp::set_profile(EmitProfile::Lean);
+            let request = default_request(
+                PathBuf::from("profile.in"),
+                CompileTarget::Jit,
+                Some(entry),
+                None,
+            );
+            let target_module = if entry == "main" {
+                module.clone()
+            } else {
+                UnifiedModule::new(Vec::new())
+            };
+            let result = super::jit::compile_jit(&target_module, "App", &request);
+            let actual = antidecomp::current_profile();
+            antidecomp::set_profile(previous);
+            assert_eq!(result.is_ok(), entry == "main");
+            if entry == "main" {
+                assert_eq!(result.unwrap().eval_exit_code, Some(42));
+            }
+            assert_eq!(actual, EmitProfile::Lean, "{entry}");
+        }
+    }
+}

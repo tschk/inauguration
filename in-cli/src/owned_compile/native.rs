@@ -29,14 +29,7 @@ pub fn compile_native(
     module_id: &str,
     request: &OwnedCompileRequest,
 ) -> Result<NativeCompileResult, String> {
-    antidecomp::set_profile(request.profile);
-    struct _ProfileGuard;
-    impl Drop for _ProfileGuard {
-        fn drop(&mut self) {
-            antidecomp::clear_profile();
-        }
-    }
-    let _profile_guard = _ProfileGuard;
+    let _profile_guard = antidecomp::ProfileGuard::new(request.profile);
     let entry = request
         .entry
         .as_deref()

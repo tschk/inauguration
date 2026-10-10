@@ -25,6 +25,25 @@ pub fn set_profile(profile: EmitProfile) {
     TL_EMIT_PROFILE.with(|p| *p.borrow_mut() = profile);
 }
 
+/// Nested evaluation must not overwrite the enclosing compilation's profile or shape sequence.
+pub(crate) struct ProfileGuard(EmitProfile, u64);
+
+impl ProfileGuard {
+    pub(crate) fn new(profile: EmitProfile) -> Self {
+        Self(
+            TL_EMIT_PROFILE.with(|current| current.replace(profile)),
+            TL_SHAPE_TICK.with(|tick| tick.replace(0)),
+        )
+    }
+}
+
+impl Drop for ProfileGuard {
+    fn drop(&mut self) {
+        set_profile(self.0);
+        TL_SHAPE_TICK.with(|tick| *tick.borrow_mut() = self.1);
+    }
+}
+
 pub fn clear_profile() {
     set_profile(EmitProfile::Default);
     TL_SHAPE_TICK.with(|t| *t.borrow_mut() = 0);
@@ -203,6 +222,31 @@ mod tests {
         for _ in 0..8 {
             assert!(!junk_pad().is_empty());
         }
+    }
+
+    #[test]
+    fn profile_scopes_restore_the_enclosing_shape_sequence() {
+        clear_profile();
+        set_profile(EmitProfile::Lean);
+        TL_SHAPE_TICK.with(|tick| *tick.borrow_mut() = 17);
+        {
+            let _outer = ProfileGuard::new(EmitProfile::Default);
+            assert_eq!(current_profile(), EmitProfile::Default);
+            assert_eq!(next_tick(), 0);
+            {
+                let _inner = ProfileGuard::new(EmitProfile::Harden);
+                assert_eq!(current_profile(), EmitProfile::Harden);
+                assert_eq!(next_tick(), 0);
+                assert_eq!(next_tick(), 1);
+            }
+            assert_eq!(current_profile(), EmitProfile::Default);
+            assert_eq!(next_tick(), 1);
+        }
+        let profile = current_profile();
+        let tick = next_tick();
+        clear_profile();
+        assert_eq!(profile, EmitProfile::Lean);
+        assert_eq!(tick, 17);
     }
 
     #[test]

@@ -63,14 +63,7 @@ pub fn compile_jit(
         );
     }
 
-    antidecomp::set_profile(request.profile);
-    struct _ProfileGuard;
-    impl Drop for _ProfileGuard {
-        fn drop(&mut self) {
-            antidecomp::clear_profile();
-        }
-    }
-    let _profile_guard = _ProfileGuard;
+    let _profile_guard = antidecomp::ProfileGuard::new(request.profile);
 
     // Lazy dependency resolution: before lowering, resolve external
     // function calls by loading their source crates.
