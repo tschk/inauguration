@@ -109,7 +109,7 @@ fn fail_report(
 struct ModuleFacts<'a> {
     functions: HashMap<&'a str, FunctionSig<'a>>,
     structs: HashMap<&'a str, &'a [(String, Typ)]>,
-    globals: HashSet<&'a str>,
+    globals: HashMap<&'a str, &'a Typ>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -273,7 +273,7 @@ fn collect_module_facts(module: &UnifiedModule) -> Result<ModuleFacts<'_>, (Stri
     let mut top_level = HashSet::new();
     let mut functions = HashMap::new();
     let mut structs = HashMap::new();
-    let mut globals = HashSet::new();
+    let mut globals = HashMap::new();
 
     add_intrinsics(&mut functions);
 
@@ -296,9 +296,9 @@ fn collect_module_facts(module: &UnifiedModule) -> Result<ModuleFacts<'_>, (Stri
             }
             Decl::Interface { .. } => {}
             Decl::Component { .. } => {}
-            Decl::Global { name, .. } => {
+            Decl::Global { name, typ, .. } => {
                 check_and_insert_top_level(&mut top_level, name.as_str())?;
-                globals.insert(name.as_str());
+                globals.insert(name.as_str(), typ);
             }
         }
     }
@@ -378,7 +378,7 @@ fn check_stmt(
         }
         Stmt::Assign(name, expr) => {
             // Allow assignment to globals (not just locals)
-            let is_global = facts.globals.contains(name.as_str());
+            let is_global = facts.globals.contains_key(name.as_str());
             if !env.contains_key(name) && !is_global {
                 return Err((
                     "unresolved-symbol".to_string(),
@@ -387,7 +387,11 @@ fn check_stmt(
             };
             check_expr(fn_name, expr, facts, env, call_edges)?;
             if let Some(expr_typ) = expr_type(expr, facts, env) {
-                let expected_typ = env.get(name).cloned().unwrap_or(Typ::Int);
+                let expected_typ = env
+                    .get(name)
+                    .or_else(|| facts.globals.get(name.as_str()).copied())
+                    .expect("assignment target was resolved")
+                    .clone();
                 if expected_typ != expr_typ {
                     return Err((
                         "type-mismatch".to_string(),
@@ -517,7 +521,7 @@ fn check_expr(
         Expr::Ident(name) => {
             if env.contains_key(name)
                 || function_sig(facts, name).is_some()
-                || facts.globals.contains(name.as_str())
+                || facts.globals.contains_key(name.as_str())
             {
                 Ok(())
             } else {
@@ -755,13 +759,7 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
             .get(name)
             .cloned()
             .or_else(|| function_sig(facts, name).map(|sig| sig.ret.clone()))
-            .or_else(|| {
-                if facts.globals.contains(name.as_str()) {
-                    Some(Typ::Int) // most globals are Int
-                } else {
-                    None
-                }
-            }),
+            .or_else(|| facts.globals.get(name.as_str()).map(|typ| (*typ).clone())),
         Expr::StructInit { name, .. } => Some(Typ::Named(name.clone())),
         Expr::Field { base, name, .. } => {
             if let Some(Typ::Named(struct_name)) = expr_type(base, facts, env)
@@ -945,6 +943,42 @@ mod tests {
         VerifyOptions {
             entry: None,
             require_entry: false,
+        }
+    }
+
+    #[test]
+    fn globals_keep_declared_types_for_reads_and_assignments() {
+        for (typ, value) in [
+            (Typ::Float, Expr::FloatLit(crate::core_ir::FloatVal(1.25))),
+            (Typ::String, Expr::StringLit("value".into())),
+            (Typ::Bool, Expr::BoolLit(true)),
+        ] {
+            let global = Decl::Global {
+                name: "value".into(),
+                typ: typ.clone(),
+                init: Some(Box::new(value.clone())),
+                mutable: true,
+            };
+            let valid = module(vec![
+                global.clone(),
+                function_with_ret(
+                    "main",
+                    typ.clone(),
+                    vec![
+                        Stmt::Assign("value".into(), value),
+                        Stmt::Return(Some(Expr::Ident("value".into()))),
+                    ],
+                ),
+            ]);
+            let report = verify_for_entry(&valid, "main");
+            assert!(report.ok, "{typ:?}: {report:?}");
+            let invalid = module(vec![
+                global,
+                function("main", vec![Stmt::Assign("value".into(), Expr::IntLit(1))]),
+            ]);
+            let report = verify_module(&invalid, &default_options());
+            assert!(!report.ok, "{typ:?}: {report:?}");
+            assert_eq!(report.reason_code.as_deref(), Some("type-mismatch"));
         }
     }
 

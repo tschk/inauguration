@@ -1188,7 +1188,11 @@ fn harden_jit_preserves_typed_float_results() {
         return;
     }
     let source = temp_path("harden-float.in");
-    fs::write(&source, "fn main() -> Float { return 1.25 + 2.5; }\n").unwrap();
+    fs::write(
+        &source,
+        "var x: Float = 1.25;\nfn main() -> Float { x = 1.25; return x + 2.5; }\n",
+    )
+    .unwrap();
     let mut request = default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
     request.profile = crate::emit_profile::EmitProfile::Harden;
     let report = compile_owned(&request);
