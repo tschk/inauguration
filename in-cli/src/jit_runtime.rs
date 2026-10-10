@@ -461,6 +461,67 @@ mod tests {
     use super::*;
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn scalar_float_arithmetic_preserves_fractional_values() {
+        use crate::emit_profile::EmitProfile;
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for (expression, expected) in [
+                ("1.25 + 2.5", 3.75_f64),
+                ("(8.5 - 2.25) * 2.0 / 5.0", 2.5),
+                ("2 + 0.5", 2.5),
+                ("-(2.5 + 0.75)", -3.25),
+                ("-0.0", -0.0),
+                ("0.5 + 2", 2.5),
+                ("(1.5 + 2.25) / (0.5 + 1.0)", 2.5),
+            ] {
+                let source = format!("fn main() -> Float {{ return {expression}; }}");
+                assert_eq!(
+                    invoke_source(&source, profile, &[]),
+                    Some(expected.to_bits() as i64),
+                    "{profile:?}: {expression}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn typed_float_values_flow_through_locals_calls_and_comparisons() {
+        use crate::emit_profile::EmitProfile;
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for source in [
+                "fn main() -> Float { let x = 1.25 + 2.5; let y: Float = 0.5; return x * y; }",
+                "fn scale(x: Float) -> Float { return x * 0.5; }\nfn main() -> Float { return scale(3.75); }",
+                "var x: Float = 3.75;\nfn main() -> Float { return x * 0.5; }",
+                "fn main() -> Float { var x: Float = 3.75; x *= 0.5; return x; }",
+                "struct Value { Float amount }\nfn main() -> Float { let value = Value { amount: 3.75 }; return value.amount * 0.5; }",
+            ] {
+                assert_eq!(
+                    invoke_source(source, profile, &[]),
+                    Some(1.875_f64.to_bits() as i64),
+                    "{profile:?}: {source}"
+                );
+            }
+            for (expression, expected) in [
+                ("1.5 < 2.0", 1),
+                ("2.0 >= 1.5", 1),
+                ("1.5 == 1.5", 1),
+                ("1.5 != 2.0", 1),
+                ("(0.0 / 0.0) == 0.0", 0),
+                ("(0.0 / 0.0) != 0.0", 1),
+                ("(0.0 / 0.0) < 1.0", 0),
+            ] {
+                let source = format!("fn main() -> Bool {{ return {expression}; }}");
+                assert_eq!(
+                    invoke_source(&source, profile, &[]),
+                    Some(expected),
+                    "{profile:?}: {expression}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn invoke_source(
         source: &str,
         profile: crate::emit_profile::EmitProfile,

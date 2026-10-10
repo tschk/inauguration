@@ -2,11 +2,11 @@
 //!
 //! Lowers a subset of Core IR functions into x86_64 machine code.
 //! Supports scalar function bodies with:
-//!   - let bindings (Int, Bool, String)
+//!   - let bindings (Int, Bool, Float, String)
 //!   - return
 //!   - if/else
 //!   - while loops
-//!   - arithmetic (add, sub, mul)
+//!   - integer and scalar double arithmetic
 //!   - direct function calls
 //!   - struct init/field access (scalar fields only)
 
@@ -139,6 +139,7 @@ struct FunctionInfo {
 struct LowerCtx<'a> {
     /// Map local name → stack offset (negative from RBP)
     locals: HashMap<String, StackSlot>,
+    scalar_types: HashMap<String, Typ>,
     /// Current stack frame size (negative, grows down)
     frame_size: u32,
     /// Set when a return statement has been emitted
@@ -198,6 +199,7 @@ impl<'a> LowerCtx<'a> {
     ) -> Self {
         let mut ctx = Self {
             locals: HashMap::new(),
+            scalar_types: HashMap::new(),
             frame_size: 0,
             emitted_return: false,
             is_interrupt: false,
@@ -218,6 +220,7 @@ impl<'a> LowerCtx<'a> {
         // way. Register params are stored to their slots in the prologue; stack params
         // are loaded from the caller's argument area and stored to their slots there.
         for (name, typ) in params.iter() {
+            ctx.scalar_types.insert(name.clone(), typ.clone());
             // Preserve known struct parameters as field-addressable locals.
             // Unknown named types retain the scalar fallback used by the
             // partial native ABI.
@@ -241,6 +244,7 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn alloc_local(&mut self, name: &str, typ: &Typ) -> Result<(), String> {
+        self.scalar_types.insert(name.to_string(), typ.clone());
         if self.locals.contains_key(name) {
             return Ok(());
         }
@@ -350,6 +354,14 @@ pub fn lower_module_with_bases_layout(
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
     let globals = collect_globals(module, &structs);
+    let global_types: HashMap<String, Typ> = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global { name, typ, .. } => Some((name.clone(), typ.canonical())),
+            _ => None,
+        })
+        .collect();
 
     let all_strings = collect_string_literals(module);
 
@@ -387,6 +399,7 @@ pub fn lower_module_with_bases_layout(
             &structs,
             &functions,
             &globals,
+            &global_types,
             &mut all_pending_calls,
             is_interrupt,
         )?;
@@ -862,6 +875,7 @@ fn lower_function(
     structs: &HashMap<String, Vec<(String, Typ)>>,
     functions: &HashMap<String, FunctionInfo>,
     globals: &HashMap<String, u64>,
+    global_types: &HashMap<String, Typ>,
     pending_calls: &mut Vec<PendingCall>,
     is_interrupt: bool,
 ) -> Result<Vec<PendingGlobal>, String> {
@@ -886,6 +900,11 @@ fn lower_function(
         functions,
         globals.clone(),
     );
+    for (name, typ) in global_types {
+        ctx.scalar_types
+            .entry(name.clone())
+            .or_insert_with(|| typ.clone());
+    }
     ctx.is_interrupt = is_interrupt;
     ctx.ret_typ = func.ret.clone();
     // Pre-allocate locals for let bindings
@@ -989,8 +1008,8 @@ fn alloc_declared_locals(ctx: &mut LowerCtx<'_>, body: &[Stmt]) -> Result<(), St
                 } else if let Some(typ) = typ {
                     ctx.alloc_local(name, typ)?;
                 } else {
-                    // Infer type from expression
-                    ctx.alloc_local(name, &Typ::Int)?;
+                    let typ = scalar_expr_type(expr, ctx).unwrap_or(Typ::Int);
+                    ctx.alloc_local(name, &typ)?;
                 }
             }
             Stmt::If {
@@ -1868,6 +1887,48 @@ fn lower_checked_div_or_mod(emitter: &mut CodeEmitter, is_interrupt: bool, modul
     );
 }
 
+fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
+    crate::native_emit::lower::expr_type(expr).or_else(|| match expr {
+        Expr::Ident(name) => ctx.scalar_types.get(name).map(Typ::canonical),
+        Expr::Field { base, name } => {
+            let mut typ = scalar_expr_type(base, ctx)?;
+            for field in name.split('.') {
+                let Typ::Named(struct_name) = typ else {
+                    return None;
+                };
+                typ = ctx
+                    .structs
+                    .get(&struct_name)?
+                    .iter()
+                    .find(|(name, _)| name == field)?
+                    .1
+                    .canonical();
+            }
+            Some(typ)
+        }
+        Expr::Call { callee, .. } => match callee.as_ref() {
+            Expr::Ident(name) => ctx.functions.get(name).map(|f| f.ret.canonical()),
+            _ => None,
+        },
+        Expr::Unary { op, expr } if op == "-" => scalar_expr_type(expr, ctx),
+        Expr::Binary { op, lhs, rhs }
+            if matches!(
+                op.as_str(),
+                "+" | "-" | "*" | "/" | "+=" | "-=" | "*=" | "/="
+            ) =>
+        {
+            if scalar_expr_type(lhs, ctx) == Some(Typ::Float)
+                || scalar_expr_type(rhs, ctx) == Some(Typ::Float)
+            {
+                Some(Typ::Float)
+            } else {
+                Some(Typ::Int)
+            }
+        }
+        _ => None,
+    })
+}
+
 fn lower_binary_expr(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -1897,6 +1958,62 @@ fn lower_binary_expr(
     emitter.emit_insns(&x86_64::push_r(RAX));
     lower_expr_into(emitter, ctx, rhs, RAX, pending_calls)?;
     emitter.emit_insns(&x86_64::pop_r(RDX));
+
+    // ponytail: Float uses the owned integer ABI; typed C FFI needs XMM argument/return marshalling.
+    let lhs_float = scalar_expr_type(lhs, ctx) == Some(Typ::Float);
+    let rhs_float = scalar_expr_type(rhs, ctx) == Some(Typ::Float);
+    if lhs_float || rhs_float {
+        if x86_64::is_32bit() {
+            return Err("x86_64-lower: Float requires 64-bit mode".into());
+        }
+        emitter.emit_insns(&if lhs_float {
+            x86_64::movq_xmm_gpr(0, RDX, true)
+        } else {
+            x86_64::cvtsi2sd(0, RDX)
+        });
+        emitter.emit_insns(&if rhs_float {
+            x86_64::movq_xmm_gpr(1, RAX, true)
+        } else {
+            x86_64::cvtsi2sd(1, RAX)
+        });
+        match op {
+            "+" | "+=" | "-" | "-=" | "*" | "*=" | "/" | "/=" => {
+                let opcode = match op {
+                    "+" | "+=" => 0x58,
+                    "-" | "-=" => 0x5c,
+                    "*" | "*=" => 0x59,
+                    _ => 0x5e,
+                };
+                emitter.emit_insns(&x86_64::scalar_double(opcode, 0, 1));
+                emitter.emit_insns(&x86_64::movq_xmm_gpr(0, RAX, false));
+            }
+            "==" | "!=" | "<" | "<=" | ">" | ">=" => {
+                emitter.emit_insns(&x86_64::ucomisd(0, 1));
+                let condition = match op {
+                    "==" => 0x94,
+                    "!=" => 0x95,
+                    "<" => 0x92,
+                    "<=" => 0x96,
+                    ">" => 0x97,
+                    _ => 0x93,
+                };
+                emitter.emit_insns(&x86_64::setcc(condition, RAX));
+                emitter.emit_insns(&x86_64::setcc(if op == "!=" { 0x9a } else { 0x9b }, RDX));
+                emitter.emit_insns(&x86_64::movzx_r8(RAX, RAX));
+                emitter.emit_insns(&x86_64::movzx_r8(RDX, RDX));
+                emitter.emit_insns(&if op == "!=" {
+                    x86_64::or_rr(RAX, RDX)
+                } else {
+                    x86_64::and_rr(RAX, RDX)
+                });
+            }
+            _ => return Err(format!("x86_64-lower: unsupported Float operator `{op}`")),
+        }
+        if target_reg != RAX {
+            emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+        }
+        return Ok(());
+    }
 
     match op {
         "+" => {
@@ -2625,7 +2742,12 @@ fn lower_unary_expr(
     lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
     match op {
         "-" => {
-            emitter.emit_insns(&x86_64::neg_reg(RAX));
+            if scalar_expr_type(expr, ctx) == Some(Typ::Float) {
+                emitter.emit_insns(&x86_64::load_i64(RDX, i64::MIN));
+                emitter.emit_insns(&x86_64::xor_rr(RAX, RDX));
+            } else {
+                emitter.emit_insns(&x86_64::neg_reg(RAX));
+            }
         }
         "!" => {
             emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
@@ -2805,8 +2927,10 @@ fn lower_expr_into(
             lower_string_lit(emitter, target_reg, content.as_str(), pending_calls)
         }
         Expr::FloatLit(v) => {
-            // Integer-scaled: treat whole-number floats as i64 for the owned subset.
-            lower_int_lit(emitter, target_reg, v.0 as i64)
+            if x86_64::is_32bit() {
+                return Err("x86_64-lower: Float requires 64-bit mode".into());
+            }
+            lower_int_lit(emitter, target_reg, v.0.to_bits() as i64)
         }
         Expr::ArrayLit(items) => {
             // Owned x86 subset: array value is its length (array-len reads the same slot).

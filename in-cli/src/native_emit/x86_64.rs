@@ -127,6 +127,41 @@ fn modrm(mod_: u8, reg: u8, rm: u8) -> u8 {
     (mod_ << 6) | ((reg & 7) << 3) | (rm & 7)
 }
 
+/// Move scalar float bits between the owned integer ABI and an XMM register.
+pub fn movq_xmm_gpr(xmm: u8, gpr: u8, to_xmm: bool) -> Vec<u8> {
+    let mut code = vec![0x66];
+    push_rex_wr(&mut code, xmm, gpr);
+    code.extend_from_slice(&[0x0f, if to_xmm { 0x6e } else { 0x7e }, modrm(3, xmm, gpr)]);
+    code
+}
+
+/// Convert a signed integer register to a scalar double.
+pub fn cvtsi2sd(xmm: u8, gpr: u8) -> Vec<u8> {
+    let mut code = vec![0xf2];
+    push_rex_wr(&mut code, xmm, gpr);
+    code.extend_from_slice(&[0x0f, 0x2a, modrm(3, xmm, gpr)]);
+    code
+}
+
+/// Scalar double arithmetic: ADD/SUB/MUL/DIV opcode, destination XMM, source XMM.
+pub fn scalar_double(opcode: u8, dst: u8, src: u8) -> Vec<u8> {
+    let mut code = vec![0xf2];
+    if dst >= 8 || src >= 8 {
+        code.push(0x40 | ((dst >> 3) << 2) | (src >> 3));
+    }
+    code.extend_from_slice(&[0x0f, opcode, modrm(3, dst, src)]);
+    code
+}
+
+pub fn ucomisd(lhs: u8, rhs: u8) -> Vec<u8> {
+    let mut code = vec![0x66];
+    if lhs >= 8 || rhs >= 8 {
+        code.push(0x40 | ((lhs >> 3) << 2) | (rhs >> 3));
+    }
+    code.extend_from_slice(&[0x0f, 0x2e, modrm(3, lhs, rhs)]);
+    code
+}
+
 // ── Instructions ────────────────────────────────────────────────
 
 /// ret (near return)
@@ -731,6 +766,28 @@ pub fn epilogue() -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn encodes_scalar_double_register_operations() {
+        assert_eq!(
+            super::movq_xmm_gpr(0, super::RDX, true),
+            [0x66, 0x48, 0x0f, 0x6e, 0xc2]
+        );
+        assert_eq!(
+            super::movq_xmm_gpr(0, super::RAX, false),
+            [0x66, 0x48, 0x0f, 0x7e, 0xc0]
+        );
+        assert_eq!(
+            super::cvtsi2sd(1, super::RAX),
+            [0xf2, 0x48, 0x0f, 0x2a, 0xc8]
+        );
+        assert_eq!(super::scalar_double(0x58, 0, 1), [0xf2, 0x0f, 0x58, 0xc1]);
+        assert_eq!(super::ucomisd(0, 1), [0x66, 0x0f, 0x2e, 0xc1]);
+        assert_eq!(
+            super::movq_xmm_gpr(8, super::R9, true),
+            [0x66, 0x4d, 0x0f, 0x6e, 0xc1]
+        );
+    }
+
     use super::*;
 
     #[test]
