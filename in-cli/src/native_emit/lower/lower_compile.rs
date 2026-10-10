@@ -91,8 +91,7 @@ pub fn compile_native_artifact_with_report(
             lowered.external_refs.len()
         );
         for (site, name) in &lowered.external_refs {
-            let link_name = native_link_name(name);
-            eprintln!("[native]   ref at offset {site}: '{name}' → '{link_name}'");
+            eprintln!("[native]   ref at offset {site}: '{name}'");
         }
         // Write assembly source and assemble+link with system tools
         let mapped_exports: Vec<(String, u32)> = lowered
@@ -100,17 +99,12 @@ pub fn compile_native_artifact_with_report(
             .iter()
             .map(|e| (native_link_name(&e.name), e.offset))
             .collect();
-        let mapped_external_refs: Vec<(u32, String)> = lowered
-            .external_refs
-            .iter()
-            .map(|(site, name)| (*site, native_link_name(name)))
-            .collect();
 
         // Build assembly source from lowered code
         let asm = build_assembly(
             &lowered.code,
             &mapped_exports,
-            &mapped_external_refs,
+            &lowered.external_refs,
             &lowered.error_slot_refs,
             &lowered.data,
             &lowered.global_relocs,

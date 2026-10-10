@@ -222,8 +222,7 @@ fn build_assembly(
 
 /// Map a Rust function name to the linker-visible symbol name.
 /// Handles `std::process::exit` → `_exit` (C ABI in libSystem) and
-/// `_main` → `_main` (macOS entry convention). For unknown symbols,
-/// adds a leading underscore (C ABI convention on macOS).
+/// raw source names → C ABI symbols with a leading underscore on macOS.
 pub fn native_link_name(name: &str) -> String {
     // Clean up spaces (rust_front may produce "std :: process :: exit" instead of "std::process::exit")
     let cleaned = name.replace(' ', "");
@@ -241,11 +240,7 @@ pub fn native_link_name(name: &str) -> String {
             if asm_safe.is_empty() {
                 return "_unknown".to_string();
             }
-            if asm_safe.starts_with('_') {
-                asm_safe
-            } else {
-                format!("_{}", asm_safe)
-            }
+            format!("_{asm_safe}")
         }
     }
 }
