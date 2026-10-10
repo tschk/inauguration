@@ -1,4 +1,6 @@
 // @expect parse: ok
+// @expect bytecode: executes
+// @expect result: 8
 struct Counter {
   Int count
 }

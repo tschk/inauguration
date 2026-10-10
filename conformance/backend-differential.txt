@@ -8,12 +8,18 @@ agree conformance/classes/class-method-override.in
 agree conformance/classes/class-methods.in
 agree conformance/classes/class-multiple-fields.in
 agree conformance/classes/interface-basic.in
+agree conformance/control-flow/array-continue.in
+agree conformance/control-flow/compound-ops.in
+agree conformance/control-flow/continue-compound.in
 agree conformance/control-flow/if-else.in
 agree conformance/control-flow/loop.in
 agree conformance/control-flow/match-string.in
 agree conformance/control-flow/nested-branches.in
 agree conformance/control-flow/nested-if.in
+agree conformance/control-flow/nested-range-jumps.in
 agree conformance/control-flow/while-counter.in
+agree conformance/control-flow/z-continue-only.in
+agree conformance/control-flow/z-plus-only.in
 agree conformance/errors/throw-caught.in
 agree conformance/errors/throw-from-function.in
 agree conformance/errors/throw.in
@@ -31,5 +37,7 @@ agree conformance/types/array-basic.in
 agree conformance/types/bool-ops.in
 agree conformance/types/float-arithmetic.in
 agree conformance/types/float-compare.in
+agree conformance/types/global-struct-field.in
+agree conformance/types/mutable-global.in
 agree conformance/types/primitive-types.in
 agree conformance/types/string-concat.in

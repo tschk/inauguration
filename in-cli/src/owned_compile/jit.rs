@@ -159,10 +159,6 @@ pub fn compile_jit(
         })
         .unwrap_or(EntryResultKind::None);
 
-    // Data section for the JIT load — only the x86_64 lowering produces one.
-    let mut jit_data: Vec<u8> = Vec::new();
-    let mut jit_global_relocs: Vec<(u32, u64)> = Vec::new();
-
     // Select lowering based on host architecture
     let lowered = if cfg!(target_arch = "x86_64") {
         let result = {
@@ -172,11 +168,11 @@ pub fn compile_jit(
             r
         }
         .map_err(|e| format!("jit-lowering-failed: {e}"))?;
-        jit_data = result.data.clone();
-        jit_global_relocs = result.global_relocs.clone();
         // Wrap into LoweredModule-compatible shape
         native_emit::lower::LoweredModule {
             code: result.code,
+            data: result.data,
+            global_relocs: result.global_relocs,
             entry_offset: Some(result.entry_offset),
             exports: vec![],
             function_offsets: result.exports.into_iter().collect(),
@@ -225,8 +221,8 @@ pub fn compile_jit(
         &lowered.code,
         &function_offsets,
         &lowered.relocations,
-        &jit_data,
-        &jit_global_relocs,
+        &lowered.data,
+        &lowered.global_relocs,
     )
     .map_err(|e| format!("jit-load-failed: {e}"))?;
 

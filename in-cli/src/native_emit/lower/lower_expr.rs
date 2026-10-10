@@ -66,6 +66,9 @@ pub(crate) fn lower_expr_into(
                         emitter.emit_u32(aarch64::add_imm64(rd, aarch64::REG_SP, addr as u16));
                     }
                 }
+            } else if let Some(offset) = ctx.globals.get(name).copied() {
+                ctx.emit_global_address(emitter, rd, offset);
+                emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
             } else {
                 // Unknown identifier — enum variant, constant, or ZST used as value.
                 // Emit 0 so the function can lower; correct at runtime for None/NULL-like values.
@@ -422,6 +425,13 @@ pub(crate) fn lower_field(
                 }
                 _ => {}
             }
+            if !ctx.locals.contains_key(local) && !ctx.params.contains_key(local) {
+                if let Some(offset) = ctx.globals.get(&format!("{local}.{name}")).copied() {
+                    ctx.emit_global_address(emitter, rd, offset);
+                    emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
+                    return Ok(());
+                }
+            }
             emitter.emit_insns(&aarch64::load_i64(rd, 0));
             Ok(())
         }
@@ -702,7 +712,28 @@ fn native_expr_type(
     functions: &HashMap<String, FunctionInfo>,
 ) -> Option<Typ> {
     expr_type(expr).or_else(|| match expr {
-        Expr::Ident(name) => ctx.scalar_type(name),
+        Expr::Ident(name) => ctx
+            .scalar_type(name)
+            .or_else(|| match ctx.locals.get(name) {
+                Some(LocalSlot::Struct { typ, .. }) => Some(Typ::Named(typ.clone())),
+                _ => None,
+            }),
+        Expr::Field { base, name } => {
+            let mut typ = native_expr_type(base, ctx, functions)?;
+            for field in name.split('.') {
+                let Typ::Named(struct_name) = typ else {
+                    return None;
+                };
+                typ = ctx
+                    .structs
+                    .get(&struct_name)?
+                    .iter()
+                    .find(|(name, _)| name == field)?
+                    .1
+                    .clone();
+            }
+            Some(typ)
+        }
         Expr::Call { callee, .. } => match callee.as_ref() {
             Expr::Ident(name) => functions.get(name).map(|function| function.ret.clone()),
             _ => None,

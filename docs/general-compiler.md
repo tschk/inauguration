@@ -39,6 +39,14 @@ binding before `continue` on both native backends. AArch64 rejects loop jumps
 outside a loop or across a `try` scope; error-flag unwind for those jumps remains
 unsupported.
 
+AArch64 JIT and macOS executable lowering share writable scalar globals and
+scalar struct fields across function calls. Both native backends use the same
+global data layout; integer, boolean, and float literal initializers retain their
+values, including `.in` declarations ending in semicolons. Locals and parameters
+shadow globals. AArch64 boot images and standalone library writers still lack
+global data relocations; they do not emit unresolved global addresses as code.
+Runtime initializers and aggregate initializers are not executed by this layout.
+
 ## inlang + crepuscularity
 
 - **inlang** (`.in`): orchestration, capabilities, polyglot driver, JIT programs.

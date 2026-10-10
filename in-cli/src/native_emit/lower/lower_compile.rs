@@ -113,6 +113,8 @@ pub fn compile_native_artifact_with_report(
             &mapped_exports,
             &mapped_external_refs,
             &lowered.error_slot_refs,
+            &lowered.data,
+            &lowered.global_relocs,
             entry,
         );
         let asm_path = out_path.with_extension("s");
@@ -167,6 +169,13 @@ pub fn compile_native_artifact_with_report(
             abi_path: None,
             degradations,
         });
+    }
+
+    // ponytail: writable globals need data relocations in library/object writers.
+    if !lowered.global_relocs.is_empty() {
+        return Err(
+            "native-lower: writable globals require the macOS executable assembly path".into(),
+        );
     }
 
     // No external refs: write standalone Mach-O executable

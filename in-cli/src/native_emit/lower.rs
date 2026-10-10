@@ -1,6 +1,6 @@
 //! Core IR → AArch64 lowering for the owned native subset.
 
-use crate::core_ir::{Expr, Stmt, Typ, UnifiedModule};
+use crate::core_ir::{Decl, Expr, Stmt, Typ, UnifiedModule};
 use crate::inrt;
 use crate::native_emit::aarch64::{self, CodeEmitter, REG_FP};
 use crate::native_emit::macho::{ExportSymbol, MachOLinkage};
@@ -110,12 +110,16 @@ fn build_assembly(
     exports: &[(String, u32)],
     external_refs: &[(u32, String)],
     error_slot_refs: &[u32],
+    data: &[u8],
+    global_relocs: &[(u32, u64)],
     entry: &str,
 ) -> String {
     // Sort external refs by site for sequential processing
     let mut ext_refs = external_refs.to_vec();
     ext_refs.sort_by_key(|(site, _)| *site);
     let error_slots: std::collections::HashSet<u32> = error_slot_refs.iter().copied().collect();
+
+    let global_sites: HashMap<u32, u64> = global_relocs.iter().copied().collect();
 
     let entry_name = native_link_name(entry);
     let mut asm = String::new();
@@ -150,6 +154,14 @@ fn build_assembly(
         // Check if this position is a function start → emit label
         if let Some(&fn_name) = fn_starts.get(&(pos as u32)) {
             asm.push_str(&format!("{fn_name}:\n"));
+        }
+
+        if let Some(offset) = global_sites.get(&(pos as u32 + 8)) {
+            let reg = u32::from_le_bytes(code[pos..pos + 4].try_into().unwrap()) & 31;
+            // Keep the JIT address sequence's width so code-relative branches stay valid.
+            asm.push_str(&format!("\tadrp x{reg}, _inrt_globals+{offset}@PAGE\n\tadd x{reg}, x{reg}, _inrt_globals+{offset}@PAGEOFF\n\tnop\n\tnop\n"));
+            pos += 16;
+            continue;
         }
 
         // Check if this position has an external call
@@ -196,6 +208,13 @@ fn build_assembly(
         asm.push_str(&format!(
             "\t.data\n\t.p2align 3\n{INRT_ERROR_SLOT_SYMBOL}:\n\t.space 16\n"
         ));
+    }
+
+    if !global_relocs.is_empty() {
+        asm.push_str("\t.data\n\t.p2align 3\n_inrt_globals:\n");
+        for byte in data {
+            asm.push_str(&format!("\t.byte {byte}\n"));
+        }
     }
 
     asm
@@ -286,6 +305,9 @@ pub struct LoweredModule {
     /// (offset, codegen_base) — absolute address relocations to patch at JIT load time.
     /// Empty for AArch64 (position-independent code).
     pub relocations: Vec<(u32, u64)>,
+    /// Writable global data and literal-address sites rebased to it at JIT load.
+    pub data: Vec<u8>,
+    pub global_relocs: Vec<(u32, u64)>,
     /// External symbol names referenced by the code (for native linking).
     /// Each entry is (instruction_offset, symbol_name).
     pub external_refs: Vec<(u32, String)>,
@@ -443,6 +465,7 @@ pub(crate) struct FunctionBuffer {
     pub(crate) pending_inrt_calls: Vec<PendingInrtCall>,
     pub(crate) pending_static_arrays: Vec<PendingStaticArray>,
     pub(crate) pending_strings: Vec<PendingString>,
+    pub(crate) pending_globals: Vec<(u32, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -458,12 +481,15 @@ fn lower_function_to_buffer(
     functions: &HashMap<String, FunctionInfo>,
     structs: &HashMap<String, Vec<(String, Typ)>>,
     strings: &HashMap<String, i64>,
+    globals: &HashMap<String, u64>,
+    global_types: &HashMap<String, Typ>,
 ) -> Result<FunctionBuffer, String> {
     let mut emitter = CodeEmitter::new();
     let mut pending_calls = Vec::new();
     let mut pending_inrt_calls = Vec::new();
     let mut pending_static_arrays = Vec::new();
     let mut pending_strings = Vec::new();
+    let mut pending_globals = Vec::new();
     lower_function(
         &mut emitter,
         func,
@@ -474,6 +500,9 @@ fn lower_function_to_buffer(
         &mut pending_inrt_calls,
         &mut pending_static_arrays,
         &mut pending_strings,
+        globals,
+        global_types,
+        &mut pending_globals,
         0,
     )?;
     Ok(FunctionBuffer {
@@ -483,6 +512,7 @@ fn lower_function_to_buffer(
         pending_inrt_calls,
         pending_static_arrays,
         pending_strings,
+        pending_globals,
     })
 }
 
@@ -559,6 +589,16 @@ pub fn lower_module_with_jobs(
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
     let strings = collect_strings(module);
+    let globals = super::global_data::collect_globals(module, &structs);
+    let data = super::global_data::build_data_section(module, &globals);
+    let global_types: HashMap<String, Typ> = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global { name, typ, .. } => Some((name.clone(), typ.clone())),
+            _ => None,
+        })
+        .collect();
     // Try exact match first, then namespaced variants
     let resolved_entry = if functions.contains_key(entry) {
         entry.to_string()
@@ -604,7 +644,14 @@ pub fn lower_module_with_jobs(
             let mut skip = Vec::new();
             for name in &names {
                 let func = &functions[name];
-                match lower_function_to_buffer(func, &functions, &structs, &strings) {
+                match lower_function_to_buffer(
+                    func,
+                    &functions,
+                    &structs,
+                    &strings,
+                    &globals,
+                    &global_types,
+                ) {
                     Ok(buf) => bufs.push(buf),
                     Err(e) => {
                         skip.push((name.clone(), e));
@@ -617,6 +664,8 @@ pub fn lower_module_with_jobs(
                 let functions = &functions;
                 let structs = &structs;
                 let strings = &strings;
+                let globals = &globals;
+                let global_types = &global_types;
                 let chunks: Vec<Vec<String>> = names
                     .chunks(names.len().div_ceil(jobs))
                     .map(|c| c.to_vec())
@@ -628,7 +677,14 @@ pub fn lower_module_with_jobs(
                         let mut skips = Vec::new();
                         for name in chunk {
                             let func = &functions[&name];
-                            match lower_function_to_buffer(func, functions, structs, strings) {
+                            match lower_function_to_buffer(
+                                func,
+                                functions,
+                                structs,
+                                strings,
+                                globals,
+                                global_types,
+                            ) {
                                 Ok(buf) => bufs.push((name, buf)),
                                 Err(e) => {
                                     skips.push((name, e));
@@ -741,10 +797,16 @@ pub fn lower_module_with_jobs(
 
     // Collect pending static arrays, strings, and inrt calls from all buffers,
     // translating local sites to global offsets.
+    let mut global_relocs = Vec::new();
     for buf in buffers {
         let base = *function_offsets
             .get(&buf.name)
             .ok_or_else(|| format!("native-lower: missing function offset for `{}`", buf.name))?;
+        global_relocs.extend(
+            buf.pending_globals
+                .into_iter()
+                .map(|(site, offset)| (base + site, offset)),
+        );
         pending_static_arrays.extend(buf.pending_static_arrays.into_iter().map(|a| {
             PendingStaticArray {
                 adr_site: base + a.adr_site,
@@ -823,7 +885,9 @@ pub fn lower_module_with_jobs(
         entry_offset,
         exports,
         function_offsets,
-        relocations: Vec::new(), // AArch64 uses position-independent code
+        relocations: Vec::new(), // Code-relative references use PC-relative instructions.
+        data,
+        global_relocs,
         external_refs,
         degradations,
         error_slot_refs,
@@ -840,6 +904,9 @@ fn lower_function(
     pending_inrt_calls: &mut Vec<PendingInrtCall>,
     pending_static_arrays: &mut Vec<PendingStaticArray>,
     pending_strings: &mut Vec<PendingString>,
+    globals: &HashMap<String, u64>,
+    global_types: &HashMap<String, Typ>,
+    pending_globals: &mut Vec<(u32, u64)>,
     _fn_start_offset: u32,
 ) -> Result<(), String> {
     ensure_return_type(&func.ret, &func.name, structs)?;
@@ -853,6 +920,8 @@ fn lower_function(
         &func.params,
         structs,
         strings,
+        globals,
+        global_types,
         pending_static_arrays,
         pending_inrt_calls,
         pending_strings,
@@ -1009,6 +1078,7 @@ fn lower_function(
         emit_epilogue(emitter, ctx.prologue_stack_reserve);
     }
 
+    pending_globals.append(&mut ctx.pending_globals);
     Ok(())
 }
 

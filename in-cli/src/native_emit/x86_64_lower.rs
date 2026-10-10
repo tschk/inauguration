@@ -12,6 +12,7 @@
 
 use crate::core_ir::{Decl, Expr, LoopKind, MatchArm, Stmt, Typ, UnifiedModule};
 use crate::native_emit::antidecomp;
+use crate::native_emit::global_data::{build_data_section, collect_globals};
 use crate::native_emit::x86_64::{self, CodeEmitter, RAX, RBP, RBX, RCX, RDI, RDX, REG_SP, RSI};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -837,63 +838,6 @@ pub(crate) fn collect_string_literals(module: &UnifiedModule) -> Vec<String> {
     strings.sort();
     strings.dedup();
     strings
-}
-
-/// Collect global variable names and assign them fixed absolute addresses.
-/// Returns: (name → address) map.
-fn collect_globals(
-    module: &UnifiedModule,
-    structs: &HashMap<String, Vec<(String, Typ)>>,
-) -> HashMap<String, u64> {
-    let mut globals = HashMap::new();
-    let mut offset = 0u64;
-    for decl in &module.decls {
-        if let Decl::Global { name, typ, .. } = decl {
-            globals.insert(name.clone(), offset);
-            // Struct-typed globals reserve one word per known field so that
-            // `{name}.{field}` sites lower to direct data-section slots.
-            if let Typ::Named(struct_name) = typ {
-                if let Some(fields) = structs.get(struct_name) {
-                    for (idx, (field, _)) in fields.iter().enumerate() {
-                        globals.insert(format!("{name}.{field}"), offset + idx as u64 * 8);
-                    }
-                    offset += (fields.len().max(1) as u64) * 8;
-                    continue;
-                }
-            }
-            offset += 8;
-        }
-    }
-    globals
-}
-
-fn build_data_section(module: &UnifiedModule, globals: &HashMap<String, u64>) -> Vec<u8> {
-    let mut data = Vec::new();
-    let mut max_offset = 0u64;
-    for decl in &module.decls {
-        if let Decl::Global { name, init, .. } = decl {
-            let offset = *globals.get(name).unwrap_or(&0);
-            let val: i64 = match init.as_deref() {
-                Some(Expr::IntLit(v)) => *v,
-                Some(Expr::BoolLit(b)) => *b as i64,
-                _ => 0,
-            };
-            while data.len() < offset as usize {
-                data.push(0);
-            }
-            data.extend_from_slice(&val.to_le_bytes());
-            if offset >= max_offset {
-                max_offset = offset + 8;
-            }
-        }
-    }
-    // Struct-typed globals reserve extra field slots past their base word;
-    // extend the section so every mapped slot exists in the image.
-    let max_needed = globals.values().copied().max().unwrap_or(0) + 8;
-    while data.len() < max_needed as usize {
-        data.push(0);
-    }
-    data
 }
 
 fn lower_function(

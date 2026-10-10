@@ -302,7 +302,7 @@ fn emit_aarch64_freestanding_object(request: &NativeObjectRequest<'_>) -> Native
         request.entry,
         NativeLinkage::StaticLib,
     ) {
-        Ok(result) => {
+        Ok(result) if result.global_relocs.is_empty() => {
             let mut bytes = Vec::new();
             let object = ElfObject {
                 code: result.code,
@@ -324,7 +324,7 @@ fn emit_aarch64_freestanding_object(request: &NativeObjectRequest<'_>) -> Native
                 abi_manifest: Some(object_abi_manifest(request)),
             }
         }
-        Err(_err) => {
+        _ => {
             // Fallback to const-evaluated exit code for trivial functions
             let object = ElfObject {
                 code: aarch64_return_i32_object_code(request.exit_code),

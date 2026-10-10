@@ -1,0 +1,13 @@
+// @expect parse: ok
+// @expect bytecode: executes
+// @expect result: 13
+
+var count: Int = 3;
+fn bump() -> Int {
+  count = count + 5;
+  return count;
+}
+fn main() -> Int {
+  bump();
+  return bump();
+}

@@ -1,0 +1,81 @@
+use crate::core_ir::{Decl, Expr, Typ, UnifiedModule};
+use std::collections::HashMap;
+
+/// Assign byte offsets in the writable data section, including scalar struct fields.
+pub(crate) fn collect_globals(
+    module: &UnifiedModule,
+    structs: &HashMap<String, Vec<(String, Typ)>>,
+) -> HashMap<String, u64> {
+    let mut globals = HashMap::new();
+    let mut offset = 0u64;
+    for decl in &module.decls {
+        if let Decl::Global { name, typ, .. } = decl {
+            globals.insert(name.clone(), offset);
+            // Struct-typed globals reserve one word per known field so that
+            // `{name}.{field}` sites lower to direct data-section slots.
+            if let Typ::Named(struct_name) = typ {
+                if let Some(fields) = structs.get(struct_name) {
+                    for (idx, (field, _)) in fields.iter().enumerate() {
+                        globals.insert(format!("{name}.{field}"), offset + idx as u64 * 8);
+                    }
+                    offset += (fields.len().max(1) as u64) * 8;
+                    continue;
+                }
+            }
+            offset += 8;
+        }
+    }
+    globals
+}
+
+pub(crate) fn build_data_section(
+    module: &UnifiedModule,
+    globals: &HashMap<String, u64>,
+) -> Vec<u8> {
+    if globals.is_empty() {
+        return Vec::new();
+    }
+    let mut data = Vec::new();
+    for decl in &module.decls {
+        if let Decl::Global { name, init, .. } = decl {
+            let offset = *globals.get(name).unwrap_or(&0);
+            let val: i64 = match init.as_deref() {
+                Some(Expr::IntLit(v)) => *v,
+                Some(Expr::BoolLit(b)) => *b as i64,
+                Some(Expr::FloatLit(crate::core_ir::FloatVal(v))) => v.to_bits() as i64,
+                _ => 0,
+            };
+            while data.len() < offset as usize {
+                data.push(0);
+            }
+            data.extend_from_slice(&val.to_le_bytes());
+        }
+    }
+    // Struct-typed globals reserve extra field slots past their base word;
+    // extend the section so every mapped slot exists in the image.
+    let max_needed = globals.values().copied().max().unwrap_or(0) + 8;
+    while data.len() < max_needed as usize {
+        data.push(0);
+    }
+    data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parsed_global_literals_initialize_shared_data() {
+        let module = crate::in_lang_parse::parse_in_source("var count: Int = 3;\nvar value: Float = 1.5;\nconst enabled: Bool = true;\nfn main() -> Int { return count; }").expect("parse");
+        let globals = collect_globals(&module, &HashMap::new());
+        let data = build_data_section(&module, &globals);
+        let words = data
+            .chunks_exact(8)
+            .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(words, vec![3, 1.5_f64.to_bits(), 1]);
+        let empty =
+            crate::in_lang_parse::parse_in_source("fn main() -> Int { return 0; }").expect("parse");
+        assert!(build_data_section(&empty, &collect_globals(&empty, &HashMap::new())).is_empty());
+    }
+}

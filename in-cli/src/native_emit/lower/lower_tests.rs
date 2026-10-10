@@ -295,10 +295,14 @@ fn lowers_string_len_to_aarch64_ldr_offset_8() {
     let mut pending_static_arrays = Vec::new();
     let mut pending_inrt_calls = Vec::new();
     let mut pending_strings = Vec::new();
+    let globals = HashMap::new();
+    let global_types = HashMap::new();
     let mut ctx = LowerCtx::new(
         &[],
         &structs,
         &strings,
+        &globals,
+        &global_types,
         &mut pending_static_arrays,
         &mut pending_inrt_calls,
         &mut pending_strings,
@@ -329,10 +333,14 @@ fn lowers_string_contains_to_native_wrapper_call() {
     let mut pending_static_arrays = Vec::new();
     let mut pending_inrt_calls = Vec::new();
     let mut pending_strings = Vec::new();
+    let globals = HashMap::new();
+    let global_types = HashMap::new();
     let mut ctx = LowerCtx::new(
         &[],
         &structs,
         &strings,
+        &globals,
+        &global_types,
         &mut pending_static_arrays,
         &mut pending_inrt_calls,
         &mut pending_strings,
@@ -1027,6 +1035,80 @@ fn jit_preserves_nested_binary_operands() {
             expected,
             "{source}"
         );
+    }
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn jit_shares_writable_globals_across_functions() {
+    let cases = [
+        (
+            include_str!("../../../../conformance/types/global-struct-field.in"),
+            8,
+        ),
+        (
+            "var count: Int = 3;\nfn bump() -> Int { count = count + 5; return count; }\nfn main() -> Int { bump(); return bump(); }",
+            13,
+        ),
+        (
+            "var count: Int = 3;\nfn main() -> Int { let count = 9; return count; }",
+            9,
+        ),
+        (
+            "var count: Int = 3;\nfn read(count: Int) -> Int { return count; }\nfn main() -> Int { return read(11); }",
+            11,
+        ),
+        (
+            "var value: Float = 1.5;\nfn main() -> Float { value = value + 2.5; return value; }",
+            4.0_f64.to_bits() as i64,
+        ),
+        (
+            "struct Value {\n Float amount\n}\nvar value: Value = 0;\nfn main() -> Float { value.amount = 1.5; value.amount = value.amount + 2.5; return value.amount; }",
+            4.0_f64.to_bits() as i64,
+        ),
+    ];
+    for (source, expected) in cases {
+        for jobs in [1, 2] {
+            let module = crate::in_lang_parse::parse_in_source(source).expect("parse");
+            let lowered = lower_module_with_jobs(&module, "main", NativeLinkage::Executable, jobs)
+                .expect("lower");
+            let offsets = lowered
+                .function_offsets
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect::<Vec<_>>();
+            let mut rt = crate::jit_runtime::JitRuntime::new();
+            rt.load_with_globals(
+                &lowered.code,
+                &offsets,
+                &lowered.relocations,
+                &lowered.data,
+                &lowered.global_relocs,
+            )
+            .expect("load");
+            assert_eq!(
+                unsafe { rt.invoke("main", &[]).expect("invoke") },
+                expected,
+                "{source} with jobs={jobs}"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_executable_shares_global_struct_fields() {
+    let source = include_str!("../../../../conformance/types/global-struct-field.in");
+    for source in [
+        source.to_string(),
+        format!("var padding: Int = 99;\n{source}"),
+    ] {
+        let module = crate::in_lang_parse::parse_in_source(&source).expect("parse");
+        let path = temp_executable("global-struct");
+        compile_native_executable(&module, "main", &path).expect("compile");
+        let output = run_native_exe(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(output.status.code(), Some(8), "{output:?}");
     }
 }
 

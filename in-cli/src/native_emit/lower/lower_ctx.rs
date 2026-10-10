@@ -211,6 +211,9 @@ pub(crate) struct LowerCtx<'a> {
     /// Stack-based params: (incoming_stack_offset, local_stack_offset)
     pub(crate) stack_params: Vec<(u32, u32)>,
     pub(crate) locals: HashMap<String, LocalSlot>,
+    pub(crate) globals: &'a HashMap<String, u64>,
+    pub(crate) global_types: &'a HashMap<String, Typ>,
+    pub(crate) pending_globals: Vec<(u32, u64)>,
     pub(crate) scalar_types: HashMap<String, Typ>,
     pub(crate) vec_for_slots: VecForPlan,
     pub(crate) structs: &'a HashMap<String, Vec<(String, Typ)>>,
@@ -391,6 +394,8 @@ impl<'a> LowerCtx<'a> {
         params: &'a [(String, Typ)],
         structs: &'a HashMap<String, Vec<(String, Typ)>>,
         strings: &'a HashMap<String, i64>,
+        globals: &'a HashMap<String, u64>,
+        global_types: &'a HashMap<String, Typ>,
         pending_static_arrays: &'a mut Vec<PendingStaticArray>,
         pending_inrt_calls: &'a mut Vec<PendingInrtCall>,
         pending_strings: &'a mut Vec<super::PendingString>,
@@ -402,6 +407,9 @@ impl<'a> LowerCtx<'a> {
             param_stores: Vec::new(),
             stack_params: Vec::new(),
             locals: HashMap::new(),
+            globals,
+            global_types,
+            pending_globals: Vec::new(),
             scalar_types: HashMap::new(),
             vec_for_slots: VecForPlan::default(),
             structs,
@@ -719,6 +727,19 @@ impl<'a> LowerCtx<'a> {
         self.alloc_local(name, resolved.as_ref(), fn_name)
     }
 
+    pub(crate) fn emit_global_address(
+        &mut self,
+        emitter: &mut crate::native_emit::aarch64::CodeEmitter,
+        rd: u8,
+        offset: u64,
+    ) {
+        // LDR literal, then branch past its embedded relocatable address.
+        emitter.emit_u32(0x5800_0040 | u32::from(rd));
+        emitter.emit_u32(crate::native_emit::aarch64::b(12));
+        self.pending_globals.push((emitter.len(), offset));
+        emitter.bytes.extend_from_slice(&0_u64.to_le_bytes());
+    }
+
     pub(crate) fn alloc_slot(&mut self) -> u32 {
         let offset = self.stack_size;
         self.stack_size += 8;
@@ -770,6 +791,7 @@ impl<'a> LowerCtx<'a> {
         self.param_types
             .get(name)
             .or_else(|| self.scalar_types.get(name))
+            .or_else(|| self.global_types.get(name))
             .cloned()
     }
 

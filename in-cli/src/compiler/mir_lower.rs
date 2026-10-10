@@ -238,6 +238,11 @@ pub fn lower_boot_image(
             entry,
             crate::native_emit::NativeLinkage::Executable,
         )?;
+        if !result.global_relocs.is_empty() {
+            return Err(
+                "native-lower: AArch64 boot images do not yet relocate writable globals".into(),
+            );
+        }
         (
             result.code,
             result
@@ -266,6 +271,20 @@ pub fn lower_boot_image(
 mod tests {
     use super::*;
     use crate::core_ir::{CoreModuleIdentity, Typ};
+
+    #[test]
+    fn aarch64_boot_rejects_unrelocated_globals() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "var count: Int = 3;\nfn main() -> Int { return count; }",
+        )
+        .expect("parse");
+        let error = lower_boot_image(&module, "main", Some("aarch64-unknown-none"))
+            .expect_err("reject unmapped globals");
+        assert!(
+            error.contains("do not yet relocate writable globals"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn lower_empty_module() {

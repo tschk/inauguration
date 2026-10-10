@@ -151,6 +151,22 @@ pub(crate) fn lower_stmt(
             ret_typ,
         ),
         Stmt::Assign(name, expr) => {
+            if !ctx.locals.contains_key(name) && !ctx.params.contains_key(name) {
+                if let Some(offset) = ctx.globals.get(name).copied() {
+                    lower_expr::lower_expr_into(
+                        emitter,
+                        ctx,
+                        expr,
+                        0,
+                        functions,
+                        pending_calls,
+                        fn_name,
+                    )?;
+                    ctx.emit_global_address(emitter, 1, offset);
+                    emitter.emit_u32(aarch64::str64(0, 1, 0));
+                    return Ok(());
+                }
+            }
             if !ctx.locals.contains_key(name) {
                 let offset = ctx.alloc_slot();
                 ctx.locals.insert(name.clone(), LocalSlot::Scalar(offset));
@@ -426,6 +442,14 @@ pub(crate) fn lower_field_assign(
             "native-lower: field assignment base must be a local identifier, got `{base:?}` in `{fn_name}`"
         ));
     };
+    if !ctx.locals.contains_key(base_name) && !ctx.params.contains_key(base_name) {
+        if let Some(offset) = ctx.globals.get(&format!("{base_name}.{name}")).copied() {
+            lower_expr::lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
+            ctx.emit_global_address(emitter, 1, offset);
+            emitter.emit_u32(aarch64::str64(0, 1, 0));
+            return Ok(());
+        }
+    }
     let scalar_offset = ctx.locals.get(base_name).and_then(|s| match s {
         LocalSlot::Scalar(off) => Some(*off),
         _ => None,

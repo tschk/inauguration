@@ -113,7 +113,7 @@ pub(crate) fn parse_module_from_blocks(
                 } else {
                     (lhs.to_string(), None)
                 };
-                let init = parse_expr(rhs);
+                let init = parse_expr(rhs.trim_end_matches(';').trim());
                 decls.push(Decl::Global {
                     name,
                     typ: typ.unwrap_or(crate::core_ir::Typ::Int),
@@ -138,7 +138,7 @@ pub(crate) fn parse_module_from_blocks(
                 } else {
                     (lhs.to_string(), None)
                 };
-                let init = parse_expr(rhs);
+                let init = parse_expr(rhs.trim_end_matches(';').trim());
                 decls.push(Decl::Global {
                     name,
                     typ: typ.unwrap_or(crate::core_ir::Typ::Int),
