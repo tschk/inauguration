@@ -82,8 +82,10 @@ pub fn compile_native_artifact_with_report(
     linkage: NativeLinkage,
     out_path: &Path,
 ) -> Result<NativeArtifactOutcome, String> {
-    TL_NATIVE_MODE.with(|m| *m.borrow_mut() = true);
-    let lowered = lower_module(module, entry, linkage)?;
+    let previous_mode = TL_NATIVE_MODE.with(|mode| mode.replace(true));
+    let lowered = lower_module(module, entry, linkage);
+    TL_NATIVE_MODE.with(|mode| *mode.borrow_mut() = previous_mode);
+    let lowered = lowered?;
     let degradations = lowered.degradations;
 
     if linkage == NativeLinkage::Executable && cfg!(target_os = "macos") {
@@ -226,4 +228,27 @@ pub fn host_supports_native_subset() -> bool {
         all(target_os = "linux", target_arch = "x86_64"),
         all(target_os = "linux", target_arch = "aarch64"),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_artifact_lowering_restores_native_mode() {
+        TL_NATIVE_MODE.with(|mode| *mode.borrow_mut() = false);
+        let mut module = crate::in_lang_parse::parse_in_source("fn main() {}").unwrap();
+        module.decls.clear();
+        let result = compile_native_artifact_with_report(
+            &module,
+            "test",
+            "missing",
+            NativeLinkage::Executable,
+            Path::new("unused"),
+        );
+        let native_mode = TL_NATIVE_MODE.with(|mode| *mode.borrow());
+        TL_NATIVE_MODE.with(|mode| *mode.borrow_mut() = false);
+        assert!(result.is_err());
+        assert!(!native_mode);
+    }
 }
