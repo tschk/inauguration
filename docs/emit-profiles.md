@@ -21,7 +21,7 @@ in compile ... --lean
 |---------|------|----|-------------|
 | `default` | Fast owned pipeline (not a textbook SysV compiler) | Two-wave inlining (threshold 6 / depth 16) then fold / DCE | `push rbp; lea rbp, [rsp]` / `lea rsp, [rbp]` frames; **no** 2KiB `rep stosq` wipe |
 | `lean` | Shortest internal calls | Aggressive inlining (higher stmt threshold + deeper recursion, two waves) then DCE | Same frames as default; fewer calls after inline |
-| `harden` | Anti-decomp / fingerprint avoidance | After normal opts: MBA, opaque predicates, `_pc` dispatch, `_H` names | Runnable Linux ELF: `exit(status)` stub + XOR-scrambled **INISA** payload. Program is not host ISA |
+| `harden` | Anti-decomp / fingerprint avoidance | After normal opts: MBA, opaque predicates, `_pc` dispatch, `_H` names | Same native backend and artifact target as default; profile-specific instruction shapes |
 
 ### Default details (fast, non-classic)
 
@@ -31,18 +31,15 @@ Default is the **runtime** profile. It does not try to look like gcc/clang:
 - No per-call `rep stosq` of the scratch frame (locals are written before use)
 - More inlining than a textbook two-stmt helper pass
 
-### Harden details (private ISA)
+### Harden details
 
-Harden dual-emit writes a **runnable Linux ELF**: a tiny `exit(status)` stub
-plus the XOR-scrambled **INISA** payload in the same `PT_LOAD`. `./foo-harden`
-runs. Ghidra sees the stub, not `mix`/`gate` as native functions. The program
-body is the private stack ISA (`eval_module` at compile time supplies the
-exit code the stub uses).
+Harden uses the same Core IR → native lowering → JIT/artifact pipeline as
+other profiles. It preserves typed JIT results and the requested target and
+linkage. Native compilation defers program execution until runtime.
 
-IR still runs anti-decomp passes (MBA, opaque predicates, `_pc` dispatch, `_H`
-names) so a determined reverse engineer who writes an INISA loader still sees
-noisy control flow. There is no claim of cryptographic strength: the scramble
-is fingerprint noise, not encryption.
+IR passes add MBA expressions, opaque predicates, `_pc` dispatch, and internal
+`_H` names. Native emit adds profile-specific instruction shapes. These are
+obfuscation measures, with no claim of cryptographic protection.
 
 ### Lean details
 
@@ -75,7 +72,7 @@ Derived harden paths: `foo.o` → `foo-harden.o`, `foo` → `foo-harden`.
 
 ## Honest limits
 
-- Harden **is** a private stack ISA (INISA) inside SCI, interpreted by `in` — not a silicon ISA and not cryptographic VM-protect. Lite CFG dispatch on the IR before INISA lower is still shallow (skips try/match/throw).
+- Harden is limited to the same supported native subset as other profiles. Lite CFG dispatch skips try/match/throw.
 - No cryptographic string encryption; string obscuring is best-effort.
 - Does not defeat a determined reverse engineer with dynamic tracing.
 - Debug stripping: Core IR has no `debug_value`; SIL helpers already strip them when SIL is materialised. Harden does not add DWARF.

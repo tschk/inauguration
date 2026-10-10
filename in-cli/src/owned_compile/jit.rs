@@ -103,23 +103,6 @@ pub fn compile_jit(
         .unwrap_or("main");
     let resolved_entry = resolve_jit_entry(expanded_module, entry);
 
-    if request.profile == crate::emit_profile::EmitProfile::Harden {
-        let raw = crate::native_emit::inisa::eval_module(expanded_module, &resolved_entry)
-            .map_err(|e| format!("jit-inisa-failed: {e}"))?;
-        return Ok(NativeCompileResult {
-            artifact_path: String::new(),
-            eval_exit_code: Some(raw as u8),
-            eval_result: Some(super::EvalValue::Int(raw)),
-            degradations: Vec::new(),
-            abi_path: None,
-            backend_level: "owned-inisa-sci".to_string(),
-            runtime_level: "inisa-interpreter".to_string(),
-            reason_code: "jit-harden-inisa".to_string(),
-            reason: "harden JIT interprets the private INISA instead of mapping host machine code"
-                .to_string(),
-        });
-    }
-
     native_link::bootstrap_jit_native();
 
     // How to read the entry's result value, which the declared return type

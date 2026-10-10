@@ -264,8 +264,15 @@ fn dual_emit_writes_runtime_and_harden_artifacts() {
     assert_eq!(
         &harden_bytes[..4.min(harden_bytes.len())],
         b"\x7fELF",
-        "harden bundle is a Linux ELF wrapping INISA"
+        "harden respects the requested ELF object target"
     );
+
+    assert_eq!(
+        u16::from_le_bytes(harden_bytes[16..18].try_into().unwrap()),
+        1,
+        "harden must preserve static-library linkage"
+    );
+    assert_eq!(harden_report.runtime_level, "freestanding-none");
 
     fs::remove_file(source_path).unwrap();
     fs::remove_file(&runtime_out).unwrap();
@@ -1173,4 +1180,47 @@ fn resolve_jit_entry_empty_name_uses_library_fallback() {
     }]);
     assert_eq!(resolve_jit_entry(&module, ""), "answer");
     assert_eq!(resolve_jit_entry(&UnifiedModule::new(vec![]), ""), "");
+}
+
+#[test]
+fn harden_jit_preserves_typed_float_results() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let source = temp_path("harden-float.in");
+    fs::write(&source, "fn main() -> Float { return 1.25 + 2.5; }\n").unwrap();
+    let mut request = default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+    request.profile = crate::emit_profile::EmitProfile::Harden;
+    let report = compile_owned(&request);
+    fs::remove_file(source).unwrap();
+    assert!(report.success, "{report:?}");
+    assert_eq!(
+        report.eval_result,
+        Some(EvalValue::Float(3.75)),
+        "{report:?}"
+    );
+    assert_eq!(report.runtime_level, "inrt-jit");
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn harden_native_preserves_host_target_and_executes_at_runtime() {
+    let source = temp_path("harden-native.in");
+    let out = temp_path("harden-native");
+    fs::write(&source, "fn main() -> Int { return 42; }\n").unwrap();
+    let mut request = default_request(
+        source.clone(),
+        CompileTarget::Native,
+        Some("main"),
+        Some(out.clone()),
+    );
+    request.profile = crate::emit_profile::EmitProfile::Harden;
+    let report = compile_owned(&request);
+    fs::remove_file(source).unwrap();
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.runtime_level, "inrt-native");
+    assert_eq!(&fs::read(&out).unwrap()[..4], &[0xcf, 0xfa, 0xed, 0xfe]);
+    let status = std::process::Command::new(&out).status().unwrap();
+    fs::remove_file(out).unwrap();
+    assert_eq!(status.code(), Some(42));
 }
