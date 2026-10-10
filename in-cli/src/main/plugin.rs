@@ -190,13 +190,15 @@ mod tests {
     }
 
     fn unique_temp_dir(name: &str) -> PathBuf {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         std::env::temp_dir().join(format!(
-            "inauguration-{name}-{}-{}",
+            "inauguration-{name}-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
     }
 }
