@@ -489,6 +489,7 @@ mod tests {
     #[test]
     fn macho_archive_links_and_executes_its_function_body() {
         for (module, caller) in [
+            (crate::in_lang_parse::parse_in_library_source("fn _answer() -> Int { return 42; }").unwrap(), "long long _answer(void); int main(void) { return (int)_answer(); }"),
             (scalar_answer_module(), "long long answer(void); int main(void) { return (int)answer(); }"),
             (crate::in_lang_parse::parse_in_library_source("fn add(a: Int, b: Int) -> Int { return a + b; }\nfn answer() -> Int { return add(5, 37); }").unwrap(), "long long add(long long, long long); int main(void) { return (int)add(-5, 47); }"),
             (crate::in_lang_parse::parse_in_library_source("fn answer() -> Int { return labs(-42); }").unwrap(), "long long answer(void); int main(void) { return (int)answer(); }"),

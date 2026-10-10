@@ -37,6 +37,7 @@ pub enum MachOLinkage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportSymbol {
+    /// Source name, before adding the Mach-O C symbol prefix.
     pub name: String,
     pub offset: u32,
 }
@@ -76,7 +77,7 @@ fn write_static_archive(image: &MachOImage, member_name: &str, out: &mut Vec<u8>
     let mut symbols: Vec<String> = image
         .exports
         .iter()
-        .map(|export| symbol_name(&export.name))
+        .map(|export| format!("_{}", export.name))
         .collect();
     symbols.sort();
     let mut strings = Vec::new();
@@ -310,7 +311,7 @@ impl LinkEditTables {
     }
 }
 
-fn symbol_name(name: &str) -> String {
+fn external_symbol_name(name: &str) -> String {
     if name.starts_with('_') {
         name.to_string()
     } else {
@@ -322,7 +323,7 @@ fn build_linkedit(image: &MachOImage, text_vmaddr: u64) -> LinkEditTables {
     let mut strtab = vec![0u8];
     let mut symtab = Vec::new();
     for export in &image.exports {
-        let sym_name = symbol_name(&export.name);
+        let sym_name = format!("_{}", export.name);
         let strx = strtab.len() as u32;
         strtab.extend_from_slice(sym_name.as_bytes());
         strtab.push(0);
@@ -498,7 +499,7 @@ pub fn write_relocatable_object(image: &MachOImage) -> Vec<u8> {
     exports_sorted.sort_by(|a, b| a.name.cmp(&b.name));
     for export in &exports_sorted {
         let off = strtab.len() as u32;
-        strtab.extend_from_slice(symbol_name(&export.name).as_bytes());
+        strtab.extend_from_slice(format!("_{}", export.name).as_bytes());
         strtab.push(0);
         str_offsets.push((export.name.clone(), off));
     }
@@ -507,7 +508,7 @@ pub fn write_relocatable_object(image: &MachOImage) -> Vec<u8> {
     for (_, name) in &image.external_refs {
         if !ext_str_offsets.iter().any(|(n, _)| n == name) {
             let off = strtab.len() as u32;
-            strtab.extend_from_slice(symbol_name(name).as_bytes());
+            strtab.extend_from_slice(external_symbol_name(name).as_bytes());
             strtab.push(0);
             ext_str_offsets.push((name.clone(), off));
         }
@@ -774,7 +775,7 @@ mod tests {
                 MH_OBJECT
             );
             assert!(String::from_utf8_lossy(&out).contains("_answer"));
-            assert!(!String::from_utf8_lossy(&out).contains("__answer"));
+            assert!(String::from_utf8_lossy(&out).contains(&format!("_{export}")));
         }
     }
 
