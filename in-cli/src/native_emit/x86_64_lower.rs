@@ -1869,6 +1869,22 @@ fn lower_binary_expr(
     rhs: &Expr,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if matches!(op, "&&" | "||") {
+        lower_expr_into(emitter, ctx, lhs, RAX, pending_calls)?;
+        emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+        let skip_rhs = emitter.len();
+        emitter.emit_insns(&x86_64::jcc_near(if op == "&&" { 4 } else { 5 }, 0));
+        lower_expr_into(emitter, ctx, rhs, RAX, pending_calls)?;
+        let delta = emitter.len() as i32 - skip_rhs as i32 - 6;
+        emitter.patch_u32(skip_rhs + 2, delta as u32);
+        emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+        emitter.emit_insns(&x86_64::setcc(0x95, RAX));
+        emitter.emit_insns(&x86_64::movzx_r8(RAX, RAX));
+        if target_reg != RAX {
+            emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+        }
+        return Ok(());
+    }
     lower_expr_into(emitter, ctx, lhs, RAX, pending_calls)?;
     emitter.emit_insns(&x86_64::push_r(RAX));
     lower_expr_into(emitter, ctx, rhs, RAX, pending_calls)?;
@@ -1895,28 +1911,6 @@ fn lower_binary_expr(
             emitter.emit_insns(&x86_64::cmp_rr(RDX, RAX));
             emitter.emit_insns(&x86_64::setcc(0x9D, RAX)); // setge al
             emitter.emit_insns(&x86_64::movzx_r8(RAX, RAX));
-        }
-        "&&" => {
-            emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
-            emitter.emit_insns(&x86_64::setcc(0x95, RAX)); // setne al
-            emitter.emit_insns(&x86_64::movzx_r8(RAX, RAX));
-            emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
-            emitter.emit_insns(&x86_64::test_rr(RDX, RDX));
-            emitter.emit_insns(&x86_64::setcc(0x95, RDX)); // setne dl
-            emitter.emit_insns(&x86_64::movzx_r8(RDX, RDX));
-            emitter.emit_insns(&x86_64::and_rr(RCX, RDX));
-            emitter.emit_insns(&x86_64::mov_rr(RAX, RCX));
-        }
-        "||" => {
-            emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
-            emitter.emit_insns(&x86_64::setcc(0x95, RAX)); // setne al
-            emitter.emit_insns(&x86_64::movzx_r8(RAX, RAX));
-            emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
-            emitter.emit_insns(&x86_64::test_rr(RDX, RDX));
-            emitter.emit_insns(&x86_64::setcc(0x95, RDX)); // setne dl
-            emitter.emit_insns(&x86_64::movzx_r8(RDX, RDX));
-            emitter.emit_insns(&x86_64::or_rr(RCX, RDX));
-            emitter.emit_insns(&x86_64::mov_rr(RAX, RCX));
         }
         "<=" => {
             emitter.emit_insns(&x86_64::cmp_rr(RDX, RAX));

@@ -511,6 +511,79 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    fn logical_operators_short_circuit_calls() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (expression, expected) in [
+                ("false && side()", 0),
+                ("true || side()", 1),
+                ("true && side()", 11),
+                ("false || side()", 11),
+                ("(false && side()) || side()", 11),
+                ("(true || side()) && side()", 11),
+                ("true && !side()", 10),
+                ("false || !side()", 10),
+                ("(true && !side()) || side()", 21),
+            ] {
+                let source = format!(
+                    "var calls: Int = 0;\nfn side() -> Bool {{ calls += 1; return true; }}\nfn main() -> Int {{ let value: Bool = {expression}; if value {{ return calls * 10 + 1; }} return calls * 10; }}"
+                );
+                let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                let previous = crate::native_emit::antidecomp::current_profile();
+                crate::native_emit::antidecomp::set_profile(profile);
+                #[cfg(target_arch = "aarch64")]
+                let result = crate::native_emit::lower::lower_module(
+                    &module,
+                    "main",
+                    crate::native_emit::NativeLinkage::Executable,
+                );
+                #[cfg(target_arch = "x86_64")]
+                let result = crate::native_emit::x86_64_lower::lower_module(&module, "main");
+                crate::native_emit::antidecomp::set_profile(previous);
+                let lowered = result.unwrap();
+                #[cfg(target_arch = "aarch64")]
+                let offsets = lowered
+                    .function_offsets
+                    .iter()
+                    .map(|(name, offset)| (name.clone(), *offset, 0))
+                    .collect::<Vec<_>>();
+                #[cfg(target_arch = "x86_64")]
+                let offsets = lowered
+                    .exports
+                    .iter()
+                    .map(|(name, offset)| (name.clone(), *offset, 0))
+                    .collect::<Vec<_>>();
+                #[cfg(target_arch = "aarch64")]
+                let relocations = lowered.relocations;
+                #[cfg(target_arch = "x86_64")]
+                let relocations = lowered
+                    .relocations
+                    .iter()
+                    .map(|site| (*site, lowered.codegen_base))
+                    .collect::<Vec<_>>();
+                let mut rt = JitRuntime::new();
+                rt.load_with_globals(
+                    &lowered.code,
+                    &offsets,
+                    &relocations,
+                    &lowered.data,
+                    &lowered.global_relocs,
+                )
+                .unwrap();
+                assert_eq!(
+                    unsafe { rt.invoke("main", &[]).unwrap() },
+                    expected,
+                    "{profile:?}: {expression}"
+                );
+            }
+        }
+    }
+
+    #[test]
     #[cfg(target_arch = "x86_64")]
     fn generated_functions_preserve_callee_saved_registers() {
         for profile in [
