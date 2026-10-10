@@ -107,30 +107,10 @@ pub(crate) fn owned_native_test_step_names() -> [&'static str; 11] {
     ]
 }
 
-fn owned_native_script_for_step(name: &str) -> &'static str {
-    if name.contains("owned-native-compiler") {
-        "scripts/check-owned-native-compiler.sh"
-    } else if name.contains("native-answer") {
-        "scripts/check-native-answer-sample.sh"
-    } else if name.contains("native-artifact") {
-        "scripts/check-native-artifact-sample.sh"
-    } else if name.contains("native ARM") {
-        "scripts/check-native-arm-linux-executables.sh"
-    } else if name.contains("native linkable") {
-        "scripts/check-native-linkable-objects.sh"
-    } else if name.contains("polyglot") {
-        "scripts/check-polyglot-sample.sh"
-    } else if name.contains("abi layouts") {
-        "scripts/check-abi-layouts.sh"
-    } else if name.contains("dynamic loader") {
-        "scripts/check-dynamic-loader.sh"
-    } else if name.contains("freestanding x86_64") {
-        "scripts/check-freestanding-x86_64.sh"
-    } else if name.contains("component metadata") {
-        "scripts/check-component-metadata.sh"
-    } else {
-        "scripts/check-target-matrix.sh"
-    }
+fn script_for_step(name: &'static str) -> &'static str {
+    name.rsplit_once(" (")
+        .and_then(|(_, script)| script.strip_suffix(')'))
+        .expect("script test catalogue entries include their script path")
 }
 
 fn owned_native_test_groups(root: &Path) -> Vec<TestGroup> {
@@ -138,7 +118,7 @@ fn owned_native_test_groups(root: &Path) -> Vec<TestGroup> {
         .into_iter()
         .map(|name| TestGroup {
             name,
-            commands: vec![bash_command(root, owned_native_script_for_step(name))],
+            commands: vec![bash_command(root, script_for_step(name))],
         })
         .collect()
 }
@@ -189,10 +169,9 @@ fn in_compile_jit_command(root: &Path, path: &str) -> TestCommand {
     }
 }
 
-fn toolchain_test_step_names() -> [&'static str; 3] {
+fn toolchain_test_step_names() -> [&'static str; 2] {
     [
         "protocol models (scripts/check-protocol-models.sh)",
-        "compiler/rust-driver (cargo test --all)",
         "in-cli (cargo test)",
     ]
 }
@@ -250,28 +229,9 @@ fn self_host_test_groups(root: &Path) -> Vec<TestGroup> {
     groups.extend(
         test_step_names()
             .into_iter()
-            .map(|name| {
-                let script = if name.contains("polyglot") {
-                    if name.contains("graph") {
-                        "scripts/check-graph-polyglot-sample.sh"
-                    } else if name.contains("eval") {
-                        "scripts/check-eval-polyglot-sample.sh"
-                    } else if name.contains("native answer") {
-                        "scripts/check-native-answer-polyglot-subset.sh"
-                    } else {
-                        "scripts/check-polyglot-sample.sh"
-                    }
-                } else if name.contains("jit") {
-                    "scripts/check-jit-compiler.sh"
-                } else if name.contains("conformance") {
-                    "scripts/run-conformance.sh"
-                } else {
-                    "scripts/check-orchestration-compiler.sh"
-                };
-                TestGroup {
-                    name,
-                    commands: vec![bash_command(root, script)],
-                }
+            .map(|name| TestGroup {
+                name,
+                commands: vec![bash_command(root, script_for_step(name))],
             })
             .collect::<Vec<_>>(),
     );
@@ -296,14 +256,6 @@ fn toolchain_test_groups(root: &Path) -> Vec<TestGroup> {
         },
         TestGroup {
             name: toolchain_test_step_names()[1],
-            commands: vec![TestCommand {
-                program: "cargo".to_string(),
-                args: vec!["test".to_string(), "--all".to_string()],
-                cwd: root.join("compiler").join("rust-driver"),
-            }],
-        },
-        TestGroup {
-            name: toolchain_test_step_names()[2],
             commands: vec![TestCommand {
                 program: "cargo".to_string(),
                 args: vec!["test".to_string()],
@@ -446,4 +398,52 @@ pub(crate) fn all_test_step_names() -> Vec<&'static str> {
     names.extend(external_parity_test_step_names());
     names.extend(toolchain_test_step_names());
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cargo_gates_point_to_existing_manifests() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        for group in toolchain_test_groups(root) {
+            for command in group.commands {
+                if command.program == "cargo" {
+                    assert!(
+                        command.cwd.join("Cargo.toml").is_file(),
+                        "{}: {}",
+                        group.name,
+                        command.cwd.display()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn advertised_gates_run_their_own_scripts() {
+        let root = Path::new("/test-root");
+        let groups = self_host_test_groups(root);
+        for (label, expected) in [
+            ("static coverage", "scripts/check-coverage.sh"),
+            (
+                "backend differential",
+                "scripts/check-backend-differential.sh",
+            ),
+            (
+                "orchestration compiler",
+                "scripts/check-orchestration-compiler.sh",
+            ),
+        ] {
+            let group = groups
+                .iter()
+                .find(|group| group.name.starts_with(label))
+                .expect("registered gate");
+            assert_eq!(group.commands.len(), 1);
+            assert_eq!(group.commands[0].program, "bash");
+            assert_eq!(group.commands[0].args, vec![expected]);
+            assert_eq!(group.commands[0].cwd, root);
+        }
+    }
 }
