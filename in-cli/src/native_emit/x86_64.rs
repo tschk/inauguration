@@ -366,6 +366,7 @@ pub fn lea_rsp_disp(reg: u8, disp: u8) -> Vec<u8> {
     push_rex_wr(&mut code, reg, RSP);
     code.push(0x8D);
     code.push(modrm(1, reg & 7, RSP & 7));
+    code.push(0x24); // SIB: no index, stack pointer base.
     code.push(disp);
     code
 }
@@ -713,6 +714,18 @@ pub fn epilogue() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stack_relative_lea_encodes_sib() {
+        let previous = is_32bit();
+        set_32bit(false);
+        let code64 = lea_rsp_disp(R11, 0);
+        set_32bit(true);
+        let code32 = lea_rsp_disp(RAX, 8);
+        set_32bit(previous);
+        assert_eq!(code64, vec![0x4C, 0x8D, 0x5C, 0x24, 0]);
+        assert_eq!(code32, vec![0x8D, 0x44, 0x24, 8]);
+    }
 
     #[test]
     fn encodes_ret() {
