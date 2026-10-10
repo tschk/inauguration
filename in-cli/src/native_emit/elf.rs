@@ -57,10 +57,18 @@ pub fn aarch64_return_i32_object_code(value: u8) -> Vec<u8> {
     code
 }
 
-pub fn arm32_return_i32_object_code(value: u8) -> Vec<u8> {
+pub fn arm32_return_i32_object_code(value: i32) -> Vec<u8> {
     let mut code = Vec::new();
-    code.extend_from_slice(&(0xE3A0_0000u32 | value as u32).to_le_bytes());
-    code.extend_from_slice(&0xE12F_FF1Eu32.to_le_bytes());
+    let bits = value as u32;
+    let low = bits & 0xffff;
+    code.extend_from_slice(&(0xe300_0000 | ((low & 0xf000) << 4) | (low & 0xfff)).to_le_bytes());
+    let high = bits >> 16;
+    if high != 0 {
+        code.extend_from_slice(
+            &(0xe340_0000 | ((high & 0xf000) << 4) | (high & 0xfff)).to_le_bytes(),
+        );
+    }
+    code.extend_from_slice(&0xe12f_ff1eu32.to_le_bytes());
     code
 }
 
@@ -437,6 +445,14 @@ fn write_arm32_section_headers(
 }
 
 pub fn write_arm32_relocatable_object(object: &ElfObject, out: &mut Vec<u8>) {
+    write_arm32_object(object, out, false);
+}
+
+pub fn write_thumb_relocatable_object(object: &ElfObject, out: &mut Vec<u8>) {
+    write_arm32_object(object, out, true);
+}
+
+fn write_arm32_object(object: &ElfObject, out: &mut Vec<u8>, thumb: bool) {
     const R_ARM_THM_CALL: u32 = 10;
     const R_ARM_THM_MOVW_ABS_NC: u32 = 47;
     const R_ARM_THM_MOVT_ABS: u32 = 48;
@@ -480,8 +496,8 @@ pub fn write_arm32_relocatable_object(object: &ElfObject, out: &mut Vec<u8>) {
     out.extend_from_slice(&object.code);
     write_symbol32(out, 0, 0, 0, 0, 0, 0);
     for (i, (_, offset)) in all_exports.iter().enumerate() {
-        // Thumb function symbols carry the low address bit set (st_value | 1).
-        let value = offset | 1;
+        // The low symbol bit tells callers to enter Thumb rather than ARM state.
+        let value = if thumb { offset | 1 } else { *offset };
         let next_off = all_exports
             .get(i + 1)
             .map(|e| e.1)
@@ -817,6 +833,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn arm32_constants_preserve_full_signed_i32_values() {
+        for (value, words) in [
+            (1000, vec![0xe30003e8u32, 0xe12fff1e]),
+            (-64536, vec![0xe30003e8u32, 0xe34f0fff, 0xe12fff1e]),
+            (i32::MIN, vec![0xe3000000u32, 0xe3480000, 0xe12fff1e]),
+        ] {
+            let expected: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+            assert_eq!(arm32_return_i32_object_code(value), expected);
+        }
+    }
+
+    #[test]
     fn writes_magic_and_program_headers() {
         let exe = ElfExecutable {
             code: vec![
@@ -940,14 +968,14 @@ mod tests {
         assert!(out.windows(6).any(|window| window == b"answer"));
         assert!(
             out.windows(8)
-                .any(|window| window == [0x2A, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1])
+                .any(|window| window == [0x2A, 0x00, 0x00, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1])
         );
-        // Thumb function symbol st_value has low bit set (value starts at 1 for offset 0).
+        // ARM code must keep the function symbol low bit clear.
         let text_off = EHDR32_SIZE as usize;
         let sym_off = text_off + object.code.len();
         let answer_sym = &out[sym_off + 16..sym_off + 32];
         let st_value = u32::from_le_bytes(answer_sym[4..8].try_into().unwrap());
-        assert_eq!(st_value & 1, 1);
+        assert_eq!(st_value & 1, 0);
     }
 
     #[test]
@@ -964,7 +992,13 @@ mod tests {
             thumb_addr_refs: vec![(20, 24, "helper".to_string())],
         };
         let mut out = Vec::new();
-        write_arm32_relocatable_object(&object, &mut out);
+        write_thumb_relocatable_object(&object, &mut out);
+
+        let first_symbol = EHDR32_SIZE as usize + object.code.len() + 16;
+        assert_eq!(
+            u32::from_le_bytes(out[first_symbol + 4..first_symbol + 8].try_into().unwrap()) & 1,
+            1
+        );
 
         // 3 relocs = 24 bytes starting at the rel section.
         let text_off = EHDR32_SIZE as usize;

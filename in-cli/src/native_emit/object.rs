@@ -8,8 +8,8 @@ use crate::native_emit::elf::{
     THUMBV8M_MAIN_NONE_EABI_TRIPLE, aarch64_linux_exit_code, arm32_linux_exit_code,
     arm32_return_i32_object_code, write_aarch64_executable, write_aarch64_relocatable_object,
     write_arm32_executable, write_arm32_relocatable_object, write_executable,
-    write_i386_relocatable_object, write_x86_64_relocatable_object, x86_64_linux_exit_code,
-    x86_64_return_i32_object_code,
+    write_i386_relocatable_object, write_thumb_relocatable_object, write_x86_64_relocatable_object,
+    x86_64_linux_exit_code,
 };
 use crate::native_emit::macho::{MachOImage, MachOLinkage, write_image};
 use crate::native_emit::target::AARCH64_NONE_TRIPLE;
@@ -40,6 +40,13 @@ pub struct NativeObjectArtifact {
 }
 
 pub fn emit_native_object(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
+    struct WidthGuard(bool);
+    impl Drop for WidthGuard {
+        fn drop(&mut self) {
+            crate::native_emit::x86_64::set_32bit(self.0);
+        }
+    }
+    let _width = WidthGuard(crate::native_emit::x86_64::is_32bit());
     match (request.target_triple, request.linkage) {
         (ELF_LINUX_TRIPLE, NativeLinkage::StaticLib) => emit_x86_64_elf_object(request),
         (ELF_LINUX_TRIPLE, NativeLinkage::Executable) => Some(emit_x86_64_elf_executable(request)),
@@ -51,18 +58,14 @@ pub fn emit_native_object(request: &NativeObjectRequest<'_>) -> Option<NativeObj
             Some(emit_aarch64_elf_executable(request))
         }
         ("aarch64-apple-darwin", NativeLinkage::StaticLib) => emit_aarch64_macho_archive(request),
-        (ARMV7_LINUX_GNUEABIHF_TRIPLE, NativeLinkage::StaticLib) => {
-            Some(emit_arm32_elf_object(request))
-        }
+        (ARMV7_LINUX_GNUEABIHF_TRIPLE, NativeLinkage::StaticLib) => emit_arm32_elf_object(request),
         (ARMV7_LINUX_GNUEABIHF_TRIPLE, NativeLinkage::Executable) => {
             Some(emit_arm32_elf_executable(request))
         }
         (WASM32_UNKNOWN_TRIPLE, NativeLinkage::StaticLib) => emit_wasm32_module(request),
         ("i386-unknown-none", NativeLinkage::StaticLib)
         | ("i686-unknown-none", NativeLinkage::StaticLib)
-        | (X86_64_TRIPLE, NativeLinkage::StaticLib) => {
-            Some(emit_x86_64_freestanding_object(request))
-        }
+        | (X86_64_TRIPLE, NativeLinkage::StaticLib) => emit_x86_64_freestanding_object(request),
         (AARCH64_NONE_TRIPLE, NativeLinkage::StaticLib) => emit_aarch64_elf_object(request),
         (THUMBV8M_MAIN_NONE_EABI_TRIPLE, NativeLinkage::StaticLib) => {
             match emit_thumbv8m_freestanding_object(request) {
@@ -95,7 +98,7 @@ fn emit_thumbv8m_freestanding_object(
         thumb_addr_refs: result.addr_relocs,
     };
     let mut bytes = Vec::new();
-    write_arm32_relocatable_object(&object, &mut bytes);
+    write_thumb_relocatable_object(&object, &mut bytes);
     Ok(NativeObjectArtifact {
         bytes,
         artifact_kind: "elf32-relocatable-object",
@@ -245,9 +248,15 @@ fn emit_aarch64_elf_executable(request: &NativeObjectRequest<'_>) -> NativeObjec
     }
 }
 
-fn emit_arm32_elf_object(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
+fn emit_arm32_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
+    // ponytail: ARM32 objects only support pure i32 entries until general body lowering exists.
+    let value = i32::try_from(crate::owned_compile::pure_entry_scalar_value(
+        request.module,
+        request.entry,
+    )?)
+    .ok()?;
     let object = ElfObject {
-        code: arm32_return_i32_object_code(request.exit_code),
+        code: arm32_return_i32_object_code(value),
         export_name: request.entry.to_string(),
         exports: vec![],
         undefs: vec![],
@@ -257,7 +266,7 @@ fn emit_arm32_elf_object(request: &NativeObjectRequest<'_>) -> NativeObjectArtif
     };
     let mut bytes = Vec::new();
     write_arm32_relocatable_object(&object, &mut bytes);
-    NativeObjectArtifact {
+    Some(NativeObjectArtifact {
         bytes,
         artifact_kind: "elf32-relocatable-object",
         backend_level: "owned-object-subset",
@@ -265,7 +274,7 @@ fn emit_arm32_elf_object(request: &NativeObjectRequest<'_>) -> NativeObjectArtif
         reason_code: NATIVE_OBJECT_SUBSET,
         reason: "inauguration owns ELF32 ARM relocatable object emission for const-evaluable scalar entry functions on this target",
         abi_manifest: Some(object_abi_manifest(request)),
-    }
+    })
 }
 
 fn emit_arm32_elf_executable(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
@@ -337,7 +346,9 @@ fn emit_x86_64_elf_executable(request: &NativeObjectRequest<'_>) -> NativeObject
     }
 }
 
-fn emit_x86_64_freestanding_object(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
+fn emit_x86_64_freestanding_object(
+    request: &NativeObjectRequest<'_>,
+) -> Option<NativeObjectArtifact> {
     let is_i386 =
         request.target_triple.starts_with("i386-") || request.target_triple.starts_with("i686-");
     crate::native_emit::x86_64::set_32bit(is_i386);
@@ -379,7 +390,7 @@ fn emit_x86_64_freestanding_object(request: &NativeObjectRequest<'_>) -> NativeO
             } else {
                 write_x86_64_relocatable_object(&object, &mut bytes);
             }
-            NativeObjectArtifact {
+            Some(NativeObjectArtifact {
                 bytes,
                 artifact_kind: "elf-relocatable-object",
                 backend_level: "owned-native-subset-freestanding",
@@ -395,39 +406,9 @@ fn emit_x86_64_freestanding_object(request: &NativeObjectRequest<'_>) -> NativeO
                     "inauguration owns ELF64 relocatable object emission for real x86_64 freestanding function bodies"
                 },
                 abi_manifest: Some(object_abi_manifest(request)),
-            }
+            })
         }
-        Err(_err) => {
-            // Fallback to const-evaluated exit code for trivial functions
-            let object = ElfObject {
-                code: x86_64_return_i32_object_code(request.exit_code),
-                export_name: request.entry.to_string(),
-                exports: vec![],
-                undefs: vec![],
-                x86_plt_relocs: vec![],
-                thumb_calls: vec![],
-                thumb_addr_refs: vec![],
-            };
-            let mut bytes = Vec::new();
-            if is_i386 {
-                write_i386_relocatable_object(&object, &mut bytes);
-            } else {
-                write_x86_64_relocatable_object(&object, &mut bytes);
-            }
-            NativeObjectArtifact {
-                bytes,
-                artifact_kind: "elf-relocatable-object",
-                backend_level: "owned-object-subset",
-                runtime_level: "freestanding-none",
-                reason_code: "native-object-subset",
-                reason: if is_i386 {
-                    "inauguration owns ELF32 i386 relocatable object emission for const-evaluable scalar entry functions on freestanding target"
-                } else {
-                    "inauguration owns ELF64 relocatable object emission for const-evaluable scalar entry functions on freestanding target"
-                },
-                abi_manifest: Some(object_abi_manifest(request)),
-            }
-        }
+        Err(_) => None,
     }
 }
 
@@ -839,13 +820,77 @@ mod tests {
     }
 
     #[test]
+    fn object_emission_restores_instruction_width_on_success_and_failure() {
+        let original = crate::native_emit::x86_64::is_32bit();
+        for previous in [false, true] {
+            for target in ["i386-unknown-none", X86_64_TRIPLE, ELF_LINUX_TRIPLE] {
+                for module in [scalar_answer_module(), UnifiedModule::new(vec![])] {
+                    crate::native_emit::x86_64::set_32bit(previous);
+                    let request = NativeObjectRequest {
+                        target_triple: target,
+                        linkage: NativeLinkage::StaticLib,
+                        entry: "answer",
+                        exit_code: 0,
+                        module: &module,
+                        module_id: "App",
+                        base: None,
+                    };
+                    let _ = emit_native_object(&request);
+                    let actual = crate::native_emit::x86_64::is_32bit();
+                    crate::native_emit::x86_64::set_32bit(original);
+                    assert_eq!(actual, previous, "{target}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn constant_and_freestanding_writers_refuse_unlowered_bodies() {
+        for module in [
+            UnifiedModule::new(vec![]),
+            UnifiedModule::new(vec![Decl::Function {
+                name: "answer".into(),
+                params: vec![],
+                ret: Typ::Int,
+                body: vec![Stmt::Return(Some(Expr::Binary {
+                    op: "**".into(),
+                    lhs: Box::new(Expr::IntLit(2)),
+                    rhs: Box::new(Expr::IntLit(3)),
+                }))],
+                type_params: vec![],
+            }]),
+        ] {
+            for target in [
+                ARMV7_LINUX_GNUEABIHF_TRIPLE,
+                "i386-unknown-none",
+                "i686-unknown-none",
+                X86_64_TRIPLE,
+            ] {
+                let request = NativeObjectRequest {
+                    target_triple: target,
+                    linkage: NativeLinkage::StaticLib,
+                    entry: "answer",
+                    exit_code: 0,
+                    module: &module,
+                    module_id: "App",
+                    base: None,
+                };
+                assert!(
+                    emit_native_object(&request).is_none(),
+                    "{target} fabricated a body"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn dispatches_arm32_staticlib_object() {
-        let module = UnifiedModule::new(Vec::new());
+        let module = scalar_answer_module();
         let request = NativeObjectRequest {
             target_triple: "armv7-unknown-linux-gnueabihf",
             linkage: NativeLinkage::StaticLib,
             entry: "answer",
-            exit_code: 42,
+            exit_code: 0,
             module: &module,
             module_id: "App",
             base: None,
@@ -853,6 +898,12 @@ mod tests {
         let artifact = emit_native_object(&request).expect("arm32 object artifact");
         assert_eq!(artifact.artifact_kind, "elf32-relocatable-object");
         assert_eq!(artifact.reason_code, NATIVE_OBJECT_SUBSET);
+        assert!(
+            artifact
+                .bytes
+                .windows(4)
+                .any(|bytes| bytes == 0xe300_002au32.to_le_bytes())
+        );
         assert_eq!(artifact.bytes[4], 1);
         assert_eq!(
             u16::from_le_bytes([artifact.bytes[18], artifact.bytes[19]]),
