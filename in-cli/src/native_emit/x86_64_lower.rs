@@ -157,6 +157,8 @@ struct LowerCtx<'a> {
     globals: HashMap<String, u64>,
     /// Sites in the emitted code that reference a global variable.
     pending_globals: Vec<PendingGlobal>,
+    /// The JIT invocation supplies a writable error page through R15.
+    runtime_error_slot: bool,
     /// Error handling: offset for error flag byte (Throw/Try)
     error_flag_offset: u32,
     /// Error handling: offset for error value (Throw/Try)
@@ -208,6 +210,7 @@ impl<'a> LowerCtx<'a> {
             fn_name: fn_name.to_string(),
             globals,
             pending_globals: Vec::new(),
+            runtime_error_slot: false,
             error_flag_offset: 0,
             error_value_offset: 0,
             ret_typ: Typ::Int,
@@ -306,9 +309,23 @@ impl<'a> LowerCtx<'a> {
     }
 }
 
-/// Lower a Core IR module to x86_64 machine code using the historical default
-/// load addresses (code at 0x101100, data at 0x200000).
+/// Lower a Core IR module for the JIT ABI, whose invocation supplies R15.
 pub fn lower_module(module: &UnifiedModule, entry: &str) -> Result<X86_64CompileResult, String> {
+    lower_module_impl(
+        module,
+        entry,
+        0x101100,
+        0x200000,
+        X86StringLayout::Instring,
+        true,
+    )
+}
+
+/// Lower a native artifact using the default load layout, without a JIT runtime.
+pub fn lower_native_module(
+    module: &UnifiedModule,
+    entry: &str,
+) -> Result<X86_64CompileResult, String> {
     lower_module_with_bases(module, entry, 0x101100, 0x200000)
 }
 
@@ -350,6 +367,17 @@ pub fn lower_module_with_bases_layout(
     code_base: u64,
     data_base: u64,
     layout: X86StringLayout,
+) -> Result<X86_64CompileResult, String> {
+    lower_module_impl(module, entry, code_base, data_base, layout, false)
+}
+
+fn lower_module_impl(
+    module: &UnifiedModule,
+    entry: &str,
+    code_base: u64,
+    data_base: u64,
+    layout: X86StringLayout,
+    runtime_error_slot: bool,
 ) -> Result<X86_64CompileResult, String> {
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
@@ -402,6 +430,7 @@ pub fn lower_module_with_bases_layout(
             &global_types,
             &mut all_pending_calls,
             is_interrupt,
+            runtime_error_slot,
         )?;
         all_pending_globals.extend(pending);
     }
@@ -880,6 +909,7 @@ fn lower_function(
     global_types: &HashMap<String, Typ>,
     pending_calls: &mut Vec<PendingCall>,
     is_interrupt: bool,
+    runtime_error_slot: bool,
 ) -> Result<Vec<PendingGlobal>, String> {
     // Validate return type and store for use in Return handling
     let _ret_is_struct = matches!(&func.ret, Typ::Named(_) | Typ::Array(_));
@@ -908,6 +938,7 @@ fn lower_function(
             .or_insert_with(|| typ.clone());
     }
     ctx.is_interrupt = is_interrupt;
+    ctx.runtime_error_slot = runtime_error_slot;
     ctx.ret_typ = func.ret.clone();
     // Pre-allocate locals for let bindings
     alloc_declared_locals(&mut ctx, &func.body)?;
@@ -1377,7 +1408,7 @@ fn lower_stmt(
             Ok(())
         }
         Stmt::Propagate => {
-            // `?`-style propagation checks the process-wide error flag set by
+            // `?`-style propagation checks the runtime-owned error flag set by
             // a fallible call.  On error, return the carried value through the
             // same epilogue as an explicit return; otherwise continue with the
             // following statement.
@@ -1742,33 +1773,35 @@ fn lower_bool_lit(emitter: &mut CodeEmitter, target_reg: u8, value: bool) -> Res
     Ok(())
 }
 
-static INRT_ERR_FLAG: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-static INRT_ERR_VAL: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-
-fn err_slot_addr(name: &str) -> Result<u64, String> {
-    let ptr = match name {
-        "__inrt_err_flag" => (&INRT_ERR_FLAG as *const std::sync::atomic::AtomicI64) as u64,
-        "__inrt_err_val" => (&INRT_ERR_VAL as *const std::sync::atomic::AtomicI64) as u64,
-        other => return Err(format!("x86_64-lower: unknown error slot `{other}`")),
-    };
-    Ok(ptr)
+fn error_slot_offset(ctx: &LowerCtx<'_>, name: &str) -> Result<i32, String> {
+    if !ctx.runtime_error_slot || x86_64::is_32bit() || ctx.is_interrupt {
+        return Err(format!(
+            "x86_64-lower: `{}` uses throw/try/propagate without a runtime-provided writable error slot",
+            ctx.fn_name
+        ));
+    }
+    match name {
+        "__inrt_err_flag" => Ok(0),
+        "__inrt_err_val" => Ok(8),
+        other => Err(format!("x86_64-lower: unknown error slot `{other}`")),
+    }
 }
 
 fn store_error_global(
     emitter: &mut CodeEmitter,
-    _ctx: &mut LowerCtx<'_>,
+    ctx: &mut LowerCtx<'_>,
     name: &str,
 ) -> Result<(), String> {
-    emitter.emit_insns(&x86_64::mov_abs_from_rax(err_slot_addr(name)?));
+    emitter.emit_insns(&x86_64::mov_m_r(15, error_slot_offset(ctx, name)?, RAX));
     Ok(())
 }
 
 fn load_error_global(
     emitter: &mut CodeEmitter,
-    _ctx: &mut LowerCtx<'_>,
+    ctx: &mut LowerCtx<'_>,
     name: &str,
 ) -> Result<(), String> {
-    emitter.emit_insns(&x86_64::mov_rax_from_abs(err_slot_addr(name)?));
+    emitter.emit_insns(&x86_64::mov_r_m(RAX, 15, error_slot_offset(ctx, name)?));
     Ok(())
 }
 
@@ -3432,8 +3465,14 @@ fn main() -> void { return 0 }
         let module = crate::in_lang_parse::parse_in_source(src).expect("parse");
         let result = lower_module(&module, "thrower").expect("lower");
         assert!(!result.code.is_empty());
-        // Process-wide error flag uses absolute RAX store (A3).
-        assert!(result.code.contains(&0xA3));
+        let store = x86_64::mov_m_r(15, 0, RAX);
+        assert!(result.code.windows(store.len()).any(|bytes| bytes == store));
+        assert!(
+            lower_native_module(&module, "thrower")
+                .err()
+                .expect("native artifacts must provide error storage")
+                .contains("runtime-provided writable error slot")
+        );
     }
 
     #[test]
@@ -3467,7 +3506,8 @@ fn main() -> void { return 0 }
         }]);
         let result = lower_module(&module, "propagate").expect("lower");
         assert!(result.code.windows(2).any(|window| window == [0x0F, 0x84]));
-        assert!(result.code.contains(&0xA1));
+        let load = x86_64::mov_r_m(RAX, 15, 0);
+        assert!(result.code.windows(load.len()).any(|bytes| bytes == load));
     }
 }
 

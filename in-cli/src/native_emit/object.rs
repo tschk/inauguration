@@ -15,7 +15,9 @@ use crate::native_emit::macho::{MachOImage, MachOLinkage, write_image};
 use crate::native_emit::target::AARCH64_NONE_TRIPLE;
 use crate::native_emit::thumb_lower;
 use crate::native_emit::wasm::{WASM32_UNKNOWN_TRIPLE, WasmModule, write_scalar_i32_module};
-use crate::native_emit::x86_64_lower::{X86_64_TRIPLE, lower_module, lower_module_with_bases};
+use crate::native_emit::x86_64_lower::{
+    X86_64_TRIPLE, lower_module_with_bases, lower_native_module,
+};
 
 pub const NATIVE_OBJECT_SUBSET: &str = "native-object-subset";
 
@@ -130,7 +132,7 @@ fn emit_x86_64_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeObj
     // recorded as R_X86_64_PLT32 relocations so `ld` binds them at link
     // time; every lowered function is exported.
     crate::native_emit::x86_64::set_32bit(false);
-    let result = match lower_module(request.module, request.entry) {
+    let result = match lower_native_module(request.module, request.entry) {
         Ok(result) => result,
         Err(_err) => return None,
     };
@@ -367,7 +369,7 @@ fn emit_x86_64_freestanding_object(
                 Err(e) => Err(e),
             }
         }
-        None => lower_module(request.module, request.entry),
+        None => lower_native_module(request.module, request.entry),
     };
     match lower_result {
         Ok(result) => {

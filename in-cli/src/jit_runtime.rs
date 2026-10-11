@@ -52,7 +52,7 @@ pub struct JitRuntime {
     /// Function dispatch table: name → entry point.
     functions: RwLock<HashMap<String, JitFunction>>,
     /// Writable page for error flag (byte at +0) and error value (ptr at +8).
-    /// Set by invoke() into X27 before calling JIT code. Throw/try use this.
+    /// Set by invoke() into X27 (AArch64) or R15 (x86_64) for throw/try.
     error_page: *mut u8,
 }
 
@@ -414,13 +414,19 @@ impl JitRuntime {
             }
             let mut values = [0_i64; 6];
             values[..args.len()].copy_from_slice(args);
-            type JitFn = unsafe extern "sysv64" fn(i64, i64, i64, i64, i64, i64) -> i64;
-            let f: JitFn = unsafe { std::mem::transmute(entry) };
-            Some(unsafe {
-                f(
-                    values[0], values[1], values[2], values[3], values[4], values[5],
-                )
-            })
+            let result: i64;
+            unsafe {
+                // Keep the saved stack pointer above the callee's frame and align its call.
+                std::arch::asm!(
+                    "mov r15, r10", "mov r10, rsp", "and rsp, -16", "sub rsp, 16",
+                    "mov [rsp], r10", "call r11", "mov rsp, [rsp]",
+                    in("r11") entry, in("r10") self.error_page as usize,
+                    in("rdi") values[0], in("rsi") values[1], in("rdx") values[2],
+                    in("rcx") values[3], in("r8") values[4], in("r9") values[5],
+                    lateout("rax") result, out("r15") _, clobber_abi("sysv64"),
+                );
+            }
+            Some(result)
         }
 
         #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -516,6 +522,57 @@ mod tests {
                 });
             }
         });
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn concurrent_runtime_errors_keep_their_own_values() {
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let barrier = Barrier::new(8);
+        let mismatches = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for worker in 1..=8_i64 {
+                let barrier = &barrier;
+                let mismatches = &mismatches;
+                scope.spawn(move || {
+                    let module = crate::in_lang_parse::parse_in_source("fn main(tag: Int) -> Int { try { throw tag; var n = 0; while n < 10000 { n = n + 1; } } catch error { return error; } return -1; }").unwrap();
+                    for profile in [crate::emit_profile::EmitProfile::Default, crate::emit_profile::EmitProfile::Lean, crate::emit_profile::EmitProfile::Harden] {
+                        let rt = runtime_for_module(&module, profile);
+                        for _ in 0..100 {
+                            barrier.wait();
+                            let result = unsafe { rt.invoke("main", &[worker]) };
+                            if result != Some(worker) { mismatches.fetch_add(1, Ordering::Relaxed); }
+                            barrier.wait();
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            mismatches.load(Ordering::Relaxed),
+            0,
+            "runtime error values crossed between invocations"
+        );
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn runtime_error_values_survive_nested_calls() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = "fn fail(tag: Int) -> Int { throw tag; return 0; }\nfn main(tag: Int) -> Int { try { fail(tag); } catch error { return error; } return -1; }";
+            assert_eq!(
+                invoke_source(source, profile, &[42]),
+                Some(42),
+                "{profile:?}"
+            );
+        }
     }
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -705,6 +762,15 @@ mod tests {
         profile: crate::emit_profile::EmitProfile,
         args: &[i64],
     ) -> Option<i64> {
+        let rt = runtime_for_module(module, profile);
+        unsafe { rt.invoke("main", args) }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn runtime_for_module(
+        module: &crate::core_ir::UnifiedModule,
+        profile: crate::emit_profile::EmitProfile,
+    ) -> JitRuntime {
         let _profile = crate::native_emit::antidecomp::ProfileGuard::new(profile);
         #[cfg(target_arch = "aarch64")]
         let result = crate::native_emit::lower::lower_module(
@@ -750,7 +816,7 @@ mod tests {
             &lowered.global_relocs,
         )
         .unwrap();
-        unsafe { rt.invoke("main", args) }
+        rt
     }
 
     #[test]
@@ -882,6 +948,42 @@ mod tests {
         }
         assert_eq!(result, 42);
         assert_eq!(preserved, 0x1234);
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn jit_entry_stack_obeys_sysv_alignment() {
+        // Return RSP modulo 16 before a generated prologue can change it.
+        let code = [0x48, 0x89, 0xE0, 0x48, 0x83, 0xE0, 0x0F, 0xC3];
+        let mut rt = JitRuntime::new();
+        rt.load(&code, &[("main".into(), 0, code.len() as u32)], &[])
+            .unwrap();
+        assert_eq!(unsafe { rt.invoke("main", &[]) }, Some(8));
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn jit_invocation_preserves_the_callers_error_register() {
+        #[inline(never)]
+        unsafe extern "sysv64" fn invoke_rt(rt: *const JitRuntime) -> i64 {
+            unsafe { (*rt).invoke("main", &[]).unwrap() }
+        }
+        let module =
+            crate::in_lang_parse::parse_in_source("fn main() -> Int { return 42; }").unwrap();
+        let rt = runtime_for_module(&module, crate::emit_profile::EmitProfile::Default);
+        let result: i64;
+        let preserved: i64;
+        unsafe {
+            std::arch::asm!(
+                "push r15", "mov r15, 0x12345678", "mov r10, rsp", "and rsp, -16",
+                "sub rsp, 16", "mov [rsp], r10", "call r11", "mov rsp, [rsp]",
+                "mov rdx, r15", "pop r15",
+                in("r11") invoke_rt as *const (), in("rdi") &rt as *const JitRuntime,
+                lateout("rax") result, lateout("rdx") preserved, clobber_abi("sysv64"),
+            );
+        }
+        assert_eq!(result, 42);
+        assert_eq!(preserved, 0x12345678);
     }
 
     #[test]
