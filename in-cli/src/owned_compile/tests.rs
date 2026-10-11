@@ -1183,6 +1183,52 @@ fn resolve_jit_entry_empty_name_uses_library_fallback() {
 }
 
 #[test]
+fn native_backends_reject_dynamic_call_targets() {
+    use crate::core_ir::{Expr, Stmt};
+    for callee in [
+        Expr::Field {
+            base: Box::new(Expr::IntLit(0)),
+            name: "method".into(),
+        },
+        Expr::Call {
+            callee: Box::new(Expr::Ident("make".into())),
+            args: vec![],
+        },
+        Expr::IntLit(42),
+    ] {
+        let mut module =
+            crate::in_lang_parse::parse_in_source("fn main() -> Int { return 0; }").unwrap();
+        if let Decl::Function { body, .. } = &mut module.decls[0] {
+            *body = vec![Stmt::Return(Some(Expr::Call {
+                callee: Box::new(callee),
+                args: vec![],
+            }))];
+        }
+        for result in [
+            crate::native_emit::lower::lower_module(&module, "main", NativeLinkage::Executable)
+                .map(|_| ()),
+            crate::native_emit::x86_64_lower::lower_module(&module, "main").map(|_| ()),
+        ] {
+            let error = result.expect_err("dynamic call cannot silently return zero");
+            assert!(error.contains("dynamic call target unsupported"), "{error}");
+        }
+        if native_backend::native_subset_host_available() {
+            let request = default_request(
+                PathBuf::from("dynamic-call.in"),
+                CompileTarget::Jit,
+                Some("main"),
+                None,
+            );
+            let error = super::jit::compile_jit(&module, "App", &request)
+                .err()
+                .expect("dynamic call must fail");
+            assert!(error.starts_with("jit-lowering-failed:"), "{error}");
+            assert!(error.contains("dynamic call target unsupported"), "{error}");
+        }
+    }
+}
+
+#[test]
 fn owned_jit_reports_uncaught_errors_before_decoding_results() {
     if !native_backend::native_subset_host_available() {
         return;

@@ -2624,9 +2624,10 @@ fn lower_call_expr(
     let target_name = match callee {
         Expr::Ident(name) => name.clone(),
         _ => {
-            // Non-Ident callee: emit 0 for return
-            emitter.emit_insns(&x86_64::load_i64(target_reg, 0));
-            return Ok(());
+            return Err(format!(
+                "x86_64-lower: dynamic call target unsupported in `{}`",
+                ctx.fn_name
+            ));
         }
     };
 
