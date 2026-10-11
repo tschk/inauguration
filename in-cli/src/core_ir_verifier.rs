@@ -397,7 +397,7 @@ fn check_stmt(
             check_expr(fn_name, expr, facts, env, call_edges)?;
             let expr_typ = expr_type(expr, facts, env);
             if let (Some(expected), Some(actual)) = (typ, expr_typ.as_ref())
-                && expected != actual
+                && !expected.compatible_with(actual)
             {
                 return Err((
                     "type-mismatch".to_string(),
@@ -442,7 +442,7 @@ fn check_stmt(
                     .or_else(|| facts.globals.get(name.as_str()).map(|global| global.typ))
                     .expect("assignment target was resolved")
                     .clone();
-                if expected_typ != expr_typ {
+                if !expected_typ.compatible_with(&expr_typ) {
                     return Err((
                         "type-mismatch".to_string(),
                         format!(
@@ -554,7 +554,22 @@ fn check_stmt(
             }
             Ok(())
         }
-        Stmt::Throw(_) | Stmt::Try { .. } | Stmt::Propagate => Ok(()),
+        Stmt::Throw(expr) => check_expr(fn_name, expr, facts, env, call_edges),
+        Stmt::Try { body, catches } => {
+            check_stmts(fn_name, body, facts, ret, &mut env.clone(), call_edges)?;
+            for catch in catches {
+                let mut catch_env = env.clone();
+                let pattern = crate::core_ir::MatchPattern::parse(&catch.pattern)
+                    .map_err(|error| ("invalid-catch-pattern".into(), error))?;
+                // CatchArm does not declare the payload type.
+                if let crate::core_ir::MatchPattern::IdentPat(name) = pattern {
+                    catch_env.insert(name, Typ::Named("Any".into()));
+                }
+                check_stmts(fn_name, &catch.body, facts, ret, &mut catch_env, call_edges)?;
+            }
+            Ok(())
+        }
+        Stmt::Propagate => Ok(()),
     }
 }
 
@@ -643,12 +658,12 @@ fn check_expr(
             Ok(())
         }
         Expr::ArrayLit(items) => {
-            let mut expected = None;
+            let mut expected: Option<Typ> = None;
             for item in items {
                 check_expr(fn_name, item, facts, env, call_edges)?;
                 if let Some(item_typ) = expr_type(item, facts, env) {
                     if let Some(expected_typ) = &expected {
-                        if expected_typ != &item_typ {
+                        if !expected_typ.compatible_with(&item_typ) {
                             return Err((
                                 "array-element-type-mismatch".to_string(),
                                 format!(
@@ -707,7 +722,7 @@ fn check_expr(
                     for ((param_name, param_typ), arg) in sig.params.iter().zip(args) {
                         check_expr(fn_name, arg, facts, env, call_edges)?;
                         if let Some(arg_typ) = expr_type(arg, facts, env)
-                            && param_typ != &arg_typ
+                            && !param_typ.compatible_with(&arg_typ)
                         {
                             // Allow String→Int/pointer coercion for string literals
                             let param_is_ptr = matches!(param_typ, Typ::Named(n) if n.ends_with("*") || n == "char" || n == "void");
@@ -776,7 +791,7 @@ fn check_struct_init(
             .iter()
             .find(|(schema_field, _)| schema_field == field)
             && let Some(actual) = expr_type(expr, facts, env)
-            && expected != &actual
+            && !expected.compatible_with(&actual)
         {
             return Err((
                 "type-mismatch".to_string(),
@@ -909,7 +924,7 @@ fn require_type(
     env: &HashMap<String, Typ>,
 ) -> Result<(), (String, String)> {
     if let Some(actual) = expr_type(expr, facts, env)
-        && &actual != expected
+        && !expected.compatible_with(&actual)
     {
         return Err((
             "type-mismatch".to_string(),
@@ -1028,6 +1043,165 @@ mod tests {
             &default_options(),
         );
         assert!(!report.ok, "a first declaration cannot initialize itself");
+    }
+
+    #[test]
+    fn exception_bodies_preserve_statement_checks() {
+        use crate::core_ir::CatchArm;
+        for (bad, reason) in [
+            (
+                Stmt::Assign("value".into(), Expr::IntLit(42)),
+                "immutable-global",
+            ),
+            (
+                Stmt::Expr(Expr::Ident("missing".into())),
+                "unresolved-symbol",
+            ),
+            (
+                Stmt::Return(Some(Expr::StringLit("wrong".into()))),
+                "return-type-mismatch",
+            ),
+            (
+                Stmt::Let(
+                    "local".into(),
+                    Some(Typ::Int),
+                    Expr::StringLit("wrong".into()),
+                ),
+                "type-mismatch",
+            ),
+        ] {
+            for in_catch in [false, true] {
+                let (body, catch_body) = if in_catch {
+                    (vec![], vec![bad.clone()])
+                } else {
+                    (vec![bad.clone()], vec![])
+                };
+                let report = verify_module(
+                    &module(vec![
+                        Decl::Global {
+                            name: "value".into(),
+                            typ: Typ::Int,
+                            init: Some(Box::new(Expr::IntLit(0))),
+                            mutable: false,
+                        },
+                        function_with_params(
+                            "main",
+                            vec![],
+                            Typ::Int,
+                            vec![Stmt::Try {
+                                body,
+                                catches: vec![CatchArm {
+                                    pattern: "error".into(),
+                                    body: catch_body,
+                                }],
+                            }],
+                        ),
+                    ]),
+                    &default_options(),
+                );
+                assert!(!report.ok, "{in_catch}: {bad:?}: {report:?}");
+                assert_eq!(report.reason_code.as_deref(), Some(reason));
+            }
+        }
+        let report = verify_module(
+            &module(vec![function_with_params(
+                "main",
+                vec![],
+                Typ::Int,
+                vec![Stmt::Throw(Expr::Ident("missing".into()))],
+            )]),
+            &default_options(),
+        );
+        assert!(!report.ok);
+        assert_eq!(report.reason_code.as_deref(), Some("unresolved-symbol"));
+    }
+
+    #[test]
+    fn caught_payloads_keep_unknown_types_until_consumed() {
+        use crate::core_ir::{CatchArm, FloatVal};
+        for (typ, value) in [
+            (Typ::Int, Expr::IntLit(7)),
+            (Typ::Bool, Expr::BoolLit(true)),
+            (Typ::Float, Expr::FloatLit(FloatVal(3.75))),
+            (Typ::String, Expr::StringLit("value".into())),
+        ] {
+            let report = verify_module(
+                &module(vec![function_with_ret(
+                    "main",
+                    typ.clone(),
+                    vec![Stmt::Try {
+                        body: vec![Stmt::Throw(value)],
+                        catches: vec![CatchArm {
+                            pattern: "error".into(),
+                            body: vec![
+                                Stmt::Let("alias".into(), Some(typ), Expr::Ident("error".into())),
+                                Stmt::Return(Some(Expr::Ident("alias".into()))),
+                            ],
+                        }],
+                    }],
+                )]),
+                &default_options(),
+            );
+            assert!(report.ok, "{report:?}");
+        }
+    }
+
+    #[test]
+    fn exception_bindings_and_call_edges_keep_their_scope() {
+        use crate::core_ir::CatchArm;
+        let caught = Stmt::Try {
+            body: vec![
+                Stmt::Let("local".into(), Some(Typ::Int), Expr::IntLit(7)),
+                Stmt::Throw(Expr::Ident("local".into())),
+            ],
+            catches: vec![CatchArm {
+                pattern: "error".into(),
+                body: vec![Stmt::Return(Some(Expr::Call {
+                    callee: Box::new(Expr::Ident("helper".into())),
+                    args: vec![Expr::Ident("error".into())],
+                }))],
+            }],
+        };
+        let helper = function_with_params(
+            "helper",
+            vec![("value".into(), Typ::Int)],
+            Typ::Int,
+            vec![Stmt::Return(Some(Expr::Ident("value".into())))],
+        );
+        let report = verify_module(
+            &module(vec![
+                helper.clone(),
+                function_with_params(
+                    "main",
+                    vec![],
+                    Typ::Int,
+                    vec![caught.clone(), Stmt::Return(Some(Expr::IntLit(0)))],
+                ),
+            ]),
+            &default_options(),
+        );
+        assert!(report.ok, "{report:?}");
+        assert!(
+            report
+                .call_edges
+                .contains(&("main".into(), "helper".into()))
+        );
+        for name in ["local", "error"] {
+            let report = verify_module(
+                &module(vec![
+                    helper.clone(),
+                    function_with_params(
+                        "main",
+                        vec![],
+                        Typ::Int,
+                        vec![caught.clone(), Stmt::Return(Some(Expr::Ident(name.into())))],
+                    ),
+                ]),
+                &default_options(),
+            );
+            assert!(!report.ok, "binding leaked: {name}: {report:?}");
+            assert_eq!(report.reason_code.as_deref(), Some("unresolved-symbol"));
+        }
     }
 
     #[test]

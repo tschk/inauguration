@@ -1206,6 +1206,68 @@ fn native_backends_reject_untyped_string_and_aggregate_catches() {
 }
 
 #[test]
+fn owned_jit_preserves_caught_scalar_payload_types() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (typ, value, expected) in [
+        ("Int", "7", EvalValue::Int(7)),
+        ("Bool", "true", EvalValue::Bool(true)),
+        ("Float", "3.75", EvalValue::Float(3.75)),
+        ("String", "\"value\"", EvalValue::Str("value".into())),
+    ] {
+        let source = temp_path("catch-payload.in");
+        fs::write(
+            &source,
+            format!(
+                "fn main() -> {typ} {{ try {{ throw {value}; }} catch error {{ return error; }} }}"
+            ),
+        )
+        .unwrap();
+        let report = compile_owned(&default_request(
+            source.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(source).unwrap();
+        assert!(report.success, "{typ}: {report:?}");
+        assert_eq!(report.eval_result, Some(expected), "{typ}");
+    }
+}
+
+#[test]
+fn owned_jit_rejects_constant_writes_in_exception_bodies() {
+    for body in [
+        "try { count = 7; } catch error { return 9; } return count;",
+        "try { throw 42; } catch error { count = 7; } return count;",
+    ] {
+        let source = temp_path("try-constant.in");
+        fs::write(
+            &source,
+            format!("const count: Int = 0;\nfn main() -> Int {{ {body} }}"),
+        )
+        .unwrap();
+        let report = compile_owned(&default_request(
+            source.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(source).unwrap();
+        assert!(!report.success, "{body}: {report:?}");
+        assert!(
+            report
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("cannot assign to constant global")),
+            "{body}: {report:?}"
+        );
+        assert_eq!(report.eval_result, None);
+    }
+}
+
+#[test]
 fn owned_jit_selects_catches_and_reports_unmatched_errors() {
     if !native_backend::native_subset_host_available() {
         return;
