@@ -208,7 +208,7 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("env-set", IntrinsicRet::Void),
     ("env-temp-dir", IntrinsicRet::String),
     ("env-current-dir", IntrinsicRet::String),
-    ("process-run", IntrinsicRet::Int),
+    ("process-run", IntrinsicRet::String),
     ("path-join", IntrinsicRet::String),
     ("path-dirname", IntrinsicRet::String),
     ("path-basename", IntrinsicRet::String),
@@ -298,7 +298,7 @@ fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
         "str-concat" | "str-eq" | "str-contains" | "str-starts-with" | "str-ends-with"
         | "str-index-of" => &[Typ::String, Typ::String],
         "str-len" | "str-trim" | "str-split-lines" | "str-split-spaces" | "str-tokenize-expr"
-        | "str-to-int" | "str-is-int" | "print" => &[Typ::String],
+        | "str-to-int" | "str-is-int" | "print" | "process-run" => &[Typ::String],
         "str-slice" | "str-substr" => &[Typ::String, Typ::Int, Typ::Int],
         "print-int" | "to-string" => &[Typ::Int],
         _ => return None,
@@ -1801,6 +1801,8 @@ mod tests {
         for (expression, reason) in [
             ("str-eq(42, 0)", Some("type-mismatch")),
             ("str_eq(42, 0)", Some("type-mismatch")),
+            ("process_run(0)", Some("type-mismatch")),
+            ("process-run()", Some("call-arity-mismatch")),
             ("str_concat(\"a\")", Some("call-arity-mismatch")),
             ("__inrt_str_eq(false, \"a\")", Some("type-mismatch")),
             ("str-concat(\"a\")", Some("call-arity-mismatch")),

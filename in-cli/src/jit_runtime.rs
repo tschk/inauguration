@@ -742,6 +742,8 @@ mod tests {
                 "str-eq(\"abc\", str-concat(\"ab\", \"c\"))",
                 "str-eq(str-concat(\"ab\", \"c\"), str-concat(\"a\", \"bc\"))",
                 "str_eq(str_concat(\"ab\", \"c\"), str_concat(\"a\", \"bc\"))",
+                "str-eq(process-run(\"printf abc\"), \"abc\")",
+                "str_eq(process_run(\"printf abc\"), \"abc\")",
             ] {
                 let source = format!("fn main() -> Bool {{ return {expression}; }}");
                 let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();

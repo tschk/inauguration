@@ -77,45 +77,47 @@ fn native_target_reports_host_status() {
 }
 
 #[test]
-fn jit_executes_snake_case_stdlib_process_run() {
-    let source_path = temp_path("stdlib-process-run.in");
-    fs::write(
-        &source_path,
-        "import std.process;\ncapability process.spawn;\nfn main() -> String { return process_run(\"true\"); }\n",
-    )
-    .unwrap();
-
-    let report = compile_owned(&default_request(
-        source_path.clone(),
-        CompileTarget::Jit,
-        Some("main"),
-        None,
-    ));
-
-    if !crate::native_emit::lower::host_supports_native_subset() {
-        assert!(!report.success, "{report:?}");
-        assert!(
-            report
-                .error
-                .as_deref()
-                .is_some_and(|error| error.starts_with("jit-host-unsupported:")),
-            "{report:?}"
-        );
+fn jit_executes_stdlib_process_run_with_string_result() {
+    for (imports, name) in [
+        ("", "process-run"),
+        ("", "process_run"),
+        (
+            "import std.process;\ncapability process.spawn;\n",
+            "process-run",
+        ),
+        (
+            "import std.process;\ncapability process.spawn;\n",
+            "process_run",
+        ),
+    ] {
+        let source_path = temp_path("stdlib-process-run.in");
+        fs::write(
+            &source_path,
+            format!("{imports}fn main() -> String {{ return {name}(\"printf hello\"); }}\n"),
+        )
+        .unwrap();
+        let report = compile_owned(&default_request(
+            source_path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
         fs::remove_file(source_path).unwrap();
-        return;
+        if !crate::native_emit::lower::host_supports_native_subset() {
+            assert!(!report.success, "{report:?}");
+            assert!(
+                report
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("jit-host-unsupported:")),
+                "{report:?}"
+            );
+            continue;
+        }
+        assert!(report.success, "{imports}/{name}: {report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+        assert_eq!(report.eval_result, Some(EvalValue::Str("hello".into())));
     }
-
-    assert!(report.success, "{report:?}");
-    assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
-    // On some environments (like CI runner where `true` has no output), `instring_from_bytes` will return None for empty strings,
-    // or Some("") depending on initialization details. We accept both here since the primary goal is executing `process_run("true")`.
-    let eval_res = match &report.eval_result {
-        Some(crate::owned_compile::EvalValue::Str(value)) => Some(value.as_str()),
-        _ => None,
-    };
-    assert!(eval_res == Some("") || eval_res.is_none());
-
-    fs::remove_file(source_path).unwrap();
 }
 
 #[test]
