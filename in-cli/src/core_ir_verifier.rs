@@ -139,7 +139,12 @@ fn fail_report(
 struct ModuleFacts<'a> {
     functions: HashMap<&'a str, FunctionSig<'a>>,
     structs: HashMap<&'a str, &'a [(String, Typ)]>,
-    globals: HashMap<&'a str, &'a Typ>,
+    globals: HashMap<&'a str, GlobalSig<'a>>,
+}
+
+struct GlobalSig<'a> {
+    typ: &'a Typ,
+    mutable: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -326,9 +331,17 @@ fn collect_module_facts(module: &UnifiedModule) -> Result<ModuleFacts<'_>, (Stri
             }
             Decl::Interface { .. } => {}
             Decl::Component { .. } => {}
-            Decl::Global { name, typ, .. } => {
+            Decl::Global {
+                name, typ, mutable, ..
+            } => {
                 check_and_insert_top_level(&mut top_level, name.as_str())?;
-                globals.insert(name.as_str(), typ);
+                globals.insert(
+                    name.as_str(),
+                    GlobalSig {
+                        typ,
+                        mutable: *mutable,
+                    },
+                );
             }
         }
     }
@@ -415,11 +428,20 @@ fn check_stmt(
                     format!("unresolved assignment `{name}` in `{fn_name}`"),
                 ));
             };
+            if !env.contains_key(name)
+                && let Some(global) = facts.globals.get(name.as_str())
+                && !global.mutable
+            {
+                return Err((
+                    "immutable-global".into(),
+                    format!("cannot assign to constant global `{name}` in `{fn_name}`"),
+                ));
+            }
             check_expr(fn_name, expr, facts, env, call_edges)?;
             if let Some(expr_typ) = expr_type(expr, facts, env) {
                 let expected_typ = env
                     .get(name)
-                    .or_else(|| facts.globals.get(name.as_str()).copied())
+                    .or_else(|| facts.globals.get(name.as_str()).map(|global| global.typ))
                     .expect("assignment target was resolved")
                     .clone();
                 if expected_typ != expr_typ {
@@ -789,7 +811,12 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
             .get(name)
             .cloned()
             .or_else(|| function_sig(facts, name).map(|sig| sig.ret.clone()))
-            .or_else(|| facts.globals.get(name.as_str()).map(|typ| (*typ).clone())),
+            .or_else(|| {
+                facts
+                    .globals
+                    .get(name.as_str())
+                    .map(|global| global.typ.clone())
+            }),
         Expr::StructInit { name, .. } => Some(Typ::Named(name.clone())),
         Expr::Field { base, name, .. } => {
             if let Some(Typ::Named(struct_name)) = expr_type(base, facts, env)
@@ -973,6 +1000,41 @@ mod tests {
         VerifyOptions {
             entry: None,
             require_entry: false,
+        }
+    }
+
+    #[test]
+    fn global_assignments_respect_mutability_and_local_shadowing() {
+        for mutable in [false, true] {
+            for shadowed in [0, 1, 2] {
+                let params = if shadowed == 1 {
+                    vec![("value".into(), Typ::Int)]
+                } else {
+                    vec![]
+                };
+                let mut body = vec![];
+                if shadowed == 2 {
+                    body.push(Stmt::Let("value".into(), Some(Typ::Int), Expr::IntLit(0)));
+                }
+                body.push(Stmt::Assign("value".into(), Expr::IntLit(42)));
+                body.push(Stmt::Return(Some(Expr::Ident("value".into()))));
+                let report = verify_module(
+                    &module(vec![
+                        Decl::Global {
+                            name: "value".into(),
+                            typ: Typ::Int,
+                            init: Some(Box::new(Expr::IntLit(1))),
+                            mutable,
+                        },
+                        function_with_params("main", params, Typ::Int, body),
+                    ]),
+                    &default_options(),
+                );
+                assert_eq!(report.ok, mutable || shadowed != 0, "{report:?}");
+                if !report.ok {
+                    assert_eq!(report.reason_code.as_deref(), Some("immutable-global"));
+                }
+            }
         }
     }
 
