@@ -1,0 +1,10 @@
+// @expect parse: ok
+// @expect bytecode: executes
+// @expect result: 7
+// @expect has-function: main
+
+fn main() -> Int {
+    let value = str_concat("ab", "cd");
+    if str_eq(value, "abcd") { return 7; }
+    return 1;
+}

@@ -247,7 +247,11 @@ pub fn is_intrinsic(name: &str) -> bool {
 /// lowering emits directly (`__inrt_str_eq` and friends): the lowering accepts
 /// those by name, so verification has to accept them too.
 fn intrinsic_ret(name: &str) -> Option<IntrinsicRet> {
-    if let Some((_, ret)) = INTRINSICS.iter().find(|(intrinsic, _)| *intrinsic == name) {
+    let public_name = name.replace('_', "-");
+    if let Some((_, ret)) = INTRINSICS
+        .iter()
+        .find(|(intrinsic, _)| *intrinsic == public_name)
+    {
         return Some(*ret);
     }
     match name {
@@ -1796,6 +1800,8 @@ mod tests {
     fn checks_scalar_intrinsic_argument_types_and_arity() {
         for (expression, reason) in [
             ("str-eq(42, 0)", Some("type-mismatch")),
+            ("str_eq(42, 0)", Some("type-mismatch")),
+            ("str_concat(\"a\")", Some("call-arity-mismatch")),
             ("__inrt_str_eq(false, \"a\")", Some("type-mismatch")),
             ("str-concat(\"a\")", Some("call-arity-mismatch")),
             (
@@ -1803,6 +1809,8 @@ mod tests {
                 Some("type-mismatch"),
             ),
             ("str-eq(\"a\", \"a\")", None),
+            ("str_eq(\"a\", \"a\")", None),
+            ("str_concat(\"a\", \"b\")", None),
             ("__inrt_str_substr(\"abc\", 0, 1)", None),
         ] {
             let source = format!("fn main() -> Int {{ let value = {expression}; return 0; }}");

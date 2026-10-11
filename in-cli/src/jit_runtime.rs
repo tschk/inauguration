@@ -741,9 +741,12 @@ mod tests {
                 "str-eq(str-concat(\"ab\", \"c\"), \"abc\")",
                 "str-eq(\"abc\", str-concat(\"ab\", \"c\"))",
                 "str-eq(str-concat(\"ab\", \"c\"), str-concat(\"a\", \"bc\"))",
+                "str_eq(str_concat(\"ab\", \"c\"), str_concat(\"a\", \"bc\"))",
             ] {
                 let source = format!("fn main() -> Bool {{ return {expression}; }}");
                 let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                let verification = crate::core_ir_verifier::verify_for_entry(&module, "main");
+                assert!(verification.ok, "{verification:?}");
                 assert_eq!(
                     invoke_module(&module, profile, &[]),
                     Some(1),
