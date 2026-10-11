@@ -372,7 +372,7 @@ fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: 
 }
 
 /// Fold a straight-line let* + return body into a single expression for inlining.
-fn fold_body_to_expr(body: &[Stmt]) -> Option<Expr> {
+fn fold_body_to_expr(body: &[Stmt], params: &[(String, Typ)]) -> Option<Expr> {
     if body.is_empty() {
         return None;
     }
@@ -389,7 +389,15 @@ fn fold_body_to_expr(body: &[Stmt]) -> Option<Expr> {
     match body.last() {
         // ponytail: effectful returns need parameter/local snapshots before substitution is safe.
         Some(Stmt::Return(Some(ret))) if !expr_has_call(ret) => {
-            Some(replace_in_expr(ret.clone(), &env))
+            let ret = replace_in_expr(ret.clone(), &env);
+            let mut bound = true;
+            walk_expr(&ret, &mut |e| match e {
+                Expr::Ident(name) => bound &= params.iter().any(|(param, _)| param == name),
+                // Free identifiers and closure captures require scope-aware inlining.
+                Expr::Closure { .. } => bound = false,
+                _ => {}
+            });
+            bound.then_some(ret)
         }
         _ => None,
     }
@@ -458,7 +466,7 @@ fn inline_in_expr_limited(
             };
             if cand.contains(&name) {
                 if let Some(Decl::Function { body, params, .. }) = fns.get(&name) {
-                    if let Some(ret) = fold_body_to_expr(body) {
+                    if let Some(ret) = fold_body_to_expr(body, params) {
                         let mut sub = HashMap::new();
                         for (i, (p, _)) in params.iter().enumerate() {
                             if i < args.len() {
@@ -487,7 +495,7 @@ fn fold_call_ret(e: Expr, cand: &[String], fns: &HashMap<String, Decl>) -> Expr 
         if let Expr::Ident(name) = callee.as_ref() {
             if cand.contains(name) {
                 if let Some(Decl::Function { body, params, .. }) = fns.get(name) {
-                    if let Some(ret) = fold_body_to_expr(body) {
+                    if let Some(ret) = fold_body_to_expr(body, params) {
                         let mut sub = HashMap::new();
                         for (i, (p, _)) in params.iter().enumerate() {
                             if i < args.len() {

@@ -1238,6 +1238,16 @@ fn inlining_preserves_argument_call_evaluation() {
                 "count = 1; helper(); return count;",
                 1,
             ),
+            (
+                "var shared: Int = 42;\nfn read() -> Int { return shared; }",
+                "let shared = 7; return read();",
+                42,
+            ),
+            (
+                "var shared: Int = 42;\nfn read() -> Int { let copy = shared; return copy; }",
+                "let shared = 7; return read();",
+                42,
+            ),
         ] {
             let source = temp_path("inline-argument-effects.in");
             fs::write(&source, format!("var count: Int = 0;\nfn next() -> Int {{ count = count + 1; return count; }}\n{callee}\nfn main() -> Int {{ {main} }}\n")).unwrap();
