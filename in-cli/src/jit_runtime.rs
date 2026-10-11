@@ -13,6 +13,7 @@
 //! dispatch table. Designed to eventually compile itself.
 
 use std::collections::HashMap;
+#[cfg(not(windows))]
 use std::ffi::c_void;
 use std::sync::RwLock;
 
@@ -44,19 +45,19 @@ unsafe impl Sync for JitFunction {}
 /// of the entire module, then all functions become callable.
 pub struct JitRuntime {
     /// Mapped executable pages (the code arena).
-    code_pages: Vec<CodePage>,
+    code_pages: Vec<MappedPage>,
     /// Mapped read-write pages holding the lowered data section (globals).
     /// Kept alive for the lifetime of the runtime so executed code can
     /// read and write global slots.
-    data_pages: Vec<(*mut u8, usize)>,
+    data_pages: Vec<MappedPage>,
     /// Function dispatch table: name → entry point.
     functions: RwLock<HashMap<String, JitFunction>>,
     /// Writable page for error flag (byte at +0) and error value (ptr at +8).
     /// Set by invoke() into X27 (AArch64) or R15 (x86_64) for throw/try.
-    error_page: *mut u8,
+    error_page: Option<MappedPage>,
 }
 
-struct CodePage {
+struct MappedPage {
     ptr: *mut u8,
     size: usize,
     /// Bytes written; used for icache flush on macOS and AArch64 Linux.
@@ -73,9 +74,8 @@ struct CodePage {
     used: usize,
 }
 
-// SAFETY: CodePage owns mmap'd memory that is valid until dropped.
-unsafe impl Send for CodePage {}
-unsafe impl Sync for CodePage {}
+// SAFETY: each mapping is exclusively owned and remains valid when moved.
+unsafe impl Send for MappedPage {}
 
 #[cfg(not(windows))]
 fn alloc_executable_pages(size: usize) -> Option<*mut u8> {
@@ -97,6 +97,21 @@ fn alloc_executable_pages(size: usize) -> Option<*mut u8> {
         return None;
     }
     Some(ptr as *mut u8)
+}
+
+#[cfg(not(windows))]
+fn alloc_writable_pages(size: usize) -> Option<*mut u8> {
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        )
+    };
+    (ptr != libc::MAP_FAILED).then_some(ptr as *mut u8)
 }
 
 #[cfg(not(windows))]
@@ -128,9 +143,18 @@ fn free_pages(ptr: *mut u8, size: usize) {
 
 #[cfg(windows)]
 fn alloc_executable_pages(size: usize) -> Option<*mut u8> {
+    alloc_windows_pages(size, 0x40) // PAGE_EXECUTE_READWRITE
+}
+
+#[cfg(windows)]
+fn alloc_writable_pages(size: usize) -> Option<*mut u8> {
+    alloc_windows_pages(size, 0x04) // PAGE_READWRITE
+}
+
+#[cfg(windows)]
+fn alloc_windows_pages(size: usize, protection: u32) -> Option<*mut u8> {
     const MEM_RESERVE: u32 = 0x2000;
     const MEM_COMMIT: u32 = 0x1000;
-    const PAGE_EXECUTE_READWRITE: u32 = 0x40;
     unsafe extern "system" {
         fn VirtualAlloc(
             lp_address: *mut std::ffi::c_void,
@@ -144,7 +168,7 @@ fn alloc_executable_pages(size: usize) -> Option<*mut u8> {
             std::ptr::null_mut(),
             size,
             MEM_RESERVE | MEM_COMMIT,
-            PAGE_EXECUTE_READWRITE,
+            protection,
         )
     };
     if ptr.is_null() {
@@ -172,7 +196,15 @@ fn free_pages(ptr: *mut u8, _size: usize) {
     }
 }
 
-impl CodePage {
+impl MappedPage {
+    fn writable(size: usize) -> Option<Self> {
+        Some(Self {
+            ptr: alloc_writable_pages(size)?,
+            size,
+            used: 0,
+        })
+    }
+
     fn new(min_size: usize) -> Option<Self> {
         let page_size = 0x4000; // 16KB typical for ARM64, works for x86_64 too
         let size = min_size.max(page_size).next_multiple_of(page_size);
@@ -197,7 +229,7 @@ impl CodePage {
             target_arch = "aarch64"
         ))]
         unsafe {
-            extern "C" {
+            unsafe extern "C" {
                 fn __clear_cache(start: *const u8, end: *const u8);
             }
             __clear_cache(self.ptr, self.ptr.add(self.used));
@@ -206,7 +238,7 @@ impl CodePage {
     }
 }
 
-impl Drop for CodePage {
+impl Drop for MappedPage {
     fn drop(&mut self) {
         free_pages(self.ptr, self.size);
     }
@@ -224,21 +256,7 @@ impl JitRuntime {
         crate::native_emit::native_link::bootstrap_jit_native();
         // Allocate a small writable page for error flag/value.
         // Not MAP_JIT — just RW for throw/try/catch writes.
-        let error_page = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                64,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        let error_page = if error_page == libc::MAP_FAILED {
-            std::ptr::null_mut()
-        } else {
-            error_page as *mut u8
-        };
+        let error_page = MappedPage::writable(64);
         Self {
             code_pages: Vec::new(),
             data_pages: Vec::new(),
@@ -278,8 +296,11 @@ impl JitRuntime {
         data: &[u8],
         global_relocs: &[(u32, u64)],
     ) -> Result<(), String> {
+        if self.error_page.is_none() {
+            return Err("jit: error page allocation failed".into());
+        }
         // Allocate a code page large enough
-        let mut page = CodePage::new(code.len()).ok_or_else(|| "jit: mmap failed".to_string())?;
+        let mut page = MappedPage::new(code.len()).ok_or_else(|| "jit: mmap failed".to_string())?;
         page.used = code.len();
 
         let dest = page.ptr;
@@ -322,26 +343,16 @@ impl JitRuntime {
         // Map the data section (globals) read-write and rebase every global
         // reference to the mapped address. Without this, executed code would
         // touch the lowered data_base (0x200000) directly, which is unmapped.
+        let mut mapped_data = None;
         if !data.is_empty() {
             let rounded = data.len().next_multiple_of(0x1000);
-            let map = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    rounded,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANON,
-                    -1,
-                    0,
-                )
-            };
-            if map == libc::MAP_FAILED {
-                return Err("jit: data section mmap failed".to_string());
-            }
-            let data_ptr = map as *mut u8;
+            let data_page = MappedPage::writable(rounded)
+                .ok_or_else(|| "jit: data section allocation failed".to_string())?;
+            let data_ptr = data_page.ptr;
             unsafe {
                 std::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr, data.len());
             }
-            self.data_pages.push((data_ptr, rounded));
+            mapped_data = Some(data_page);
             let actual_data_base = data_ptr as u64;
             for &(site, offset) in global_relocs {
                 let site = site as usize;
@@ -358,6 +369,9 @@ impl JitRuntime {
         page.finalize()?;
         let base = page.ptr;
         self.code_pages.push(page);
+        if let Some(data_page) = mapped_data {
+            self.data_pages.push(data_page);
+        }
         let mut funcs = self.functions.write().unwrap();
         for (name, offset, size) in function_offsets {
             funcs.insert(
@@ -378,11 +392,13 @@ impl JitRuntime {
     ///
     /// # Safety
     /// The function must have been loaded via `load()`. The caller is
-    /// responsible for ensuring the function signature matches the arguments.
+    /// responsible for ensuring the function signature matches the arguments
+    /// and for invoking a runtime exclusively while its writable state is in use.
     pub unsafe fn invoke(&self, name: &str, args: &[i64]) -> Option<i64> {
         let funcs = self.functions.read().unwrap();
         let func = funcs.get(name)?;
         let entry = func.entry as *const ();
+        let error_page = self.error_page.as_ref()?.ptr;
 
         #[cfg(target_arch = "aarch64")]
         {
@@ -396,7 +412,7 @@ impl JitRuntime {
             unsafe {
                 std::arch::asm!(
                     "mov x27, x17", "blr x16",
-                    in("x16") entry, in("x17") self.error_page as usize,
+                    in("x16") entry, in("x17") error_page as usize,
                     in("x0") values[0], in("x1") values[1], in("x2") values[2], in("x3") values[3],
                     in("x4") values[4], in("x5") values[5], in("x6") values[6], in("x7") values[7],
                     lateout("x0") result, out("x27") _, clobber_abi("C"),
@@ -420,7 +436,7 @@ impl JitRuntime {
                 std::arch::asm!(
                     "mov r15, r10", "mov r10, rsp", "and rsp, -16", "sub rsp, 16",
                     "mov [rsp], r10", "call r11", "mov rsp, [rsp]",
-                    in("r11") entry, in("r10") self.error_page as usize,
+                    in("r11") entry, in("r10") error_page as usize,
                     in("rdi") values[0], in("rsi") values[1], in("rdx") values[2],
                     in("rcx") values[3], in("r8") values[4], in("r9") values[5],
                     lateout("rax") result, out("r15") _, clobber_abi("sysv64"),
@@ -456,24 +472,64 @@ impl JitRuntime {
     }
 }
 
-impl Drop for JitRuntime {
-    fn drop(&mut self) {
-        if !self.error_page.is_null() {
-            unsafe {
-                libc::munmap(self.error_page as *mut c_void, 64);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn missing_error_page_refuses_loading_before_publishing_functions() {
+        let mut rt = JitRuntime::new();
+        rt.error_page = None;
+        assert_eq!(
+            rt.load(&[], &[], &[]),
+            Err("jit: error page allocation failed".into())
+        );
+        assert_eq!(rt.function_count(), 0);
+        assert!(rt.code_pages.is_empty());
+        assert!(rt.data_pages.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_pages_are_released_after_runtime_drop() {
+        const CHILD: &str = "IN_TEST_MAPPED_PAGE_DROP_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Isolate the address check from parallel tests that could reuse freed mappings.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "jit_runtime::tests::writable_pages_are_released_after_runtime_drop",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let mut rt = JitRuntime::new();
+        rt.load_with_globals(&[], &[], &[], &[1], &[]).unwrap();
+        let error = rt.error_page.as_ref().unwrap();
+        let data = &rt.data_pages[0];
+        let mappings = [(error.ptr, error.size), (data.ptr, data.size)];
+        drop(rt);
+        for (ptr, size) in mappings {
+            assert_ne!(
+                unsafe { libc::mprotect(ptr.cast(), size, libc::PROT_READ) },
+                0,
+                "runtime mapping remains allocated after drop"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn executable_page_protection_reports_failures() {
-        let page = CodePage::new(1).expect("code page");
+        let page = MappedPage::new(1).expect("code page");
         let error = make_executable(unsafe { page.ptr.add(1) }, page.size - 1)
             .expect_err("unaligned page protection must fail");
         assert!(error.starts_with("jit: executable page protection failed:"));
