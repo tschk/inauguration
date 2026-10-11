@@ -75,32 +75,8 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
     {
         return Expr::FloatLit(FloatVal(f));
     }
-    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-        let raw = &s[1..s.len() - 1];
-        // Process escape sequences: \n, \t, \r, \\, \"
-        let mut processed = String::with_capacity(raw.len());
-        let mut esc = false;
-        for c in raw.chars() {
-            if esc {
-                match c {
-                    'n' => processed.push('\n'),
-                    't' => processed.push('\t'),
-                    'r' => processed.push('\r'),
-                    '\\' => processed.push('\\'),
-                    '"' => processed.push('"'),
-                    _ => {
-                        processed.push('\\');
-                        processed.push(c);
-                    }
-                }
-                esc = false;
-            } else if c == '\\' {
-                esc = true;
-            } else {
-                processed.push(c);
-            }
-        }
-        return Expr::StringLit(processed);
+    if let Some(value) = crate::core_ir::decode_string_literal(s) {
+        return Expr::StringLit(value);
     }
     if let Some(closure) = try_parse_closure_expr(s) {
         return closure;

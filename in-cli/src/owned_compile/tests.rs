@@ -1183,8 +1183,8 @@ fn resolve_jit_entry_empty_name_uses_library_fallback() {
 }
 
 #[test]
-fn native_backends_reject_untyped_string_and_aggregate_catches() {
-    for pattern in ["\"value\"", "[value]", "(value, other)"] {
+fn native_backends_reject_aggregate_catches() {
+    for pattern in ["[value]", "(value, other)"] {
         let mut module = crate::in_lang_parse::parse_in_source(
             "fn main() -> Int { try { throw 42; } catch error { return 1; } return 2; }",
         )
@@ -1202,6 +1202,25 @@ fn native_backends_reject_untyped_string_and_aggregate_catches() {
             let error = result.expect_err("unsupported catch must not run unconditionally");
             assert!(error.contains("unsupported catch pattern"), "{error}");
         }
+    }
+}
+
+#[test]
+fn native_string_patterns_reject_non_string_scrutinees() {
+    let module = crate::in_lang_parse::parse_in_source(
+        "fn main() -> Int { match 123 { \"text\" { return 1; } _ { return 2; } } return 3; }",
+    )
+    .unwrap();
+    for result in [
+        crate::native_emit::lower::lower_module(&module, "main", NativeLinkage::Executable)
+            .map(|_| ()),
+        crate::native_emit::x86_64_lower::lower_module(&module, "main").map(|_| ()),
+    ] {
+        assert!(
+            result
+                .unwrap_err()
+                .contains("string pattern requires a String scrutinee")
+        );
     }
 }
 

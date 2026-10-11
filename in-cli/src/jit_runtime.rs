@@ -625,6 +625,83 @@ mod tests {
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
+    fn string_patterns_match_independent_payloads_by_content() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (value, pattern, expected) in [
+                ("abcdefghijk", "abcdefghijk", 42),
+                ("éabc", "éabc", 42),
+                ("line\n\t\r\"\\end", "line\n\t\r\"\\end", 42),
+                ("", "", 42),
+                ("abcdefghijk", "abcdefghijl", 7),
+                ("abc", "abcd", 7),
+            ] {
+                let mut storage = (value.len() as u64).to_ne_bytes().to_vec();
+                storage.extend_from_slice(value.as_bytes());
+                for body in [
+                    format!("match value {{ {pattern:?} {{ return 42; }} _ {{ return 7; }} }}"),
+                    format!(
+                        "try {{ throw value; }} catch caught {{ match caught {{ {pattern:?} {{ return 42; }} _ {{ return 7; }} }} }}"
+                    ),
+                    format!(
+                        "try {{ throw value; }} catch {pattern:?} {{ return 42; }} catch _ {{ return 7; }}"
+                    ),
+                    format!(
+                        "try {{ try {{ throw value; }} catch caught {{ let alias = caught; throw alias; }} }} catch {pattern:?} {{ return 42; }} catch _ {{ return 7; }}"
+                    ),
+                ] {
+                    let source = format!("fn main(value: String) -> Int {{ {body} return 9; }}");
+                    let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                    let args = [storage.as_ptr() as i64];
+                    assert_eq!(
+                        invoke_module(&module, profile, &args),
+                        Some(expected),
+                        "raw {profile:?}: {source}"
+                    );
+                    crate::core_opt::optimize_with_profile(
+                        &mut module.decls,
+                        Some("main"),
+                        profile,
+                    );
+                    assert_eq!(
+                        invoke_module(&module, profile, &args),
+                        Some(expected),
+                        "optimized {profile:?}: {source}"
+                    );
+                }
+            }
+            let mut storage = 3u64.to_ne_bytes().to_vec();
+            storage.extend_from_slice(b"abc");
+            let mut module = crate::in_lang_parse::parse_in_source("fn main(value: String) -> Int { match value { \"abc\" { return 42; } _ { return 7; } } return 9; }").unwrap();
+            if let crate::core_ir::Decl::Function { params, .. } = &mut module.decls[0] {
+                params[0].1 = crate::core_ir::Typ::Named("str".into());
+            }
+            assert_eq!(
+                invoke_module(&module, profile, &[storage.as_ptr() as i64]),
+                Some(42)
+            );
+            for body in [
+                "match value { \"\" { return 1; } _ { return 7; } }",
+                "try { throw value; } catch \"\" { return 1; } catch _ { return 7; }",
+            ] {
+                let module = crate::in_lang_parse::parse_in_source(&format!(
+                    "fn main(value: String) -> Int {{ {body} return 9; }}"
+                ))
+                .unwrap();
+                assert_eq!(invoke_module(&module, profile, &[0]), Some(7));
+            }
+            let module = crate::in_lang_parse::parse_in_source("fn main() -> Int { try { throw 0; } catch \"text\" { return 1; } catch 0 { return 42; } return 7; }").unwrap();
+            assert_eq!(invoke_module(&module, profile, &[]), Some(42));
+            let module = crate::in_lang_parse::parse_in_source("fn main() -> Int { try { throw 123; } catch caught { match caught { \"text\" { return 1; } _ { return 42; } } } return 7; }").unwrap();
+            assert_eq!(invoke_module(&module, profile, &[]), Some(42));
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
     fn catches_select_in_order_and_propagate_unmatched_errors() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

@@ -874,6 +874,9 @@ fn collect_strings_from_stmt(stmt: &Stmt, out: &mut Vec<String>) {
         } => {
             collect_strings_from_expr(scrutinee, out);
             for arm in arms {
+                if let Some(value) = parse_string_match_pattern(&arm.pattern) {
+                    out.push(value);
+                }
                 for s in &arm.body {
                     collect_strings_from_stmt(s, out);
                 }
@@ -885,6 +888,9 @@ fn collect_strings_from_stmt(stmt: &Stmt, out: &mut Vec<String>) {
                 collect_strings_from_stmt(s, out);
             }
             for c in catches {
+                if let Ok(MatchPattern::StringPat(value)) = MatchPattern::parse(&c.pattern) {
+                    out.push(value);
+                }
                 for s in &c.body {
                     collect_strings_from_stmt(s, out);
                 }
@@ -1513,6 +1519,7 @@ fn lower_stmt(
                 let tag = match &pattern {
                     MatchPattern::IntPat(_) => Some(1),
                     MatchPattern::BoolPat(_) => Some(2),
+                    MatchPattern::StringPat(_) => Some(4),
                     _ => None,
                 };
                 if let Some(tag) = tag {
@@ -1542,6 +1549,13 @@ fn lower_stmt(
                         emitter.emit_insns(&x86_64::jcc_near(0x05, 0));
                         Some(site)
                     }
+                    MatchPattern::StringPat(value) => {
+                        emitter.emit_insns(&x86_64::push_r(RAX));
+                        lower_string_lit(emitter, RCX, &value, pending_calls)?;
+                        emitter.emit_insns(&x86_64::pop_r(RAX));
+                        type_misses.extend(emit_string_match_test(emitter)?);
+                        None
+                    }
                     MatchPattern::WildPat => None,
                     MatchPattern::IdentPat(name) => {
                         if let Some(StackSlot::Scalar(offset)) = ctx.locals.get(&name) {
@@ -1557,7 +1571,7 @@ fn lower_stmt(
                         }
                         None
                     }
-                    // ponytail: string content and aggregate catch matching are not lowered yet.
+                    // ponytail: aggregate catch matching is not lowered yet.
                     _ => {
                         return Err(format!(
                             "x86_64-lower: unsupported catch pattern `{}` in `{}`",
@@ -1695,6 +1709,42 @@ fn lower_loop(
     Ok(())
 }
 
+fn emit_string_match_test(emitter: &mut CodeEmitter) -> Result<Vec<u32>, String> {
+    if x86_64::is_32bit() {
+        return Err("x86_64-lower: string matching requires 64-bit mode".into());
+    }
+    // Preserve RAX for later arms; R8/R9 walk the two length-prefixed payloads.
+    let mut misses = Vec::with_capacity(3);
+    emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+    misses.push(emitter.len());
+    emitter.emit_insns(&x86_64::jcc_near(4, 0));
+    emitter.emit_insns(&x86_64::mov_rr(8, RAX));
+    emitter.emit_insns(&x86_64::mov_rr(9, RCX));
+    emitter.emit_insns(&x86_64::mov_r_m(10, 8, 0));
+    emitter.emit_insns(&x86_64::mov_r_m(11, 9, 0));
+    emitter.emit_insns(&x86_64::cmp_rr(10, 11));
+    misses.push(emitter.len());
+    emitter.emit_insns(&x86_64::jcc_near(5, 0));
+    emitter.emit_insns(&x86_64::test_rr(10, 10));
+    let empty = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(4, 0));
+    emitter.emit_insns(&x86_64::add_rmi8(8, 8));
+    emitter.emit_insns(&x86_64::add_rmi8(9, 8));
+    let head = emitter.len();
+    emitter.emit_insns(&x86_64::movzx_m8(RDX, 8));
+    emitter.emit_insns(&x86_64::movzx_m8(RCX, 9));
+    emitter.emit_insns(&x86_64::cmp_rr(RDX, RCX));
+    misses.push(emitter.len());
+    emitter.emit_insns(&x86_64::jcc_near(5, 0));
+    emitter.emit_insns(&x86_64::add_rmi8(8, 1));
+    emitter.emit_insns(&x86_64::add_rmi8(9, 1));
+    emitter.emit_insns(&x86_64::sub_rmi8(10, 1));
+    let back = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(5, head as i32 - back as i32 - 6));
+    emitter.patch_u32(empty + 2, (emitter.len() as i32 - empty as i32 - 6) as u32);
+    Ok(misses)
+}
+
 fn lower_match(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -1733,12 +1783,26 @@ fn lower_match(
             emitter.patch_u32(next_branch + 2, next_offset as u32);
             end_branches.push(end_branch);
         } else if let Some(pat) = parse_string_match_pattern(&arm.pattern) {
+            let type_miss = if let Expr::Ident(name) = scrutinee
+                && ctx.error_types.contains_key(name)
+            {
+                emit_error_type(emitter, ctx, scrutinee)?;
+                emitter.emit_insns(&x86_64::load_i64(RDX, 4));
+                emitter.emit_insns(&x86_64::cmp_rr(RCX, RDX));
+                let site = emitter.len();
+                emitter.emit_insns(&x86_64::jcc_near(5, 0));
+                Some(site)
+            } else {
+                if scalar_expr_type(scrutinee, ctx) != Some(Typ::String) {
+                    return Err("x86_64-lower: string pattern requires a String scrutinee".into());
+                }
+                None
+            };
             emitter.emit_insns(&x86_64::push_r(RAX));
             lower_string_lit(emitter, RCX, &pat, pending_calls)?;
             emitter.emit_insns(&x86_64::pop_r(RAX));
-            emitter.emit_insns(&x86_64::cmp_rr(RAX, RCX));
-            let next_branch = emitter.len();
-            emitter.emit_bytes(&[0x0F, 0x85, 0, 0, 0, 0]);
+            let mut not_equal = emit_string_match_test(emitter)?;
+            not_equal.extend(type_miss);
 
             for stmt in &arm.body {
                 lower_stmt(emitter, ctx, stmt, pending_calls)?;
@@ -1747,8 +1811,9 @@ fn lower_match(
             let end_branch = emitter.len();
             emitter.emit_insns(&x86_64::jmp_rel32(0));
 
-            let next_offset = emitter.len() as i32 - next_branch as i32 - 6;
-            emitter.patch_u32(next_branch + 2, next_offset as u32);
+            for site in not_equal {
+                emitter.patch_u32(site + 2, (emitter.len() as i32 - site as i32 - 6) as u32);
+            }
             end_branches.push(end_branch);
         } else {
             // ponytail: non-int pattern (enum variant, range, etc.) — skip entirely to avoid crash
@@ -1796,11 +1861,7 @@ fn parse_int_match_pattern(pattern: &str) -> Option<i64> {
 fn parse_string_match_pattern(pattern: &str) -> Option<String> {
     let trimmed = pattern.trim().trim_end_matches(':').trim();
     let trimmed = trimmed.strip_prefix("case ").unwrap_or(trimmed).trim();
-    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
-        Some(trimmed[1..trimmed.len() - 1].to_string())
-    } else {
-        None
-    }
+    crate::core_ir::decode_string_literal(trimmed)
 }
 
 fn maybe_push_var(word: &str, vars: &mut Vec<String>) {

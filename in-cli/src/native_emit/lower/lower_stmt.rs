@@ -351,13 +351,14 @@ pub(crate) fn lower_stmt(
                 let tag = match &pattern {
                     MatchPattern::IntPat(_) => Some(1),
                     MatchPattern::BoolPat(_) => Some(2),
+                    MatchPattern::StringPat(_) => Some(4),
                     _ => None,
                 };
                 if let Some(tag) = tag {
                     emitter.emit_u32(aarch64::ldr64(9, 27, 16));
                     emitter.emit_insns(&aarch64::load_i64(1, tag));
                     emitter.emit_u32(aarch64::cmp_reg64(9, 1));
-                    type_misses.push(emitter.emit_insn(aarch64::b_cond(1, 0)));
+                    type_misses.push((emitter.emit_insn(aarch64::b_cond(1, 0)), 1));
                 }
                 let next_arm = match pattern {
                     MatchPattern::IntPat(value) => {
@@ -370,6 +371,12 @@ pub(crate) fn lower_stmt(
                         emitter.emit_u32(aarch64::cmp_reg64(0, 1));
                         Some(emitter.emit_insn(aarch64::b_cond(1, 0)))
                     }
+                    MatchPattern::StringPat(value) => {
+                        let id = ctx.string_id(&value)?;
+                        emitter.emit_u32(aarch64::mov_reg64(2, 0));
+                        type_misses.extend(emit_string_match_test(emitter, ctx, id));
+                        None
+                    }
                     MatchPattern::WildPat => None,
                     MatchPattern::IdentPat(name) => {
                         if let Some(LocalSlot::Scalar(offset)) = ctx.locals.get(&name) {
@@ -381,7 +388,7 @@ pub(crate) fn lower_stmt(
                         }
                         None
                     }
-                    // ponytail: string content and aggregate catch matching are not lowered yet.
+                    // ponytail: aggregate catch matching is not lowered yet.
                     _ => {
                         return Err(format!(
                             "native-lower: unsupported catch pattern `{}` in `{fn_name}`",
@@ -402,9 +409,12 @@ pub(crate) fn lower_stmt(
                     )?;
                 }
                 caught_branches.push(emitter.emit_insn(aarch64::b(0)));
-                type_misses.extend(next_arm);
-                for site in type_misses {
-                    emitter.patch_u32(site, aarch64::b_cond(1, emitter.len() as i32 - site as i32));
+                type_misses.extend(next_arm.map(|site| (site, 1)));
+                for (site, condition) in type_misses {
+                    emitter.patch_u32(
+                        site,
+                        aarch64::b_cond(condition, emitter.len() as i32 - site as i32),
+                    );
                 }
             }
             emit_error_exit(emitter, ctx);
@@ -1264,7 +1274,7 @@ fn emit_string_match_test(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
     string_index: i64,
-) -> Vec<u32> {
+) -> Vec<(u32, u8)> {
     // x1 = the pattern literal. x9/x12 walk the payloads; x13/x14 hold one byte
     // from each side. x3/x4 hold the lengths and x3 doubles as the loop counter.
     let adr_site = emitter.emit_insn(aarch64::adr(1, 0));
@@ -1274,13 +1284,21 @@ fn emit_string_match_test(
         rd: 1,
     });
     let mut not_equal = Vec::with_capacity(3);
+    emitter.emit_u32(aarch64::cmp_reg64(2, aarch64::REG_XZR));
+    not_equal.push((
+        emitter.emit_insn(aarch64::b_cond(aarch64::COND_EQ, 0)),
+        aarch64::COND_EQ,
+    ));
 
     // Lengths must agree before the payloads are worth comparing, and reading a
     // length header is safe for every literal now that `""` is a real entry.
     emitter.emit_u32(aarch64::ldr64(3, 2, 0));
     emitter.emit_u32(aarch64::ldr64(4, 1, 0));
     emitter.emit_u32(aarch64::cmp_reg64(3, 4));
-    not_equal.push(emitter.emit_insn(aarch64::b_cond(aarch64::COND_NE, 0)));
+    not_equal.push((
+        emitter.emit_insn(aarch64::b_cond(aarch64::COND_NE, 0)),
+        aarch64::COND_NE,
+    ));
 
     // Equal lengths: empty strings match without entering the loop.
     emitter.emit_u32(aarch64::cmp_reg64(3, aarch64::REG_XZR));
@@ -1292,7 +1310,10 @@ fn emit_string_match_test(
     emitter.emit_u32(aarch64::ldrb(13, 9, 0));
     emitter.emit_u32(aarch64::ldrb(14, 12, 0));
     emitter.emit_u32(aarch64::cmp_reg64(13, 14));
-    not_equal.push(emitter.emit_insn(aarch64::b_cond(aarch64::COND_NE, 0)));
+    not_equal.push((
+        emitter.emit_insn(aarch64::b_cond(aarch64::COND_NE, 0)),
+        aarch64::COND_NE,
+    ));
     emitter.emit_u32(aarch64::add_imm64(9, 9, 1));
     emitter.emit_u32(aarch64::add_imm64(12, 12, 1));
     emitter.emit_u32(aarch64::sub_imm64(3, 3, 1));
@@ -1354,8 +1375,25 @@ pub(crate) fn lower_match(
             let next_offset = emitter.len() as i32 - next_branch as i32;
             emitter.patch_u32(next_branch, aarch64::b_cond(1, next_offset));
         } else if let Some(value) = parse_string_match_pattern(&arm.pattern) {
+            let type_miss = if let Expr::Ident(name) = scrutinee
+                && ctx.error_types.contains_key(name)
+            {
+                emit_error_type(emitter, ctx, scrutinee, functions)?;
+                emitter.emit_insns(&aarch64::load_i64(1, 4));
+                emitter.emit_u32(aarch64::cmp_reg64(9, 1));
+                Some((emitter.emit_insn(aarch64::b_cond(1, 0)), 1))
+            } else {
+                if lower_expr::native_expr_type(scrutinee, ctx, functions)
+                    .map(|typ| typ.canonical())
+                    != Some(Typ::String)
+                {
+                    return Err("native-lower: string pattern requires a String scrutinee".into());
+                }
+                None
+            };
             let id = ctx.string_id(&value)?;
-            let not_equal = emit_string_match_test(emitter, ctx, id);
+            let mut not_equal = emit_string_match_test(emitter, ctx, id);
+            not_equal.extend(type_miss);
             for stmt in &arm.body {
                 lower_stmt(
                     emitter,
@@ -1368,9 +1406,9 @@ pub(crate) fn lower_match(
                 )?;
             }
             end_branches.push(emitter.emit_insn(aarch64::b(0)));
-            for site in not_equal {
+            for (site, condition) in not_equal {
                 let next_offset = emitter.len() as i32 - site as i32;
-                emitter.patch_u32(site, aarch64::b_cond(aarch64::COND_NE, next_offset));
+                emitter.patch_u32(site, aarch64::b_cond(condition, next_offset));
             }
         } else {
             // A pattern the lowerer cannot test (bool, variant, range, ...) used
@@ -1419,9 +1457,5 @@ pub(crate) fn parse_int_match_pattern(pattern: &str) -> Option<i64> {
 pub(crate) fn parse_string_match_pattern(pattern: &str) -> Option<String> {
     let trimmed = pattern.trim().trim_end_matches(':').trim();
     let trimmed = trimmed.strip_prefix("case ").unwrap_or(trimmed).trim();
-    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
-        Some(trimmed[1..trimmed.len() - 1].to_string())
-    } else {
-        None
-    }
+    crate::core_ir::decode_string_literal(trimmed)
 }

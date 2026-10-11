@@ -1,0 +1,16 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 2
+
+fn main() -> Int {
+    let value = __inrt_str_concat("ab", "c");
+    try {
+        try { throw value; }
+        catch caught { let alias = caught; throw alias; }
+    }
+    catch 0 { return 1; }
+    catch "abd" { return 3; }
+    catch "abc" { return 2; }
+    return 4;
+}

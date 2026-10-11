@@ -264,6 +264,35 @@ pub(crate) fn looks_like_int_literal(s: &str) -> bool {
     !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
 }
 
+/// Decode the common quoted string syntax used by Core IR patterns and `.in` literals.
+pub(crate) fn decode_string_literal(quoted: &str) -> Option<String> {
+    let raw = quoted.strip_prefix('"')?.strip_suffix('"')?;
+    // Process escape sequences: \n, \t, \r, \\, \"
+    let mut processed = String::with_capacity(raw.len());
+    let mut esc = false;
+    for c in raw.chars() {
+        if esc {
+            match c {
+                'n' => processed.push('\n'),
+                't' => processed.push('\t'),
+                'r' => processed.push('\r'),
+                '\\' => processed.push('\\'),
+                '"' => processed.push('"'),
+                _ => {
+                    processed.push('\\');
+                    processed.push(c);
+                }
+            }
+            esc = false;
+        } else if c == '\\' {
+            esc = true;
+        } else {
+            processed.push(c);
+        }
+    }
+    Some(processed)
+}
+
 impl MatchPattern {
     pub fn parse(s: &str) -> Result<Self, String> {
         let s = trim_match_pat(s).trim_end_matches(':').trim();
@@ -291,8 +320,8 @@ impl MatchPattern {
         if looks_like_int_literal(s) {
             return Err(format!(".in: integer pattern `{s}` out of i64 range"));
         }
-        if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-            return Ok(MatchPattern::StringPat(s[1..s.len() - 1].to_string()));
+        if let Some(value) = decode_string_literal(s) {
+            return Ok(MatchPattern::StringPat(value));
         }
         if s.starts_with('(') && s.ends_with(')') {
             let inner = &s[1..s.len() - 1];
