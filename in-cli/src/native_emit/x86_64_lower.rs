@@ -587,7 +587,9 @@ fn collect_functions(module: &UnifiedModule) -> Result<HashMap<String, FunctionI
         let orig = unique.split("__dup").next().unwrap_or(unique).to_string();
         name_map.insert(orig, unique.clone());
     }
+    let module_names = crate::core_bindings::module_names(&module.decls);
     for func in functions.values_mut() {
+        crate::core_bindings::normalize_function(&mut func.params, &mut func.body, &module_names);
         rename_calls(&mut func.body, &name_map);
     }
     if functions.is_empty() {

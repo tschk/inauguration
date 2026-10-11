@@ -38,6 +38,7 @@ pub mod compile_cache;
 pub mod compile_error;
 pub mod compiler;
 pub mod config;
+mod core_bindings;
 pub mod core_ir;
 pub mod core_ir_verifier;
 pub mod coverage;

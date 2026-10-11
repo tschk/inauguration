@@ -48,7 +48,9 @@ pub(crate) fn collect_functions(
         name_map.insert(orig, unique.clone());
     }
     // Update call targets in all function bodies
+    let module_names = crate::core_bindings::module_names(&module.decls);
     for func in functions.values_mut() {
+        crate::core_bindings::normalize_function(&mut func.params, &mut func.body, &module_names);
         rename_calls(&mut func.body, &name_map);
     }
     if functions.is_empty() {

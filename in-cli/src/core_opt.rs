@@ -32,6 +32,7 @@ pub fn optimize_with_linkage(
     profile: EmitProfile,
     keep_all_functions: bool,
 ) {
+    crate::core_bindings::normalize_decls(decls);
     match profile {
         EmitProfile::Default => {
             // Fast owned path: more inlining than a textbook compiler, then fold/DCE.

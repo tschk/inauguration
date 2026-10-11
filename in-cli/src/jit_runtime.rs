@@ -520,6 +520,49 @@ mod tests {
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
+    fn shadowed_bindings_keep_their_lexical_identity() {
+        use crate::emit_profile::EmitProfile;
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for (source, expected) in [
+                (
+                    "var count: Int = 0;\nfn read() -> Int { return count; }\nfn main() -> Int { count = 42; let count = 7; return read(); }",
+                    42,
+                ),
+                (
+                    "var count: Int = 42;\nfn main() -> Int { let before = count; let count = 7; count = count + 1; return before + count; }",
+                    50,
+                ),
+                (
+                    "fn shadow(x: Int) -> Int { let x = x + 1; return x; }\nfn main() -> Int { return shadow(41); }",
+                    42,
+                ),
+                (
+                    "fn main() -> Int { let x = 1; let before = x; let x = 7; return before + x; }",
+                    8,
+                ),
+                (
+                    "fn main() -> Int { var x = 1; if true { let x = 7; x = x + 1; } return x; }",
+                    1,
+                ),
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).expect("parse");
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "raw {profile:?}: {source}"
+                );
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "optimized {profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
     fn optimized_call_arguments_are_evaluated_once() {
         use crate::emit_profile::EmitProfile;
         for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {

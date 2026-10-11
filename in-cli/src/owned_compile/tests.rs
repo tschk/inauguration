@@ -1183,6 +1183,51 @@ fn resolve_jit_entry_empty_name_uses_library_fallback() {
 }
 
 #[test]
+fn owned_jit_preserves_shadowed_bindings() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for (text, expected) in [
+            (
+                "var count: Int = 0;\nfn read() -> Int { return count; }\nfn main() -> Int { count = 42; let count = 7; return read(); }",
+                42,
+            ),
+            (
+                "fn shadow(x: Int) -> Int { let x = x + 1; return x; }\nfn main() -> Int { return shadow(41); }",
+                42,
+            ),
+            (
+                "fn main() -> Int { let x = 1; let before = x; let x = 7; return before + x; }",
+                8,
+            ),
+            (
+                "fn main() -> Int { var x = 1; if true { let x = 7; x = x + 1; } return x; }",
+                1,
+            ),
+        ] {
+            let source = temp_path("shadowed-bindings.in");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(source).unwrap();
+            assert!(report.success, "{profile:?}: {text}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(expected)),
+                "{profile:?}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
 fn inlining_preserves_argument_call_evaluation() {
     if !native_backend::native_subset_host_available() {
         return;
