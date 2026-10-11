@@ -728,6 +728,55 @@ mod tests {
         }
     }
 
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn filesystem_calls_expose_boolean_success_and_failure() {
+        crate::native_emit::native_link::bootstrap_jit_native();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (create, remove) in [("create-dir", "remove-file"), ("create_dir", "remove_file")] {
+                for optimize in [false, true] {
+                    let nonce = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos();
+                    let directory = std::env::temp_dir().join(format!(
+                        "inauguration-fs-jit-{}-{nonce}",
+                        std::process::id()
+                    ));
+                    let file = directory.join("file");
+                    let source = format!(
+                        "fn main() -> Bool {{ if !{create}({directory:?}) {{ return false; }} if !write-file({file:?}, \"text\") {{ return false; }} if !{remove}({file:?}) {{ return false; }} if {remove}({file:?}) {{ return false; }} if {create}({directory:?}) {{ return false; }} return true; }}"
+                    );
+                    let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                    let verification = crate::core_ir_verifier::verify_for_entry(&module, "main");
+                    assert!(verification.ok, "{verification:?}");
+                    if optimize {
+                        crate::core_opt::optimize_with_profile(
+                            &mut module.decls,
+                            Some("main"),
+                            profile,
+                        );
+                    }
+                    let result = invoke_module(&module, profile, &[]);
+                    let directory_created = directory.is_dir();
+                    let file_removed = !file.exists();
+                    if file.exists() {
+                        std::fs::remove_file(&file).unwrap();
+                    }
+                    if directory.exists() {
+                        std::fs::remove_dir(&directory).unwrap();
+                    }
+                    assert_eq!(result, Some(1), "{profile:?}/{create}/{optimize}");
+                    assert!(directory_created && file_removed);
+                }
+            }
+        }
+    }
+
     #[cfg(all(unix, target_arch = "x86_64"))]
     #[test]
     fn jit_stdlib_results_survive_nested_argument_calls() {
