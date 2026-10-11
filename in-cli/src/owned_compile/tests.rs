@@ -1335,6 +1335,8 @@ fn owned_jit_uses_runtime_builtin_result_types() {
         return;
     }
     for (typ, expression, expected) in [
+        ("String", "\"\"", EvalValue::Str(String::new())),
+        ("String", "\"é🙂\"", EvalValue::Str("é🙂".into())),
         (
             "String",
             "__inrt_str_concat(\"a\", \"b\")",
@@ -1358,15 +1360,17 @@ fn owned_jit_uses_runtime_builtin_result_types() {
             format!("fn main() -> {typ} {{ return {expression}; }}"),
         )
         .unwrap();
-        let report = compile_owned(&default_request(
-            source.clone(),
-            CompileTarget::Jit,
-            Some("main"),
-            None,
-        ));
+        for out in [None, Some(temp_path("builtin-result.jit"))] {
+            let report = compile_owned(&default_request(
+                source.clone(),
+                CompileTarget::Jit,
+                Some("main"),
+                out,
+            ));
+            assert!(report.success, "{expression}: {report:?}");
+            assert_eq!(report.eval_result, Some(expected.clone()), "{expression}");
+        }
         fs::remove_file(source).unwrap();
-        assert!(report.success, "{expression}: {report:?}");
-        assert_eq!(report.eval_result, Some(expected), "{expression}");
     }
 }
 

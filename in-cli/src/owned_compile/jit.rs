@@ -105,9 +105,8 @@ pub fn compile_jit(
 
     native_link::bootstrap_jit_native();
 
-    // How to read the entry's result value, which the declared return type
-    // decides: `Int` and `Bool` arrive in x0, `Float` in d0, and `String` as a
-    // pointer to an instring.
+    // Scalar results arrive in the integer result register; Float uses its bits
+    // and String points to an instring. The declared return type selects decoding.
     let entry_result_kind = expanded_module
         .decls
         .iter()
@@ -219,12 +218,9 @@ pub fn compile_jit(
             EntryResultKind::Bool => (raw as u8, Some(EvalValue::Bool(raw != 0))),
             EntryResultKind::Float => (0, Some(EvalValue::Float(f64::from_bits(raw as u64)))),
             EntryResultKind::String => {
-                let decode_string = raw != 0 && request.out.is_none();
-                let string = if decode_string {
-                    decode_jit_string(raw).unwrap_or_default()
-                } else {
-                    String::new()
-                };
+                let string = decode_jit_string(raw).ok_or_else(|| {
+                    format!("jit-string-result-invalid: entry `{resolved_entry}` returned an invalid string reference")
+                })?;
                 // The decoded string is the value; the pointer is not an exit status.
                 (0, Some(EvalValue::Str(string)))
             }
@@ -263,7 +259,11 @@ pub fn compile_jit(
 fn decode_jit_string(raw: i64) -> Option<String> {
     const MAX_BYTES: usize = 64 * 1024 * 1024;
     let ptr = raw as *const u8;
-    if ptr.is_null() || !(ptr as usize).is_multiple_of(8) {
+    // Runtime builtins use null for an empty result on invalid input ranges.
+    if ptr.is_null() {
+        return Some(String::new());
+    }
+    if !(ptr as usize).is_multiple_of(8) {
         return None;
     }
     let len = unsafe { *(ptr as *const u64) as usize };
@@ -280,7 +280,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn jit_string_decode_rejects_unaligned_reference() {
+    fn jit_string_decode_rejects_invalid_references() {
+        assert_eq!(decode_jit_string(0), Some(String::new()));
         assert_eq!(decode_jit_string(1), None);
+        let oversized = u64::MAX;
+        assert_eq!(decode_jit_string((&oversized as *const u64) as i64), None);
     }
 }
