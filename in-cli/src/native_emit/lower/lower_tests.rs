@@ -1273,7 +1273,7 @@ fn main() -> Result<i64, i64> {
 "#,
     )
     .expect("parse failure result");
-    for (module, expected) in [(success, 5), (failure, 0)] {
+    for (module, expected) in [(success, 5), (failure, 4)] {
         let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
         let function_offsets = lowered
             .function_offsets

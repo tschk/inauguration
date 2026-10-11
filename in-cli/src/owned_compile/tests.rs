@@ -1183,6 +1183,37 @@ fn resolve_jit_entry_empty_name_uses_library_fallback() {
 }
 
 #[test]
+fn owned_jit_stops_effects_after_throwing_calls() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for main in [
+            "try { throw 42; count = 7; } catch error { return count; } return -1;",
+            "try { fail(); count = 8; } catch error { return count; } return -1;",
+        ] {
+            let source = temp_path("throw-flow.in");
+            fs::write(&source, format!("var count: Int = 0;\nfn fail() -> Int {{ throw 42; count = 7; return 0; }}\nfn main() -> Int {{ {main} }}")).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(source).unwrap();
+            assert!(report.success, "{profile:?}: {main}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(0)),
+                "{profile:?}: {main}"
+            );
+        }
+    }
+}
+
+#[test]
 fn owned_jit_preserves_shadowed_bindings() {
     if !native_backend::native_subset_host_available() {
         return;

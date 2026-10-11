@@ -25,8 +25,8 @@ pub fn movk64(rd: u8, imm16: u16, shift: u8) -> u32 {
 /// because the encoding cannot distinguish it from the zero register; use
 /// [`mov_zero64`] to materialize zero.
 pub fn mov_reg64(rd: u8, rm: u8) -> u32 {
-    if rm == REG_SP {
-        add_imm64(rd, REG_SP, 0)
+    if rm == REG_SP || rd == REG_SP {
+        add_imm64(rd, rm, 0)
     } else {
         // Canonical register move: `orr rd, xzr, rm`.
         0xAA00_03E0 | ((rm as u32) << 16) | (rd as u32)
@@ -312,6 +312,8 @@ mod tests {
         assert_eq!(movz64(3, 0x1234, 16), 0xD2A24683);
         assert_eq!(movk64(3, 0x1234, 16), 0xF2A24683);
         assert_eq!(mov_reg64(3, 7), 0xAA0703E3);
+        assert_eq!(mov_reg64(REG_SP, REG_FP), add_imm64(REG_SP, REG_FP, 0));
+        assert_eq!(mov_reg64(REG_FP, REG_SP), add_imm64(REG_FP, REG_SP, 0));
         assert_eq!(mov_zero64(3), 0xD2800003);
         assert_eq!(b(8), 0x14000002);
         assert_eq!(bl(8), 0x94000002);

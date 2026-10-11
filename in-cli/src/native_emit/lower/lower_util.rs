@@ -89,14 +89,9 @@ pub(crate) fn lower_comparison_result(
     Ok(())
 }
 
-pub(crate) fn emit_epilogue(emitter: &mut CodeEmitter, stack_reserve: u32) {
-    if stack_reserve > 0 {
-        emitter.emit_u32(aarch64::add_imm64(
-            aarch64::REG_SP,
-            aarch64::REG_SP,
-            stack_reserve as u16,
-        ));
-    }
+pub(crate) fn emit_epilogue(emitter: &mut CodeEmitter, _stack_reserve: u32) {
+    // Restore the frame base even when an error leaves operand spills outstanding.
+    emitter.emit_u32(aarch64::mov_reg64(aarch64::REG_SP, aarch64::REG_FP));
     emitter.emit_u32(0xA8C1_7BFD);
     emitter.emit_u32(aarch64::ret());
 }

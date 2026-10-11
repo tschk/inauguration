@@ -37,6 +37,7 @@ pub(crate) fn collect_functions(
                     .collect(),
                 ret: canonical_type(ret),
                 body: body.clone(),
+                may_throw: false,
             },
         );
     }
@@ -52,6 +53,14 @@ pub(crate) fn collect_functions(
     for func in functions.values_mut() {
         crate::core_bindings::normalize_function(&mut func.params, &mut func.body, &module_names);
         rename_calls(&mut func.body, &name_map);
+    }
+    let fallible = crate::core_effects::fallible_functions(
+        functions
+            .values()
+            .map(|info| (info.name.as_str(), info.body.as_slice())),
+    );
+    for info in functions.values_mut() {
+        info.may_throw = fallible.contains(&info.name);
     }
     if functions.is_empty() {
         return Err("native-lower: module has no functions".to_string());

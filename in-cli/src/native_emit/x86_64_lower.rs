@@ -134,6 +134,7 @@ struct FunctionInfo {
     params: Vec<(String, Typ)>,
     ret: Typ,
     body: Vec<Stmt>,
+    may_throw: bool,
 }
 
 struct LowerCtx<'a> {
@@ -144,6 +145,8 @@ struct LowerCtx<'a> {
     frame_size: u32,
     /// Set when a return statement has been emitted
     emitted_return: bool,
+    error_branches: Vec<Vec<u32>>,
+    prologue_frame_size: u32,
     /// True if this function is an interrupt handler
     is_interrupt: bool,
     /// Struct field definitions
@@ -204,6 +207,8 @@ impl<'a> LowerCtx<'a> {
             scalar_types: HashMap::new(),
             frame_size: 0,
             emitted_return: false,
+            error_branches: Vec::new(),
+            prologue_frame_size: 0,
             is_interrupt: false,
             structs,
             functions,
@@ -607,6 +612,7 @@ fn collect_functions(module: &UnifiedModule) -> Result<HashMap<String, FunctionI
                 params: params.clone(),
                 ret: ret.clone(),
                 body: body.clone(),
+                may_throw: false,
             },
         );
     }
@@ -620,6 +626,14 @@ fn collect_functions(module: &UnifiedModule) -> Result<HashMap<String, FunctionI
     for func in functions.values_mut() {
         crate::core_bindings::normalize_function(&mut func.params, &mut func.body, &module_names);
         rename_calls(&mut func.body, &name_map);
+    }
+    let fallible = crate::core_effects::fallible_functions(
+        functions
+            .values()
+            .map(|info| (info.name.as_str(), info.body.as_slice())),
+    );
+    for info in functions.values_mut() {
+        info.may_throw = fallible.contains(&info.name);
     }
     if functions.is_empty() {
         return Err("x86_64-lower: module has no functions".to_string());
@@ -966,6 +980,7 @@ fn lower_function(
     // corruption when complex expressions spilled values past the frame.
     ctx.frame_size += 2048;
     let frame_size = ctx.frame_reserve();
+    ctx.prologue_frame_size = frame_size;
     if frame_size > 0 {
         emitter.emit_insns(&x86_64::sub_rsp_i32(frame_size as i32));
     }
@@ -1072,6 +1087,36 @@ fn alloc_declared_locals(ctx: &mut LowerCtx<'_>, body: &[Stmt]) -> Result<(), St
             _ => {}
         }
     }
+    Ok(())
+}
+
+fn emit_error_exit(emitter: &mut CodeEmitter, ctx: &mut LowerCtx<'_>) -> Result<(), String> {
+    if let Some(branches) = ctx.error_branches.last_mut() {
+        let site = emitter.len();
+        emitter.emit_insns(&x86_64::jmp_rel32(0));
+        branches.push(site);
+    } else {
+        if matches!(
+            ctx.ret_typ.canonical(),
+            Typ::Named(_) | Typ::Array(_) | Typ::Vector(_) | Typ::Void
+        ) {
+            emitter.emit_insns(&x86_64::load_i64(RAX, 0));
+        } else {
+            load_error_global(emitter, ctx, "__inrt_err_val")?;
+        }
+        emit_function_epilogue(emitter, ctx.is_interrupt);
+    }
+    Ok(())
+}
+
+fn emit_error_check(emitter: &mut CodeEmitter, ctx: &mut LowerCtx<'_>) -> Result<(), String> {
+    error_slot_offset(ctx, "__inrt_err_flag")?;
+    emitter.emit_insns(&[0x41, 0x80, 0x3F, 0x00]); // cmp byte [r15], 0
+    let continue_branch = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
+    emit_error_exit(emitter, ctx)?;
+    let delta = emitter.len() as i32 - continue_branch as i32 - 6;
+    emitter.patch_u32(continue_branch + 2, delta as u32);
     Ok(())
 }
 
@@ -1407,29 +1452,7 @@ fn lower_stmt(
             emitter.patch_u32(exit + 2, (after as i32 - exit as i32 - 6) as u32);
             Ok(())
         }
-        Stmt::Propagate => {
-            // `?`-style propagation checks the runtime-owned error flag set by
-            // a fallible call.  On error, return the carried value through the
-            // same epilogue as an explicit return; otherwise continue with the
-            // following statement.
-            load_error_global(emitter, ctx, "__inrt_err_flag")?;
-            emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 0));
-            let continue_branch = emitter.len();
-            emitter.emit_insns(&x86_64::jcc_near(0x04, 0)); // je rel32
-
-            let ret_typ = ctx.ret_typ.canonical();
-            if matches!(ret_typ, Typ::Named(_) | Typ::Array(_) | Typ::Void) {
-                emitter.emit_insns(&x86_64::load_i64(RAX, 0));
-            } else {
-                load_error_global(emitter, ctx, "__inrt_err_val")?;
-            }
-            emit_function_epilogue(emitter, ctx.is_interrupt);
-
-            let continue_offset = emitter.len();
-            let continue_delta = continue_offset as i32 - continue_branch as i32 - 6;
-            emitter.patch_u32(continue_branch + 2, continue_delta as u32);
-            Ok(())
-        }
+        Stmt::Propagate => emit_error_check(emitter, ctx),
         Stmt::Loop { cond, body, .. } => lower_loop(emitter, ctx, cond, body, pending_calls),
         Stmt::Match {
             scrutinee, arms, ..
@@ -1439,15 +1462,17 @@ fn lower_stmt(
             store_error_global(emitter, ctx, "__inrt_err_val")?;
             emitter.emit_insns(&x86_64::load_i64(RAX, 1));
             store_error_global(emitter, ctx, "__inrt_err_flag")?;
-            Ok(())
+            emit_error_exit(emitter, ctx)
         }
         Stmt::Try { body, catches, .. } => {
             emitter.emit_insns(&x86_64::load_i64(RAX, 0));
             store_error_global(emitter, ctx, "__inrt_err_flag")?;
 
+            ctx.error_branches.push(Vec::new());
             for stmt in body {
                 lower_stmt(emitter, ctx, stmt, pending_calls)?;
             }
+            let error_branches = ctx.error_branches.pop().unwrap();
 
             load_error_global(emitter, ctx, "__inrt_err_flag")?;
             emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
@@ -1457,6 +1482,14 @@ fn lower_stmt(
             emitter.emit_insns(&x86_64::jmp_rel32(0)); // jmp end placeholder
 
             let handler_offset = emitter.len();
+            for site in error_branches {
+                emitter.patch_u32(site + 1, (handler_offset as i32 - site as i32 - 5) as u32);
+            }
+            emitter.emit_insns(&x86_64::lea_sp_from_fp());
+            emitter.emit_insns(&x86_64::sub_rsp_i32(ctx.prologue_frame_size as i32));
+            if catches.is_empty() {
+                emit_error_exit(emitter, ctx)?;
+            }
             emitter.emit_insns(&x86_64::load_i64(RAX, 0));
             store_error_global(emitter, ctx, "__inrt_err_flag")?;
 
@@ -2648,6 +2681,7 @@ fn lower_call_expr(
         return Ok(());
     }
 
+    let may_throw = ctx.functions[&target_name].may_throw;
     // Save caller-saved regs before call (RAX excluded — gets return value).
     // Skip target_reg if caller-saved — holds return value after mov_rr.
     // i386: never touch r8-r15 (REX prefixes are illegal in protected mode).
@@ -2686,6 +2720,9 @@ fn lower_call_expr(
         emitter.emit_insns(&x86_64::pop_r(reg));
     }
 
+    if may_throw {
+        emit_error_check(emitter, ctx)?;
+    }
     if target_reg != RAX {
         emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
     }
@@ -3506,7 +3543,13 @@ fn main() -> void { return 0 }
         }]);
         let result = lower_module(&module, "propagate").expect("lower");
         assert!(result.code.windows(2).any(|window| window == [0x0F, 0x84]));
-        let load = x86_64::mov_r_m(RAX, 15, 0);
+        assert!(
+            result
+                .code
+                .windows(4)
+                .any(|bytes| bytes == [0x41, 0x80, 0x3F, 0x00])
+        );
+        let load = x86_64::mov_r_m(RAX, 15, 8);
         assert!(result.code.windows(load.len()).any(|bytes| bytes == load));
     }
 }

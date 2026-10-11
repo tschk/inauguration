@@ -399,6 +399,9 @@ impl JitRuntime {
         let func = funcs.get(name)?;
         let entry = func.entry as *const ();
         let error_page = self.error_page.as_ref()?.ptr;
+        unsafe {
+            error_page.cast::<u64>().write(0);
+        }
 
         #[cfg(target_arch = "aarch64")]
         {
@@ -612,6 +615,112 @@ mod tests {
             0,
             "runtime error values crossed between invocations"
         );
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn throws_exit_to_the_nearest_handler_and_skip_later_effects() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (helpers, main, expected) in [
+                (
+                    "",
+                    "try { throw 42; count = 7; } catch error { return count; } return -1;",
+                    0,
+                ),
+                (
+                    "fn fail() -> Int { throw 42; count = 7; return 0; }",
+                    "try { fail(); count = 8; } catch error { return count; } return -1;",
+                    0,
+                ),
+                (
+                    "fn fail() -> Int { throw 42; return 0; }",
+                    "try { let result = 100 + fail(); count = 8; } catch error { return error; } return -1;",
+                    42,
+                ),
+                (
+                    "fn fail() -> Int { throw 42; return 0; }\nfn use(x: Int, y: Int) -> Int { count = 9; return x + y; }",
+                    "try { use(1, fail()); count = 8; } catch error { return count; } return -1;",
+                    0,
+                ),
+                (
+                    "",
+                    "try { try { throw 42; } catch inner { throw 43; count = 7; } count = 8; } catch outer { return outer; } return -1;",
+                    43,
+                ),
+                (
+                    "fn fail() -> Int { throw 42; return 0; }\nfn middle() -> Int { return fail() + 7; }",
+                    "try { middle(); count = 8; } catch error { return error; } return -1;",
+                    42,
+                ),
+                (
+                    "",
+                    "try { var n = 0; while n < 3 { n += 1; if n == 2 { throw 42; } count += 1; } count = 9; } catch error { return count; } return -1;",
+                    1,
+                ),
+                (
+                    "fn pure() -> Int { return 42; }",
+                    "try { pure(); count = 3; } catch error { return -1; } return count;",
+                    3,
+                ),
+                ("", "throw 42; count = 7; return 0;", 42),
+            ] {
+                let source =
+                    format!("var count: Int = 0;\n{helpers}\nfn main() -> Int {{ {main} }}");
+                let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "raw {profile:?}: {source}"
+                );
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "optimized {profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn try_without_catches_propagates_to_the_outer_handler() {
+        let mut module = crate::in_lang_parse::parse_in_source("fn main() -> Int { try { try { throw 42; } catch inner { return 1; } return 2; } catch outer { return outer; } return 3; }").unwrap();
+        for decl in &mut module.decls {
+            if let crate::core_ir::Decl::Function { body, .. } = decl
+                && let crate::core_ir::Stmt::Try { body, .. } = &mut body[0]
+                && let crate::core_ir::Stmt::Try { catches, .. } = &mut body[0]
+            {
+                catches.clear();
+            }
+        }
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(invoke_module(&module, profile, &[]), Some(42));
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn new_invocations_clear_previous_error_flags() {
+        let mut module = crate::in_lang_parse::parse_in_source("fn fail() -> Int { throw 42; return 0; }\nfn pure() -> Int { return 7; }\nfn main() -> Int { pure(); return 7; }").unwrap();
+        for decl in &mut module.decls {
+            if let crate::core_ir::Decl::Function { name, body, .. } = decl
+                && name == "main"
+            {
+                body.insert(1, crate::core_ir::Stmt::Propagate);
+            }
+        }
+        let rt = runtime_for_module(&module, crate::emit_profile::EmitProfile::Default);
+        assert_eq!(unsafe { rt.invoke("fail", &[]) }, Some(42));
+        assert_eq!(unsafe { rt.invoke("main", &[]) }, Some(7));
     }
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]

@@ -470,6 +470,7 @@ pub(crate) struct FunctionInfo {
     pub(crate) params: Vec<(String, Typ)>,
     pub(crate) ret: Typ,
     pub(crate) body: Vec<Stmt>,
+    pub(crate) may_throw: bool,
 }
 
 fn lower_function_to_buffer(
@@ -942,6 +943,7 @@ fn lower_function(
         pending_strings,
         &func.name,
     )?;
+    ctx.ret_typ = func.ret.clone();
     alloc_declared_locals(&mut ctx, &func.body, &func.name, functions)?;
     ctx.binop_temp = ctx.alloc_slot();
     for index in 0..ctx.binop_temps.len() {

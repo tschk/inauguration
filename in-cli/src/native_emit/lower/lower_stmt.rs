@@ -33,6 +33,36 @@ fn emit_error_slot_adr(emitter: &mut CodeEmitter, fn_name: &str) -> Result<(), S
     }
 }
 
+pub(crate) fn emit_error_exit(emitter: &mut CodeEmitter, ctx: &mut LowerCtx<'_>) {
+    if let Some(branches) = ctx.error_branches.last_mut() {
+        branches.push(emitter.emit_insn(aarch64::b(0)));
+    } else {
+        if matches!(
+            ctx.ret_typ.canonical(),
+            Typ::Void | Typ::Named(_) | Typ::Array(_) | Typ::Vector(_)
+        ) {
+            emitter.emit_insns(&aarch64::load_i64(0, 0));
+        } else {
+            emitter.emit_u32(aarch64::ldr64(0, 27, 8));
+        }
+        emit_epilogue(emitter, ctx.prologue_stack_reserve);
+    }
+}
+
+pub(crate) fn emit_error_check(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    fn_name: &str,
+) -> Result<(), String> {
+    emit_error_slot_adr(emitter, fn_name)?;
+    emitter.emit_u32(aarch64::ldrb(9, 27, 0));
+    let continue_branch = emitter.emit_insn(aarch64::cbz_w(9, 0));
+    emit_error_exit(emitter, ctx);
+    let delta = emitter.len() as i32 - continue_branch as i32;
+    emitter.patch_u32(continue_branch, aarch64::cbz_w(9, delta));
+    Ok(())
+}
+
 pub(crate) fn lower_stmt(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -246,6 +276,7 @@ pub(crate) fn lower_stmt(
             // Set error flag to 1
             emitter.emit_insns(&aarch64::load_i64(1, 1));
             emitter.emit_u32(aarch64::strb(1, 27, 0));
+            emit_error_exit(emitter, ctx);
             Ok(())
         }
         Stmt::Try { body, catches, .. } => {
@@ -258,6 +289,7 @@ pub(crate) fn lower_stmt(
             // Clear global error flag
             emitter.emit_u32(aarch64::strb(aarch64::REG_XZR, 27, 0));
 
+            ctx.error_branches.push(Vec::new());
             for stmt in body {
                 lower_stmt(
                     emitter,
@@ -270,12 +302,28 @@ pub(crate) fn lower_stmt(
                 )?;
             }
 
+            let error_branches = ctx.error_branches.pop().unwrap();
+
             // Check global error flag
             emitter.emit_u32(aarch64::ldrb(0, 27, 0));
             let handler_branch = emitter.emit_insn(aarch64::cbnz_w(0, 0));
             let end_branch = emitter.emit_insn(aarch64::b(0));
 
             let handler_offset = emitter.len();
+            for site in error_branches {
+                emitter.patch_u32(site, aarch64::b(handler_offset as i32 - site as i32));
+            }
+            emitter.emit_u32(aarch64::mov_reg64(aarch64::REG_SP, aarch64::REG_FP));
+            if ctx.prologue_stack_reserve > 0 {
+                emitter.emit_u32(aarch64::sub_imm64(
+                    aarch64::REG_SP,
+                    aarch64::REG_SP,
+                    ctx.prologue_stack_reserve as u16,
+                ));
+            }
+            if catches.is_empty() {
+                emit_error_exit(emitter, ctx);
+            }
             // Clear global error flag
             emitter.emit_u32(aarch64::strb(aarch64::REG_XZR, 27, 0));
 
@@ -312,15 +360,7 @@ pub(crate) fn lower_stmt(
             ctx.loop_branches = outer_loops;
             Ok(())
         }
-        Stmt::Propagate => {
-            emitter.emit_u32(aarch64::ldrb(0, 27, 0));
-            let continue_branch = emitter.emit_insn(aarch64::cbz_w(0, 0));
-            emitter.emit_insns(&aarch64::load_i64(0, 0));
-            emit_epilogue(emitter, ctx.prologue_stack_reserve);
-            let end_offset = emitter.len() as i32 - continue_branch as i32;
-            emitter.patch_u32(continue_branch, aarch64::cbz_w(0, end_offset));
-            Ok(())
-        }
+        Stmt::Propagate => emit_error_check(emitter, ctx, fn_name),
         Stmt::Break | Stmt::Continue => {
             let Some(branches) = ctx.loop_branches.last_mut() else {
                 return Err(format!(

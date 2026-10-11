@@ -169,6 +169,9 @@ pub(crate) fn lower_call(
         target: target.clone(),
     });
     ctx.release_call_arg_temps();
+    if functions[target].may_throw {
+        super::lower_stmt::emit_error_check(emitter, ctx, fn_name)?;
+    }
 
     if rd != 0 {
         emitter.emit_u32(aarch64::mov_reg64(rd, 0));
