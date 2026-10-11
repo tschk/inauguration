@@ -100,16 +100,23 @@ fn alloc_executable_pages(size: usize) -> Option<*mut u8> {
 }
 
 #[cfg(not(windows))]
-fn make_executable(ptr: *mut u8, size: usize) {
+fn make_executable(ptr: *mut u8, size: usize) -> Result<(), String> {
     // ponytail: pthread_jit_write_protect_np regressed JIT on arm64 macOS CI;
     // mprotect on MAP_JIT pages still passes conformance here.
-    unsafe {
+    let result = unsafe {
         libc::mprotect(
             ptr as *mut std::ffi::c_void,
             size,
             libc::PROT_READ | libc::PROT_EXEC,
-        );
+        )
+    };
+    if result != 0 {
+        return Err(format!(
+            "jit: executable page protection failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
+    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -147,9 +154,10 @@ fn alloc_executable_pages(size: usize) -> Option<*mut u8> {
 }
 
 #[cfg(windows)]
-fn make_executable(_ptr: *mut u8, _size: usize) {
+fn make_executable(_ptr: *mut u8, _size: usize) -> Result<(), String> {
     // Already RWX from VirtualAlloc. ARM64 Windows needs FlushInstructionCache
     // but that requires win32_ffi we can add when tested.
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -179,7 +187,7 @@ impl CodePage {
     }
 
     /// Make the written code executable and flush caches.
-    fn finalize(&self) {
+    fn finalize(&self) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         unsafe {
             sys_icache_invalidate(self.ptr as *const std::ffi::c_void, self.used);
@@ -194,7 +202,7 @@ impl CodePage {
             }
             __clear_cache(self.ptr, self.ptr.add(self.used));
         }
-        make_executable(self.ptr, self.size);
+        make_executable(self.ptr, self.size)
     }
 }
 
@@ -346,14 +354,10 @@ impl JitRuntime {
             }
         }
 
-        // On Apple ARM64, flush the instruction cache after writing code
+        // Publish entry points only after the page is executable.
+        page.finalize()?;
+        let base = page.ptr;
         self.code_pages.push(page);
-
-        // Make code pages executable
-        let last_page = self.code_pages.last().unwrap();
-        last_page.finalize();
-
-        let base = self.code_pages.last().unwrap().ptr;
         let mut funcs = self.functions.write().unwrap();
         for (name, offset, size) in function_offsets {
             funcs.insert(
@@ -459,6 +463,60 @@ impl Drop for JitRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_page_protection_reports_failures() {
+        let page = CodePage::new(1).expect("code page");
+        let error = make_executable(unsafe { page.ptr.add(1) }, page.size - 1)
+            .expect_err("unaligned page protection must fail");
+        assert!(error.starts_with("jit: executable page protection failed:"));
+        page.finalize().expect("valid page protection");
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    #[ignore = "diagnostic stress for mixed JIT code-page reuse"]
+    fn jit_code_pages_keep_fresh_results_when_reused() {
+        use crate::emit_profile::EmitProfile;
+        std::thread::scope(|scope| {
+            for worker in 0..32_i64 {
+                scope.spawn(move || {
+                    for iteration in 0..1024_i64 {
+                        let profile = match (iteration / 4) % 3 {
+                            0 => EmitProfile::Default,
+                            1 => EmitProfile::Lean,
+                            _ => EmitProfile::Harden,
+                        };
+                        let tag = worker * 5000 + iteration;
+                        let (source, args, expected) = match iteration % 4 {
+                            0 => (format!("fn main() -> Int {{ return {tag}; }}"), vec![], tag),
+                            1 => (
+                                "fn main() -> Float { return 1.25 + 2.5; }".into(),
+                                vec![],
+                                3.75_f64.to_bits() as i64,
+                            ),
+                            2 => (
+                                format!("var value: Int = {tag};\nfn read(x: Int) -> Int {{ return x; }}\nfn main() -> Int {{ return read(value); }}"),
+                                vec![],
+                                tag,
+                            ),
+                            _ => (
+                                "fn main(a: Int, b: Int) -> Int { return a % b; }".into(),
+                                vec![i64::MIN, -1],
+                                0,
+                            ),
+                        };
+                        assert_eq!(
+                            invoke_source(&source, profile, &args),
+                            Some(expected),
+                            "worker={worker} iteration={iteration} profile={profile:?}"
+                        );
+                    }
+                });
+            }
+        });
+    }
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
