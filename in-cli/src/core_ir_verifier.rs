@@ -393,9 +393,7 @@ fn check_stmt(
 ) -> Result<(), (String, String)> {
     match stmt {
         Stmt::Let(name, typ, expr) => {
-            // Allow re-declaration of locals (desugared for-loop variables may reuse names)
-            // The last declaration wins.
-            let _ = env.remove(name);
+            // Check the initializer before the new binding shadows the previous one.
             check_expr(fn_name, expr, facts, env, call_edges)?;
             let expr_typ = expr_type(expr, facts, env);
             if let (Some(expected), Some(actual)) = (typ, expr_typ.as_ref())
@@ -1001,6 +999,35 @@ mod tests {
             entry: None,
             require_entry: false,
         }
+    }
+
+    #[test]
+    fn shadow_initializers_use_the_previous_binding() {
+        for params in [vec![], vec![("x".into(), Typ::Int)]] {
+            let mut body = vec![];
+            if params.is_empty() {
+                body.push(Stmt::Let("x".into(), Some(Typ::Int), Expr::IntLit(1)));
+            }
+            body.push(Stmt::Let(
+                "x".into(),
+                Some(Typ::Int),
+                Expr::Ident("x".into()),
+            ));
+            body.push(Stmt::Return(Some(Expr::Ident("x".into()))));
+            let report = verify_module(
+                &module(vec![function_with_params("main", params, Typ::Int, body)]),
+                &default_options(),
+            );
+            assert!(report.ok, "{report:?}");
+        }
+        let report = verify_module(
+            &module(vec![function(
+                "main",
+                vec![Stmt::Let("x".into(), None, Expr::Ident("x".into()))],
+            )]),
+            &default_options(),
+        );
+        assert!(!report.ok, "a first declaration cannot initialize itself");
     }
 
     #[test]
