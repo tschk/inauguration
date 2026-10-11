@@ -121,7 +121,11 @@ pub(crate) fn alloc_declared_locals(
             Stmt::Try { body, catches, .. } => {
                 alloc_declared_locals(ctx, body, fn_name, functions)?;
                 for catch in catches {
-                    ctx.alloc_local(&catch.pattern, Some(&Typ::Int), fn_name)?;
+                    if let crate::core_ir::MatchPattern::IdentPat(name) =
+                        crate::core_ir::MatchPattern::parse(&catch.pattern)?
+                    {
+                        ctx.alloc_local(&name, Some(&Typ::Int), fn_name)?;
+                    }
                     alloc_declared_locals(ctx, &catch.body, fn_name, functions)?;
                 }
             }

@@ -10,7 +10,7 @@
 //!   - direct function calls
 //!   - struct init/field access (scalar fields only)
 
-use crate::core_ir::{Decl, Expr, LoopKind, MatchArm, Stmt, Typ, UnifiedModule};
+use crate::core_ir::{Decl, Expr, LoopKind, MatchArm, MatchPattern, Stmt, Typ, UnifiedModule};
 use crate::native_emit::antidecomp;
 use crate::native_emit::global_data::{build_data_section, collect_globals};
 use crate::native_emit::x86_64::{self, CodeEmitter, RAX, RBP, RBX, RCX, RDI, RDX, RSI};
@@ -1080,7 +1080,9 @@ fn alloc_declared_locals(ctx: &mut LowerCtx<'_>, body: &[Stmt]) -> Result<(), St
             Stmt::Try { body, catches, .. } => {
                 alloc_declared_locals(ctx, body)?;
                 for catch in catches {
-                    ctx.alloc_local(&catch.pattern, &Typ::Int)?;
+                    if let MatchPattern::IdentPat(name) = MatchPattern::parse(&catch.pattern)? {
+                        ctx.alloc_local(&name, &Typ::Int)?;
+                    }
                     alloc_declared_locals(ctx, &catch.body)?;
                 }
             }
@@ -1487,23 +1489,59 @@ fn lower_stmt(
             }
             emitter.emit_insns(&x86_64::lea_sp_from_fp());
             emitter.emit_insns(&x86_64::sub_rsp_i32(ctx.prologue_frame_size as i32));
-            if catches.is_empty() {
-                emit_error_exit(emitter, ctx)?;
-            }
-            emitter.emit_insns(&x86_64::load_i64(RAX, 0));
-            store_error_global(emitter, ctx, "__inrt_err_flag")?;
-
-            if let Some(catch_arm) = catches.first() {
+            let mut caught_branches = Vec::new();
+            for catch_arm in catches {
+                let pattern = MatchPattern::parse(&catch_arm.pattern)?;
                 load_error_global(emitter, ctx, "__inrt_err_val")?;
-                if let Some(StackSlot::Scalar(offset)) = ctx.locals.get(&catch_arm.pattern) {
-                    emitter.emit_insns(&x86_64::str64(RAX, *offset as u16));
-                }
+                // ponytail: scalar patterns compare carrier words; mixed error types need type tags.
+                let next_arm = match pattern {
+                    MatchPattern::IntPat(value) => {
+                        emitter.emit_insns(&x86_64::load_i64(RCX, value));
+                        emitter.emit_insns(&x86_64::cmp_rr(RAX, RCX));
+                        let site = emitter.len();
+                        emitter.emit_insns(&x86_64::jcc_near(0x05, 0));
+                        Some(site)
+                    }
+                    MatchPattern::BoolPat(value) => {
+                        emitter.emit_insns(&x86_64::load_i64(RCX, i64::from(value)));
+                        emitter.emit_insns(&x86_64::cmp_rr(RAX, RCX));
+                        let site = emitter.len();
+                        emitter.emit_insns(&x86_64::jcc_near(0x05, 0));
+                        Some(site)
+                    }
+                    MatchPattern::WildPat => None,
+                    MatchPattern::IdentPat(name) => {
+                        if let Some(StackSlot::Scalar(offset)) = ctx.locals.get(&name) {
+                            emitter.emit_insns(&x86_64::str64(RAX, *offset as u16));
+                        }
+                        None
+                    }
+                    // ponytail: string/aggregate catches need a typed error carrier before matching safely.
+                    _ => {
+                        return Err(format!(
+                            "x86_64-lower: unsupported catch pattern `{}` in `{}`",
+                            catch_arm.pattern, ctx.fn_name
+                        ));
+                    }
+                };
+                emitter.emit_insns(&x86_64::load_i64(RAX, 0));
+                store_error_global(emitter, ctx, "__inrt_err_flag")?;
                 for catch_stmt in &catch_arm.body {
                     lower_stmt(emitter, ctx, catch_stmt, pending_calls)?;
                 }
+                let site = emitter.len();
+                emitter.emit_insns(&x86_64::jmp_rel32(0));
+                caught_branches.push(site);
+                if let Some(site) = next_arm {
+                    emitter.patch_u32(site + 2, (emitter.len() as i32 - site as i32 - 6) as u32);
+                }
             }
+            emit_error_exit(emitter, ctx)?;
 
             let end_offset = emitter.len();
+            for site in caught_branches {
+                emitter.patch_u32(site + 1, (end_offset as i32 - site as i32 - 5) as u32);
+            }
 
             // Patch handler branch (jne rel32)
             let handler_delta = handler_offset as i32 - handler_branch as i32 - 6;

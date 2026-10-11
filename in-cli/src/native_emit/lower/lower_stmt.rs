@@ -4,7 +4,7 @@ use super::lower_util::{
     find_field_offset, is_native_scalar_type, native_struct_fields,
 };
 use super::{FunctionInfo, LocalSlot, LowerCtx, PendingCall};
-use crate::core_ir::{Expr, LoopKind, Stmt, Typ};
+use crate::core_ir::{Expr, LoopKind, MatchPattern, Stmt, Typ};
 use crate::native_emit::aarch64::{self, CodeEmitter};
 use std::collections::HashMap;
 
@@ -321,18 +321,38 @@ pub(crate) fn lower_stmt(
                     ctx.prologue_stack_reserve as u16,
                 ));
             }
-            if catches.is_empty() {
-                emit_error_exit(emitter, ctx);
-            }
-            // Clear global error flag
-            emitter.emit_u32(aarch64::strb(aarch64::REG_XZR, 27, 0));
-
-            if let Some(catch_arm) = catches.first() {
-                // Load error value from global location via X27
+            let mut caught_branches = Vec::new();
+            for catch_arm in catches {
+                let pattern = MatchPattern::parse(&catch_arm.pattern)?;
                 emitter.emit_u32(aarch64::ldr64(0, 27, 8));
-                if let Some(LocalSlot::Scalar(offset)) = ctx.locals.get(&catch_arm.pattern) {
-                    emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, *offset));
-                }
+                // ponytail: scalar patterns compare carrier words; mixed error types need type tags.
+                let next_arm = match pattern {
+                    MatchPattern::IntPat(value) => {
+                        emitter.emit_insns(&aarch64::load_i64(1, value));
+                        emitter.emit_u32(aarch64::cmp_reg64(0, 1));
+                        Some(emitter.emit_insn(aarch64::b_cond(1, 0)))
+                    }
+                    MatchPattern::BoolPat(value) => {
+                        emitter.emit_insns(&aarch64::load_i64(1, i64::from(value)));
+                        emitter.emit_u32(aarch64::cmp_reg64(0, 1));
+                        Some(emitter.emit_insn(aarch64::b_cond(1, 0)))
+                    }
+                    MatchPattern::WildPat => None,
+                    MatchPattern::IdentPat(name) => {
+                        if let Some(LocalSlot::Scalar(offset)) = ctx.locals.get(&name) {
+                            emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, *offset));
+                        }
+                        None
+                    }
+                    // ponytail: string/aggregate catches need a typed error carrier before matching safely.
+                    _ => {
+                        return Err(format!(
+                            "native-lower: unsupported catch pattern `{}` in `{fn_name}`",
+                            catch_arm.pattern
+                        ));
+                    }
+                };
+                emitter.emit_u32(aarch64::strb(aarch64::REG_XZR, 27, 0));
                 for catch_stmt in &catch_arm.body {
                     lower_stmt(
                         emitter,
@@ -344,9 +364,17 @@ pub(crate) fn lower_stmt(
                         ret_typ,
                     )?;
                 }
+                caught_branches.push(emitter.emit_insn(aarch64::b(0)));
+                if let Some(site) = next_arm {
+                    emitter.patch_u32(site, aarch64::b_cond(1, emitter.len() as i32 - site as i32));
+                }
             }
+            emit_error_exit(emitter, ctx);
 
             let end_offset = emitter.len();
+            for site in caught_branches {
+                emitter.patch_u32(site, aarch64::b(end_offset as i32 - site as i32));
+            }
 
             let handler_delta = handler_offset as i32 - handler_branch as i32;
             emitter.patch_u32(handler_branch, aarch64::cbnz_w(0, handler_delta));

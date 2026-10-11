@@ -2011,3 +2011,34 @@ fn parses_typed_local_var_and_rejects_missing_initializer() {
     );
     assert!(parse_in_source("fn main() -> Int { var value: Int; return 0; }").is_err());
 }
+
+#[test]
+fn block_continuations_survive_newlines() {
+    for separator in ["\n", "\r\n", "\n\n"] {
+        for (prefix, suffix, is_try) in [
+            ("try { throw 42; }", "catch 41 { return 1; }", true),
+            ("if true { return 1; }", "else { return 2; }", false),
+        ] {
+            let module = parse_in_source(&format!(
+                "fn main() -> Int {{ {prefix}{separator}{suffix}{separator}return 3; }}"
+            ))
+            .unwrap();
+            let Decl::Function { body, .. } = &module.decls[0] else {
+                panic!("main");
+            };
+            assert_eq!(body.len(), 2, "{separator:?}: {body:?}");
+            if is_try {
+                let Stmt::Try { catches, .. } = &body[0] else {
+                    panic!("try");
+                };
+                assert_eq!(catches.len(), 1);
+                assert_eq!(catches[0].pattern, "41");
+            } else {
+                let Stmt::If { else_body, .. } = &body[0] else {
+                    panic!("if");
+                };
+                assert_eq!(else_body.len(), 1);
+            }
+        }
+    }
+}

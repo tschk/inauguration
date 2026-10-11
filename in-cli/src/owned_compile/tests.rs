@@ -1183,6 +1183,64 @@ fn resolve_jit_entry_empty_name_uses_library_fallback() {
 }
 
 #[test]
+fn native_backends_reject_untyped_string_and_aggregate_catches() {
+    for pattern in ["\"value\"", "[value]", "(value, other)"] {
+        let mut module = crate::in_lang_parse::parse_in_source(
+            "fn main() -> Int { try { throw 42; } catch error { return 1; } return 2; }",
+        )
+        .unwrap();
+        if let Decl::Function { body, .. } = &mut module.decls[0]
+            && let crate::core_ir::Stmt::Try { catches, .. } = &mut body[0]
+        {
+            catches[0].pattern = pattern.into();
+        }
+        for result in [
+            crate::native_emit::lower::lower_module(&module, "main", NativeLinkage::Executable)
+                .map(|_| ()),
+            crate::native_emit::x86_64_lower::lower_module(&module, "main").map(|_| ()),
+        ] {
+            let error = result.expect_err("unsupported catch must not run unconditionally");
+            assert!(error.contains("unsupported catch pattern"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn owned_jit_selects_catches_and_reports_unmatched_errors() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for (catches, handled) in [
+            ("catch 41 { return 1; } catch 42 { return 2; }", true),
+            ("catch 41 { return 1; }", false),
+        ] {
+            let source = temp_path("catch-dispatch.in");
+            fs::write(&source, format!("fn fail() -> Int {{ throw 42; return 0; }}\nfn main() -> Int {{ try {{ fail(); }} {catches} return 3; }}")).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(source).unwrap();
+            assert_eq!(report.success, handled, "{profile:?}: {report:?}");
+            if handled {
+                assert_eq!(report.eval_result, Some(EvalValue::Int(2)));
+            } else {
+                assert_eq!(
+                    report.error.as_deref(),
+                    Some("jit-uncaught-error: entry `main` threw 42")
+                );
+                assert_eq!(report.eval_result, None);
+            }
+        }
+    }
+}
+
+#[test]
 fn native_backends_reject_dynamic_call_targets() {
     use crate::core_ir::{Expr, Stmt};
     for callee in [

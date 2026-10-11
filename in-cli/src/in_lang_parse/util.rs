@@ -521,6 +521,15 @@ pub(crate) fn split_function_statements(body: &str) -> Vec<String> {
                 }
             }
             ';' | '\n' if depth == 0 => {
+                if c == '\n' && body[start..i].trim_end().ends_with('}') {
+                    let tail = body[i + 1..].trim_start();
+                    if tail.starts_with("else")
+                        || tail.starts_with("catch")
+                        || tail.starts_with('.')
+                    {
+                        continue;
+                    }
+                }
                 let stmt = trim(&body[start..i]);
                 if !stmt.is_empty() {
                     let stmt = strip_line_comment_outside_strings(stmt);

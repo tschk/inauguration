@@ -1,0 +1,11 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 2
+
+fn main() -> Int {
+    try { throw 42; }
+    catch 41 { return 1; }
+    catch 42 { return 2; }
+    return 3;
+}

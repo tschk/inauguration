@@ -625,6 +625,76 @@ mod tests {
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
+    fn catches_select_in_order_and_propagate_unmatched_errors() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (body, expected) in [
+                (
+                    "try { throw 42; } catch 41 { return 1; } catch 42 { return 2; } return 3;",
+                    2,
+                ),
+                (
+                    "try { throw 42; } catch 41 { return 1; } catch error { return error; } return 3;",
+                    42,
+                ),
+                (
+                    "try { throw 42; } catch _ { return 9; } catch 42 { return 2; } return 3;",
+                    9,
+                ),
+                (
+                    "try { throw 42; } catch 41 { count = 1; } catch 42 { count = 2; } count += 3; return count;",
+                    5,
+                ),
+                (
+                    "try { try { throw 43; } catch 41 { return 1; } catch 42 { return 2; } return 3; } catch outer { return outer; } return 4;",
+                    43,
+                ),
+                (
+                    "try { throw false; } catch true { return 1; } catch false { return 2; } return 3;",
+                    2,
+                ),
+                (
+                    "try { throw -42; } catch 42 { return 1; } catch -42 { return 2; } return 3;",
+                    2,
+                ),
+                (
+                    "try { throw 42; } catch count { return count; } return 3;",
+                    42,
+                ),
+                (
+                    "try { try { throw 42; } catch 42 { throw 43; } } catch 42 { return 1; } catch 43 { return 2; } return 3;",
+                    2,
+                ),
+            ] {
+                let source = format!("var count: Int = 0;\nfn main() -> Int {{ {body} }}");
+                let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "raw {profile:?}: {source}"
+                );
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "optimized {profile:?}: {source}"
+                );
+            }
+            let module = crate::in_lang_parse::parse_in_source(
+                "fn main() -> Int { try { throw 42; } catch 41 { return 1; } return 3; }",
+            )
+            .unwrap();
+            let rt = runtime_for_module(&module, profile);
+            assert_eq!(unsafe { rt.invoke("main", &[]) }, Some(42));
+            assert_eq!(rt.invocation_error(), Some(42));
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
     fn throws_exit_to_the_nearest_handler_and_skip_later_effects() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

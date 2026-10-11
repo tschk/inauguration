@@ -20,6 +20,7 @@ agree conformance/control-flow/nested-range-jumps.in
 agree conformance/control-flow/while-counter.in
 agree conformance/control-flow/z-continue-only.in
 agree conformance/control-flow/z-plus-only.in
+agree conformance/errors/catch-selection.in
 agree conformance/errors/throw-caught.in
 agree conformance/errors/throw-from-function.in
 agree conformance/errors/throw.in
