@@ -1223,6 +1223,21 @@ fn inlining_preserves_argument_call_evaluation() {
                 "return combine();",
                 1,
             ),
+            (
+                "fn addtwice(x: Int) -> Void { count = count + x; count = count + x; }",
+                "count = 1; addtwice(count); return count;",
+                3,
+            ),
+            (
+                "fn helper() -> Void { let temp = 7; count = temp; }",
+                "let temp = 42; helper(); return count + temp;",
+                49,
+            ),
+            (
+                "fn helper() -> Void { return; count = 2; }",
+                "count = 1; helper(); return count;",
+                1,
+            ),
         ] {
             let source = temp_path("inline-argument-effects.in");
             fs::write(&source, format!("var count: Int = 0;\nfn next() -> Int {{ count = count + 1; return count; }}\n{callee}\nfn main() -> Int {{ {main} }}\n")).unwrap();

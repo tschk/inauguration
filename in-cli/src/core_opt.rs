@@ -426,10 +426,8 @@ fn inline_body_limited(
             }
             Stmt::Expr(e) => {
                 let e = inline_in_expr_limited(e, cand, fns, depth + 1, max_depth);
-                match try_inline_void(&e, cand, fns) {
-                    Some(s) => r.extend(s),
-                    None => r.push(Stmt::Expr(e)),
-                }
+                // ponytail: void-body splicing needs hygienic bindings and argument snapshots.
+                r.push(Stmt::Expr(e));
             }
             s => r.push(map_stmt(s, &mut |e| {
                 inline_in_expr_limited(e, cand, fns, depth + 1, max_depth)
@@ -505,104 +503,6 @@ fn fold_call_ret(e: Expr, cand: &[String], fns: &HashMap<String, Decl>) -> Expr 
     e
 }
 
-fn try_inline_void(e: &Expr, cand: &[String], fns: &HashMap<String, Decl>) -> Option<Vec<Stmt>> {
-    if let Expr::Call { callee, args, .. } = e {
-        if args.iter().any(expr_has_call) {
-            return None;
-        }
-        if let Expr::Ident(name) = callee.as_ref() {
-            if cand.contains(name) {
-                if let Some(Decl::Function {
-                    body, params, ret, ..
-                }) = fns.get(name)
-                {
-                    if *ret != Typ::Void {
-                        return None;
-                    }
-                    let mut sub = HashMap::new();
-                    for (i, (p, _)) in params.iter().enumerate() {
-                        if i < args.len() {
-                            sub.insert(p.as_str(), &args[i]);
-                        }
-                    }
-                    let r: Vec<Stmt> = substitute_params(body, &sub)
-                        .into_iter()
-                        .filter(|s| !matches!(s, Stmt::Return(None)))
-                        .collect();
-                    return Some(r);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn substitute_params(stmts: &[Stmt], sub: &HashMap<&str, &Expr>) -> Vec<Stmt> {
-    stmts.iter().map(|s| subst_stmt(s, sub)).collect()
-}
-fn subst_stmt(s: &Stmt, sub: &HashMap<&str, &Expr>) -> Stmt {
-    match s {
-        Stmt::Let(n, t, e) => Stmt::Let(n.clone(), t.clone(), substitute_expr(e, sub)),
-        Stmt::Assign(n, e) => Stmt::Assign(n.clone(), substitute_expr(e, sub)),
-        Stmt::FieldAssign {
-            base, name, value, ..
-        } => Stmt::FieldAssign {
-            base: substitute_expr(base, sub),
-            name: name.clone(),
-            value: substitute_expr(value, sub),
-        },
-        Stmt::IndexAssign {
-            base, index, value, ..
-        } => Stmt::IndexAssign {
-            base: substitute_expr(base, sub),
-            index: substitute_expr(index, sub),
-            value: substitute_expr(value, sub),
-        },
-        Stmt::Return(e) => Stmt::Return(e.as_ref().map(|e| substitute_expr(e, sub))),
-        Stmt::If {
-            cond,
-            then_body,
-            else_body,
-            ..
-        } => Stmt::If {
-            cond: substitute_expr(cond, sub),
-            then_body: substitute_params(then_body, sub),
-            else_body: substitute_params(else_body, sub),
-        },
-        Stmt::Loop {
-            kind, cond, body, ..
-        } => Stmt::Loop {
-            kind: kind.clone(),
-            cond: cond.as_ref().map(|c| substitute_expr(c, sub)),
-            body: substitute_params(body, sub),
-        },
-        Stmt::Expr(e) => Stmt::Expr(substitute_expr(e, sub)),
-        Stmt::Throw(e) => Stmt::Throw(substitute_expr(e, sub)),
-        Stmt::Try { body, catches } => Stmt::Try {
-            body: substitute_params(body, sub),
-            catches: catches
-                .iter()
-                .map(|c| CatchArm {
-                    pattern: c.pattern.clone(),
-                    body: substitute_params(&c.body, sub),
-                })
-                .collect(),
-        },
-        Stmt::Match { scrutinee, arms } => Stmt::Match {
-            scrutinee: substitute_expr(scrutinee, sub),
-            arms: arms
-                .iter()
-                .map(|a| MatchArm {
-                    pattern: a.pattern.clone(),
-                    body: substitute_params(&a.body, sub),
-                })
-                .collect(),
-        },
-        Stmt::Break => Stmt::Break,
-        Stmt::Continue => Stmt::Continue,
-        Stmt::Propagate => Stmt::Propagate,
-    }
-}
 fn substitute_expr(e: &Expr, sub: &HashMap<&str, &Expr>) -> Expr {
     let mut e = e.clone();
     map_expr_mut(&mut e, &mut |expr_mut| {
