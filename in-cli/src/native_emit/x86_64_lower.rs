@@ -1788,13 +1788,21 @@ fn lower_ident_ref(
                 width: if x86_64::is_32bit() { 4 } else { 8 },
                 offset,
             });
-        } else {
-            let addr_offset = if x86_64::is_32bit() { 3 } else { 4 };
-            let site = emitter.len() + addr_offset;
+        } else if x86_64::is_32bit() {
+            let site = emitter.len() + 3;
             emitter.emit_insns(&x86_64::mov_r_from_abs32(target_reg, 0));
             ctx.pending_globals.push(PendingGlobal {
                 site,
                 width: 4,
+                offset,
+            });
+        } else {
+            let site = emitter.len() + 2;
+            emitter.emit_insns(&x86_64::mov_ri64(target_reg, 0));
+            emitter.emit_insns(&x86_64::mov_r_m(target_reg, target_reg, 0));
+            ctx.pending_globals.push(PendingGlobal {
+                site,
+                width: 8,
                 offset,
             });
         }

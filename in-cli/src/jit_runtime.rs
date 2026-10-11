@@ -476,6 +476,16 @@ mod tests {
                     "unused(next()); return count;",
                     1,
                 ),
+                (
+                    "fn combine(x: Int) -> Int { return next() + x; }",
+                    "return combine(count);",
+                    1,
+                ),
+                (
+                    "fn combine() -> Int { let snapshot = count; return next() + snapshot; }",
+                    "return combine();",
+                    1,
+                ),
             ] {
                 let source = format!(
                     "var count: Int = 0;\nfn next() -> Int {{ count = count + 1; return count; }}\n{callee}\nfn main() -> Int {{ {body} }}"

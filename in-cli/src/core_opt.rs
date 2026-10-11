@@ -387,7 +387,10 @@ fn fold_body_to_expr(body: &[Stmt]) -> Option<Expr> {
         }
     }
     match body.last() {
-        Some(Stmt::Return(Some(ret))) => Some(replace_in_expr(ret.clone(), &env)),
+        // ponytail: effectful returns need parameter/local snapshots before substitution is safe.
+        Some(Stmt::Return(Some(ret))) if !expr_has_call(ret) => {
+            Some(replace_in_expr(ret.clone(), &env))
+        }
         _ => None,
     }
 }
