@@ -462,6 +462,37 @@ mod tests {
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
+    fn optimized_call_arguments_are_evaluated_once() {
+        use crate::emit_profile::EmitProfile;
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for (callee, body, expected) in [
+                (
+                    "fn twice(x: Int) -> Int { return x + x; }",
+                    "return twice(next());",
+                    2,
+                ),
+                (
+                    "fn unused(x: Int) -> Void { return; }",
+                    "unused(next()); return count;",
+                    1,
+                ),
+            ] {
+                let source = format!(
+                    "var count: Int = 0;\nfn next() -> Int {{ count = count + 1; return count; }}\n{callee}\nfn main() -> Int {{ {body} }}"
+                );
+                let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "{profile:?}: {body}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
     fn scalar_float_arithmetic_preserves_fractional_values() {
         use crate::emit_profile::EmitProfile;
         for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
@@ -529,15 +560,24 @@ mod tests {
         args: &[i64],
     ) -> Option<i64> {
         let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        invoke_module(&module, profile, args)
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn invoke_module(
+        module: &crate::core_ir::UnifiedModule,
+        profile: crate::emit_profile::EmitProfile,
+        args: &[i64],
+    ) -> Option<i64> {
         let _profile = crate::native_emit::antidecomp::ProfileGuard::new(profile);
         #[cfg(target_arch = "aarch64")]
         let result = crate::native_emit::lower::lower_module(
-            &module,
+            module,
             "main",
             crate::native_emit::NativeLinkage::Executable,
         );
         #[cfg(target_arch = "x86_64")]
-        let result = crate::native_emit::x86_64_lower::lower_module(&module, "main");
+        let result = crate::native_emit::x86_64_lower::lower_module(module, "main");
         let lowered = result.unwrap();
         #[cfg(target_arch = "aarch64")]
         assert!(

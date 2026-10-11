@@ -444,7 +444,8 @@ fn inline_in_expr_limited(
     max_depth: u32,
 ) -> Expr {
     map_expr(e, &mut |e| match e {
-        Expr::Call { callee, args, .. } if depth < max_depth => {
+        // Substitution must not duplicate or discard argument calls.
+        Expr::Call { callee, args, .. } if depth < max_depth && !args.iter().any(expr_has_call) => {
             let name = match *callee {
                 Expr::Ident(ref n) => n.clone(),
                 other => {
@@ -479,6 +480,9 @@ fn inline_in_expr_limited(
 /// Replace a call-to-small-fn with its return value (for let-bindings).
 fn fold_call_ret(e: Expr, cand: &[String], fns: &HashMap<String, Decl>) -> Expr {
     if let Expr::Call { callee, args, .. } = &e {
+        if args.iter().any(expr_has_call) {
+            return e;
+        }
         if let Expr::Ident(name) = callee.as_ref() {
             if cand.contains(name) {
                 if let Some(Decl::Function { body, params, .. }) = fns.get(name) {
@@ -500,6 +504,9 @@ fn fold_call_ret(e: Expr, cand: &[String], fns: &HashMap<String, Decl>) -> Expr 
 
 fn try_inline_void(e: &Expr, cand: &[String], fns: &HashMap<String, Decl>) -> Option<Vec<Stmt>> {
     if let Expr::Call { callee, args, .. } = e {
+        if args.iter().any(expr_has_call) {
+            return None;
+        }
         if let Expr::Ident(name) = callee.as_ref() {
             if cand.contains(name) {
                 if let Some(Decl::Function {

@@ -1183,6 +1183,55 @@ fn resolve_jit_entry_empty_name_uses_library_fallback() {
 }
 
 #[test]
+fn inlining_preserves_argument_call_evaluation() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for (callee, main, expected) in [
+            (
+                "fn twice(x: Int) -> Int { return x + x; }",
+                "return twice(next());",
+                2,
+            ),
+            (
+                "fn twice(x: Int) -> Int { return x + x; }",
+                "let result = twice(next()); return result;",
+                2,
+            ),
+            (
+                "fn unused(x: Int) -> Int { return 7; }",
+                "let result = unused(next()); return count;",
+                1,
+            ),
+            (
+                "fn unused(x: Int) -> Void { return; }",
+                "unused(next()); return count;",
+                1,
+            ),
+        ] {
+            let source = temp_path("inline-argument-effects.in");
+            fs::write(&source, format!("var count: Int = 0;\nfn next() -> Int {{ count = count + 1; return count; }}\n{callee}\nfn main() -> Int {{ {main} }}\n")).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(source).unwrap();
+            assert!(report.success, "{profile:?}: {main}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(expected)),
+                "{profile:?}: {main}: {report:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn harden_jit_preserves_typed_float_results() {
     if !native_backend::native_subset_host_available() {
         return;
