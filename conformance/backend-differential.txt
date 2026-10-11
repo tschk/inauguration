@@ -13,6 +13,7 @@ agree conformance/control-flow/compound-ops.in
 agree conformance/control-flow/continue-compound.in
 agree conformance/control-flow/if-else.in
 agree conformance/control-flow/loop.in
+agree conformance/control-flow/match-binding.in
 agree conformance/control-flow/match-bool.in
 agree conformance/control-flow/match-order.in
 agree conformance/control-flow/match-string.in

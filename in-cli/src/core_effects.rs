@@ -114,8 +114,14 @@ pub(crate) fn error_bindings(body: &[Stmt]) -> std::collections::BTreeSet<String
                     scan(else_body, seeds, aliases);
                 }
                 Stmt::Loop { body, .. } => scan(body, seeds, aliases),
-                Stmt::Match { arms, .. } => {
+                Stmt::Match { scrutinee, arms } => {
                     for arm in arms {
+                        if let Expr::Ident(source) = scrutinee
+                            && let Ok(crate::core_ir::MatchPattern::IdentPat(name)) =
+                                crate::core_ir::MatchPattern::parse(&arm.pattern)
+                        {
+                            aliases.entry(source.clone()).or_default().push(name);
+                        }
                         scan(&arm.body, seeds, aliases);
                     }
                 }

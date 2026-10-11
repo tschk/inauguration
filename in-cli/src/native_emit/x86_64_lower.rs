@@ -1089,8 +1089,17 @@ fn alloc_declared_locals(ctx: &mut LowerCtx<'_>, body: &[Stmt]) -> Result<(), St
             Stmt::Loop { body, .. } => {
                 alloc_declared_locals(ctx, body)?;
             }
-            Stmt::Match { arms, .. } => {
+            Stmt::Match { scrutinee, arms } => {
                 for arm in arms {
+                    if let MatchPattern::IdentPat(name) = MatchPattern::parse(&arm.pattern)? {
+                        let typ = scalar_expr_type(scrutinee, ctx)
+                            .map(|typ| typ.canonical())
+                            .ok_or("native-lower: unknown match binding type")?;
+                        if !matches!(typ, Typ::Int | Typ::Bool | Typ::Float | Typ::String) {
+                            return Err("native-lower: unsupported aggregate match binding".into());
+                        }
+                        ctx.alloc_local(&name, &typ)?;
+                    }
                     alloc_declared_locals(ctx, &arm.body)?;
                 }
             }
@@ -1762,7 +1771,14 @@ fn lower_match(
 
     for arm in arms {
         let pattern = MatchPattern::parse(&arm.pattern)?;
-        if matches!(pattern, MatchPattern::WildPat) {
+        if let MatchPattern::IdentPat(name) = &pattern {
+            let Some(StackSlot::Scalar(offset)) = ctx.locals.get(name) else {
+                return Err("x86_64-lower: missing scalar match binding".into());
+            };
+            emitter.emit_insns(&x86_64::str64(RAX, *offset as u16));
+            store_local_error_type(emitter, ctx, name, scrutinee)?;
+        }
+        if matches!(pattern, MatchPattern::WildPat | MatchPattern::IdentPat(_)) {
             for stmt in &arm.body {
                 lower_stmt(emitter, ctx, stmt, pending_calls)?;
             }

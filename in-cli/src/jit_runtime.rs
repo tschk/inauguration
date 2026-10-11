@@ -669,6 +669,9 @@ mod tests {
                 for body in [
                     format!("match value {{ {pattern:?} {{ return 42; }} _ {{ return 7; }} }}"),
                     format!(
+                        "match value {{ captured {{ match captured {{ {pattern:?} {{ return 42; }} _ {{ return 7; }} }} }} }}"
+                    ),
+                    format!(
                         "try {{ throw value; }} catch caught {{ match caught {{ {pattern:?} {{ return 42; }} _ {{ return 7; }} }} }}"
                     ),
                     format!(
@@ -722,6 +725,60 @@ mod tests {
             assert_eq!(invoke_module(&module, profile, &[]), Some(42));
             let module = crate::in_lang_parse::parse_in_source("fn main() -> Int { try { throw 123; } catch caught { match caught { \"text\" { return 1; } _ { return 42; } } } return 7; }").unwrap();
             assert_eq!(invoke_module(&module, profile, &[]), Some(42));
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn match_bindings_keep_values_types_scope_and_error_tags() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (source, expected) in [
+                (
+                    "fn main() -> Int { match 5 { captured { return captured; } 5 { return 9; } } return 0; }",
+                    5,
+                ),
+                (
+                    "fn main() -> Int { match false { captured { match captured { false { return 2; } _ { return 1; } } } } return 0; }",
+                    2,
+                ),
+                (
+                    "fn main() -> Int { match 3.75 { captured { if captured == 3.75 { return 2; } } } return 0; }",
+                    2,
+                ),
+                (
+                    "fn text() -> String { return \"abc\"; }\nfn main() -> Int { match text() { captured { match captured { \"abc\" { return 2; } _ { return 1; } } } } return 0; }",
+                    2,
+                ),
+                (
+                    "var calls: Int = 0;\nfn value() -> Int { calls += 1; return 5; }\nfn main() -> Int { match value() { captured { return captured + calls; } } return 0; }",
+                    6,
+                ),
+                (
+                    "fn main() -> Int { let captured = 7; match 5 { captured { if captured != 5 { return 0; } } } return captured; }",
+                    7,
+                ),
+                (
+                    "fn main() -> Int { try { try { throw false; } catch caught { match caught { captured { throw captured; } } } } catch 0 { return 1; } catch false { return 2; } return 0; }",
+                    2,
+                ),
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "raw {profile:?}: {source}"
+                );
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "optimized {profile:?}: {source}"
+                );
+            }
         }
     }
 

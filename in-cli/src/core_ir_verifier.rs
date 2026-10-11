@@ -556,7 +556,16 @@ fn check_stmt(
         } => {
             check_expr(fn_name, scrutinee, facts, env, call_edges)?;
             for arm in arms {
-                check_stmts(fn_name, &arm.body, facts, ret, &mut env.clone(), call_edges)?;
+                let mut arm_env = env.clone();
+                if let Ok(crate::core_ir::MatchPattern::IdentPat(name)) =
+                    crate::core_ir::MatchPattern::parse(&arm.pattern)
+                {
+                    arm_env.insert(
+                        name,
+                        expr_type(scrutinee, facts, env).unwrap_or(Typ::Named("Any".into())),
+                    );
+                }
+                check_stmts(fn_name, &arm.body, facts, ret, &mut arm_env, call_edges)?;
             }
             Ok(())
         }
@@ -1739,6 +1748,29 @@ mod tests {
             report.ok,
             "empty body + non-void return should be allowed: {report:?}"
         );
+    }
+
+    #[test]
+    fn match_bindings_keep_scrutinee_types_and_arm_scope() {
+        for (source, reason) in [
+            (
+                "fn main() -> Int { match 5 { captured { return captured; } } return 0; }",
+                None,
+            ),
+            (
+                "fn main() -> Int { match false { captured { return captured; } } return 0; }",
+                Some("return-type-mismatch"),
+            ),
+            (
+                "fn main() -> Int { match 5 { captured { let seen = captured; } } return captured; }",
+                Some("unresolved-symbol"),
+            ),
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            let report = verify_for_entry(&module, "main");
+            assert_eq!(report.reason_code.as_deref(), reason, "{report:?}");
+            assert_eq!(report.ok, reason.is_none(), "{report:?}");
+        }
     }
 
     #[test]

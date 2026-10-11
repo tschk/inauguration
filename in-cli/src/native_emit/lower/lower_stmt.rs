@@ -1351,7 +1351,17 @@ pub(crate) fn lower_match(
     let mut end_branches = Vec::new();
     for arm in arms {
         let pattern = MatchPattern::parse(&arm.pattern)?;
-        if matches!(pattern, MatchPattern::WildPat) {
+        if let MatchPattern::IdentPat(name) = &pattern {
+            let Some(LocalSlot::Scalar(offset)) = ctx.locals.get(name) else {
+                return Err("native-lower: missing scalar match binding".into());
+            };
+            emitter.emit_u32(aarch64::str64(2, aarch64::REG_SP, *offset));
+            if let Some(tag_offset) = ctx.error_types.get(name) {
+                emit_error_type(emitter, ctx, scrutinee, functions)?;
+                emitter.emit_u32(aarch64::str64(9, aarch64::REG_SP, *tag_offset));
+            }
+        }
+        if matches!(pattern, MatchPattern::WildPat | MatchPattern::IdentPat(_)) {
             for stmt in &arm.body {
                 lower_stmt(
                     emitter,

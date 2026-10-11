@@ -107,8 +107,19 @@ pub(crate) fn alloc_declared_locals(
                 alloc_declared_locals(ctx, body, fn_name, functions)?;
             }
             Stmt::Loop { body, .. } => alloc_declared_locals(ctx, body, fn_name, functions)?,
-            Stmt::Match { arms, .. } => {
+            Stmt::Match { scrutinee, arms } => {
                 for arm in arms {
+                    if let crate::core_ir::MatchPattern::IdentPat(name) =
+                        crate::core_ir::MatchPattern::parse(&arm.pattern)?
+                    {
+                        let typ = super::lower_expr::native_expr_type(scrutinee, ctx, functions)
+                            .map(|typ| typ.canonical())
+                            .ok_or("native-lower: unknown match binding type")?;
+                        if !matches!(typ, Typ::Int | Typ::Bool | Typ::Float | Typ::String) {
+                            return Err("native-lower: unsupported aggregate match binding".into());
+                        }
+                        ctx.alloc_local(&name, Some(&typ), fn_name)?;
+                    }
                     alloc_declared_locals(ctx, &arm.body, fn_name, functions)?;
                 }
             }

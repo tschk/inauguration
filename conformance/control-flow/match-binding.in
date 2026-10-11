@@ -1,0 +1,13 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 6
+
+var calls: Int = 0;
+fn value() -> Int { calls += 1; return 5; }
+fn main() -> Int {
+    match value() {
+        captured { return captured + calls; }
+    }
+    return 0;
+}
