@@ -1,0 +1,19 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 2
+
+fn fail() -> Int { throw false; return 0; }
+
+fn main() -> Int {
+    try {
+        try { fail(); }
+        catch value {
+            let alias = value;
+            throw alias;
+        }
+    }
+    catch 0 { return 1; }
+    catch false { return 2; }
+    return 3;
+}

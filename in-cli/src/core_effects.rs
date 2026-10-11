@@ -1,4 +1,4 @@
-//! Identify fallible direct calls without charging pure functions for error checks.
+//! Track fallible calls and caught payload aliases for native error lowering.
 use crate::core_ir::{Expr, Stmt};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -93,9 +93,91 @@ fn scan_body<'a>(body: &'a [Stmt], calls: &mut HashSet<&'a str>) -> bool {
     fallible
 }
 
+/// Reserve type slots only for catch bindings and their direct local aliases.
+pub(crate) fn error_bindings(body: &[Stmt]) -> std::collections::BTreeSet<String> {
+    fn scan(body: &[Stmt], seeds: &mut Vec<String>, aliases: &mut HashMap<String, Vec<String>>) {
+        for stmt in body {
+            match stmt {
+                Stmt::Let(name, _, Expr::Ident(source))
+                | Stmt::Assign(name, Expr::Ident(source)) => {
+                    aliases
+                        .entry(source.clone())
+                        .or_default()
+                        .push(name.clone());
+                }
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    scan(then_body, seeds, aliases);
+                    scan(else_body, seeds, aliases);
+                }
+                Stmt::Loop { body, .. } => scan(body, seeds, aliases),
+                Stmt::Match { arms, .. } => {
+                    for arm in arms {
+                        scan(&arm.body, seeds, aliases);
+                    }
+                }
+                Stmt::Try { body, catches } => {
+                    scan(body, seeds, aliases);
+                    for catch in catches {
+                        if let Ok(crate::core_ir::MatchPattern::IdentPat(name)) =
+                            crate::core_ir::MatchPattern::parse(&catch.pattern)
+                        {
+                            seeds.push(name);
+                        }
+                        scan(&catch.body, seeds, aliases);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut seeds = Vec::new();
+    let mut aliases = HashMap::new();
+    scan(body, &mut seeds, &mut aliases);
+    let mut found = std::collections::BTreeSet::new();
+    let mut queue: VecDeque<_> = seeds.into();
+    while let Some(name) = queue.pop_front() {
+        if found.insert(name.clone()) {
+            queue.extend(aliases.get(&name).into_iter().flatten().cloned());
+        }
+    }
+    found
+}
+
+/// Tags in the native error carrier at +16; +0 is the flag and +8 the value.
+pub(crate) fn error_type_tag(typ: &crate::core_ir::Typ) -> Option<i64> {
+    use crate::core_ir::Typ;
+    match typ.canonical() {
+        Typ::Int => Some(1),
+        Typ::Bool => Some(2),
+        Typ::Float => Some(3),
+        Typ::String => Some(4),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn caught_type_slots_follow_alias_cycles_and_skip_unrelated_locals() {
+        let module = crate::in_lang_parse::parse_in_source("fn main() -> Int { let plain = 7; try { throw false; } catch value { let alias = value; let next = alias; alias = next; try { throw 42; } catch other { let copy = other; } } return plain; }").unwrap();
+        let crate::core_ir::Decl::Function { body, .. } = &module.decls[0] else {
+            panic!("missing main")
+        };
+        assert_eq!(
+            error_bindings(body),
+            ["alias", "copy", "next", "other", "value"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(error_bindings(&[Stmt::Let("plain".into(), None, Expr::IntLit(7))]).is_empty());
+    }
+
     #[test]
     fn error_effects_reach_recursive_callers_but_not_pure_functions() {
         let module = crate::in_lang_parse::parse_in_source("fn fail() -> Int { throw 42; return 0; }\nfn first() -> Int { return second(); }\nfn second() -> Int { first(); return fail(); }\nfn pure() -> Int { return 7; }\nfn main() -> Int { return pure(); }").unwrap();

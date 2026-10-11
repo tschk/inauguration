@@ -1379,6 +1379,44 @@ fn owned_jit_rejects_constant_writes_in_exception_bodies() {
 }
 
 #[test]
+fn owned_jit_preserves_error_type_through_calls_and_rethrows() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for body in [
+            "try { fail(); } catch 0 { return 1; } catch false { return 2; } return 3;",
+            "try { try { fail(); } catch value { let alias = value; throw alias; } } catch 0 { return 1; } catch false { return 2; } return 3;",
+            "try { throw 0 == 1; } catch 0 { return 1; } catch false { return 2; } return 3;",
+        ] {
+            let source = temp_path("typed-error.in");
+            fs::write(
+                &source,
+                format!(
+                    "fn fail() -> Int {{ throw false; return 0; }}\nfn main() -> Int {{ {body} }}"
+                ),
+            )
+            .unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(source).unwrap();
+            assert!(report.success, "{profile:?}: {body}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(2)),
+                "{profile:?}: {body}"
+            );
+        }
+    }
+}
+
+#[test]
 fn owned_jit_selects_catches_and_reports_unmatched_errors() {
     if !native_backend::native_subset_host_available() {
         return;

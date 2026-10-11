@@ -146,6 +146,7 @@ struct LowerCtx<'a> {
     /// Set when a return statement has been emitted
     emitted_return: bool,
     error_branches: Vec<Vec<u32>>,
+    error_types: HashMap<String, u32>,
     prologue_frame_size: u32,
     /// True if this function is an interrupt handler
     is_interrupt: bool,
@@ -208,6 +209,7 @@ impl<'a> LowerCtx<'a> {
             frame_size: 0,
             emitted_return: false,
             error_branches: Vec::new(),
+            error_types: HashMap::new(),
             prologue_frame_size: 0,
             is_interrupt: false,
             structs,
@@ -957,6 +959,12 @@ fn lower_function(
     // Pre-allocate locals for let bindings
     alloc_declared_locals(&mut ctx, &func.body)?;
 
+    for name in crate::core_effects::error_bindings(&func.body) {
+        if ctx.locals.contains_key(&name) {
+            let offset = ctx.alloc_slot();
+            ctx.error_types.insert(name, offset);
+        }
+    }
     ctx.error_flag_offset = ctx.frame_size;
     ctx.error_value_offset = ctx.frame_size + 8;
     ctx.frame_size += 24;
@@ -1189,6 +1197,7 @@ fn lower_stmt(
                 ctx.alloc_local(name, &resolved)?;
             }
             lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
+            store_local_error_type(emitter, ctx, name, expr)?;
             match ctx.locals.get(name) {
                 Some(StackSlot::Scalar(offset)) => {
                     emitter.emit_insns(&x86_64::str64(RAX, *offset as u16));
@@ -1241,6 +1250,7 @@ fn lower_stmt(
             lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
             if let Some(off) = offset {
                 emitter.emit_insns(&x86_64::str64(RAX, off as u16));
+                store_local_error_type(emitter, ctx, name, expr)?;
             }
             Ok(())
         }
@@ -1462,6 +1472,12 @@ fn lower_stmt(
         Stmt::Throw(expr) => {
             lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
             store_error_global(emitter, ctx, "__inrt_err_val")?;
+            emit_error_type(emitter, ctx, expr)?;
+            emitter.emit_insns(&x86_64::mov_m_r(
+                15,
+                error_slot_offset(ctx, "__inrt_err_type")?,
+                RCX,
+            ));
             emitter.emit_insns(&x86_64::load_i64(RAX, 1));
             store_error_global(emitter, ctx, "__inrt_err_flag")?;
             emit_error_exit(emitter, ctx)
@@ -1493,7 +1509,24 @@ fn lower_stmt(
             for catch_arm in catches {
                 let pattern = MatchPattern::parse(&catch_arm.pattern)?;
                 load_error_global(emitter, ctx, "__inrt_err_val")?;
-                // ponytail: scalar patterns compare carrier words; mixed error types need type tags.
+                let mut type_misses = Vec::new();
+                let tag = match &pattern {
+                    MatchPattern::IntPat(_) => Some(1),
+                    MatchPattern::BoolPat(_) => Some(2),
+                    _ => None,
+                };
+                if let Some(tag) = tag {
+                    emitter.emit_insns(&x86_64::mov_r_m(
+                        RCX,
+                        15,
+                        error_slot_offset(ctx, "__inrt_err_type")?,
+                    ));
+                    emitter.emit_insns(&x86_64::load_i64(RDX, tag));
+                    emitter.emit_insns(&x86_64::cmp_rr(RCX, RDX));
+                    let site = emitter.len();
+                    emitter.emit_insns(&x86_64::jcc_near(0x05, 0));
+                    type_misses.push(site);
+                }
                 let next_arm = match pattern {
                     MatchPattern::IntPat(value) => {
                         emitter.emit_insns(&x86_64::load_i64(RCX, value));
@@ -1513,10 +1546,18 @@ fn lower_stmt(
                     MatchPattern::IdentPat(name) => {
                         if let Some(StackSlot::Scalar(offset)) = ctx.locals.get(&name) {
                             emitter.emit_insns(&x86_64::str64(RAX, *offset as u16));
+                            if let Some(tag_offset) = ctx.error_types.get(&name) {
+                                emitter.emit_insns(&x86_64::mov_r_m(
+                                    RCX,
+                                    15,
+                                    error_slot_offset(ctx, "__inrt_err_type")?,
+                                ));
+                                emitter.emit_insns(&x86_64::str64(RCX, *tag_offset as u16));
+                            }
                         }
                         None
                     }
-                    // ponytail: string/aggregate catches need a typed error carrier before matching safely.
+                    // ponytail: string content and aggregate catch matching are not lowered yet.
                     _ => {
                         return Err(format!(
                             "x86_64-lower: unsupported catch pattern `{}` in `{}`",
@@ -1532,7 +1573,8 @@ fn lower_stmt(
                 let site = emitter.len();
                 emitter.emit_insns(&x86_64::jmp_rel32(0));
                 caught_branches.push(site);
-                if let Some(site) = next_arm {
+                type_misses.extend(next_arm);
+                for site in type_misses {
                     emitter.patch_u32(site + 2, (emitter.len() as i32 - site as i32 - 6) as u32);
                 }
             }
@@ -1844,6 +1886,38 @@ fn lower_bool_lit(emitter: &mut CodeEmitter, target_reg: u8, value: bool) -> Res
     Ok(())
 }
 
+fn emit_error_type(
+    emitter: &mut CodeEmitter,
+    ctx: &LowerCtx<'_>,
+    expr: &Expr,
+) -> Result<(), String> {
+    if let Expr::Ident(name) = expr
+        && let Some(offset) = ctx.error_types.get(name)
+    {
+        emitter.emit_insns(&x86_64::ldr64(RCX, *offset as u16));
+        return Ok(());
+    }
+    let tag = scalar_expr_type(expr, ctx)
+        .as_ref()
+        .and_then(crate::core_effects::error_type_tag)
+        .ok_or_else(|| format!("x86_64-lower: unsupported throw payload type for {expr:?}"))?;
+    emitter.emit_insns(&x86_64::load_i64(RCX, tag));
+    Ok(())
+}
+
+fn store_local_error_type(
+    emitter: &mut CodeEmitter,
+    ctx: &LowerCtx<'_>,
+    name: &str,
+    expr: &Expr,
+) -> Result<(), String> {
+    if let Some(offset) = ctx.error_types.get(name) {
+        emit_error_type(emitter, ctx, expr)?;
+        emitter.emit_insns(&x86_64::str64(RCX, *offset as u16));
+    }
+    Ok(())
+}
+
 fn error_slot_offset(ctx: &LowerCtx<'_>, name: &str) -> Result<i32, String> {
     if !ctx.runtime_error_slot || x86_64::is_32bit() || ctx.is_interrupt {
         return Err(format!(
@@ -1854,6 +1928,7 @@ fn error_slot_offset(ctx: &LowerCtx<'_>, name: &str) -> Result<i32, String> {
     match name {
         "__inrt_err_flag" => Ok(0),
         "__inrt_err_val" => Ok(8),
+        "__inrt_err_type" => Ok(16),
         other => Err(format!("x86_64-lower: unknown error slot `{other}`")),
     }
 }
@@ -2029,6 +2104,28 @@ fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
             _ => None,
         },
         Expr::Unary { op, expr } if op == "-" => scalar_expr_type(expr, ctx),
+        Expr::Unary { op, .. } if op == "!" => Some(Typ::Bool),
+        Expr::Unary { op, .. } if op == "~" => Some(Typ::Int),
+        Expr::Binary { op, lhs, rhs }
+            if matches!(op.as_str(), "&" | "|" | "^" | "<<" | ">>" | "%") =>
+        {
+            if scalar_expr_type(lhs, ctx) == Some(Typ::Int)
+                && scalar_expr_type(rhs, ctx) == Some(Typ::Int)
+            {
+                Some(Typ::Int)
+            } else {
+                None
+            }
+        }
+        Expr::Binary { op, .. }
+            if matches!(
+                op.as_str(),
+                "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+            ) =>
+        {
+            Some(Typ::Bool)
+        }
+
         Expr::Binary { op, lhs, rhs }
             if matches!(
                 op.as_str(),

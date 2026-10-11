@@ -770,6 +770,20 @@ pub(crate) fn native_expr_type(
             _ => None,
         },
         Expr::Unary { op, expr } if op == "-" => native_expr_type(expr, ctx, functions),
+        Expr::Unary { op, .. } if op == "!" => Some(Typ::Bool),
+        Expr::Unary { op, .. } if op == "~" => Some(Typ::Int),
+        Expr::Binary { op, lhs, rhs }
+            if matches!(op.as_str(), "&" | "|" | "^" | "<<" | ">>" | "%") =>
+        {
+            if native_expr_type(lhs, ctx, functions) == Some(Typ::Int)
+                && native_expr_type(rhs, ctx, functions) == Some(Typ::Int)
+            {
+                Some(Typ::Int)
+            } else {
+                None
+            }
+        }
+
         Expr::Binary { op, .. }
             if matches!(
                 op.as_str(),

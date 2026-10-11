@@ -8,6 +8,26 @@ use crate::core_ir::{Expr, LoopKind, MatchPattern, Stmt, Typ};
 use crate::native_emit::aarch64::{self, CodeEmitter};
 use std::collections::HashMap;
 
+fn emit_error_type(
+    emitter: &mut CodeEmitter,
+    ctx: &LowerCtx<'_>,
+    expr: &Expr,
+    functions: &HashMap<String, FunctionInfo>,
+) -> Result<(), String> {
+    if let Expr::Ident(name) = expr
+        && let Some(offset) = ctx.error_types.get(name)
+    {
+        emitter.emit_u32(aarch64::ldr64(9, aarch64::REG_SP, *offset));
+        return Ok(());
+    }
+    let tag = lower_expr::native_expr_type(expr, ctx, functions)
+        .as_ref()
+        .and_then(crate::core_effects::error_type_tag)
+        .ok_or_else(|| format!("native-lower: unsupported throw payload type for {expr:?}"))?;
+    emitter.emit_insns(&aarch64::load_i64(9, tag));
+    Ok(())
+}
+
 /// Point x27 at the throw/try error slot before it is used.
 ///
 /// The JIT runtime sets x27 once for the whole invocation. A native executable
@@ -271,6 +291,8 @@ pub(crate) fn lower_stmt(
         Stmt::Throw(expr) => {
             emit_error_slot_adr(emitter, fn_name)?;
             lower_expr::lower_expr_into(emitter, ctx, expr, 0, functions, pending_calls, fn_name)?;
+            emit_error_type(emitter, ctx, expr, functions)?;
+            emitter.emit_u32(aarch64::str64(9, 27, 16));
             // Store error value to global location via X27
             emitter.emit_u32(aarch64::str64(0, 27, 8));
             // Set error flag to 1
@@ -325,7 +347,18 @@ pub(crate) fn lower_stmt(
             for catch_arm in catches {
                 let pattern = MatchPattern::parse(&catch_arm.pattern)?;
                 emitter.emit_u32(aarch64::ldr64(0, 27, 8));
-                // ponytail: scalar patterns compare carrier words; mixed error types need type tags.
+                let mut type_misses = Vec::new();
+                let tag = match &pattern {
+                    MatchPattern::IntPat(_) => Some(1),
+                    MatchPattern::BoolPat(_) => Some(2),
+                    _ => None,
+                };
+                if let Some(tag) = tag {
+                    emitter.emit_u32(aarch64::ldr64(9, 27, 16));
+                    emitter.emit_insns(&aarch64::load_i64(1, tag));
+                    emitter.emit_u32(aarch64::cmp_reg64(9, 1));
+                    type_misses.push(emitter.emit_insn(aarch64::b_cond(1, 0)));
+                }
                 let next_arm = match pattern {
                     MatchPattern::IntPat(value) => {
                         emitter.emit_insns(&aarch64::load_i64(1, value));
@@ -341,10 +374,14 @@ pub(crate) fn lower_stmt(
                     MatchPattern::IdentPat(name) => {
                         if let Some(LocalSlot::Scalar(offset)) = ctx.locals.get(&name) {
                             emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, *offset));
+                            if let Some(tag_offset) = ctx.error_types.get(&name) {
+                                emitter.emit_u32(aarch64::ldr64(9, 27, 16));
+                                emitter.emit_u32(aarch64::str64(9, aarch64::REG_SP, *tag_offset));
+                            }
                         }
                         None
                     }
-                    // ponytail: string/aggregate catches need a typed error carrier before matching safely.
+                    // ponytail: string content and aggregate catch matching are not lowered yet.
                     _ => {
                         return Err(format!(
                             "native-lower: unsupported catch pattern `{}` in `{fn_name}`",
@@ -365,7 +402,8 @@ pub(crate) fn lower_stmt(
                     )?;
                 }
                 caught_branches.push(emitter.emit_insn(aarch64::b(0)));
-                if let Some(site) = next_arm {
+                type_misses.extend(next_arm);
+                for site in type_misses {
                     emitter.patch_u32(site, aarch64::b_cond(1, emitter.len() as i32 - site as i32));
                 }
             }
@@ -430,6 +468,10 @@ pub(crate) fn lower_store_local(
         LocalSlot::Scalar(offset) => {
             lower_expr::lower_expr_into(emitter, ctx, expr, 0, functions, pending_calls, fn_name)?;
             emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, offset));
+            if let Some(tag_offset) = ctx.error_types.get(name).copied() {
+                emit_error_type(emitter, ctx, expr, functions)?;
+                emitter.emit_u32(aarch64::str64(9, aarch64::REG_SP, tag_offset));
+            }
             Ok(())
         }
         LocalSlot::Array { elem, offsets } => {

@@ -657,6 +657,38 @@ mod tests {
                     2,
                 ),
                 (
+                    "try { throw false; } catch 0 { return 1; } catch false { return 2; } return 3;",
+                    2,
+                ),
+                (
+                    "try { throw 0; } catch false { return 1; } catch 0 { return 2; } return 3;",
+                    2,
+                ),
+                (
+                    "try { throw 0.0; } catch 0 { return 1; } catch false { return 2; } catch _ { return 4; } return 3;",
+                    4,
+                ),
+                (
+                    "try { try { throw false; } catch value { throw value; } } catch 0 { return 1; } catch false { return 2; } return 3;",
+                    2,
+                ),
+                (
+                    "try { try { throw false; } catch value { let alias = value; let next = alias; throw next; } } catch 0 { return 1; } catch false { return 2; } return 3;",
+                    2,
+                ),
+                (
+                    "try { try { throw false; } catch value { let alias = value; alias = 0; throw alias; } } catch false { return 1; } catch 0 { return 2; } return 3;",
+                    2,
+                ),
+                (
+                    "try { try { throw 0; } catch value { value = false; throw value; } } catch 0 { return 1; } catch false { return 2; } return 3;",
+                    2,
+                ),
+                (
+                    "try { try { throw false; } catch value { try { throw 42; } catch other { count = other; } throw value; } } catch 0 { return 1; } catch false { return 2; } return 3;",
+                    2,
+                ),
+                (
                     "try { throw -42; } catch 42 { return 1; } catch -42 { return 2; } return 3;",
                     2,
                 ),

@@ -204,9 +204,9 @@ fn build_assembly(
     }
 
     if !error_slot_refs.is_empty() {
-        // Flag at +0, value at +8, matching what the lowering writes through x27.
+        // Flag at +0, value at +8, type at +16, matching what the lowering writes through x27.
         asm.push_str(&format!(
-            "\t.data\n\t.p2align 3\n{INRT_ERROR_SLOT_SYMBOL}:\n\t.space 16\n"
+            "\t.data\n\t.p2align 3\n{INRT_ERROR_SLOT_SYMBOL}:\n\t.space 24\n"
         ));
     }
 
@@ -945,6 +945,12 @@ fn lower_function(
     )?;
     ctx.ret_typ = func.ret.clone();
     alloc_declared_locals(&mut ctx, &func.body, &func.name, functions)?;
+    for name in crate::core_effects::error_bindings(&func.body) {
+        if ctx.locals.contains_key(&name) {
+            let offset = ctx.alloc_slot();
+            ctx.error_types.insert(name, offset);
+        }
+    }
     ctx.binop_temp = ctx.alloc_slot();
     for index in 0..ctx.binop_temps.len() {
         ctx.binop_temps[index] = ctx.alloc_slot();

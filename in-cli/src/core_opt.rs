@@ -1105,7 +1105,28 @@ fn fold_expr(e: Expr) -> Expr {
                     _ => None,
                 };
                 if let Some(v) = result {
-                    return Expr::IntLit(v);
+                    return if matches!(
+                        op.as_str(),
+                        "eq" | "=="
+                            | "neq"
+                            | "!="
+                            | "lt"
+                            | "<"
+                            | "gt"
+                            | ">"
+                            | "le"
+                            | "<="
+                            | "ge"
+                            | ">="
+                            | "land"
+                            | "&&"
+                            | "lor"
+                            | "||"
+                    ) {
+                        Expr::BoolLit(v != 0)
+                    } else {
+                        Expr::IntLit(v)
+                    };
                 }
             }
             e
@@ -1118,7 +1139,11 @@ fn fold_expr(e: Expr) -> Expr {
                     _ => None,
                 };
                 if let Some(v) = result {
-                    return Expr::IntLit(v);
+                    return if matches!(op.as_str(), "not" | "!") {
+                        Expr::BoolLit(v != 0)
+                    } else {
+                        Expr::IntLit(v)
+                    };
                 }
             }
             e
@@ -2484,31 +2509,31 @@ mod tests {
     fn fold_comparison() {
         assert_eq!(
             fold_expr(bin("eq", Expr::IntLit(5), Expr::IntLit(5))),
-            Expr::IntLit(1)
+            Expr::BoolLit(true)
         );
         assert_eq!(
             fold_expr(bin("eq", Expr::IntLit(5), Expr::IntLit(3))),
-            Expr::IntLit(0)
+            Expr::BoolLit(false)
         );
         assert_eq!(
             fold_expr(bin("neq", Expr::IntLit(1), Expr::IntLit(2))),
-            Expr::IntLit(1)
+            Expr::BoolLit(true)
         );
         assert_eq!(
             fold_expr(bin("lt", Expr::IntLit(3), Expr::IntLit(5))),
-            Expr::IntLit(1)
+            Expr::BoolLit(true)
         );
         assert_eq!(
             fold_expr(bin("gt", Expr::IntLit(5), Expr::IntLit(3))),
-            Expr::IntLit(1)
+            Expr::BoolLit(true)
         );
         assert_eq!(
             fold_expr(bin("le", Expr::IntLit(5), Expr::IntLit(5))),
-            Expr::IntLit(1)
+            Expr::BoolLit(true)
         );
         assert_eq!(
             fold_expr(bin("ge", Expr::IntLit(5), Expr::IntLit(5))),
-            Expr::IntLit(1)
+            Expr::BoolLit(true)
         );
     }
 
@@ -2516,19 +2541,19 @@ mod tests {
     fn fold_logical_ops() {
         assert_eq!(
             fold_expr(bin("land", Expr::IntLit(1), Expr::IntLit(1))),
-            Expr::IntLit(1)
+            Expr::BoolLit(true)
         );
         assert_eq!(
             fold_expr(bin("land", Expr::IntLit(0), Expr::IntLit(1))),
-            Expr::IntLit(0)
+            Expr::BoolLit(false)
         );
         assert_eq!(
             fold_expr(bin("lor", Expr::IntLit(0), Expr::IntLit(1))),
-            Expr::IntLit(1)
+            Expr::BoolLit(true)
         );
         assert_eq!(
             fold_expr(bin("lor", Expr::IntLit(0), Expr::IntLit(0))),
-            Expr::IntLit(0)
+            Expr::BoolLit(false)
         );
     }
 
@@ -2539,8 +2564,14 @@ mod tests {
 
     #[test]
     fn fold_unary_not() {
-        assert_eq!(fold_expr(unary("not", Expr::IntLit(0))), Expr::IntLit(1));
-        assert_eq!(fold_expr(unary("not", Expr::IntLit(42))), Expr::IntLit(0));
+        assert_eq!(
+            fold_expr(unary("not", Expr::IntLit(0))),
+            Expr::BoolLit(true)
+        );
+        assert_eq!(
+            fold_expr(unary("not", Expr::IntLit(42))),
+            Expr::BoolLit(false)
+        );
     }
 
     #[test]
