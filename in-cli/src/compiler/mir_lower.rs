@@ -261,6 +261,12 @@ pub fn lower_boot_image(
             0x200000,
             crate::native_emit::x86_64_lower::X86StringLayout::Cstring,
         )?;
+        result.require_resolved_imports()?;
+        if !result.global_relocs.is_empty() {
+            return Err(
+                "native-lower: x86 boot images do not yet relocate writable globals".into(),
+            );
+        }
         (result.code, result.exports)
     };
     let mir_module = MirModule::new();
@@ -271,6 +277,24 @@ pub fn lower_boot_image(
 mod tests {
     use super::*;
     use crate::core_ir::{CoreModuleIdentity, Typ};
+
+    #[test]
+    fn x86_boot_rejects_unresolved_imports_and_unrelocated_globals() {
+        for (source, expected) in [
+            (
+                "fn missing() -> Int {}\nfn main() -> Int { return missing(); }",
+                "unresolved runtime imports: missing",
+            ),
+            (
+                "var count: Int = 3;\nfn main() -> Int { return count; }",
+                "boot images do not yet relocate writable globals",
+            ),
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            let error = lower_boot_image(&module, "main", Some("x86_64-unknown-none")).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
 
     #[test]
     fn aarch64_boot_rejects_unrelocated_globals() {

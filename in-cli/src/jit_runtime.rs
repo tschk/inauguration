@@ -728,6 +728,37 @@ mod tests {
         }
     }
 
+    #[cfg(all(unix, target_arch = "x86_64"))]
+    #[test]
+    fn jit_stdlib_results_survive_nested_argument_calls() {
+        crate::native_emit::native_link::bootstrap_jit_native();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for expression in [
+                "str-eq(str-concat(\"ab\", \"c\"), \"abc\")",
+                "str-eq(\"abc\", str-concat(\"ab\", \"c\"))",
+                "str-eq(str-concat(\"ab\", \"c\"), str-concat(\"a\", \"bc\"))",
+            ] {
+                let source = format!("fn main() -> Bool {{ return {expression}; }}");
+                let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(1),
+                    "raw {profile:?}: {source}"
+                );
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(1),
+                    "optimized {profile:?}: {source}"
+                );
+            }
+        }
+    }
+
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
     fn match_bindings_keep_values_types_scope_and_error_tags() {

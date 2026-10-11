@@ -14,14 +14,7 @@ use crate::core_ir::{Decl, Expr, LoopKind, MatchArm, MatchPattern, Stmt, Typ, Un
 use crate::native_emit::antidecomp;
 use crate::native_emit::global_data::{build_data_section, collect_globals};
 use crate::native_emit::x86_64::{self, CodeEmitter, RAX, RBP, RBX, RCX, RDI, RDX, RSI};
-use std::cell::RefCell;
 use std::collections::HashMap;
-
-thread_local! {
-    /// JIT mode: resolve extern stdlib calls to in-process wrapper addresses
-    /// instead of leaving rel32 placeholders for the system linker.
-    pub(crate) static TL_JIT_EXTERNS: RefCell<bool> = const { RefCell::new(false) };
-}
 
 /// Core IR stdlib call name -> C-ABI wrapper registered in the JIT symbol cache.
 fn jit_stdlib_wrapper(name: &str) -> Option<&'static str> {
@@ -128,6 +121,21 @@ pub struct X86_64CompileResult {
     pub extern_calls: Vec<(String, u32)>,
 }
 
+impl X86_64CompileResult {
+    pub(crate) fn require_resolved_imports(&self) -> Result<(), String> {
+        if self.externs.is_empty() {
+            return Ok(());
+        }
+        let mut names = self.externs.clone();
+        names.sort();
+        names.dedup();
+        Err(format!(
+            "x86_64-lower: unresolved runtime imports: {}",
+            names.join(", ")
+        ))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FunctionInfo {
     name: String,
@@ -161,7 +169,7 @@ struct LowerCtx<'a> {
     globals: HashMap<String, u64>,
     /// Sites in the emitted code that reference a global variable.
     pending_globals: Vec<PendingGlobal>,
-    /// The JIT invocation supplies a writable error page through R15.
+    /// JIT ABI: R15 supplies a writable error page and stdlib imports resolve in process.
     runtime_error_slot: bool,
     /// Error handling: offset for error flag byte (Throw/Try)
     error_flag_offset: u32,
@@ -318,14 +326,16 @@ impl<'a> LowerCtx<'a> {
 
 /// Lower a Core IR module for the JIT ABI, whose invocation supplies R15.
 pub fn lower_module(module: &UnifiedModule, entry: &str) -> Result<X86_64CompileResult, String> {
-    lower_module_impl(
+    let result = lower_module_impl(
         module,
         entry,
         0x101100,
         0x200000,
         X86StringLayout::Instring,
         true,
-    )
+    )?;
+    result.require_resolved_imports()?;
+    Ok(result)
 }
 
 /// Lower a native artifact using the default load layout, without a JIT runtime.
@@ -462,6 +472,10 @@ fn lower_module_impl(
                     emitter.bytes[site..site + 8].copy_from_slice(&abs_addr.to_le_bytes());
                     relocations.push(call.site);
                 }
+            } else {
+                return Err(format!(
+                    "x86_64-lower: unresolved function address `{fn_name}`"
+                ));
             }
         } else if call.target.starts_with("@str_") {
             str_refs.push((call.site, call.target[5..].to_string()));
@@ -2810,7 +2824,7 @@ fn lower_call_expr(
         return Ok(());
     }
 
-    if TL_JIT_EXTERNS.with(|m| *m.borrow()) {
+    if ctx.runtime_error_slot {
         let base = target_name
             .rsplit("::")
             .next()
@@ -2819,12 +2833,24 @@ fn lower_call_expr(
         if let Some(wrapper) = jit_stdlib_wrapper(&base)
             && let Some(ptr) = crate::native_emit::native_link::resolve_native_fn(wrapper)
         {
+            if x86_64::is_32bit() || args.len() > 6 {
+                return Err(
+                    "x86_64-lower: JIT stdlib wrappers require 64-bit register arguments".into(),
+                );
+            }
             lower_call_args(emitter, ctx, args, &target_name, pending_calls)?;
             emitter.emit_insns(&x86_64::load_i64(RAX, ptr as i64));
+            // Operand spills and Harden frames may leave the stack unaligned for C calls.
+            emitter.emit_insns(&x86_64::mov_rr(11, x86_64::REG_SP));
+            emitter.emit_insns(&x86_64::load_i64(10, -16));
+            emitter.emit_insns(&x86_64::and_rr(x86_64::REG_SP, 10));
+            emitter.emit_insns(&x86_64::sub_rsp_i8(16));
+            emitter.emit_insns(&x86_64::mov_m_r(x86_64::REG_SP, 0, 11));
             emitter.emit_insns(&[0xFF, 0xD0]);
+            emitter.emit_insns(&x86_64::mov_r_m(x86_64::REG_SP, x86_64::REG_SP, 0));
             emit_stack_cleanup(emitter, args.len());
             if target_reg != RAX {
-                emitter.emit_insns(&x86_64::xor_rr(target_reg, target_reg));
+                emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
             }
             return Ok(());
         }
@@ -2845,7 +2871,7 @@ fn lower_call_expr(
         });
         emit_stack_cleanup(emitter, args.len());
         if target_reg != RAX {
-            emitter.emit_insns(&x86_64::xor_rr(target_reg, target_reg));
+            emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
         }
         return Ok(());
     }
@@ -3234,13 +3260,69 @@ fn main() -> void { return 0 }
     }
 
     #[test]
+    fn jit_rejects_unresolved_calls_but_native_retains_linker_imports() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "fn missing() -> Int {}\nfn main() -> Int { return missing(); }",
+        )
+        .unwrap();
+        let error = lower_module(&module, "main")
+            .err()
+            .expect("unresolved import must be rejected");
+        assert!(
+            error.contains("unresolved runtime imports: missing"),
+            "{error}"
+        );
+        let native = lower_native_module(&module, "main").unwrap();
+        assert_eq!(native.externs, ["missing"]);
+        assert_eq!(native.extern_calls.len(), 1);
+        let valid =
+            crate::in_lang_parse::parse_in_source("fn main() -> Int { return 42; }").unwrap();
+        lower_module(&valid, "main").unwrap();
+    }
+
+    #[test]
+    fn jit_stdlib_rejects_stack_arguments_before_calling_host_wrappers() {
+        crate::native_emit::native_link::bootstrap_jit_native();
+        let module = crate::in_lang_parse::parse_in_source(
+            "fn main() -> Bool { return str-eq(\"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\"); }",
+        )
+        .unwrap();
+        let error = lower_module(&module, "main")
+            .err()
+            .expect("stack arguments must be rejected");
+        assert!(
+            error.contains("JIT stdlib wrappers require 64-bit register arguments"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unresolved_function_addresses_never_leave_placeholders() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "fn missing() -> Int {}\nfn main() -> Int { return missing; }",
+        )
+        .unwrap();
+        for result in [
+            lower_module(&module, "main"),
+            lower_native_module(&module, "main"),
+        ] {
+            assert!(
+                result
+                    .err()
+                    .expect("unresolved import must be rejected")
+                    .contains("unresolved function address `missing`")
+            );
+        }
+    }
+
+    #[test]
     fn jit_string_return_and_stdlib_extern_lower_together() {
         let src = "import std.process;\ncapability process.spawn;\nfn main() -> String { return process_run(\"true\"); }\n";
         let module = crate::in_lang_parse::parse_in_source(src).expect("parse");
         crate::native_emit::native_link::bootstrap_jit_native();
-        TL_JIT_EXTERNS.with(|m| *m.borrow_mut() = true);
         let result = lower_module(&module, "main").expect("lower");
-        TL_JIT_EXTERNS.with(|m| *m.borrow_mut() = false);
+        let native = lower_native_module(&module, "main").expect("native lower");
+        assert_eq!(native.externs, ["process_run"]);
         let has_call_rax = result.code.windows(2).any(|w| w == [0xFF, 0xD0]);
         let has_unresolved_rel32 = result.code.windows(5).any(|w| w == [0xE8, 0, 0, 0, 0]);
         assert!(has_call_rax, "stdlib extern must lower to call rax");

@@ -129,13 +129,8 @@ pub fn compile_jit(
 
     // Select lowering based on host architecture
     let lowered = if cfg!(target_arch = "x86_64") {
-        let result = {
-            x86_64_lower::TL_JIT_EXTERNS.with(|m| *m.borrow_mut() = true);
-            let r = x86_64_lower::lower_module(expanded_module, &resolved_entry);
-            x86_64_lower::TL_JIT_EXTERNS.with(|m| *m.borrow_mut() = false);
-            r
-        }
-        .map_err(|e| format!("jit-lowering-failed: {e}"))?;
+        let result = x86_64_lower::lower_module(expanded_module, &resolved_entry)
+            .map_err(|e| format!("jit-lowering-failed: {e}"))?;
         // Wrap into LoweredModule-compatible shape
         native_emit::lower::LoweredModule {
             code: result.code,
