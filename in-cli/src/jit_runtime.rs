@@ -730,6 +730,84 @@ mod tests {
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
+    fn string_lengths_preserve_bytes_nulls_and_single_evaluation() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for name in ["str-len", "str_len", "__inrt_str_len"] {
+                for (source, args, expected) in [
+                    (
+                        format!("fn main() -> Int {{ return {name}(\"é🙂\"); }}"),
+                        vec![],
+                        6,
+                    ),
+                    (
+                        format!("fn main() -> Int {{ return {name}(\"\"); }}"),
+                        vec![],
+                        0,
+                    ),
+                    (
+                        format!("fn main(value: String) -> Int {{ return {name}(value); }}"),
+                        vec![0],
+                        0,
+                    ),
+                    (
+                        format!(
+                            "var calls: Int = 0;\nfn text() -> String {{ calls += 1; return \"abc\"; }}\nfn main() -> Int {{ return {name}(text()) + calls; }}"
+                        ),
+                        vec![],
+                        4,
+                    ),
+                ] {
+                    let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                    assert_eq!(
+                        invoke_module(&module, profile, &args),
+                        Some(expected),
+                        "raw {profile:?}: {source}"
+                    );
+                    crate::core_opt::optimize_with_profile(
+                        &mut module.decls,
+                        Some("main"),
+                        profile,
+                    );
+                    assert_eq!(
+                        invoke_module(&module, profile, &args),
+                        Some(expected),
+                        "optimized {profile:?}: {source}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(all(unix, target_arch = "aarch64"))]
+    #[test]
+    fn runtime_builtin_arguments_keep_nested_results_and_effects() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = "var calls: Int = 0;\nfn text() -> String { calls += 1; return \"abcd\"; }\nfn start() -> Int { calls += 1; return 1; }\nfn count() -> Int { calls += 1; return 2; }\nfn main() -> Int { let value = __inrt_str_substr(text(), start(), count()); if __inrt_str_eq(value, \"bc\") { return __inrt_str_len(value) + calls; } return 0; }";
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            assert_eq!(
+                invoke_module(&module, profile, &[]),
+                Some(5),
+                "raw {profile:?}"
+            );
+            crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            assert_eq!(
+                invoke_module(&module, profile, &[]),
+                Some(5),
+                "optimized {profile:?}"
+            );
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
     fn filesystem_calls_expose_boolean_success_and_failure() {
         crate::native_emit::native_link::bootstrap_jit_native();
         for profile in [

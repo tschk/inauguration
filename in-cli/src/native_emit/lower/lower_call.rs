@@ -1,6 +1,6 @@
 //! Core IR → AArch64 call lowering.
 
-use super::lower_expr::lower_expr_into;
+use super::lower_expr::{lower_expr_into, native_expr_type};
 use super::lower_stdlib;
 use super::lower_stmt::lower_struct_expr_into_slots;
 use super::{
@@ -29,7 +29,16 @@ pub(crate) fn lower_call(
         ));
     };
     if is_inrt_builtin(target) {
-        return lower_inrt_call(emitter, ctx, target, args, rd, fn_name);
+        return lower_inrt_call(
+            emitter,
+            ctx,
+            target,
+            args,
+            rd,
+            functions,
+            pending_calls,
+            fn_name,
+        );
     }
     // ponytail: try stdlib intrinsic lowering before external ref fallback
     if lower_stdlib::lower_stdlib_call(
@@ -185,6 +194,8 @@ pub(crate) fn lower_inrt_call(
     target: &str,
     args: &[Expr],
     rd: u8,
+    functions: &HashMap<String, FunctionInfo>,
+    pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
     let expected = inrt_builtin_param_slots(target)
@@ -196,8 +207,9 @@ pub(crate) fn lower_inrt_call(
         ));
     }
 
+    let temp_base = ctx.acquire_call_arg_temps(fn_name)?;
     for (i, arg) in args.iter().enumerate() {
-        let reg = i as u8;
+        let reg = 0;
         match arg {
             Expr::IntLit(v) => {
                 emitter.emit_insns(&aarch64::load_i64(reg, *v));
@@ -225,13 +237,31 @@ pub(crate) fn lower_inrt_call(
                     ));
                 }
             }
+            _ if native_expr_type(arg, ctx, functions)
+                .is_some_and(|typ| is_native_scalar_type(&typ)) =>
+            {
+                lower_expr_into(emitter, ctx, arg, reg, functions, pending_calls, fn_name)?;
+            }
             _ => {
                 return Err(format!(
                     "native-lower: unsupported inrt call arg expression in `{fn_name}`"
                 ));
             }
         }
+        emitter.emit_u32(aarch64::str64(
+            reg,
+            aarch64::REG_SP,
+            ctx.call_arg_temps[temp_base + i],
+        ));
     }
+    for i in 0..args.len() {
+        emitter.emit_u32(aarch64::ldr64(
+            i as u8,
+            aarch64::REG_SP,
+            ctx.call_arg_temps[temp_base + i],
+        ));
+    }
+    ctx.release_call_arg_temps();
 
     let call_site = emitter.len();
     emitter.emit_u32(aarch64::bl(0));

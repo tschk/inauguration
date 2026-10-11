@@ -48,3 +48,5 @@ agree conformance/types/mutable-global.in
 agree conformance/types/primitive-types.in
 agree conformance/types/string-aliases.in
 agree conformance/types/string-concat.in
+agree conformance/types/string-length.in
+agree conformance/types/string-ops.in

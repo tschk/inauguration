@@ -2408,6 +2408,18 @@ fn lower_builtin_call(
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<bool, String> {
     match target_name {
+        "str-len" | "str_len" | "__inrt_str_len" if args.len() == 1 => {
+            if x86_64::is_32bit() {
+                return Err("x86_64-lower: string length requires 64-bit mode".into());
+            }
+            lower_expr_into(emitter, ctx, &args[0], target_reg, pending_calls)?;
+            emitter.emit_insns(&x86_64::test_rr(target_reg, target_reg));
+            let empty = emitter.len();
+            emitter.emit_insns(&x86_64::jcc_near(4, 0));
+            emitter.emit_insns(&x86_64::mov_r_m(target_reg, target_reg, 0));
+            emitter.patch_u32(empty + 2, (emitter.len() as i32 - empty as i32 - 6) as u32);
+            Ok(true)
+        }
         "array-len" if args.len() == 1 => {
             let len = match &args[0] {
                 Expr::ArrayLit(items) => items.len() as i64,
@@ -3257,6 +3269,19 @@ fn answer() -> Int {
 fn main() -> void { return 0 }
 "#;
         crate::in_lang_parse::parse_in_source(src).expect("parse")
+    }
+
+    #[test]
+    fn string_length_needs_no_runtime_imports() {
+        for name in ["str-len", "str_len", "__inrt_str_len"] {
+            let module = crate::in_lang_parse::parse_in_source(&format!(
+                "fn main() -> Int {{ return {name}(\"hello\"); }}"
+            ))
+            .unwrap();
+            lower_module(&module, "main").unwrap();
+            let native = lower_native_module(&module, "main").unwrap();
+            assert!(native.externs.is_empty(), "{:?}", native.externs);
+        }
     }
 
     #[test]

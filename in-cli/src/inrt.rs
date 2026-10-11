@@ -125,8 +125,16 @@ fn insn_lsl_imm64(rd: u8, rn: u8, shift: u8) -> u32 {
 }
 
 fn build_inrt_str_len() -> Vec<u8> {
-    let mut buf = Vec::with_capacity(8);
-    emit_insn_blob(&[aarch64::ldr64(X0, X0, 0), aarch64::ret()], &mut buf);
+    let mut buf = Vec::with_capacity(16);
+    emit_insn_blob(
+        &[
+            aarch64::cmp_reg64(X0, XZR),
+            aarch64::b_cond(aarch64::COND_EQ, 8),
+            aarch64::ldr64(X0, X0, 0),
+            aarch64::ret(),
+        ],
+        &mut buf,
+    );
     buf
 }
 

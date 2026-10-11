@@ -1,0 +1,10 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 10
+
+var calls: Int = 0;
+fn text() -> String { calls += 1; return "abc"; }
+fn main() -> Int {
+    return str-len(text()) + calls + str_len("é🙂") + str-len("");
+}

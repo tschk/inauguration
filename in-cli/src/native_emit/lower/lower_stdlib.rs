@@ -1409,6 +1409,8 @@ pub(crate) fn lower_stdlib_call(
                 pending_calls,
                 fn_name,
             )?;
+            emitter.emit_u32(aarch64::cmp_reg64(rd, aarch64::REG_XZR));
+            emitter.emit_u32(aarch64::b_cond(aarch64::COND_EQ, 8));
             emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
             return Ok(true);
         }
