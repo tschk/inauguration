@@ -2420,9 +2420,12 @@ fn lower_builtin_call(
             emitter.patch_u32(empty + 2, (emitter.len() as i32 - empty as i32 - 6) as u32);
             Ok(true)
         }
-        "array-len" if args.len() == 1 => {
+        "array-len" | "array_len" if args.len() == 1 => {
             let len = match &args[0] {
-                Expr::ArrayLit(items) => items.len() as i64,
+                Expr::ArrayLit(_) => {
+                    lower_expr_into(emitter, ctx, &args[0], target_reg, pending_calls)?;
+                    return Ok(true);
+                }
                 Expr::Ident(name) => {
                     if let Some(StackSlot::Array { offsets }) = ctx.locals.get(name) {
                         offsets.len() as i64
@@ -3220,7 +3223,10 @@ fn lower_expr_into(
             lower_int_lit(emitter, target_reg, v.0.to_bits() as i64)
         }
         Expr::ArrayLit(items) => {
-            // Owned x86 subset: array value is its length (array-len reads the same slot).
+            // ponytail: scalar array values carry length only; upgrade for array moves and returns.
+            for item in items {
+                lower_expr_into(emitter, ctx, item, target_reg, pending_calls)?;
+            }
             lower_int_lit(emitter, target_reg, items.len() as i64)
         }
         Expr::Closure { body, .. } => {

@@ -752,6 +752,13 @@ fn lower_array_len(
     fn_name: &str,
 ) -> Result<(), String> {
     match source {
+        Expr::ArrayLit(items) => {
+            for item in items {
+                lower_expr_into(emitter, ctx, item, rd, functions, pending_calls, fn_name)?;
+            }
+            emitter.emit_insns(&aarch64::load_i64(rd, items.len() as i64));
+            Ok(())
+        }
         Expr::Ident(local) => match ctx.locals.get(local) {
             Some(LocalSlot::Array { offsets, .. }) => {
                 emitter.emit_insns(&aarch64::load_i64(rd, offsets.len() as i64));

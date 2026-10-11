@@ -1,0 +1,8 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 14
+
+var calls: Int = 0;
+fn next(digit: Int) -> Int { calls = calls * 10 + digit; return calls; }
+fn main() -> Int { return array-len([next(1), next(2)]) + calls; }

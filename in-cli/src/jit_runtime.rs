@@ -730,6 +730,42 @@ mod tests {
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
+    fn array_lengths_evaluate_literal_elements_once_in_order() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (source, expected) in [
+                (
+                    "var calls: Int = 0;\nfn next(digit: Int) -> Int { calls = calls * 10 + digit; return calls; }\nfn main() -> Int { return array-len([next(1), next(2)]) + calls; }",
+                    14,
+                ),
+                ("fn main() -> Int { return array_len([]); }", 0),
+                ("fn main() -> Int { return array_len([\"a\", \"b\"]); }", 2),
+                (
+                    "var calls: Int = 0;\nfn fail() -> Int { calls += 1; throw 9; }\nfn next() -> Int { calls += 10; return 1; }\nfn main() -> Int { try { return array-len([fail(), next()]); } catch 9 { return calls; } return 0; }",
+                    1,
+                ),
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "raw {profile:?}: {source}"
+                );
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "optimized {profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
     fn string_lengths_preserve_bytes_nulls_and_single_evaluation() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,
