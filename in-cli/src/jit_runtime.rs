@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 #[cfg(not(windows))]
 use std::ffi::c_void;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
@@ -52,9 +52,36 @@ pub struct JitRuntime {
     data_pages: Vec<MappedPage>,
     /// Function dispatch table: name → entry point.
     functions: RwLock<HashMap<String, JitFunction>>,
-    /// Writable page for error flag (byte at +0) and error value (ptr at +8).
-    /// Set by invoke() into X27 (AArch64) or R15 (x86_64) for throw/try.
+    /// Context page: error flag at +0, value at +8, type at +16, array arena at +24.
+    /// Set by invoke() into X27 (AArch64) or R15 (x86_64).
     error_page: Option<MappedPage>,
+    // Box keeps the allocation arena address stable when the runtime moves.
+    _arrays: Box<Mutex<Vec<Box<[u64]>>>>,
+}
+
+// The x86 lowerer uses SysV registers even on Windows hosts.
+#[cfg(target_arch = "x86_64")]
+pub(crate) unsafe extern "sysv64" fn allocate_array(error_page: *mut u8, len: usize) -> *mut u64 {
+    unsafe { allocate_array_words(error_page, len) }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub(crate) unsafe extern "C" fn allocate_array(error_page: *mut u8, len: usize) -> *mut u64 {
+    unsafe { allocate_array_words(error_page, len) }
+}
+
+/// The generated caller supplies its runtime's writable context page.
+/// Returned arrays remain valid until that runtime is dropped.
+unsafe fn allocate_array_words(error_page: *mut u8, len: usize) -> *mut u64 {
+    let arena =
+        unsafe { error_page.add(24).cast::<usize>().read() as *const Mutex<Vec<Box<[u64]>>> };
+    let mut words =
+        vec![0_u64; len.checked_add(2).expect("array allocation overflow")].into_boxed_slice();
+    words[0] = len as u64;
+    words[1] = len as u64;
+    let ptr = words.as_mut_ptr();
+    unsafe { &*arena }.lock().unwrap().push(words);
+    ptr
 }
 
 struct MappedPage {
@@ -265,11 +292,21 @@ impl JitRuntime {
         // Allocate a small writable page for error flag/value.
         // Not MAP_JIT — just RW for throw/try/catch writes.
         let error_page = MappedPage::writable(64);
+        let arrays = Box::new(Mutex::new(Vec::new()));
+        if let Some(page) = &error_page {
+            unsafe {
+                page.ptr
+                    .add(24)
+                    .cast::<usize>()
+                    .write((&*arrays as *const Mutex<Vec<Box<[u64]>>>) as usize);
+            }
+        }
         Self {
             code_pages: Vec::new(),
             data_pages: Vec::new(),
             functions: RwLock::new(HashMap::new()),
             error_page,
+            _arrays: arrays,
         }
     }
 
@@ -725,6 +762,280 @@ mod tests {
             assert_eq!(invoke_module(&module, profile, &[]), Some(42));
             let module = crate::in_lang_parse::parse_in_source("fn main() -> Int { try { throw 123; } catch caught { match caught { \"text\" { return 1; } _ { return 42; } } } return 7; }").unwrap();
             assert_eq!(invoke_module(&module, profile, &[]), Some(42));
+        }
+    }
+
+    #[cfg(all(unix, target_arch = "x86_64"))]
+    #[test]
+    fn array_literal_indexing_evaluates_all_elements_once() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (index, expected) in [(0, 13), (1, 24), (9, 12), (-1, 12)] {
+                let source = format!(
+                    "var calls: Int = 0;\nfn next(digit: Int) -> Int {{ calls = calls * 10 + digit; return calls; }}\nfn main() -> Int {{ let item = [next(1), next(2)][{index}]; return item + calls; }}"
+                );
+                let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
+            }
+            let items = (0..400)
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let scratch = vec!["9"; 64].join(",");
+            for (source, expected) in [
+                (format!("fn index() -> Int {{ let scratch: [Int] = [{scratch}]; return scratch[0] - 8; }}\nfn main() -> Int {{ return [{items}][index()]; }}"), 1),
+                ("var calls: Int = 0;\nfn fail() -> Int { calls += 1; throw 9; }\nfn next() -> Int { calls += 10; return 1; }\nfn main() -> Int { try { return [fail(), next()][0]; } catch 9 { return [calls, 99][0]; } return 0; }".into(), 1),
+                ("var calls: Int = 0;\nfn index() -> Int { calls += 1; return 0; }\nfn main() -> Int { let item = [][index()]; return item + calls; }".into(), 1),
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
+            }
+        }
+    }
+
+    #[cfg(all(unix, target_arch = "x86_64"))]
+    #[test]
+    fn array_dynamic_stores_check_bounds_and_evaluate_index_before_value() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (index, expected) in [(1, 29), (9, 42), (-1, 42)] {
+                let source = format!(
+                    "var calls: Int = 0;\nfn index() -> Int {{ calls = calls * 10 + 1; return {index}; }}\nfn value() -> Int {{ calls = calls * 10 + 2; return 7; }}\nfn main() -> Int {{ let xs: [Int] = [10, 20]; xs[index()] = value(); return xs[0] + xs[1] + calls; }}"
+                );
+                let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
+            }
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn array_for_evaluates_collection_once() {
+        use crate::core_ir::{Decl, Expr, LoopKind, Stmt};
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source("var calls: Int = 0;\nfn next(digit: Int) -> Int { calls = calls * 10 + digit; return calls; }\nfn main() -> Int { var sum: Int = 0; return sum + calls; }").unwrap();
+            let body = module
+                .decls
+                .iter_mut()
+                .find_map(|decl| match decl {
+                    Decl::Function { name, body, .. } if name == "main" => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            body.insert(
+                1,
+                Stmt::Loop {
+                    kind: LoopKind::For {
+                        binding: "item".into(),
+                    },
+                    cond: Some(Expr::ArrayLit(
+                        [1, 2]
+                            .into_iter()
+                            .map(|digit| Expr::Call {
+                                callee: Box::new(Expr::Ident("next".into())),
+                                args: vec![Expr::IntLit(digit)],
+                            })
+                            .collect(),
+                    )),
+                    body: vec![Stmt::Assign(
+                        "sum".into(),
+                        Expr::Binary {
+                            op: "+".into(),
+                            lhs: Box::new(Expr::Ident("sum".into())),
+                            rhs: Box::new(Expr::Ident("item".into())),
+                        },
+                    )],
+                },
+            );
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(invoke_module(&module, profile, &[]), Some(25));
+            crate::lower_core::desugar_module(&mut module);
+            assert_eq!(invoke_module(&module, profile, &[]), Some(25));
+            crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            assert_eq!(invoke_module(&module, profile, &[]), Some(25));
+        }
+    }
+
+    #[cfg(all(unix, target_arch = "x86_64"))]
+    #[test]
+    fn array_length_calls_preserve_returned_lengths_and_effects() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (source, expected) in [
+                (
+                    "var calls: Int = 0;\nfn values() -> [Int] { calls += 1; return [1, 2]; }\nfn main() -> Int { return array_len(values()) + calls; }",
+                    3,
+                ),
+                (
+                    "var calls: Int = 0;\nfn next(digit: Int) -> Int { calls = calls * 10 + digit; return calls; }\nfn values() -> [Int] { let xs = [next(1), next(2)]; return xs; }\nfn main() -> Int { let xs = values(); return xs[0] * 100 + xs[1] + calls; }",
+                    124,
+                ),
+                (
+                    "fn values() -> [Int] { return [1, 2]; }\nfn forward() -> [Int] { return values(); }\nfn update(xs: [Int]) -> void { xs[0] = 42; }\nfn main() -> Int { let xs = forward(); let alias = xs; update(alias); return xs[0] + array_len(alias); }",
+                    44,
+                ),
+                (
+                    "fn values() -> [Int] { return [10, 20]; }\nfn index() -> Int { let scratch = [8, 9]; return scratch[1] - 8; }\nfn main() -> Int { return values()[index()]; }",
+                    20,
+                ),
+                (
+                    "fn values() -> [Int] { return []; }\nfn main() -> Int { return array_len(values()) + values()[0]; }",
+                    0,
+                ),
+                (
+                    "fn values() -> [String] { return [\"a\", \"bc\"]; }\nfn main() -> Int { return str_len(values()[1]); }",
+                    2,
+                ),
+                (
+                    "fn values() -> [Bool] { return [true, false]; }\nfn main() -> Int { if values()[0] { return 7; } return 0; }",
+                    7,
+                ),
+                (
+                    "fn values() -> [Float] { return [1.25, 2.5]; }\nfn main() -> Float { return values()[0] + values()[1]; }",
+                    3.75_f64.to_bits() as i64,
+                ),
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "{source}"
+                );
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    #[test]
+    fn native_array_allocation_uses_aligned_system_calls() {
+        unsafe extern "sysv64" fn allocation_failure(_: usize) -> usize {
+            0
+        }
+        unsafe extern "sysv64" fn abort_observed() -> ! {
+            std::process::exit(73)
+        }
+        let oom = std::env::var_os("IN_TEST_NATIVE_ARRAY_OOM").is_some();
+        if !oom {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "jit_runtime::tests::native_array_allocation_uses_aligned_system_calls",
+                ])
+                .env("IN_TEST_NATIVE_ARRAY_OOM", "1")
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(73),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let _profile = crate::native_emit::antidecomp::ProfileGuard::new(profile);
+            let module = crate::in_lang_parse::parse_in_source("fn values() -> [Int] { return [1, 2, 3]; }\nfn main() -> [Int] { return values(); }").unwrap();
+            let mut lowered =
+                crate::native_emit::x86_64_lower::lower_native_module(&module, "main").unwrap();
+            assert_eq!(lowered.externs.len(), 2);
+            for name in ["malloc", "abort"] {
+                let stub = lowered.code.len() as u32;
+                let ptr = if oom {
+                    match name {
+                        "malloc" => allocation_failure as *const () as usize,
+                        "abort" => abort_observed as *const () as usize,
+                        _ => unreachable!(),
+                    }
+                } else {
+                    crate::native_emit::native_link::resolve_native_fn(name).unwrap() as usize
+                };
+                lowered
+                    .code
+                    .extend(crate::native_emit::x86_64::load_i64(0, ptr as i64));
+                lowered.code.extend([0xFF, 0xE0]); // tail call keeps the caller's aligned C frame
+                for (target, site) in &lowered.extern_calls {
+                    if target == name {
+                        let delta = stub as i32 - *site as i32 - 5;
+                        lowered.code[*site as usize + 1..*site as usize + 5]
+                            .copy_from_slice(&delta.to_le_bytes());
+                    }
+                }
+            }
+            let offsets = lowered
+                .exports
+                .iter()
+                .map(|(name, off)| (name.clone(), *off, 0))
+                .collect::<Vec<_>>();
+            let relocations = lowered
+                .relocations
+                .iter()
+                .map(|site| (*site, lowered.codegen_base))
+                .collect::<Vec<_>>();
+            let mut rt = JitRuntime::new();
+            rt.load_with_globals(
+                &lowered.code,
+                &offsets,
+                &relocations,
+                &lowered.data,
+                &lowered.global_relocs,
+            )
+            .unwrap();
+            let ptr = unsafe { rt.invoke("main", &[]) }.unwrap() as *mut u64;
+            unsafe {
+                assert_eq!(std::slice::from_raw_parts(ptr, 5), &[3, 3, 1, 2, 3]);
+                libc::free(ptr.cast());
+            }
+            assert!(rt._arrays.lock().unwrap().is_empty());
+        }
+    }
+
+    #[cfg(all(unix, target_arch = "x86_64"))]
+    #[test]
+    fn returned_arrays_remain_owned_across_runtime_moves_and_calls() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let module = crate::in_lang_parse::parse_in_source("var counter: Int = 0;\nfn values() -> [Int] { counter += 1; return [counter, counter + 10]; }\nfn main() -> Int { return 0; }").unwrap();
+            let rt = runtime_for_module(&module, profile);
+            let first = unsafe { rt.invoke("values", &[]) }.unwrap() as *const u64;
+            let moved = Box::new(rt);
+            let second = unsafe { moved.invoke("values", &[]) }.unwrap() as *const u64;
+            unsafe {
+                assert_eq!(std::slice::from_raw_parts(first, 4), &[2, 2, 1, 11]);
+                assert_eq!(std::slice::from_raw_parts(second, 4), &[2, 2, 2, 12]);
+            }
+            assert_eq!(moved._arrays.lock().unwrap().len(), 2);
         }
     }
 
@@ -1777,9 +2088,10 @@ mod tests {
                 unsafe {
                     // Restore the host's RBX even when the generated function violates its ABI.
                     std::arch::asm!(
-                        "push rbx", "sub rsp, 8", "mov rbx, 0x12345678", "call r11",
-                        "mov rdx, rbx", "add rsp, 8", "pop rbx",
-                        in("r11") entry, in("rdi") 9_i64, in("rsi") 4_i64,
+                        "push rbx", "push r15", "mov r15, r10", "mov rbx, 0x12345678", "call r11",
+                        "mov rdx, rbx", "pop r15", "pop rbx",
+                        in("r11") entry, in("r10") rt.error_page.as_ref().unwrap().ptr,
+                        in("rdi") 9_i64, in("rsi") 4_i64,
                         lateout("rax") result, lateout("rdx") preserved,
                         clobber_abi("C"),
                     );

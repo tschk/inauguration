@@ -168,19 +168,17 @@ fn expand_for_loop(
     }
 
     let idx = format!("__for_{counter}");
+    let collection = format!("__for_items_{counter}");
     *counter += 1;
-    let len_expr = match &iter {
-        Expr::ArrayLit(items) => Expr::IntLit(items.len() as i64),
-        other => Expr::Call {
-            callee: Box::new(Expr::Ident("array-len".into())),
-            args: vec![other.clone()],
-        },
+    let len_expr = Expr::Call {
+        callee: Box::new(Expr::Ident("array-len".into())),
+        args: vec![Expr::Ident(collection.clone())],
     };
     let mut body = vec![Stmt::Let(
         binding,
         None,
         Expr::Index {
-            base: Box::new(iter),
+            base: Box::new(Expr::Ident(collection.clone())),
             index: Box::new(Expr::Ident(idx.clone())),
         },
     )];
@@ -194,6 +192,7 @@ fn expand_for_loop(
         },
     ));
     vec![
+        Stmt::Let(collection, None, iter),
         Stmt::Let(idx.clone(), Some(Typ::Int), Expr::IntLit(0)),
         Stmt::Loop {
             kind: LoopKind::While,

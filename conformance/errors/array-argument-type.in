@@ -1,0 +1,5 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect build-error: expected array, got String
+
+fn main() -> Int { return array-len("abc"); }

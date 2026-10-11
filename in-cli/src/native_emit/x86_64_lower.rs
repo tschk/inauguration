@@ -155,7 +155,7 @@ struct LowerCtx<'a> {
     emitted_return: bool,
     error_branches: Vec<Vec<u32>>,
     error_types: HashMap<String, u32>,
-    prologue_frame_size: u32,
+    frame_size_sites: Vec<u32>,
     /// True if this function is an interrupt handler
     is_interrupt: bool,
     /// Struct field definitions
@@ -187,7 +187,7 @@ struct LowerCtx<'a> {
 enum StackSlot {
     Scalar(u32), // offset from RBP (negative)
     Struct { fields: HashMap<String, u32> },
-    Array { offsets: Vec<u32> },
+    InlineArray { offsets: Vec<u32> },
 }
 
 #[derive(Debug, Clone)]
@@ -218,7 +218,7 @@ impl<'a> LowerCtx<'a> {
             emitted_return: false,
             error_branches: Vec::new(),
             error_types: HashMap::new(),
-            prologue_frame_size: 0,
+            frame_size_sites: Vec::new(),
             is_interrupt: false,
             structs,
             functions,
@@ -1002,20 +1002,12 @@ fn lower_function(
         emitter.emit_insns(&emit_profile_prologue());
     }
 
-    // Allocate stack frame. Add extra padding for expression temporaries that
-    // the lowering code pushes/pops without declaring them as locals; the
-    // previous frame size only counted declared locals, which led to stack
-    // corruption when complex expressions spilled values past the frame.
-    ctx.frame_size += 2048;
-    let frame_size = ctx.frame_reserve();
-    ctx.prologue_frame_size = frame_size;
-    if frame_size > 0 {
-        emitter.emit_insns(&x86_64::sub_rsp_i32(frame_size as i32));
-    }
+    // Temporaries are allocated during lowering; patch every stack reset afterward.
+    let frame_instruction = x86_64::sub_rsp_i32(0);
+    ctx.frame_size_sites
+        .push(emitter.len() + frame_instruction.len() as u32 - 4);
+    emitter.emit_insns(&frame_instruction);
 
-    // Fast path: do not `rep stosq` the scratch frame. Locals are written
-    // before use; wiping 2KiB on every call was a conventional-compiler cost
-    // we do not want. Interrupt handlers already skipped the wipe.
     let param_regs = [RDI, RSI, RDX, RCX, 8, 9];
     if !is_interrupt {
         for (i, (name, _)) in func.params.iter().enumerate() {
@@ -1052,12 +1044,18 @@ fn lower_function(
         lower_stmt(emitter, &mut ctx, stmt, pending_calls)?;
     }
 
+    if ctx.frame_size > u16::MAX as u32 {
+        return Err("x86_64-lower: stack frame exceeds supported slot offsets".into());
+    }
+    for site in &ctx.frame_size_sites {
+        emitter.patch_u32(*site, ctx.frame_reserve());
+    }
     let pending_globals = ctx.pending_globals;
 
     // If no explicit return, emit default epilogue
     if !ctx.emitted_return {
         if matches!(&func.ret, Typ::Named(_) | Typ::Array(_)) {
-            // ponytail: struct/array return — return 0 (tag)
+            // ponytail: missing aggregate returns require control-flow validation.
             emitter.emit_insns(&x86_64::load_i64(RAX, 0));
         } else if func.ret == Typ::Void {
             emitter.emit_insns(&x86_64::zero_reg(RAX));
@@ -1072,18 +1070,18 @@ fn alloc_declared_locals(ctx: &mut LowerCtx<'_>, body: &[Stmt]) -> Result<(), St
     for stmt in body {
         match stmt {
             Stmt::Let(name, typ, expr) => {
-                if let Expr::ArrayLit(items) = expr {
-                    if let Some(array_type) = typ.clone().or_else(|| scalar_expr_type(expr, ctx)) {
-                        ctx.scalar_types.insert(name.clone(), array_type);
-                    }
-
-                    // Array literals occupy one slot per element so element
-                    // reads/writes can address them; the main Let path stores
-                    // the items into these offsets.
+                if x86_64::is_32bit()
+                    && let Expr::ArrayLit(items) = expr
+                {
+                    let array_type = typ
+                        .clone()
+                        .or_else(|| scalar_expr_type(expr, ctx))
+                        .unwrap_or(Typ::Array(Box::new(Typ::Void)));
+                    ctx.scalar_types.insert(name.clone(), array_type);
                     if !ctx.locals.contains_key(name) {
                         let offsets = (0..items.len()).map(|_| ctx.alloc_slot()).collect();
                         ctx.locals
-                            .insert(name.clone(), StackSlot::Array { offsets });
+                            .insert(name.clone(), StackSlot::InlineArray { offsets });
                     }
                 } else if let Some(typ) = typ {
                     ctx.alloc_local(name, typ)?;
@@ -1174,8 +1172,8 @@ fn lower_stmt(
         Stmt::Return(expr) => {
             if let Some(expr) = expr {
                 let ret_typ = ctx.ret_typ.canonical();
-                if matches!(ret_typ, Typ::Named(_) | Typ::Array(_)) {
-                    // ponytail: struct/array return — just return 0 (tag)
+                if matches!(ret_typ, Typ::Named(_)) {
+                    // ponytail: struct return still requires an aggregate ABI.
                     emitter.emit_insns(&x86_64::load_i64(RAX, 0));
                 } else {
                     lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
@@ -1188,20 +1186,12 @@ fn lower_stmt(
             Ok(())
         }
         Stmt::Let(name, typ, expr) => {
-            if let Expr::ArrayLit(items) = expr {
-                if !ctx.locals.contains_key(name) {
-                    let mut offsets = Vec::with_capacity(items.len());
-                    for _ in items {
-                        offsets.push(ctx.alloc_slot());
-                    }
-                    ctx.locals
-                        .insert(name.clone(), StackSlot::Array { offsets });
-                }
-                if let Some(StackSlot::Array { offsets }) = ctx.locals.get(name).cloned() {
-                    for (item, offset) in items.iter().zip(offsets.iter()) {
-                        lower_expr_into(emitter, ctx, item, RAX, pending_calls)?;
-                        emitter.emit_insns(&x86_64::str64(RAX, *offset as u16));
-                    }
+            if let Expr::ArrayLit(items) = expr
+                && let Some(StackSlot::InlineArray { offsets }) = ctx.locals.get(name).cloned()
+            {
+                for (item, offset) in items.iter().zip(offsets) {
+                    lower_expr_into(emitter, ctx, item, RAX, pending_calls)?;
+                    emitter.emit_insns(&x86_64::str64(RAX, offset as u16));
                 }
                 return Ok(());
             }
@@ -1245,11 +1235,6 @@ fn lower_stmt(
                     for off in sorted.iter().skip(1) {
                         emitter.emit_insns(&x86_64::load_i64(RAX, 0));
                         emitter.emit_insns(&x86_64::str64(RAX, **off as u16));
-                    }
-                }
-                Some(StackSlot::Array { offsets }) => {
-                    if let Some(first) = offsets.first() {
-                        emitter.emit_insns(&x86_64::str64(RAX, *first as u16));
                     }
                 }
                 _ => {}
@@ -1347,62 +1332,50 @@ fn lower_stmt(
         Stmt::IndexAssign {
             base, index, value, ..
         } => {
-            // Local array element store: `arr[i] = value` writes the stack slot.
-            if let Expr::Ident(name) = base {
-                if let Some(StackSlot::Array { offsets }) = ctx.locals.get(name).cloned() {
-                    if let Expr::IntLit(i) = index {
-                        if *i >= 0 {
-                            if let Some(&off) = offsets.get(*i as usize) {
-                                lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
-                                emitter.emit_insns(&x86_64::str64(RAX, off as u16));
-                                return Ok(());
-                            }
-                        }
-                        // Out-of-range constant index: keep value side effects,
-                        // write nowhere (matches the read path's OOB behavior).
-                        lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
-                        return Ok(());
-                    }
-                    if offsets.is_empty() {
-                        lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
-                        return Ok(());
-                    }
-                    // Dynamic index: value first (a call inside it would
-                    // clobber the address registers), then slot address math
-                    // mirroring lower_array_elem_read.
-                    let Some(&first) = offsets.first() else {
-                        return Ok(());
-                    };
-                    lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
-                    emitter.emit_insns(&x86_64::push_r(RAX));
-                    lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
+            if let Expr::Ident(name) = base
+                && let Some(StackSlot::InlineArray { offsets }) = ctx.locals.get(name).cloned()
+            {
+                let index_slot = ctx.alloc_slot();
+                lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::str64(RAX, index_slot as u16));
+                lower_expr_into(emitter, ctx, value, RSI, pending_calls)?;
+                emitter.emit_insns(&x86_64::ldr64(RAX, index_slot as u16));
+                emitter.emit_insns(&x86_64::load_i64(RDX, offsets.len() as i64));
+                emitter.emit_insns(&x86_64::cmp_rr(RAX, RDX));
+                let out_of_bounds = emitter.len();
+                emitter.emit_insns(&x86_64::jcc_near(0x03, 0));
+                if let Some(&first) = offsets.first() {
                     emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
                     emitter.emit_insns(&x86_64::load_i64(RDX, first as i64 + 8));
                     emitter.emit_insns(&x86_64::add_rr(RAX, RDX));
                     emitter.emit_insns(&x86_64::mov_rr(RDI, x86_64::REG_FP));
                     emitter.emit_insns(&x86_64::sub_rr(RDI, RAX));
-                    emitter.emit_insns(&x86_64::pop_r(RSI));
                     emitter.emit_insns(&x86_64::mov_ptr_reg(RDI, RSI));
-                    return Ok(());
                 }
-            }
-            // A store into a bare literal has no observable effect; keep only
-            // the value's side effects.
-            if let Expr::ArrayLit(_) = base {
-                lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
                 return Ok(());
             }
-            // a[i] = value → compute addr = base + i*8, store value
-            lower_expr_into(emitter, ctx, base, RDI, pending_calls)?;
+            let base_slot = ctx.alloc_slot();
+            let index_slot = ctx.alloc_slot();
+            lower_expr_into(emitter, ctx, base, RAX, pending_calls)?;
+            emitter.emit_insns(&x86_64::str64(RAX, base_slot as u16));
             lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
-            // RAX = index; shl rax, 3 (multiply by 8 for Int)
-            emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
-            // add rdi, rax
-            emitter.emit_insns(&x86_64::add_rr(RDI, RAX));
-            // value into rsi
+            emitter.emit_insns(&x86_64::str64(RAX, index_slot as u16));
             lower_expr_into(emitter, ctx, value, RSI, pending_calls)?;
-            // mov [rdi], rsi
-            emitter.emit_insns(&x86_64::mov_ptr_reg(RDI, RSI));
+            emitter.emit_insns(&x86_64::ldr64(RDI, base_slot as u16));
+            emitter.emit_insns(&x86_64::ldr64(RAX, index_slot as u16));
+            emitter.emit_insns(&x86_64::test_rr(RDI, RDI));
+            let null = emitter.len();
+            emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
+            emitter.emit_insns(&x86_64::mov_r_m(RDX, RDI, 0));
+            emitter.emit_insns(&x86_64::cmp_rr(RAX, RDX));
+            let out_of_bounds = emitter.len();
+            emitter.emit_insns(&x86_64::jcc_near(0x03, 0));
+            emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
+            emitter.emit_insns(&x86_64::add_rr(RDI, RAX));
+            emitter.emit_insns(&x86_64::mov_m_r(RDI, 16, RSI));
+            emitter.patch_u32(null + 2, emitter.len() - null - 6);
+            emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
             Ok(())
         }
         Stmt::Break => {
@@ -1431,20 +1404,35 @@ fn lower_stmt(
             // Owned x86 path: desugar should have rewritten range/array fors.
             // Remaining iterator forms still compile as a while over array-len.
             let iter = cond.clone().unwrap_or(Expr::ArrayLit(vec![]));
+            let iter_type =
+                scalar_expr_type(&iter, ctx).ok_or("x86_64-lower: unknown for collection type")?;
+            let item_type = match iter_type.canonical() {
+                Typ::Array(item) | Typ::Vector(item) => *item,
+                _ => return Err("x86_64-lower: for collection must be an array".into()),
+            };
+            let collection = format!("__x86_for_items_{}", ctx.frame_size);
+            if let Expr::Ident(source) = &iter
+                && let Some(slot @ StackSlot::InlineArray { .. }) = ctx.locals.get(source).cloned()
+            {
+                ctx.scalar_types.insert(collection.clone(), iter_type);
+                ctx.locals.insert(collection.clone(), slot);
+            } else {
+                let capture = Stmt::Let(collection.clone(), Some(iter_type), iter);
+                alloc_declared_locals(ctx, std::slice::from_ref(&capture))?;
+                lower_stmt(emitter, ctx, &capture, pending_calls)?;
+            }
+            let iter = Expr::Ident(collection);
             let idx = format!("__x86_for_{binding}");
             ctx.alloc_local(&idx, &Typ::Int)?;
-            ctx.alloc_local(binding, &Typ::Int)?;
+            ctx.alloc_local(binding, &item_type)?;
             emitter.emit_insns(&x86_64::load_i64(RAX, 0));
             if let Ok(off) = ctx.slot_offset(&idx) {
                 emitter.emit_insns(&x86_64::str64(RAX, off as u16));
             }
             let head = emitter.len();
-            let len_expr = match &iter {
-                Expr::ArrayLit(items) => Expr::IntLit(items.len() as i64),
-                other => Expr::Call {
-                    callee: Box::new(Expr::Ident("array-len".into())),
-                    args: vec![other.clone()],
-                },
+            let len_expr = Expr::Call {
+                callee: Box::new(Expr::Ident("array-len".into())),
+                args: vec![iter.clone()],
             };
             lower_expr_into(
                 emitter,
@@ -1537,7 +1525,10 @@ fn lower_stmt(
                 emitter.patch_u32(site + 1, (handler_offset as i32 - site as i32 - 5) as u32);
             }
             emitter.emit_insns(&x86_64::lea_sp_from_fp());
-            emitter.emit_insns(&x86_64::sub_rsp_i32(ctx.prologue_frame_size as i32));
+            let frame_instruction = x86_64::sub_rsp_i32(0);
+            ctx.frame_size_sites
+                .push(emitter.len() + frame_instruction.len() as u32 - 4);
+            emitter.emit_insns(&frame_instruction);
             let mut caught_branches = Vec::new();
             for catch_arm in catches {
                 let pattern = MatchPattern::parse(&catch_arm.pattern)?;
@@ -1989,6 +1980,9 @@ fn lower_ident_ref(
     name: &str,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if matches!(ctx.locals.get(name), Some(StackSlot::InlineArray { .. })) {
+        return Err("x86_64-lower: escaping 32-bit arrays require an aggregate ABI".into());
+    }
     // Check if this is a global variable
     if let Some(&offset) = ctx.globals.get(name) {
         if target_reg == RAX {
@@ -2421,20 +2415,33 @@ fn lower_builtin_call(
             Ok(true)
         }
         "array-len" | "array_len" if args.len() == 1 => {
+            if let Expr::Ident(name) = &args[0]
+                && let Some(StackSlot::InlineArray { offsets }) = ctx.locals.get(name)
+            {
+                emitter.emit_insns(&x86_64::load_i64(target_reg, offsets.len() as i64));
+                return Ok(true);
+            }
             let len = match &args[0] {
-                Expr::ArrayLit(_) => {
-                    lower_expr_into(emitter, ctx, &args[0], target_reg, pending_calls)?;
+                Expr::ArrayLit(items) => {
+                    for item in items {
+                        lower_expr_into(emitter, ctx, item, target_reg, pending_calls)?;
+                    }
+                    items.len() as i64
+                }
+                expr if matches!(
+                    scalar_expr_type(expr, ctx),
+                    Some(Typ::Array(_) | Typ::Vector(_))
+                ) =>
+                {
+                    lower_expr_into(emitter, ctx, expr, target_reg, pending_calls)?;
+                    emitter.emit_insns(&x86_64::test_rr(target_reg, target_reg));
+                    let empty = emitter.len();
+                    emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
+                    emitter.emit_insns(&x86_64::mov_r_m(target_reg, target_reg, 0));
+                    emitter.patch_u32(empty + 2, emitter.len() - empty - 6);
                     return Ok(true);
                 }
-                Expr::Ident(name) => {
-                    if let Some(StackSlot::Array { offsets }) = ctx.locals.get(name) {
-                        offsets.len() as i64
-                    } else {
-                        lower_expr_into(emitter, ctx, &args[0], target_reg, pending_calls)?;
-                        return Ok(true);
-                    }
-                }
-                _ => 0,
+                _ => return Err("x86_64-lower: unsupported array-len argument".into()),
             };
             emitter.emit_insns(&x86_64::load_i64(target_reg, len));
             Ok(true)
@@ -3086,18 +3093,91 @@ fn lower_array_elem_read(
         return lower_int_lit(emitter, target_reg, 0);
     }
     let Some(&first) = offsets.first() else {
+        lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
         return lower_int_lit(emitter, target_reg, 0);
     };
     lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
+    emitter.emit_insns(&x86_64::load_i64(RDX, offsets.len() as i64));
+    emitter.emit_insns(&x86_64::cmp_rr(RAX, RDX));
+    let out_of_bounds = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(0x03, 0)); // unsigned >= also rejects negative indices
     emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
     emitter.emit_insns(&x86_64::load_i64(RDX, first as i64 + 8));
     emitter.emit_insns(&x86_64::add_rr(RAX, RDX));
     emitter.emit_insns(&x86_64::mov_rr(RDI, x86_64::REG_FP));
     emitter.emit_insns(&x86_64::sub_rr(RDI, RAX));
     emitter.emit_insns(&x86_64::mov_reg_ptr(RAX, RDI));
+    let end = emitter.len();
+    emitter.emit_insns(&x86_64::jmp_rel32(0));
+    emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
+    emitter.emit_insns(&x86_64::zero_reg(RAX));
+    emitter.patch_u32(end + 1, emitter.len() - end - 5);
     if target_reg != RAX {
         emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
     }
+    Ok(())
+}
+
+fn lower_heap_array(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    offsets: &[u32],
+    pending_calls: &mut Vec<PendingCall>,
+) -> Result<(), String> {
+    if x86_64::is_32bit() || ctx.is_interrupt {
+        return Err("x86_64-lower: escaping arrays require the 64-bit hosted ABI".into());
+    }
+    if ctx.runtime_error_slot {
+        emitter.emit_insns(&x86_64::mov_rr(RDI, 15));
+        emitter.emit_insns(&x86_64::load_i64(RSI, offsets.len() as i64));
+        emitter.emit_insns(&x86_64::load_i64(
+            RAX,
+            crate::jit_runtime::allocate_array as *const () as i64,
+        ));
+    } else {
+        let bytes = offsets
+            .len()
+            .checked_add(2)
+            .and_then(|n| n.checked_mul(8))
+            .ok_or("x86_64-lower: array allocation overflow")?;
+        emitter.emit_insns(&x86_64::load_i64(RDI, bytes as i64));
+    }
+    // Align C calls independently of the active profile and operand spills.
+    emitter.emit_insns(&x86_64::mov_rr(11, x86_64::REG_SP));
+    emitter.emit_insns(&x86_64::load_i64(10, -16));
+    emitter.emit_insns(&x86_64::and_rr(x86_64::REG_SP, 10));
+    emitter.emit_insns(&x86_64::sub_rsp_i8(16));
+    emitter.emit_insns(&x86_64::mov_m_r(x86_64::REG_SP, 0, 11));
+    if ctx.runtime_error_slot {
+        emitter.emit_insns(&[0xFF, 0xD0]);
+    } else {
+        let site = emitter.len();
+        emitter.emit_insns(&x86_64::call_rel32(0));
+        pending_calls.push(PendingCall {
+            site,
+            target: "malloc".into(),
+        });
+        emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+        let allocated = emitter.len();
+        emitter.emit_insns(&x86_64::jcc_near(0x05, 0));
+        let site = emitter.len();
+        emitter.emit_insns(&x86_64::call_rel32(0));
+        pending_calls.push(PendingCall {
+            site,
+            target: "abort".into(),
+        });
+        emitter.emit_insns(&[0x0F, 0x0B]);
+        emitter.patch_u32(allocated + 2, emitter.len() - allocated - 6);
+    }
+    emitter.emit_insns(&x86_64::mov_r_m(x86_64::REG_SP, x86_64::REG_SP, 0));
+    emitter.emit_insns(&x86_64::load_i64(RDX, offsets.len() as i64));
+    emitter.emit_insns(&x86_64::mov_m_r(RAX, 0, RDX));
+    emitter.emit_insns(&x86_64::mov_m_r(RAX, 8, RDX));
+    for (index, offset) in offsets.iter().enumerate() {
+        emitter.emit_insns(&x86_64::ldr64(RDX, *offset as u16));
+        emitter.emit_insns(&x86_64::mov_m_r(RAX, 16 + index as i32 * 8, RDX));
+    }
+    // ponytail: native arrays are process-owned; add release semantics with language ownership.
     Ok(())
 }
 
@@ -3130,29 +3210,36 @@ fn lower_index_expr(
     index: &Expr,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
-    if let (Expr::ArrayLit(items), Expr::IntLit(i)) = (base, index) {
-        if *i >= 0 {
-            let idx = *i as usize;
-            if idx < items.len() {
-                return lower_expr_into(emitter, ctx, &items[idx], target_reg, pending_calls);
-            }
-        }
-        return lower_int_lit(emitter, target_reg, 0);
-    }
-    if let Expr::Ident(name) = base {
-        if let Some(StackSlot::Array { offsets }) = ctx.locals.get(name).cloned() {
-            return lower_array_elem_read(emitter, ctx, &offsets, index, target_reg, pending_calls);
-        }
+    if let Expr::Ident(name) = base
+        && let Some(StackSlot::InlineArray { offsets }) = ctx.locals.get(name).cloned()
+    {
+        return lower_array_elem_read(emitter, ctx, &offsets, index, target_reg, pending_calls);
     }
     if let Expr::ArrayLit(items) = base {
         let offsets = materialize_array_literal(emitter, ctx, items, pending_calls)?;
         return lower_array_elem_read(emitter, ctx, &offsets, index, target_reg, pending_calls);
     }
-    lower_expr_into(emitter, ctx, base, RDI, pending_calls)?;
+    let base_slot = ctx.alloc_slot();
+    lower_expr_into(emitter, ctx, base, RAX, pending_calls)?;
+    emitter.emit_insns(&x86_64::str64(RAX, base_slot as u16));
     lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
+    emitter.emit_insns(&x86_64::ldr64(RDI, base_slot as u16));
+    emitter.emit_insns(&x86_64::test_rr(RDI, RDI));
+    let null = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
+    emitter.emit_insns(&x86_64::mov_r_m(RDX, RDI, 0));
+    emitter.emit_insns(&x86_64::cmp_rr(RAX, RDX));
+    let out_of_bounds = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(0x03, 0));
     emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
     emitter.emit_insns(&x86_64::add_rr(RDI, RAX));
-    emitter.emit_insns(&x86_64::mov_reg_ptr(RAX, RDI));
+    emitter.emit_insns(&x86_64::mov_r_m(RAX, RDI, 16));
+    let end = emitter.len();
+    emitter.emit_insns(&x86_64::jmp_rel32(0));
+    emitter.patch_u32(null + 2, emitter.len() - null - 6);
+    emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
+    emitter.emit_insns(&x86_64::zero_reg(RAX));
+    emitter.patch_u32(end + 1, emitter.len() - end - 5);
     if target_reg != RAX {
         emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
     }
@@ -3223,11 +3310,12 @@ fn lower_expr_into(
             lower_int_lit(emitter, target_reg, v.0.to_bits() as i64)
         }
         Expr::ArrayLit(items) => {
-            // ponytail: scalar array values carry length only; upgrade for array moves and returns.
-            for item in items {
-                lower_expr_into(emitter, ctx, item, target_reg, pending_calls)?;
+            let offsets = materialize_array_literal(emitter, ctx, items, pending_calls)?;
+            lower_heap_array(emitter, ctx, &offsets, pending_calls)?;
+            if target_reg != RAX {
+                emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
             }
-            lower_int_lit(emitter, target_reg, items.len() as i64)
+            Ok(())
         }
         Expr::Closure { body, .. } => {
             if let Some(Stmt::Return(Some(e)) | Stmt::Expr(e)) = body.last() {
@@ -3433,12 +3521,37 @@ fn main() -> void { return 0 }
     }
 
     #[test]
+    fn keeps_32bit_local_arrays_without_allocator_imports() {
+        struct WidthGuard(bool);
+        impl Drop for WidthGuard {
+            fn drop(&mut self) {
+                x86_64::set_32bit(self.0);
+            }
+        }
+        let _width = WidthGuard(x86_64::is_32bit());
+        x86_64::set_32bit(true);
+        let module = crate::in_lang_parse::parse_in_source("fn main(index: Int) -> Int { let xs: [Int] = [1, 2]; xs[index] = 7; return xs[index] + array_len(xs); }").unwrap();
+        let result = lower_native_module(&module, "main").unwrap();
+        assert!(result.externs.is_empty());
+        let escaped = crate::in_lang_parse::parse_in_source(
+            "fn main() -> [Int] { let xs = [1, 2]; return xs; }",
+        )
+        .unwrap();
+        assert!(
+            lower_native_module(&escaped, "main")
+                .err()
+                .unwrap()
+                .contains("escaping 32-bit arrays")
+        );
+    }
+
+    #[test]
     fn lowers_vec_for_loop() {
         let module = UnifiedModule {
             identity: Default::default(),
             decls: vec![Decl::Function {
                 name: "main".into(),
-                params: vec![],
+                params: vec![("values".into(), Typ::Array(Box::new(Typ::Int)))],
                 ret: Typ::Int,
                 body: vec![Stmt::Loop {
                     kind: LoopKind::For {

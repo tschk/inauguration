@@ -783,6 +783,33 @@ fn check_expr(
                     for arg in args {
                         check_expr(fn_name, arg, facts, env, call_edges)?;
                     }
+                    if matches!(name.as_str(), "array-len" | "array_len") {
+                        if args.len() != 1 {
+                            return Err((
+                                "call-arity-mismatch".into(),
+                                format!(
+                                    "call to `{name}` in `{fn_name}` expects 1 args, got {}",
+                                    args.len()
+                                ),
+                            ));
+                        }
+                        let actual = expr_type(&args[0], facts, env);
+                        if !matches!(
+                            actual.as_ref().map(Typ::canonical),
+                            Some(Typ::Array(_) | Typ::Vector(_))
+                        ) {
+                            return Err((
+                                "type-mismatch".into(),
+                                format!(
+                                    "argument 1 for `{name}` in `{fn_name}` expected array, got {}",
+                                    actual
+                                        .as_ref()
+                                        .map(type_name)
+                                        .unwrap_or_else(|| "unknown".into())
+                                ),
+                            ));
+                        }
+                    }
                     if let Some(params) = intrinsic_param_types(name) {
                         if args.len() != params.len() {
                             return Err((
@@ -1803,6 +1830,12 @@ mod tests {
     fn checks_scalar_intrinsic_argument_types_and_arity() {
         for (expression, reason) in [
             ("str-eq(42, 0)", Some("type-mismatch")),
+            ("array-len(\"abc\")", Some("type-mismatch")),
+            ("array_len(42)", Some("type-mismatch")),
+            ("array-len()", Some("call-arity-mismatch")),
+            ("array_len([], [])", Some("call-arity-mismatch")),
+            ("array-len([])", None),
+            ("array_len([1, 2])", None),
             ("str_eq(42, 0)", Some("type-mismatch")),
             ("process_run(0)", Some("type-mismatch")),
             ("path-join(42, \"x\")", Some("type-mismatch")),

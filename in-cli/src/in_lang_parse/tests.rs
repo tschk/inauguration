@@ -2042,3 +2042,15 @@ fn block_continuations_survive_newlines() {
         }
     }
 }
+
+#[test]
+fn parses_literal_and_chained_indexing() {
+    use crate::core_ir::Expr;
+    for source in ["[1, 2][0]", "xs[0][1]", "[[1], [2]][0][0]"] {
+        assert!(matches!(parse_expr(source), Expr::Index { .. }), "{source}");
+    }
+    assert!(matches!(parse_expr("[[1], [2]]"), Expr::ArrayLit(_)));
+    assert!(
+        matches!(parse_expr("xs[0][1]"), Expr::Index { base, .. } if matches!(base.as_ref(), Expr::Index { .. }))
+    );
+}

@@ -1127,6 +1127,14 @@ fn fold_expr(e: Expr) -> Expr {
         }
         Expr::Index { base, index, .. } => {
             if let (Expr::ArrayLit(items), Expr::IntLit(i)) = (base.as_ref(), index.as_ref()) {
+                if !items.iter().all(|item| {
+                    matches!(
+                        item,
+                        Expr::IntLit(_) | Expr::BoolLit(_) | Expr::FloatLit(_) | Expr::StringLit(_)
+                    )
+                }) {
+                    return e;
+                }
                 if *i >= 0 {
                     let idx = *i as usize;
                     if idx < items.len() {

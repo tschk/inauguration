@@ -81,15 +81,6 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
     if let Some(closure) = try_parse_closure_expr(s) {
         return closure;
     }
-    if s.starts_with('[') && s.ends_with(']') {
-        let inner = &s[1..s.len() - 1];
-        return Expr::ArrayLit(
-            split_call_args(inner)
-                .into_iter()
-                .map(|arg| parse_expr(&arg))
-                .collect(),
-        );
-    }
     if let Some(open) = find_top_level_index_open(s)
         && s.ends_with(']')
     {
@@ -101,6 +92,15 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
                 index: Box::new(parse_expr(index)),
             };
         }
+    }
+    if s.starts_with('[') && s.ends_with(']') {
+        let inner = &s[1..s.len() - 1];
+        return Expr::ArrayLit(
+            split_call_args(inner)
+                .into_iter()
+                .map(|arg| parse_expr(&arg))
+                .collect(),
+        );
     }
     if let Some(open) = find_struct_init_open_brace(s)
         && s.ends_with('}')
