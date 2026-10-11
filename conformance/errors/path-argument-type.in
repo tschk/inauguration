@@ -1,0 +1,5 @@
+// @expect parse: ok
+// @expect build-error: expected String, got Int
+// @expect has-function: main
+
+fn main() -> String { return path-join(42, 43); }

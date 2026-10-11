@@ -1339,6 +1339,11 @@ fn owned_jit_uses_runtime_builtin_result_types() {
         ("String", "\"é🙂\"", EvalValue::Str("é🙂".into())),
         (
             "String",
+            "path_join(\"/tmp\", \"file\")",
+            EvalValue::Str("/tmp/file".into()),
+        ),
+        (
+            "String",
             "__inrt_str_concat(\"a\", \"b\")",
             EvalValue::Str("ab".into()),
         ),

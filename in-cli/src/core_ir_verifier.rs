@@ -296,9 +296,12 @@ fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
         .replace('_', "-");
     Some(match name.as_str() {
         "str-concat" | "str-eq" | "str-contains" | "str-starts-with" | "str-ends-with"
-        | "str-index-of" => &[Typ::String, Typ::String],
+        | "str-index-of" | "path-join" | "write-file" | "env-set" => &[Typ::String, Typ::String],
         "str-len" | "str-trim" | "str-split-lines" | "str-split-spaces" | "str-tokenize-expr"
-        | "str-to-int" | "str-is-int" | "print" | "process-run" => &[Typ::String],
+        | "str-to-int" | "str-is-int" | "print" | "process-run" | "read-file" | "fs-exists"
+        | "create-dir" | "remove-file" | "env-get" | "env-has" | "path-dirname"
+        | "path-basename" | "path-extname" | "path-normalize" | "json-stringify" => &[Typ::String],
+        "env-temp-dir" | "env-current-dir" => &[],
         "str-slice" | "str-substr" => &[Typ::String, Typ::Int, Typ::Int],
         "print-int" | "to-string" => &[Typ::Int],
         _ => return None,
@@ -1802,6 +1805,20 @@ mod tests {
             ("str-eq(42, 0)", Some("type-mismatch")),
             ("str_eq(42, 0)", Some("type-mismatch")),
             ("process_run(0)", Some("type-mismatch")),
+            ("path-join(42, \"x\")", Some("type-mismatch")),
+            ("path_join(\"x\", false)", Some("type-mismatch")),
+            ("read-file(42)", Some("type-mismatch")),
+            ("fs_exists(false)", Some("type-mismatch")),
+            ("write_file(\"x\", 42)", Some("type-mismatch")),
+            ("env_set(\"KEY\", false)", Some("type-mismatch")),
+            ("env-get(42)", Some("type-mismatch")),
+            ("env-temp-dir(1)", Some("call-arity-mismatch")),
+            ("path-join(\"a\")", Some("call-arity-mismatch")),
+            ("path_join(\"a\", \"b\")", None),
+            ("write-file(\"a\", \"b\")", None),
+            ("env-set(\"KEY\", \"value\")", None),
+            ("env_current_dir()", None),
+            ("json_stringify(42)", Some("type-mismatch")),
             ("process-run()", Some("call-arity-mismatch")),
             ("str_concat(\"a\")", Some("call-arity-mismatch")),
             ("__inrt_str_eq(false, \"a\")", Some("type-mismatch")),
