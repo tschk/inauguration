@@ -516,7 +516,7 @@ pub fn lower_module_with_bases_layout(
         .iter()
         .map(|(name, offset)| (name.clone(), *offset))
         .collect();
-    let data = build_data_section(module, &globals);
+    let data = build_data_section(module, &globals)?;
 
     // Build externs list: calls to functions not defined in this module
     let mut externs: Vec<String> = Vec::new();

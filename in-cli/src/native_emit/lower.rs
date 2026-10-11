@@ -600,7 +600,7 @@ pub fn lower_module_with_jobs(
     let structs = collect_structs(module);
     let strings = collect_strings(module);
     let globals = super::global_data::collect_globals(module, &structs);
-    let data = super::global_data::build_data_section(module, &globals);
+    let data = super::global_data::build_data_section(module, &globals)?;
     let global_types: HashMap<String, Typ> = module
         .decls
         .iter()

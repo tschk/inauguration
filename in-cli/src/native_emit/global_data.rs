@@ -31,9 +31,9 @@ pub(crate) fn collect_globals(
 pub(crate) fn build_data_section(
     module: &UnifiedModule,
     globals: &HashMap<String, u64>,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, String> {
     if globals.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut data = Vec::new();
     for decl in &module.decls {
@@ -43,7 +43,13 @@ pub(crate) fn build_data_section(
                 Some(Expr::IntLit(v)) => *v,
                 Some(Expr::BoolLit(b)) => *b as i64,
                 Some(Expr::FloatLit(crate::core_ir::FloatVal(v))) => v.to_bits() as i64,
-                _ => 0,
+                None => 0,
+                // ponytail: runtime and aggregate initializers need an initialization pipeline, not fabricated zero values.
+                _ => {
+                    return Err(format!(
+                        "unsupported native initializer for global `{name}`; expected an integer, float, or boolean constant"
+                    ));
+                }
             };
             while data.len() < offset as usize {
                 data.push(0);
@@ -57,7 +63,7 @@ pub(crate) fn build_data_section(
     while data.len() < max_needed as usize {
         data.push(0);
     }
-    data
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -65,10 +71,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unsupported_global_initializers_are_refused_by_both_backends() {
+        let module = crate::in_lang_parse::parse_in_source("var count: Int = answer();\nfn answer() -> Int { return 42; }\nfn main() -> Int { return count; }").unwrap();
+        assert!(
+            crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .is_err()
+        );
+        assert!(crate::native_emit::x86_64_lower::lower_module(&module, "main").is_err());
+    }
+
+    #[test]
     fn parsed_global_literals_initialize_shared_data() {
         let module = crate::in_lang_parse::parse_in_source("var count: Int = 3;\nvar value: Float = 1.5;\nconst enabled: Bool = true;\nfn main() -> Int { return count; }").expect("parse");
         let globals = collect_globals(&module, &HashMap::new());
-        let data = build_data_section(&module, &globals);
+        let data = build_data_section(&module, &globals).unwrap();
         let words = data
             .chunks_exact(8)
             .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
@@ -76,6 +96,10 @@ mod tests {
         assert_eq!(words, vec![3, 1.5_f64.to_bits(), 1]);
         let empty =
             crate::in_lang_parse::parse_in_source("fn main() -> Int { return 0; }").expect("parse");
-        assert!(build_data_section(&empty, &collect_globals(&empty, &HashMap::new())).is_empty());
+        assert!(
+            build_data_section(&empty, &collect_globals(&empty, &HashMap::new()))
+                .unwrap()
+                .is_empty()
+        );
     }
 }
