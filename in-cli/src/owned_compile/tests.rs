@@ -1183,6 +1183,42 @@ fn resolve_jit_entry_empty_name_uses_library_fallback() {
 }
 
 #[test]
+fn owned_jit_reports_uncaught_errors_before_decoding_results() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for (typ, tail) in [
+            ("Int", "return 7;"),
+            ("Bool", "return true;"),
+            ("Float", "return 1.5;"),
+            ("String", "return \"value\";"),
+            ("void", "return;"),
+        ] {
+            let source = temp_path("uncaught-error.in");
+            fs::write(&source, format!("fn fail() -> Int {{ throw 42; return 0; }}\nfn main() -> {typ} {{ fail(); {tail} }}")).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(source).unwrap();
+            assert!(!report.success, "{profile:?}/{typ}: {report:?}");
+            assert_eq!(
+                report.error.as_deref(),
+                Some("jit-uncaught-error: entry `main` threw 42"),
+                "{profile:?}/{typ}: {report:?}"
+            );
+            assert_eq!(report.eval_result, None);
+            assert_eq!(report.eval_exit_code, None);
+        }
+    }
+}
+
+#[test]
 fn owned_jit_stops_effects_after_throwing_calls() {
     if !native_backend::native_subset_host_available() {
         return;

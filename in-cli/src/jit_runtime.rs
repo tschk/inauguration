@@ -469,6 +469,12 @@ impl JitRuntime {
         Some(f64::from_bits(bits as u64))
     }
 
+    /// Error carried by the last invocation, before decoding its return register.
+    pub(crate) fn invocation_error(&self) -> Option<i64> {
+        let page = self.error_page.as_ref()?;
+        unsafe { (page.ptr.read() != 0).then(|| page.ptr.add(8).cast::<i64>().read()) }
+    }
+
     /// Returns the number of loaded functions.
     pub fn function_count(&self) -> usize {
         self.functions.read().unwrap().len()
@@ -720,7 +726,9 @@ mod tests {
         }
         let rt = runtime_for_module(&module, crate::emit_profile::EmitProfile::Default);
         assert_eq!(unsafe { rt.invoke("fail", &[]) }, Some(42));
+        assert_eq!(rt.invocation_error(), Some(42));
         assert_eq!(unsafe { rt.invoke("main", &[]) }, Some(7));
+        assert_eq!(rt.invocation_error(), None);
     }
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]

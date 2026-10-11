@@ -1,4 +1,5 @@
 // @expect parse: ok
+// @expect build-error: jit-uncaught-error:
 // @expect has-function: main
 
 fn main() -> void {

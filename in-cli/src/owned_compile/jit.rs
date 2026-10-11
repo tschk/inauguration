@@ -211,21 +211,19 @@ pub fn compile_jit(
     let (exit_code, eval_result) = if is_rust {
         (0, None)
     } else {
+        let raw = unsafe { rt.invoke(&resolved_entry, &[]) }.ok_or_else(|| {
+            format!("jit-invocation-failed: entry `{resolved_entry}` could not be invoked")
+        })?;
+        if let Some(value) = rt.invocation_error() {
+            return Err(format!(
+                "jit-uncaught-error: entry `{resolved_entry}` threw {value}"
+            ));
+        }
         match entry_result_kind {
-            EntryResultKind::Int => {
-                let raw = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
-                (raw as u8, Some(EvalValue::Int(raw)))
-            }
-            EntryResultKind::Bool => {
-                let raw = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
-                (raw as u8, Some(EvalValue::Bool(raw != 0)))
-            }
-            EntryResultKind::Float => {
-                let value = unsafe { rt.invoke_float(&resolved_entry) };
-                (0, value.map(EvalValue::Float))
-            }
+            EntryResultKind::Int => (raw as u8, Some(EvalValue::Int(raw))),
+            EntryResultKind::Bool => (raw as u8, Some(EvalValue::Bool(raw != 0))),
+            EntryResultKind::Float => (0, Some(EvalValue::Float(f64::from_bits(raw as u64)))),
             EntryResultKind::String => {
-                let raw = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
                 let decode_string = raw != 0 && request.out.is_none();
                 let string = if decode_string {
                     decode_jit_string(raw).unwrap_or_default()
@@ -238,7 +236,6 @@ pub fn compile_jit(
             EntryResultKind::None => {
                 // The entry returns something an exit status cannot carry (Void,
                 // an aggregate). Run it for its effects, report no result.
-                let _ = unsafe { rt.invoke(&resolved_entry, &[]).unwrap_or(1) };
                 (0, None)
             }
         }

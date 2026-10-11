@@ -78,7 +78,7 @@ run_fixture() {
     | sed -E -e 's#^[[:space:]]*//[[:space:]]*@expect[[:space:]]+##' \
              -e 's/[[:space:]]*:[[:space:]]*/|/' || true)
 
-  local has_graph=0 has_jit=0 expect_parse_fail=0
+  local has_graph=0 has_jit=0 expect_parse_fail=0 expected_build_error=""
 
   while IFS='|' read -r check value; do
     [[ -z "$check" ]] && continue
@@ -86,6 +86,7 @@ run_fixture() {
     value="$(echo "$value" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
     case "$check" in
       parse) [[ "$value" == "fail" ]] && expect_parse_fail=1 ;;
+      build-error) expected_build_error="$value" ;;
       ir|symbols|symbol-count|has-struct|has-function|has-call-edge|has-import|has-effect|package) has_graph=1 ;;
       bytecode|result) has_jit=1 ;;
     esac
@@ -95,7 +96,10 @@ run_fixture() {
   build_tmp=$(mktemp "${TMPDIR:-/tmp}/conformance-build.XXXXXX")
 
   if "${IN_CMD[@]}" build --path "$fixture" --module-id Conformance >"$build_tmp" 2>&1; then
-    if [[ $expect_parse_fail -eq 1 ]]; then
+    if [[ -n "$expected_build_error" ]]; then
+      echo "  ${RED}FAIL${NC} build-error: expected $expected_build_error"
+      failed=1
+    elif [[ $expect_parse_fail -eq 1 ]]; then
       echo "  ${RED}FAIL${NC} parse: should have failed"
       failed=1
     else
@@ -107,6 +111,8 @@ run_fixture() {
       results "PASS|$rel"
       rm -f "$build_tmp"
       return 0
+    elif [[ -n "$expected_build_error" ]] && grep -Fq -- "$expected_build_error" "$build_tmp"; then
+      echo "  ${GREEN}PASS${NC} build-error: $expected_build_error"
     else
       echo "  ${RED}FAIL${NC} parse: in build error:"
       while IFS= read -r line; do echo "    $line"; done < "$build_tmp"
