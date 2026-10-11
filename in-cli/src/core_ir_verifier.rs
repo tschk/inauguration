@@ -285,6 +285,22 @@ pub(crate) fn intrinsic_return_type(name: &str) -> Option<&'static Typ> {
     })
 }
 
+fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
+    let name = name
+        .strip_prefix("__inrt_")
+        .unwrap_or(name)
+        .replace('_', "-");
+    Some(match name.as_str() {
+        "str-concat" | "str-eq" | "str-contains" | "str-starts-with" | "str-ends-with"
+        | "str-index-of" => &[Typ::String, Typ::String],
+        "str-len" | "str-trim" | "str-split-lines" | "str-split-spaces" | "str-tokenize-expr"
+        | "str-to-int" | "str-is-int" | "print" => &[Typ::String],
+        "str-slice" | "str-substr" => &[Typ::String, Typ::Int, Typ::Int],
+        "print-int" | "to-string" => &[Typ::Int],
+        _ => return None,
+    })
+}
+
 fn add_intrinsics<'a>(functions: &mut HashMap<&'a str, FunctionSig<'a>>) {
     for name in INTRINSICS
         .iter()
@@ -722,7 +738,7 @@ fn check_expr(
                     ));
                 };
                 call_edges.push((fn_name.to_string(), name.clone()));
-                // Relax arity and type checking for intrinsics — the codegen handles validation.
+                // Scalar runtime intrinsics require their declared argument types.
                 if !is_intrinsic(name) {
                     if args.len() != sig.params.len() {
                         return Err((
@@ -757,9 +773,35 @@ fn check_expr(
                         }
                     }
                 } else {
-                    // Still check argument expressions (for side-effect / error detection)
                     for arg in args {
                         check_expr(fn_name, arg, facts, env, call_edges)?;
+                    }
+                    if let Some(params) = intrinsic_param_types(name) {
+                        if args.len() != params.len() {
+                            return Err((
+                                "call-arity-mismatch".into(),
+                                format!(
+                                    "call to `{name}` in `{fn_name}` expects {} args, got {}",
+                                    params.len(),
+                                    args.len()
+                                ),
+                            ));
+                        }
+                        for (index, (expected, arg)) in params.iter().zip(args).enumerate() {
+                            if let Some(actual) = expr_type(arg, facts, env)
+                                && actual.canonical() != expected.canonical()
+                            {
+                                return Err((
+                                    "type-mismatch".into(),
+                                    format!(
+                                        "argument {} for `{name}` in `{fn_name}` expected {}, got {}",
+                                        index + 1,
+                                        type_name(expected),
+                                        type_name(&actual)
+                                    ),
+                                ));
+                            }
+                        }
                     }
                 }
                 return Ok(());
@@ -1748,6 +1790,27 @@ mod tests {
             report.ok,
             "empty body + non-void return should be allowed: {report:?}"
         );
+    }
+
+    #[test]
+    fn checks_scalar_intrinsic_argument_types_and_arity() {
+        for (expression, reason) in [
+            ("str-eq(42, 0)", Some("type-mismatch")),
+            ("__inrt_str_eq(false, \"a\")", Some("type-mismatch")),
+            ("str-concat(\"a\")", Some("call-arity-mismatch")),
+            (
+                "__inrt_str_substr(\"abc\", false, 1)",
+                Some("type-mismatch"),
+            ),
+            ("str-eq(\"a\", \"a\")", None),
+            ("__inrt_str_substr(\"abc\", 0, 1)", None),
+        ] {
+            let source = format!("fn main() -> Int {{ let value = {expression}; return 0; }}");
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let report = verify_for_entry(&module, "main");
+            assert_eq!(report.reason_code.as_deref(), reason, "{report:?}");
+            assert_eq!(report.ok, reason.is_none(), "{report:?}");
+        }
     }
 
     #[test]

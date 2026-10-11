@@ -1,0 +1,8 @@
+// @expect parse: ok
+// @expect build-error: expected String, got Int
+// @expect has-function: main
+
+fn main() -> Int {
+    if str-eq(42, 0) { return 1; }
+    return 0;
+}

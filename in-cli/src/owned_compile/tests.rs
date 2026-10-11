@@ -1307,8 +1307,8 @@ fn substring_builtin_copies_bytes_and_checks_ranges() {
         None,
     ));
     fs::remove_file(null_source).unwrap();
-    assert!(report.success, "{report:?}");
-    assert_eq!(report.eval_result, Some(EvalValue::Str(String::new())));
+    assert!(!report.success, "{report:?}");
+    assert_eq!(report.reason_code.as_deref(), Some("verify-type-mismatch"));
     let source = temp_path("substring-native.in");
     let binary = temp_path("substring-native");
     fs::write(&source, "fn main() -> Int { let value = __inrt_str_substr(\"abcdefghijk\", 1, 9); if __inrt_str_eq(value, \"bcdefghij\") { return 42; } return 1; }").unwrap();
