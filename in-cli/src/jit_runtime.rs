@@ -240,6 +240,14 @@ impl MappedPage {
 
 impl Drop for MappedPage {
     fn drop(&mut self) {
+        // Revoke execution before address reuse so Rosetta discards translated code.
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        if self.used > 0
+            && unsafe { libc::mprotect(self.ptr.cast(), self.size, libc::PROT_NONE) } != 0
+        {
+            // Keep the address reserved if translated code cannot be invalidated safely.
+            return;
+        }
         free_pages(self.ptr, self.size);
     }
 }
@@ -500,14 +508,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn writable_pages_are_released_after_runtime_drop() {
+    fn runtime_pages_are_released_after_runtime_drop() {
         const CHILD: &str = "IN_TEST_MAPPED_PAGE_DROP_CHILD";
         if std::env::var_os(CHILD).is_none() {
             // Isolate the address check from parallel tests that could reuse freed mappings.
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "jit_runtime::tests::writable_pages_are_released_after_runtime_drop",
+                    "jit_runtime::tests::runtime_pages_are_released_after_runtime_drop",
                 ])
                 .env(CHILD, "1")
                 .output()
@@ -521,10 +529,15 @@ mod tests {
             return;
         }
         let mut rt = JitRuntime::new();
-        rt.load_with_globals(&[], &[], &[], &[1], &[]).unwrap();
+        rt.load_with_globals(&[0], &[], &[], &[1], &[]).unwrap();
         let error = rt.error_page.as_ref().unwrap();
         let data = &rt.data_pages[0];
-        let mappings = [(error.ptr, error.size), (data.ptr, data.size)];
+        let code = &rt.code_pages[0];
+        let mappings = [
+            (error.ptr, error.size),
+            (data.ptr, data.size),
+            (code.ptr, code.size),
+        ];
         drop(rt);
         for (ptr, size) in mappings {
             assert_ne!(
@@ -547,7 +560,6 @@ mod tests {
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
-    #[ignore = "diagnostic stress for mixed JIT code-page reuse"]
     fn jit_code_pages_keep_fresh_results_when_reused() {
         use crate::emit_profile::EmitProfile;
         std::thread::scope(|scope| {
@@ -578,10 +590,23 @@ mod tests {
                                 0,
                             ),
                         };
+                        let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                        let rt = runtime_for_module(&module, profile);
+                        let page = &rt.code_pages[0];
+                        let snapshot = unsafe {
+                            std::slice::from_raw_parts(page.ptr, page.used).to_vec()
+                        };
+                        let result = unsafe { rt.invoke("main", &args) };
                         assert_eq!(
-                            invoke_source(&source, profile, &args),
+                            unsafe { std::slice::from_raw_parts(page.ptr, page.used) },
+                            snapshot,
+                            "mapped code changed during invocation"
+                        );
+                        assert_eq!(
+                            result,
                             Some(expected),
-                            "worker={worker} iteration={iteration} profile={profile:?}"
+                            "worker={worker} iteration={iteration} profile={profile:?} page={:p} bytes={snapshot:02x?}",
+                            page.ptr
                         );
                     }
                 });
