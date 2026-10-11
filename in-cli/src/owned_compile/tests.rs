@@ -1206,6 +1206,39 @@ fn native_backends_reject_aggregate_catches() {
 }
 
 #[test]
+fn native_matches_reject_unsupported_and_incompatible_patterns() {
+    for body in [
+        "match 5 { [value] { return 1; } _ { return 2; } } return 3;",
+        "match false { 0 { return 1; } _ { return 2; } } return 3;",
+    ] {
+        let mut module =
+            crate::in_lang_parse::parse_in_source(&format!("fn main() -> Int {{ {body} }}"))
+                .unwrap();
+        for optimized in [false, true] {
+            if optimized {
+                crate::core_opt::optimize_with_profile(
+                    &mut module.decls,
+                    Some("main"),
+                    crate::emit_profile::EmitProfile::Default,
+                );
+            }
+            for result in [
+                crate::native_emit::lower::lower_module(&module, "main", NativeLinkage::Executable)
+                    .map(|_| ()),
+                crate::native_emit::x86_64_lower::lower_module(&module, "main").map(|_| ()),
+            ] {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("unsupported match pattern")
+                        || error.contains("compatible scrutinee"),
+                    "{error}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn native_string_patterns_reject_non_string_scrutinees() {
     let module = crate::in_lang_parse::parse_in_source(
         "fn main() -> Int { match 123 { \"text\" { return 1; } _ { return 2; } } return 3; }",

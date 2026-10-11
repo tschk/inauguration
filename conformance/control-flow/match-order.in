@@ -1,0 +1,12 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 1
+
+fn main() -> Int {
+    match 5 {
+        _ { return 1; }
+        5 { return 2; }
+    }
+    return 3;
+}

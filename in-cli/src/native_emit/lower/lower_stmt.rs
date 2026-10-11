@@ -1349,14 +1349,49 @@ pub(crate) fn lower_match(
         fn_name,
     )?;
     let mut end_branches = Vec::new();
-    let mut default_body = None;
     for arm in arms {
-        if is_default_match_pattern(&arm.pattern) {
-            default_body = Some(arm.body.as_slice());
-            continue;
+        let pattern = MatchPattern::parse(&arm.pattern)?;
+        if matches!(pattern, MatchPattern::WildPat) {
+            for stmt in &arm.body {
+                lower_stmt(
+                    emitter,
+                    ctx,
+                    stmt,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                    ret_typ,
+                )?;
+            }
+            break;
         }
-        // Try integer pattern first, then string literal pattern.
-        if let Some(value) = parse_int_match_pattern(&arm.pattern) {
+        let scalar = match &pattern {
+            MatchPattern::IntPat(value) => Some((*value, Typ::Int)),
+            MatchPattern::BoolPat(value) => Some((i64::from(*value), Typ::Bool)),
+            _ => None,
+        };
+        if let Some((value, typ)) = scalar {
+            let type_miss = if let Expr::Ident(name) = scrutinee
+                && ctx.error_types.contains_key(name)
+            {
+                emit_error_type(emitter, ctx, scrutinee, functions)?;
+                emitter.emit_insns(&aarch64::load_i64(
+                    1,
+                    crate::core_effects::error_type_tag(&typ).unwrap(),
+                ));
+                emitter.emit_u32(aarch64::cmp_reg64(9, 1));
+                Some(emitter.emit_insn(aarch64::b_cond(1, 0)))
+            } else {
+                if lower_expr::native_expr_type(scrutinee, ctx, functions)
+                    .map(|typ| typ.canonical())
+                    != Some(typ)
+                {
+                    return Err(
+                        "native-lower: scalar pattern requires a compatible scrutinee".into(),
+                    );
+                }
+                None
+            };
             emitter.emit_insns(&aarch64::load_i64(1, value));
             emitter.emit_u32(aarch64::cmp_reg64(2, 1));
             let next_branch = emitter.emit_insn(aarch64::b_cond(1, 0));
@@ -1374,7 +1409,10 @@ pub(crate) fn lower_match(
             end_branches.push(emitter.emit_insn(aarch64::b(0)));
             let next_offset = emitter.len() as i32 - next_branch as i32;
             emitter.patch_u32(next_branch, aarch64::b_cond(1, next_offset));
-        } else if let Some(value) = parse_string_match_pattern(&arm.pattern) {
+            if let Some(site) = type_miss {
+                emitter.patch_u32(site, aarch64::b_cond(1, emitter.len() as i32 - site as i32));
+            }
+        } else if let MatchPattern::StringPat(value) = pattern {
             let type_miss = if let Expr::Ident(name) = scrutinee
                 && ctx.error_types.contains_key(name)
             {
@@ -1411,7 +1449,7 @@ pub(crate) fn lower_match(
                 emitter.patch_u32(site, aarch64::b_cond(condition, next_offset));
             }
         } else {
-            // A pattern the lowerer cannot test (bool, variant, range, ...) used
+            // A pattern the lowerer cannot test (variant, range, ...) used
             // to fall through to this arm's body unconditionally, which silently
             // returned the first arm's result for every input. Refusing lowers
             // the function to a trap that names the pattern instead.
@@ -1421,41 +1459,9 @@ pub(crate) fn lower_match(
             ));
         }
     }
-    if let Some(body) = default_body {
-        for stmt in body {
-            lower_stmt(
-                emitter,
-                ctx,
-                stmt,
-                functions,
-                pending_calls,
-                fn_name,
-                ret_typ,
-            )?;
-        }
-    }
     for branch in end_branches {
         let offset = emitter.len() as i32 - branch as i32;
         emitter.patch_u32(branch, aarch64::b(offset));
     }
     Ok(())
-}
-
-pub(crate) fn is_default_match_pattern(pattern: &str) -> bool {
-    matches!(
-        pattern.trim().trim_end_matches(':'),
-        "_" | "-" | "else" | "default" | "case else" | "case default"
-    )
-}
-
-pub(crate) fn parse_int_match_pattern(pattern: &str) -> Option<i64> {
-    let trimmed = pattern.trim().trim_end_matches(':').trim();
-    let trimmed = trimmed.strip_prefix("case ").unwrap_or(trimmed).trim();
-    trimmed.parse::<i64>().ok()
-}
-
-pub(crate) fn parse_string_match_pattern(pattern: &str) -> Option<String> {
-    let trimmed = pattern.trim().trim_end_matches(':').trim();
-    let trimmed = trimmed.strip_prefix("case ").unwrap_or(trimmed).trim();
-    crate::core_ir::decode_string_literal(trimmed)
 }

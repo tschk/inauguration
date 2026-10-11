@@ -735,13 +735,28 @@ pub(crate) fn native_expr_type(
     ctx: &LowerCtx<'_>,
     functions: &HashMap<String, FunctionInfo>,
 ) -> Option<Typ> {
+    if let Expr::ArrayLit(items) = expr {
+        return Some(Typ::Array(Box::new(
+            items
+                .iter()
+                .find_map(|item| native_expr_type(item, ctx, functions))
+                .unwrap_or(Typ::Void),
+        )));
+    }
     expr_type(expr).or_else(|| match expr {
         Expr::Ident(name) => ctx
             .scalar_type(name)
             .or_else(|| match ctx.locals.get(name) {
                 Some(LocalSlot::Struct { typ, .. }) => Some(Typ::Named(typ.clone())),
+                Some(LocalSlot::Array { elem, .. } | LocalSlot::ArrayParam { elem, .. }) => {
+                    Some(Typ::Array(Box::new(elem.clone())))
+                }
                 _ => None,
             }),
+        Expr::Index { base, .. } => match native_expr_type(base, ctx, functions)?.canonical() {
+            Typ::Array(item) | Typ::Vector(item) => Some(*item),
+            _ => None,
+        },
         Expr::Field { base, name } => {
             let mut typ = native_expr_type(base, ctx, functions)?;
             for field in name.split('.') {

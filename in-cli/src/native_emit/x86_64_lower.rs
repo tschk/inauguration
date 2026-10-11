@@ -1059,6 +1059,10 @@ fn alloc_declared_locals(ctx: &mut LowerCtx<'_>, body: &[Stmt]) -> Result<(), St
         match stmt {
             Stmt::Let(name, typ, expr) => {
                 if let Expr::ArrayLit(items) = expr {
+                    if let Some(array_type) = typ.clone().or_else(|| scalar_expr_type(expr, ctx)) {
+                        ctx.scalar_types.insert(name.clone(), array_type);
+                    }
+
                     // Array literals occupy one slot per element so element
                     // reads/writes can address them; the main Let path stores
                     // the items into these offsets.
@@ -1755,15 +1759,41 @@ fn lower_match(
     lower_expr_into(emitter, ctx, scrutinee, RAX, pending_calls)?;
 
     let mut end_branches = Vec::new();
-    let mut default_body: Option<&[Stmt]> = None;
 
     for arm in arms {
-        if is_default_match_pattern(&arm.pattern) {
-            default_body = Some(arm.body.as_slice());
-            continue;
+        let pattern = MatchPattern::parse(&arm.pattern)?;
+        if matches!(pattern, MatchPattern::WildPat) {
+            for stmt in &arm.body {
+                lower_stmt(emitter, ctx, stmt, pending_calls)?;
+            }
+            break;
         }
-
-        if let Some(value) = parse_int_match_pattern(&arm.pattern) {
+        let scalar = match &pattern {
+            MatchPattern::IntPat(value) => Some((*value, Typ::Int)),
+            MatchPattern::BoolPat(value) => Some((i64::from(*value), Typ::Bool)),
+            _ => None,
+        };
+        if let Some((value, typ)) = scalar {
+            let type_miss = if let Expr::Ident(name) = scrutinee
+                && ctx.error_types.contains_key(name)
+            {
+                emit_error_type(emitter, ctx, scrutinee)?;
+                emitter.emit_insns(&x86_64::load_i64(
+                    RDX,
+                    crate::core_effects::error_type_tag(&typ).unwrap(),
+                ));
+                emitter.emit_insns(&x86_64::cmp_rr(RCX, RDX));
+                let site = emitter.len();
+                emitter.emit_insns(&x86_64::jcc_near(5, 0));
+                Some(site)
+            } else {
+                if scalar_expr_type(scrutinee, ctx) != Some(typ) {
+                    return Err(
+                        "x86_64-lower: scalar pattern requires a compatible scrutinee".into(),
+                    );
+                }
+                None
+            };
             // cmp rax, value
             emitter.emit_insns(&x86_64::load_i64(RCX, value));
             emitter.emit_insns(&x86_64::cmp_rr(RAX, RCX));
@@ -1781,8 +1811,11 @@ fn lower_match(
             // Patch next_branch (jne rel32)
             let next_offset = emitter.len() as i32 - next_branch as i32 - 6;
             emitter.patch_u32(next_branch + 2, next_offset as u32);
+            if let Some(site) = type_miss {
+                emitter.patch_u32(site + 2, (emitter.len() as i32 - site as i32 - 6) as u32);
+            }
             end_branches.push(end_branch);
-        } else if let Some(pat) = parse_string_match_pattern(&arm.pattern) {
+        } else if let MatchPattern::StringPat(pat) = pattern {
             let type_miss = if let Expr::Ident(name) = scrutinee
                 && ctx.error_types.contains_key(name)
             {
@@ -1816,22 +1849,11 @@ fn lower_match(
             }
             end_branches.push(end_branch);
         } else {
-            // ponytail: non-int pattern (enum variant, range, etc.) — skip entirely to avoid crash
-            // (unconditional execution of non-int arms causes issues on x86_64 self-host)
-            // Extract vars anyway so they exist if referenced, but don't execute body
-            let vars = extract_pattern_vars(&arm.pattern);
-            for var in &vars {
-                if !ctx.locals.contains_key(var) {
-                    ctx.alloc_local(var, &Typ::Int)?;
-                }
-            }
-            // No unconditional execution — prevents cascading command handlers from crashing
-        }
-    }
-
-    if let Some(body) = default_body {
-        for stmt in body {
-            lower_stmt(emitter, ctx, stmt, pending_calls)?;
+            return Err(format!(
+                "x86_64-lower: unsupported match pattern `{}` in `{}`",
+                arm.pattern.trim(),
+                ctx.fn_name
+            ));
         }
     }
 
@@ -1845,92 +1867,10 @@ fn lower_match(
     Ok(())
 }
 
-fn is_default_match_pattern(pattern: &str) -> bool {
-    matches!(
-        pattern.trim().trim_end_matches(':'),
-        "_" | "-" | "else" | "default" | "case else" | "case default"
-    )
-}
-
-fn parse_int_match_pattern(pattern: &str) -> Option<i64> {
-    let trimmed = pattern.trim().trim_end_matches(':').trim();
-    let trimmed = trimmed.strip_prefix("case ").unwrap_or(trimmed).trim();
-    trimmed.parse::<i64>().ok()
-}
-
 fn parse_string_match_pattern(pattern: &str) -> Option<String> {
     let trimmed = pattern.trim().trim_end_matches(':').trim();
     let trimmed = trimmed.strip_prefix("case ").unwrap_or(trimmed).trim();
     crate::core_ir::decode_string_literal(trimmed)
-}
-
-fn maybe_push_var(word: &str, vars: &mut Vec<String>) {
-    if word.len() == 1 && word.chars().next().map_or(false, |c| c.is_uppercase()) {
-        return;
-    }
-    if matches!(
-        word,
-        "true"
-            | "false"
-            | "mut"
-            | "ref"
-            | "self"
-            | "Self"
-            | "let"
-            | "fn"
-            | "if"
-            | "else"
-            | "match"
-            | "while"
-            | "for"
-            | "return"
-            | "use"
-            | "mod"
-            | "pub"
-            | "struct"
-            | "enum"
-            | "trait"
-            | "impl"
-            | "where"
-            | "as"
-            | "in"
-            | "move"
-            | "static"
-            | "const"
-            | "type"
-            | "unsafe"
-            | "extern"
-            | "crate"
-            | "super"
-            | "dyn"
-    ) {
-        return;
-    }
-    let w = word.to_string();
-    if !vars.contains(&w) {
-        vars.push(w);
-    }
-}
-
-/// Extract variable names from a match pattern string.
-fn extract_pattern_vars(pattern: &str) -> Vec<String> {
-    let mut vars = Vec::new();
-    let s = pattern.trim().trim_end_matches(':');
-    let mut current = String::new();
-    for c in s.chars() {
-        if c.is_alphanumeric() || c == '_' {
-            current.push(c);
-        } else {
-            if !current.is_empty() {
-                maybe_push_var(&current, &mut vars);
-                current.clear();
-            }
-        }
-    }
-    if !current.is_empty() {
-        maybe_push_var(&current, &mut vars);
-    }
-    vars
 }
 
 fn lower_int_lit(emitter: &mut CodeEmitter, target_reg: u8, value: i64) -> Result<(), String> {
@@ -2138,8 +2078,20 @@ fn lower_checked_div_or_mod(emitter: &mut CodeEmitter, is_interrupt: bool, modul
 }
 
 fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
+    if let Expr::ArrayLit(items) = expr {
+        return Some(Typ::Array(Box::new(
+            items
+                .iter()
+                .find_map(|item| scalar_expr_type(item, ctx))
+                .unwrap_or(Typ::Void),
+        )));
+    }
     crate::native_emit::lower::expr_type(expr).or_else(|| match expr {
         Expr::Ident(name) => ctx.scalar_types.get(name).map(Typ::canonical),
+        Expr::Index { base, .. } => match scalar_expr_type(base, ctx)?.canonical() {
+            Typ::Array(item) | Typ::Vector(item) => Some(*item),
+            _ => None,
+        },
         Expr::Field { base, name } => {
             let mut typ = scalar_expr_type(base, ctx)?;
             for field in name.split('.') {

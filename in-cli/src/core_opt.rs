@@ -1005,57 +1005,34 @@ fn fold_stmt_matches(s: Stmt) -> Vec<Stmt> {
         Stmt::Match {
             scrutinee, arms, ..
         } => {
-            let chosen = match &scrutinee {
-                Expr::IntLit(v) => arms.iter().find(|a| {
-                    parse_folded_int_pat(&a.pattern)
-                        .map(|p| p == *v)
-                        .unwrap_or(false)
-                }),
-                Expr::StringLit(v) => arms.iter().find(|a| {
-                    parse_folded_string_pat(&a.pattern)
-                        .as_ref()
-                        .map(|p| p == v)
-                        .unwrap_or(false)
-                }),
-                Expr::BoolLit(v) => arms.iter().find(|a| {
-                    let t = a.pattern.trim();
-                    (*v && t == "true") || (!*v && t == "false")
-                }),
-                _ => None,
-            };
-            if let Some(arm) = chosen {
-                return arm.body.clone();
-            }
             if matches!(
                 &scrutinee,
                 Expr::IntLit(_) | Expr::StringLit(_) | Expr::BoolLit(_)
             ) {
-                if let Some(arm) = arms
-                    .iter()
-                    .find(|a| matches!(a.pattern.trim(), "_" | "-" | "else" | "default"))
-                {
-                    return arm.body.clone();
+                for arm in &arms {
+                    use crate::core_ir::MatchPattern;
+                    let matches = match (&scrutinee, MatchPattern::parse(&arm.pattern)) {
+                        (_, Ok(MatchPattern::WildPat)) => true,
+                        (Expr::IntLit(value), Ok(MatchPattern::IntPat(pattern))) => {
+                            *value == pattern
+                        }
+                        (Expr::BoolLit(value), Ok(MatchPattern::BoolPat(pattern))) => {
+                            *value == pattern
+                        }
+                        (Expr::StringLit(value), Ok(MatchPattern::StringPat(pattern))) => {
+                            *value == pattern
+                        }
+                        // Keep unsupported and incompatible patterns visible to lowering.
+                        _ => break,
+                    };
+                    if matches {
+                        return arm.body.clone();
+                    }
                 }
             }
             vec![Stmt::Match { scrutinee, arms }]
         }
         other => vec![other],
-    }
-}
-
-fn parse_folded_int_pat(pattern: &str) -> Option<i64> {
-    let trimmed = pattern.trim().trim_end_matches(':').trim();
-    let trimmed = trimmed.strip_prefix("case ").unwrap_or(trimmed).trim();
-    trimmed.parse::<i64>().ok()
-}
-
-fn parse_folded_string_pat(pattern: &str) -> Option<String> {
-    let trimmed = pattern.trim().trim_end_matches(':').trim();
-    let trimmed = trimmed.strip_prefix("case ").unwrap_or(trimmed).trim();
-    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
-        Some(trimmed[1..trimmed.len() - 1].to_string())
-    } else {
-        None
     }
 }
 

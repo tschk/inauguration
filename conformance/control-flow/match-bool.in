@@ -1,0 +1,14 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 2
+
+fn classify(value: Bool) -> Int {
+    match value {
+        true { return 1; }
+        false { return 2; }
+        _ { return 3; }
+    }
+    return 4;
+}
+fn main() -> Int { return classify(false); }

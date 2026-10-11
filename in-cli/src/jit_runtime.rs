@@ -702,6 +702,115 @@ mod tests {
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
+    fn scalar_matches_preserve_arm_order_and_payload_types() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (typ, argument, body, expected) in [
+                (
+                    "Int",
+                    5,
+                    "match value { _ { count = 1; } 5 { count = 2; } } return count;",
+                    1,
+                ),
+                (
+                    "Int",
+                    5,
+                    "match value { 4 { count = 4; } _ { count = 1; } 5 { count = 2; } } return count;",
+                    1,
+                ),
+                (
+                    "Int",
+                    5,
+                    "match value { 5 { count = 1; } 5 { count = 2; } _ { count = 3; } } return count;",
+                    1,
+                ),
+                (
+                    "Bool",
+                    0,
+                    "match value { true { return 1; } false { return 2; } _ { return 3; } } return 4;",
+                    2,
+                ),
+                (
+                    "Bool",
+                    1,
+                    "match value { false { return 1; } true { return 2; } _ { return 3; } } return 4;",
+                    2,
+                ),
+                (
+                    "Bool",
+                    0,
+                    "try { throw value; } catch caught { match caught { 0 { return 1; } false { return 2; } _ { return 3; } } } return 4;",
+                    2,
+                ),
+                (
+                    "Int",
+                    0,
+                    "try { throw value; } catch caught { match caught { false { return 1; } 0 { return 2; } _ { return 3; } } } return 4;",
+                    2,
+                ),
+                (
+                    "Int",
+                    0,
+                    "try { throw 0.0; } catch caught { match caught { false { return 1; } 0 { return 2; } _ { return 3; } } } return 4;",
+                    3,
+                ),
+                (
+                    "Int",
+                    5,
+                    "let values = [5, 6]; match values[0] { 5 { return 1; } _ { return 2; } } return 3;",
+                    1,
+                ),
+                (
+                    "Int",
+                    5,
+                    "let values = [false, true]; match values[0] { true { return 1; } false { return 2; } _ { return 3; } } return 4;",
+                    2,
+                ),
+            ] {
+                let source =
+                    format!("var count: Int = 0;\nfn main(value: {typ}) -> Int {{ {body} }}");
+                let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                assert_eq!(
+                    invoke_module(&module, profile, &[argument]),
+                    Some(expected),
+                    "raw {profile:?}: {source}"
+                );
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[argument]),
+                    Some(expected),
+                    "optimized {profile:?}: {source}"
+                );
+            }
+            for body in [
+                "match 5 { _ { return 1; } 5 { return 2; } } return 3;",
+                "match false { _ { return 1; } false { return 2; } } return 3;",
+                "match \"line\\n\" { \"line\\n\" { return 1; } _ { return 2; } } return 3;",
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(&format!(
+                    "fn main() -> Int {{ {body} }}"
+                ))
+                .unwrap();
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(1),
+                    "raw {profile:?}: {body}"
+                );
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(1),
+                    "optimized {profile:?}: {body}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
     fn catches_select_in_order_and_propagate_unmatched_errors() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,
