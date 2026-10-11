@@ -2021,7 +2021,11 @@ fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
             Some(typ)
         }
         Expr::Call { callee, .. } => match callee.as_ref() {
-            Expr::Ident(name) => ctx.functions.get(name).map(|f| f.ret.canonical()),
+            Expr::Ident(name) => ctx
+                .functions
+                .get(name)
+                .map(|f| f.ret.canonical())
+                .or_else(|| crate::core_ir_verifier::intrinsic_return_type(name).cloned()),
             _ => None,
         },
         Expr::Unary { op, expr } if op == "-" => scalar_expr_type(expr, ctx),

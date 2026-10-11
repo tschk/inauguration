@@ -765,7 +765,8 @@ pub(crate) fn native_expr_type(
                     name.rsplit_once("::")
                         .and_then(|(_, short)| functions.get(short))
                 })
-                .map(|function| function.ret.clone()),
+                .map(|function| function.ret.clone())
+                .or_else(|| crate::core_ir_verifier::intrinsic_return_type(name).cloned()),
             _ => None,
         },
         Expr::Unary { op, expr } if op == "-" => native_expr_type(expr, ctx, functions),

@@ -1205,6 +1205,117 @@ fn native_backends_reject_untyped_string_and_aggregate_catches() {
     }
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn substring_builtin_copies_bytes_and_checks_ranges() {
+    for (text, start, count, expected) in [
+        ("abcdefghijk", 1, 9, "bcdefghij"),
+        ("éabc", 2, 2, "ab"),
+        ("abc", 3, 0, ""),
+        ("abc", 0, 3, "abc"),
+        ("abc", -1, 1, ""),
+        ("abc", 0, -1, ""),
+        ("abc", 4, 0, ""),
+        ("abc", 2, 2, ""),
+        ("abc", i64::MAX, 1, ""),
+        ("abc", 1, i64::MAX, ""),
+    ] {
+        let source = temp_path("substring-range.in");
+        fs::write(
+            &source,
+            format!(
+                "fn main() -> String {{ return __inrt_str_substr({text:?}, {start}, {count}); }}"
+            ),
+        )
+        .unwrap();
+        let report = compile_owned(&default_request(
+            source.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(source).unwrap();
+        assert!(report.success, "{text:?}/{start}/{count}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Str(expected.into())),
+            "{text:?}/{start}/{count}"
+        );
+    }
+    let null_source = temp_path("substring-null.in");
+    fs::write(
+        &null_source,
+        "fn main() -> String { return __inrt_str_substr(0, 0, 0); }",
+    )
+    .unwrap();
+    let report = compile_owned(&default_request(
+        null_source.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    fs::remove_file(null_source).unwrap();
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.eval_result, Some(EvalValue::Str(String::new())));
+    let source = temp_path("substring-native.in");
+    let binary = temp_path("substring-native");
+    fs::write(&source, "fn main() -> Int { let value = __inrt_str_substr(\"abcdefghijk\", 1, 9); if __inrt_str_eq(value, \"bcdefghij\") { return 42; } return 1; }").unwrap();
+    let report = compile_owned(&default_request(
+        source.clone(),
+        CompileTarget::Native,
+        Some("main"),
+        Some(binary.clone()),
+    ));
+    assert!(report.success, "{report:?}");
+    assert_eq!(
+        std::process::Command::new(&binary).status().unwrap().code(),
+        Some(42)
+    );
+    fs::remove_file(source).unwrap();
+    fs::remove_file(binary).unwrap();
+}
+
+#[test]
+fn owned_jit_uses_runtime_builtin_result_types() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (typ, expression, expected) in [
+        (
+            "String",
+            "__inrt_str_concat(\"a\", \"b\")",
+            EvalValue::Str("ab".into()),
+        ),
+        (
+            "String",
+            "__inrt_str_substr(\"abcd\", 1, 2)",
+            EvalValue::Str("bc".into()),
+        ),
+        ("Bool", "__inrt_str_eq(\"a\", \"a\")", EvalValue::Bool(true)),
+        (
+            "Bool",
+            "__inrt_str_contains(\"abcd\", \"bc\")",
+            EvalValue::Bool(true),
+        ),
+    ] {
+        let source = temp_path("builtin-result.in");
+        fs::write(
+            &source,
+            format!("fn main() -> {typ} {{ return {expression}; }}"),
+        )
+        .unwrap();
+        let report = compile_owned(&default_request(
+            source.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(source).unwrap();
+        assert!(report.success, "{expression}: {report:?}");
+        assert_eq!(report.eval_result, Some(expected), "{expression}");
+    }
+}
+
 #[test]
 fn owned_jit_preserves_caught_scalar_payload_types() {
     if !native_backend::native_subset_host_available() {

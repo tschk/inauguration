@@ -250,7 +250,14 @@ fn intrinsic_ret(name: &str) -> Option<IntrinsicRet> {
     if let Some((_, ret)) = INTRINSICS.iter().find(|(intrinsic, _)| *intrinsic == name) {
         return Some(*ret);
     }
-    crate::inrt::is_inrt_builtin(name).then_some(IntrinsicRet::Int)
+    match name {
+        crate::inrt::INRT_STR_CONCAT | "__inrt_str_substr" => Some(IntrinsicRet::String),
+        crate::inrt::INRT_STR_EQ | crate::inrt::INRT_STR_CONTAINS => Some(IntrinsicRet::Bool),
+        crate::inrt::INRT_PRINT | crate::inrt::INRT_PRINT_INT | crate::inrt::INRT_TRAP_BUILTIN => {
+            Some(IntrinsicRet::Void)
+        }
+        _ => crate::inrt::is_inrt_builtin(name).then_some(IntrinsicRet::Int),
+    }
 }
 
 fn function_sig<'a>(facts: &ModuleFacts<'a>, name: &str) -> Option<FunctionSig<'a>> {
@@ -262,32 +269,31 @@ fn function_sig<'a>(facts: &ModuleFacts<'a>, name: &str) -> Option<FunctionSig<'
     })
 }
 
-fn add_intrinsics<'a>(functions: &mut HashMap<&'a str, FunctionSig<'a>>) {
-    // Static intrinsics: these variants contain no owned data, so a static item
-    // gives a cheap 'static reference without leaking an allocation.
+pub(crate) fn intrinsic_return_type(name: &str) -> Option<&'static Typ> {
     static VOID_RET: Typ = Typ::Void;
     static INT_RET: Typ = Typ::Int;
     static STRING_RET: Typ = Typ::String;
     static BOOL_RET: Typ = Typ::Bool;
-    let string_array_ret = Box::leak(Box::new(Typ::Array(Box::new(Typ::String))));
-    for (name, ret) in INTRINSICS {
-        let ret = match ret {
-            IntrinsicRet::Void => &VOID_RET,
-            IntrinsicRet::Int => &INT_RET,
-            IntrinsicRet::Bool => &BOOL_RET,
-            IntrinsicRet::String => &STRING_RET,
-            IntrinsicRet::StringArray => string_array_ret,
-        };
-        functions.insert(name, FunctionSig { params: &[], ret });
-    }
-    for name in crate::inrt::INRT_BUILTINS {
-        functions.insert(
-            name,
-            FunctionSig {
-                params: &[],
-                ret: &INT_RET,
-            },
-        );
+    static STRING_ARRAY_RET: std::sync::LazyLock<Typ> =
+        std::sync::LazyLock::new(|| Typ::Array(Box::new(Typ::String)));
+    Some(match intrinsic_ret(name)? {
+        IntrinsicRet::Void => &VOID_RET,
+        IntrinsicRet::Int => &INT_RET,
+        IntrinsicRet::String => &STRING_RET,
+        IntrinsicRet::Bool => &BOOL_RET,
+        IntrinsicRet::StringArray => &STRING_ARRAY_RET,
+    })
+}
+
+fn add_intrinsics<'a>(functions: &mut HashMap<&'a str, FunctionSig<'a>>) {
+    for name in INTRINSICS
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(crate::inrt::INRT_BUILTINS.iter().copied())
+    {
+        if let Some(ret) = intrinsic_return_type(name) {
+            functions.insert(name, FunctionSig { params: &[], ret });
+        }
     }
 }
 

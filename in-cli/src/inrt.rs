@@ -413,82 +413,70 @@ fn build_inrt_str_contains() -> Vec<u8> {
 }
 
 fn build_inrt_str_substr() -> Vec<u8> {
-    let mut buf = Vec::with_capacity(256);
-    emit_insn_blob(
-        &[
-            aarch64::stp_pre(FP, LR, -48),
-            aarch64::add_imm64(FP, SP, 0),
-            aarch64::str64(X0, SP, 16),
-            aarch64::str64(X1, SP, 24),
-            aarch64::str64(X2, SP, 32),
-        ],
-        &mut buf,
-    );
-    emit_insn_blob(
-        &[
-            aarch64::cmp_reg64(X1, XZR),
-            aarch64::b_cond(11, 40),
-            aarch64::ldr64(X3, X0, 0),
-            aarch64::add_reg64(X4, X1, X2),
-            aarch64::cmp_reg64(X4, X3),
-            aarch64::b_cond(12, 36),
-        ],
-        &mut buf,
-    );
-    emit_insn_blob(
-        &[aarch64::add_imm64(X1, X2, 8), aarch64::mov_zero64(X0)],
-        &mut buf,
-    );
-    emit_inline_mmap(&mut buf);
-    emit_insn_blob(
-        &[
-            aarch64::ldr64(X2, SP, 32),
-            aarch64::str64(X2, X0, 0),
-            aarch64::str64(X0, SP, 40),
-        ],
-        &mut buf,
-    );
-    emit_insn_blob(
-        &[
-            aarch64::ldr64(X3, SP, 16),
-            aarch64::add_imm64(X3, X3, 8),
-            aarch64::ldr64(X4, SP, 24),
-            aarch64::add_imm64(X5, X0, 8),
-            aarch64::mov_zero64(X6),
-        ],
-        &mut buf,
-    );
-    let cl = buf.len() as u32;
-    emit_insn_blob(
-        &[
-            aarch64::ldr64(X7, SP, 32),
-            aarch64::cmp_reg64(X6, X7),
-            aarch64::b_cond(10, 5 * 4),
-            aarch64::add_reg64(X9, X4, X6),
-            aarch64::ldr64_reg_offset(X8, X3, X9),
-            aarch64::str64_reg_offset(X8, X5, X6),
-            aarch64::add_imm64(X6, X6, 1),
-        ],
-        &mut buf,
-    );
-    emit_insn_blob(&[aarch64::b(cl as i32 - buf.len() as i32)], &mut buf);
-    emit_insn_blob(
-        &[
-            aarch64::ldr64(X0, SP, 40),
-            aarch64::ldp_post(FP, LR, 48),
-            aarch64::ret(),
-        ],
-        &mut buf,
-    );
-    emit_insn_blob(
-        &[
-            aarch64::mov_zero64(X0),
-            aarch64::ldp_post(FP, LR, 48),
-            aarch64::ret(),
-        ],
-        &mut buf,
-    );
-    buf
+    let mut e = aarch64::CodeEmitter::new();
+    e.emit_insns(&[
+        aarch64::stp_pre(FP, LR, -48),
+        aarch64::add_imm64(FP, SP, 0),
+        aarch64::str64(X0, SP, 16),
+        aarch64::str64(X1, SP, 24),
+        aarch64::str64(X2, SP, 32),
+    ]);
+    let mut invalid = Vec::new();
+    for (register, condition) in [(X0, 0), (X1, 11), (X2, 11)] {
+        e.emit_u32(aarch64::cmp_reg64(register, XZR));
+        invalid.push((e.emit_insn(aarch64::b_cond(condition, 0)), condition));
+    }
+    e.emit_u32(aarch64::ldr64(X3, X0, 0));
+    e.emit_u32(aarch64::cmp_reg64(X1, X3));
+    invalid.push((e.emit_insn(aarch64::b_cond(8, 0)), 8)); // start > byte length
+    e.emit_u32(aarch64::sub_reg64(X3, X3, X1));
+    e.emit_u32(aarch64::cmp_reg64(X2, X3));
+    invalid.push((e.emit_insn(aarch64::b_cond(8, 0)), 8)); // count > remaining bytes
+    e.emit_insns(&[aarch64::add_imm64(X1, X2, 8), aarch64::mov_zero64(X0)]);
+    emit_inline_mmap(&mut e.bytes);
+    invalid.push((e.emit_insn(aarch64::b_cond(2, 0)), 2)); // Darwin syscall carry means failure.
+    e.emit_insns(&[
+        aarch64::ldr64(X7, SP, 32),
+        aarch64::str64(X7, X0, 0),
+        aarch64::str64(X0, SP, 40),
+        aarch64::ldr64(X3, SP, 16),
+        aarch64::add_imm64(X3, X3, 8),
+        aarch64::ldr64(X4, SP, 24),
+        aarch64::add_reg64(X3, X3, X4),
+        aarch64::add_imm64(X5, X0, 8),
+        aarch64::mov_zero64(X6),
+    ]);
+    let copy = e.len();
+    e.emit_u32(aarch64::cmp_reg64(X6, X7));
+    let done = e.emit_insn(aarch64::b_cond(2, 0));
+    e.emit_insns(&[
+        aarch64::ldrb(X8, X3, 0),
+        aarch64::strb(X8, X5, 0),
+        aarch64::add_imm64(X3, X3, 1),
+        aarch64::add_imm64(X5, X5, 1),
+        aarch64::add_imm64(X6, X6, 1),
+    ]);
+    let back = e.len();
+    e.emit_u32(aarch64::b(copy as i32 - back as i32));
+    e.patch_u32(done, aarch64::b_cond(2, e.len() as i32 - done as i32));
+    e.emit_insns(&[
+        aarch64::ldr64(X0, SP, 40),
+        aarch64::ldp_post(FP, LR, 48),
+        aarch64::ret(),
+    ]);
+    let failure = e.len();
+    e.emit_insns(&[
+        aarch64::mov_zero64(X0),
+        aarch64::ldp_post(FP, LR, 48),
+        aarch64::ret(),
+    ]);
+    for (site, condition) in invalid {
+        e.patch_u32(
+            site,
+            aarch64::b_cond(condition, failure as i32 - site as i32),
+        );
+    }
+    e.bytes
 }
 
 fn build_inrt_array_len() -> Vec<u8> {
