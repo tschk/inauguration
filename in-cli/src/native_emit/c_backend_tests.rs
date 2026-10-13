@@ -680,3 +680,49 @@ fn floating_width_projection_rounds_and_evaluates_once() {
     std::fs::remove_dir_all(dir).unwrap();
     assert_eq!(status.code(), Some(42));
 }
+
+#[test]
+fn signed_right_shift_projection_preserves_boundary_signs() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let mut module = crate::in_lang_parse::parse_in_source(
+        "fn main(value: Int, count: Int) -> Int { return value >> count; }",
+    )
+    .unwrap();
+    let Decl::Function { name, .. } = &mut module.decls[0] else {
+        panic!("function");
+    };
+    *name = "shift".into();
+    let source = format!(
+        "{}\nint main(void) {{ if (shift(-1, 1) != -1 || shift(INT64_MIN, 63) != -1 || shift(INT64_MAX, 63) != 0) return 99; return (int)-shift(-84, 1); }}\n",
+        emit_c_module(&module).unwrap()
+    );
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-signed-shift-c-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let c = dir.join("shift.c");
+    let binary = dir.join("shift");
+    std::fs::write(&c, source).unwrap();
+    let build = Command::new("clang")
+        .arg(&c)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let status = Command::new(&binary).status().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(status.code(), Some(42));
+}

@@ -611,6 +611,14 @@ pub fn shl_reg_cl(reg: u8) -> Vec<u8> {
     code
 }
 
+/// Arithmetic right shift of a signed word by CL.
+pub fn sar_reg_cl(reg: u8) -> Vec<u8> {
+    let mut code = Vec::new();
+    push_rex_w(&mut code, reg);
+    code.extend_from_slice(&[0xD3, modrm(3, 7, reg & 7)]);
+    code
+}
+
 /// shr reg, cl
 pub fn shr_reg_cl(reg: u8) -> Vec<u8> {
     let mut code = Vec::new();
@@ -785,6 +793,8 @@ pub fn epilogue() -> Vec<u8> {
 mod tests {
     #[test]
     fn encodes_scalar_double_register_operations() {
+        assert_eq!(super::sar_reg_cl(super::RAX), [0x48, 0xd3, 0xf8]);
+        assert_eq!(super::sar_reg_cl(super::R9), [0x49, 0xd3, 0xf9]);
         assert_eq!(
             super::convert_scalar_float(0, 1, true),
             [0xf2, 0x0f, 0x5a, 0xc1]

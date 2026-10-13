@@ -581,7 +581,7 @@ fn interpret(prog: &Program) -> Result<i64, String> {
             OP_AND => bin(&mut stack, |a, b| a & b)?,
             OP_OR => bin(&mut stack, |a, b| a | b)?,
             OP_SHL => bin(&mut stack, |a, b| a.wrapping_shl((b as u32) & 63))?,
-            OP_SHR => bin(&mut stack, |a, b| ((a as u64) >> ((b as u32) & 63)) as i64)?,
+            OP_SHR => bin(&mut stack, |a, b| a.wrapping_shr((b as u32) & 63))?,
             OP_NEG => {
                 let a = stack.pop().ok_or("inisa: neg")?;
                 stack.push(a.wrapping_neg());
@@ -779,5 +779,17 @@ mod tests {
         );
         let module = UnifiedModule::new(decls);
         assert_eq!(eval_module(&module, "main").unwrap(), 20);
+    }
+    #[test]
+    fn signed_right_shift_preserves_sign_in_legacy_evaluation() {
+        for value in [-84i64, -1, i64::MIN, i64::MAX] {
+            for count in [0, 1, 31, 63] {
+                let source = format!(
+                    "fn main() -> Int {{ let value: Int = {value}; return value >> {count}; }}"
+                );
+                let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                assert_eq!(eval_module(&module, "main").unwrap(), value >> count);
+            }
+        }
     }
 }

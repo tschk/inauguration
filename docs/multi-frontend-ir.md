@@ -39,6 +39,14 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## Harden dispatcher scopes
+
+Control-flow dispatcher states keep a local declaration with its last read or write, preserving lexical scope without moving initialization effects. A single scan computes the use boundaries, and the synthetic program counter avoids existing names. Hardened programs retain valid bindings across assignments and returns.
+
+## Signed shifts
+
+Canonical Int64 `>>` and `>>=` preserve the sign bit at runtime, matching shared constant folding and C projection. `.in` shift compound assignments use the existing assignment desugaring, retaining the complete multi-character operator. Explicit logical-shift instruction encoders remain available for bit-oriented runtime helpers. Source unsignedness and narrower integer widths still require separate representation work.
+
 ## Floating width casts
 
 Rust `as f32` and `as f64` preserve explicit precision conversion for canonical floating values. `f32` conversion rounds to IEEE single precision, then widens into the internal Float64 word; `f64` conversion preserves that word. Both native CPUs and C projection use this representation. Rust `f64` annotations normalize to the canonical floating type, and explicit `f32`/`f64` literal suffixes retain their precision, including decimal literals without a point. Overflowing source literals remain refused; floating-width conversion itself can produce infinity or subnormal values.

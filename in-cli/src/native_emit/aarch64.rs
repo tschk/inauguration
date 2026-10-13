@@ -91,6 +91,10 @@ pub fn lsr_reg64(rd: u8, rn: u8, rm: u8) -> u32 {
     0x9AC0_2400 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
 }
 
+pub fn asr_reg64(rd: u8, rn: u8, rm: u8) -> u32 {
+    0x9AC0_2800 | ((rm as u32) << 16) | ((rn as u32) << 5) | rd as u32
+}
+
 pub fn bl(offset_bytes: i32) -> u32 {
     let imm26 = ((offset_bytes >> 2) as u32) & 0x03FF_FFFF;
     0x9400_0000 | imm26
@@ -347,6 +351,7 @@ mod tests {
         assert_eq!(mvn_reg64(3, 9), 0xAA2903E3);
         assert_eq!(lsl_reg64(3, 7, 9), 0x9AC920E3);
         assert_eq!(lsr_reg64(3, 7, 9), 0x9AC924E3);
+        assert_eq!(asr_reg64(3, 7, 9), 0x9AC928E3);
         assert_eq!(ret(), 0xD65F03C0);
         assert_eq!(cmp_reg64(7, 9), 0xEB0900FF);
         assert_eq!(b_cond(0, 8), 0x54000040);

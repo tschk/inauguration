@@ -2054,3 +2054,23 @@ fn parses_literal_and_chained_indexing() {
         matches!(parse_expr("xs[0][1]"), Expr::Index { base, .. } if matches!(base.as_ref(), Expr::Index { .. }))
     );
 }
+
+#[test]
+fn shift_compound_assignments_keep_both_operator_characters() {
+    let module = parse_in_source(
+        "fn main() -> Int { var value: Int = -84; value >>= 1; value <<= 1; return value; }",
+    )
+    .unwrap();
+    let Decl::Function { body, .. } = &module.decls[0] else {
+        panic!("function");
+    };
+    for (stmt, expected) in body[1..3].iter().zip([">>", "<<"]) {
+        let Stmt::Assign(name, Expr::Binary { op, lhs, rhs }) = stmt else {
+            panic!("assignment: {stmt:?}");
+        };
+        assert_eq!(name, "value");
+        assert_eq!(op, expected);
+        assert_eq!(lhs.as_ref(), &Expr::Ident("value".into()));
+        assert_eq!(rhs.as_ref(), &Expr::IntLit(1));
+    }
+}

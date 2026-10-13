@@ -4034,3 +4034,47 @@ fn owned_rust_floating_width_casts_round_and_keep_values() {
         }
     }
 }
+
+#[test]
+fn owned_signed_shift_sources_preserve_sign_and_compound_updates() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (extension, source) in [
+        (
+            "in",
+            include_str!("../../../conformance/types/signed-shift-effects.in"),
+        ),
+        (
+            "rs",
+            "fn half(value: i64, count: i64) -> i64 { return value >> count; } fn main() -> i64 { let mut value: i64 = -168; value >>= 1; return -half(value, 1); }",
+        ),
+        (
+            "c",
+            "long long value = -84; long long ones = -1; long long minimum = -9223372036854775807LL - 1; int main() { int count = 1; if ((ones >> count) != -1) return 99; count = 63; if ((minimum >> count) != -1) return 99; count = 1; value >>= count; return -value; }",
+        ),
+        (
+            "cpp",
+            "long long value = -84; long long ones = -1; long long minimum = -9223372036854775807LL - 1; int main() { int count = 1; if ((ones >> count) != -1) return 99; count = 63; if ((minimum >> count) != -1) return 99; count = 1; value >>= count; return -value; }",
+        ),
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let path = temp_path(&format!("signed-shift.{extension}"));
+            fs::write(&path, source).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{extension}: {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{extension}: {profile:?}"
+            );
+        }
+    }
+}

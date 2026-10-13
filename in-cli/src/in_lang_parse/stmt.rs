@@ -66,7 +66,7 @@ pub(crate) fn parse_return_stmt(s: &str) -> Result<Stmt, String> {
 
 /// Compound assignment operators, desugared to plain assignments:
 /// `x += e` becomes `x = x + e`, `arr[i] *= e` becomes `arr[i] = arr[i] * e`.
-const COMPOUND_ASSIGN_OPS: [&str; 5] = ["+=", "-=", "*=", "/=", "%="];
+const COMPOUND_ASSIGN_OPS: [&str; 7] = ["<<=", ">>=", "+=", "-=", "*=", "/=", "%="];
 
 /// Find the first top-level compound assignment operator, skipping string
 /// literals so `"a += b"` inside an expression is not mistaken for one.
@@ -94,7 +94,7 @@ fn find_compound_assign_op(s: &str) -> Option<(usize, &'static str)> {
 
 fn compound_binary(op: &str, lhs: Expr, rhs: Expr) -> Expr {
     Expr::Binary {
-        op: op[..1].to_string(),
+        op: op.strip_suffix('=').unwrap().to_string(),
         lhs: Box::new(lhs),
         rhs: Box::new(rhs),
     }

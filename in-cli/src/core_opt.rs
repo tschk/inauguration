@@ -2266,13 +2266,33 @@ fn harden_cfg_dispatch_lite(decls: &mut [Decl]) {
             continue;
         }
         let original: Vec<Stmt> = std::mem::take(body);
-        // Chunk large bodies so the dispatcher stays bounded.
+        // Prefer short states when binding lifetimes permit.
         let chunk = if original.len() > 8 { 2 } else { 1 };
+        let mut last_use = HashMap::new();
+        let mut used = HashSet::new();
+        for (index, stmt) in original.iter().enumerate() {
+            collect_used(std::slice::from_ref(stmt), &mut used);
+            for name in used.drain() {
+                last_use.insert(name, index);
+            }
+            if let Stmt::Let(name, ..) = stmt {
+                last_use.entry(name.clone()).or_insert(index);
+            }
+        }
+        let mut pc = "_pc".to_string();
+        while last_use.contains_key(&pc) {
+            pc.push('_');
+        }
         let mut chunks: Vec<Vec<Stmt>> = Vec::new();
         let mut cur = Vec::new();
-        for stmt in original {
+        let mut needed_through = 0;
+        for (index, stmt) in original.into_iter().enumerate() {
+            if let Stmt::Let(name, ..) = &stmt {
+                needed_through = needed_through.max(last_use.get(name).copied().unwrap_or(index));
+            }
             cur.push(stmt);
-            if cur.len() >= chunk {
+            // State scopes must retain a local until its last read or write.
+            if cur.len() >= chunk && index >= needed_through {
                 chunks.push(std::mem::take(&mut cur));
             }
         }
@@ -2284,15 +2304,15 @@ fn harden_cfg_dispatch_lite(decls: &mut [Decl]) {
         for (i, chunk_stmts) in chunks.into_iter().enumerate().rev() {
             let i = i as i64;
             let mut then_body = chunk_stmts;
-            then_body.push(Stmt::Assign("_pc".into(), Expr::IntLit(i + 1)));
+            then_body.push(Stmt::Assign(pc.clone(), Expr::IntLit(i + 1)));
             let cond = Expr::Binary {
                 op: "==".into(),
-                lhs: Box::new(Expr::Ident("_pc".into())),
+                lhs: Box::new(Expr::Ident(pc.clone())),
                 rhs: Box::new(Expr::IntLit(i)),
             };
             let else_body = match chain.take() {
                 Some(s) => vec![s],
-                None => vec![Stmt::Assign("_pc".into(), Expr::IntLit(state_count))],
+                None => vec![Stmt::Assign(pc.clone(), Expr::IntLit(state_count))],
             };
             chain = Some(Stmt::If {
                 cond,
@@ -2302,12 +2322,12 @@ fn harden_cfg_dispatch_lite(decls: &mut [Decl]) {
         }
         let dispatch = chain.expect("chunks non-empty");
         *body = vec![
-            Stmt::Let("_pc".into(), Some(Typ::Int), Expr::IntLit(0)),
+            Stmt::Let(pc.clone(), Some(Typ::Int), Expr::IntLit(0)),
             Stmt::Loop {
                 kind: LoopKind::While,
                 cond: Some(Expr::Binary {
                     op: "<".into(),
-                    lhs: Box::new(Expr::Ident("_pc".into())),
+                    lhs: Box::new(Expr::Ident(pc.clone())),
                     rhs: Box::new(Expr::IntLit(state_count)),
                 }),
                 body: vec![dispatch],
@@ -3931,6 +3951,50 @@ mod tests {
                 panic!("literal");
             };
             assert_eq!(value.0.to_bits(), expected.to_bits());
+        }
+    }
+    #[test]
+    fn cfg_dispatch_retains_binding_lifetimes_and_private_counter_names() {
+        for source in [
+            "fn main() -> Int { var value: Int = 40; value += 2; return value; }",
+            "fn main() -> Int { let _pc: Int = 40; var value: Int = _pc; value += 2; return value; }",
+            "fn consume(value: Int) -> Int { return value; }\nfn main() -> Int { let value: Int = 40; if true { consume(value); } consume(1); return 42; }",
+            "fn consume(value: Int) -> Int { return value; }\nfn main() -> Int { let _pc: Int = 20; let _pc_: Int = 20; consume(_pc + _pc_); consume(1); consume(2); consume(3); consume(4); consume(5); consume(6); return 42; }",
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            harden_cfg_dispatch_lite(&mut module.decls);
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{source}: {verified:?}: {:?}", module.decls);
+            assert_eq!(
+                crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
+                42
+            );
+            if source.starts_with("fn consume") {
+                let body = module
+                    .decls
+                    .iter()
+                    .find_map(|decl| match decl {
+                        Decl::Function { name, body, .. } if name == "main" => Some(body),
+                        _ => None,
+                    })
+                    .unwrap();
+                let Stmt::Loop {
+                    cond: Some(Expr::Binary { rhs, .. }),
+                    ..
+                } = &body[1]
+                else {
+                    panic!("dispatcher");
+                };
+                assert!(
+                    matches!(rhs.as_ref(), Expr::IntLit(states) if *states > 1),
+                    "must split after the local dies: {body:?}"
+                );
+                if source.contains("let _pc_") {
+                    assert!(
+                        matches!(&body[0], Stmt::Let(name, ..) if name != "_pc" && name != "_pc_")
+                    );
+                }
+            }
         }
     }
 }

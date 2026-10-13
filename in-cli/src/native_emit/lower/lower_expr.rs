@@ -769,7 +769,7 @@ pub(crate) fn lower_binary(
         "|" | "|=" => aarch64::orr_reg64(rd, lhs_reg, rhs_reg),
         "^" | "^=" => aarch64::eor_reg64(rd, lhs_reg, rhs_reg),
         "<<" | "<<=" => aarch64::lsl_reg64(rd, lhs_reg, rhs_reg),
-        ">>" | ">>=" => aarch64::lsr_reg64(rd, lhs_reg, rhs_reg),
+        ">>" | ">>=" => aarch64::asr_reg64(rd, lhs_reg, rhs_reg),
         "++" => {
             // Zig array concatenation: emit empty slice (ptr=0, len=0)
             emitter.emit_insns(&aarch64::load_i64(rd, 0));

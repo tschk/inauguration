@@ -21,7 +21,7 @@ in compile ... --lean
 |---------|------|----|-------------|
 | `default` | Fast owned pipeline (not a textbook SysV compiler) | Two-wave inlining (threshold 6 / depth 16) then fold / DCE | `push rbp; lea rbp, [rsp]` / `lea rsp, [rbp]` frames; **no** 2KiB `rep stosq` wipe |
 | `lean` | Shortest internal calls | Aggressive inlining (higher stmt threshold + deeper recursion, two waves) then DCE | Same frames as default; fewer calls after inline |
-| `harden` | Anti-decomp / fingerprint avoidance | After normal opts: MBA, opaque predicates, `_pc` dispatch, `_H` names | Same native backend and artifact target as default; profile-specific instruction shapes |
+| `harden` | Anti-decomp / fingerprint avoidance | After normal opts: MBA, opaque predicates, dispatch with a private counter, `_H` names | Same native backend and artifact target as default; profile-specific instruction shapes |
 
 ### Default details (fast, non-classic)
 

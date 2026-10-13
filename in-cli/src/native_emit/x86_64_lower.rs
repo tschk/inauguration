@@ -2361,7 +2361,7 @@ fn lower_binary_expr(
         ">>" => {
             emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
             emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
-            emitter.emit_insns(&x86_64::shr_reg_cl(RAX));
+            emitter.emit_insns(&x86_64::sar_reg_cl(RAX));
         }
         "&" => {
             emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
@@ -2412,7 +2412,7 @@ fn lower_binary_expr(
         ">>=" => {
             emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
             emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
-            emitter.emit_insns(&x86_64::shr_reg_cl(RAX));
+            emitter.emit_insns(&x86_64::sar_reg_cl(RAX));
         }
 
         _ => {

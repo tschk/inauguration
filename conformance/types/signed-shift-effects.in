@@ -1,0 +1,19 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var value: Int = -82;
+var calls: Int = 0;
+var ones: Int = -1;
+var minimum: Int = -9223372036854775808;
+fn count() -> Int { calls += 1; return 1; }
+fn main() -> Int {
+    var result: Int = value >> count();
+    result <<= 1;
+    result >>= 1;
+    if calls != 1 { return 99; }
+    if (ones >> 1) != -1 { return 99; }
+    if (minimum >> 63) != -1 { return 99; }
+    return -result + calls;
+}

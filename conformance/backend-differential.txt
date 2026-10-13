@@ -62,3 +62,4 @@ agree conformance/classes/class-array-repeat.in
 agree conformance/control-flow/index-compound-effects.in
 agree conformance/control-flow/field-compound-effects.in
 agree conformance/types/bool-bitwise-effects.in
+agree conformance/types/signed-shift-effects.in

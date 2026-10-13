@@ -2342,6 +2342,61 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn signed_right_shifts_match_constant_folding_at_runtime() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for body in [
+                "return value >> count;",
+                "var result: Int = value; result >>= count; return result;",
+            ] {
+                let source = format!("fn main(value: Int, count: Int) -> Int {{ {body} }}");
+                for value in [-84i64, -1, i64::MIN, i64::MAX, 84, 0] {
+                    for count in [0, 1, 7, 31, 63] {
+                        assert_eq!(
+                            invoke_source(&source, profile, &[value, count]),
+                            Some(value >> count),
+                            "{profile:?}: {body}: {value}, {count}"
+                        );
+                    }
+                }
+            }
+            let source = "var calls: Int = 0;\nfn count() -> Int { calls += 1; return 1; }\nfn main() -> Int { let value: Int = -82; return -(value >> count()) + calls; }";
+            assert_eq!(
+                invoke_source(source, profile, &[]),
+                Some(42),
+                "{profile:?}: count evaluation"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn hardened_dispatch_preserves_mutable_local_scope() {
+        for source in [
+            "fn main(value: Int) -> Int { var result: Int = value; result >>= 1; return -result; }",
+            "fn main(_pc: Int) -> Int { var result: Int = _pc; result >>= 1; return -result; }",
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            crate::core_opt::optimize_with_profile(
+                &mut module.decls,
+                Some("main"),
+                crate::emit_profile::EmitProfile::Harden,
+            );
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{source}: {verified:?}");
+            assert_eq!(
+                invoke_module(&module, crate::emit_profile::EmitProfile::Harden, &[-84]),
+                Some(42),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,
