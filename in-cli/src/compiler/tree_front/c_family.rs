@@ -404,10 +404,7 @@ fn c_for_statement(src: &[u8], stmt: Node<'_>) -> Option<Vec<Stmt>> {
             _ => out.push(Stmt::Expr(c_expr(src, init)?)),
         }
     }
-    let cond = match stmt.child_by_field_name("condition") {
-        Some(cond) => Some(c_expr(src, cond)?),
-        None => None,
-    };
+    let condition = stmt.child_by_field_name("condition");
     let mut body = c_stmt_or_body(src, stmt.child_by_field_name("body")?);
     if let Some(update) = stmt.child_by_field_name("update") {
         let advance = match update.kind() {
@@ -418,10 +415,13 @@ fn c_for_statement(src: &[u8], stmt: Node<'_>) -> Option<Vec<Stmt>> {
         crate::lower_core::advance_for_continues(&mut body, &advance);
         body.push(advance);
     }
-    out.push(Stmt::Loop {
-        kind: crate::core_ir::LoopKind::While,
-        cond,
-        body,
+    out.push(match condition {
+        Some(condition) => c_condition_loop(src, condition, body)?,
+        None => Stmt::Loop {
+            kind: crate::core_ir::LoopKind::While,
+            cond: None,
+            body,
+        },
     });
     // The initializer binding belongs to the loop, not the enclosing block.
     Some(vec![Stmt::If {
@@ -585,14 +585,43 @@ fn c_if_statement(src: &[u8], stmt: Node<'_>) -> Option<Stmt> {
 }
 
 fn c_while_statement(src: &[u8], stmt: Node<'_>) -> Option<Stmt> {
-    let cond = stmt
+    let condition = stmt
         .child_by_field_name("condition")
-        .and_then(|n| c_expr(src, n))
-        .or_else(|| first_named(stmt, "parenthesized_expression").and_then(|n| c_expr(src, n)))?;
+        .or_else(|| first_named(stmt, "parenthesized_expression"))?;
     let body = stmt
         .child_by_field_name("body")
-        .map(|n| c_stmt_or_body(src, n))
+        .map(|node| c_stmt_or_body(src, node))
         .unwrap_or_default();
+    c_condition_loop(src, condition, body)
+}
+
+fn c_condition_loop(src: &[u8], condition: Node<'_>, body: Vec<Stmt>) -> Option<Stmt> {
+    let value = if condition.kind() == "condition_clause" {
+        if condition.child_by_field_name("initializer").is_some() {
+            return None;
+        }
+        condition.child_by_field_name("value")?
+    } else {
+        condition
+    };
+    if value.kind() == "declaration" {
+        let mut header = c_declarations(src, value)?;
+        let [Stmt::Let(name, _, _)] = header.as_slice() else {
+            return None;
+        };
+        let cond = Expr::Ident(name.clone());
+        header.push(Stmt::If {
+            cond,
+            then_body: body,
+            else_body: vec![Stmt::Break],
+        });
+        return Some(Stmt::Loop {
+            kind: crate::core_ir::LoopKind::While,
+            cond: None,
+            body: header,
+        });
+    }
+    let cond = c_expr(src, value)?;
     Some(Stmt::Loop {
         kind: crate::core_ir::LoopKind::While,
         cond: Some(cond),

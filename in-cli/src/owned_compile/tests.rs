@@ -3780,3 +3780,36 @@ fn owned_c_decimal_floating_literals_reach_native_values() {
     assert!(report.success, "{report:?}");
     assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
 }
+
+#[test]
+fn owned_cpp_while_declarations_reevaluate_and_keep_scope() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "int calls = 0; int next() { calls++; if (calls < 3) return 1; return 0; } int main() { int sum = 0; while (int value = next()) { sum += 21; if (sum > 42) return 99; } return sum; }",
+        "int calls = 0; int next() { calls++; if (calls < 3) return 1; return 0; } int main() { int iterations = 0; while (int value = next()) { iterations++; if (iterations > 2) return 99; continue; } return calls + 39; }",
+        "int value = 42; int main() { while (int value = 0) { return 0; } return value; }",
+        "int main() { while (bool value = 2) { return value * 42; } return 0; }",
+        "int calls = 0; int next() { calls++; return 1; } int main() { while (int value = next()) { break; } return calls + 41; }",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let path = temp_path("cpp-while-decl.cpp");
+            fs::write(&path, source).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{profile:?}: {source}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{profile:?}: {source}"
+            );
+        }
+    }
+}

@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## C++ while declaration conditions
+
+A `while` declaration condition lowers to a declaration at the start of every loop iteration, followed by the converted condition and a break on false. Its binding remains scoped to the body, and `continue` reevaluates the initializer. The existing shared loop and boolean lowering handle returns and breaks. Declaration conditions in `for` headers remain unavailable in the installed C++ grammar.
+
 ## C-like decimal floating literals
 
 Decimal floating literals, exponent forms, and valid digit separators lower to canonical `Float`. An `f` suffix rounds the literal as an `f32` value before widening into the existing `f64` representation. Shared constant folding handles literal floating comparisons with NaN and signed-zero semantics, including static boolean initializers. Hexadecimal floating literals, long-double suffixes, non-finite overflow literals, and full source-width arithmetic remain unsupported. Ordinary literals borrow their digit text; only separators require a copy.
