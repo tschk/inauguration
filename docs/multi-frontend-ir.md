@@ -29,7 +29,7 @@ Rust type: `in_cli::core_ir::UnifiedModule`.
 
 `Decl::Global.constant_value` distinguishes a value copied at use from runtime storage. Rust `const` items use this flag; `.in` globals keep their existing storage semantics. Shared lowering resolves pure constant expressions, including literal strings, arrays, and struct fields, with lexical shadowing and qualified module names. Unresolved constant uses are refused rather than initialized with fabricated data. Native and C emission omit compile-time declarations from runtime global storage.
 
-Rust indexed assignment uses `index-assign-value-first(base, index, value)` in statement position. Shared operand spilling evaluates the assigned value before the place, evaluates each operand once, and skips place evaluation when the value throws.
+Rust indexed assignment uses `index-assign-value-first(base, index, value)` in statement position. Shared operand spilling evaluates the assigned value before the place, evaluates each operand once, and skips place evaluation when the value throws. Primitive indexed compound assignments use `index-modify-value-first(base, index, value, operator)`; the old element is read after the right-hand operand has completed, and the same saved place receives the result.
 
 ## Array repetition and collection loops
 

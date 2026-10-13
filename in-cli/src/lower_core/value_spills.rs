@@ -13,7 +13,7 @@ fn is_repeat(expr: &Expr) -> bool {
 }
 
 fn is_value_first_store(expr: &Expr) -> bool {
-    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "index-assign-value-first"))
+    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "index-assign-value-first" || name == "index-modify-value-first"))
 }
 
 fn expr_needs_spills(expr: &Expr) -> bool {
@@ -352,8 +352,12 @@ impl Lower {
             let mut prefix = Vec::new();
             if let Stmt::Expr(expr) = &stmt
                 && is_value_first_store(expr)
-                && let Expr::Call { args, .. } = expr
-                && args.len() == 3
+                && let Expr::Call { callee, args } = expr
+                && ((matches!(callee.as_ref(), Expr::Ident(name) if name == "index-assign-value-first")
+                    && args.len() == 3)
+                    || (matches!(callee.as_ref(), Expr::Ident(name) if name == "index-modify-value-first")
+                        && args.len() == 4
+                        && matches!(&args[3], Expr::StringLit(op) if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"))))
             {
                 // Rust assignment evaluates the value before the place. Save
                 // all three operands so each effect occurs exactly once.
@@ -366,6 +370,18 @@ impl Lower {
                 let mut index = args[1].clone();
                 self.expr(&mut index, &mut prefix);
                 let index = self.save(index, &mut prefix);
+                let value = if let Some(Expr::StringLit(op)) = args.get(3) {
+                    Expr::Binary {
+                        op: op.clone(),
+                        lhs: Box::new(Expr::Index {
+                            base: Box::new(base.clone()),
+                            index: Box::new(index.clone()),
+                        }),
+                        rhs: Box::new(value),
+                    }
+                } else {
+                    value
+                };
                 stmt = Stmt::IndexAssign { base, index, value };
             }
             match &mut stmt {

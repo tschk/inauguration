@@ -2748,3 +2748,108 @@ fn owned_large_repeat_respects_native_frame_limits() {
         assert_eq!(report.eval_result, Some(EvalValue::Int(4200)));
     }
 }
+
+#[test]
+fn owned_rust_indexed_compound_assignments_store_results() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (op, initial, rhs, expected) in [
+        ("+", 7, 21, 28),
+        ("-", 7, 2, 5),
+        ("*", 7, 3, 21),
+        ("/", 21, 3, 7),
+        ("%", 21, 4, 1),
+        ("&", 7, 3, 3),
+        ("|", 4, 3, 7),
+        ("^", 7, 3, 4),
+        ("<<", 3, 2, 12),
+        (">>", 12, 2, 3),
+    ] {
+        let path = temp_path("indexed-compound-store.rs");
+        let source = format!(
+            "fn main() -> i64 {{ let mut values = [{initial}, 14]; values[0] {op}= {rhs}; values[0] + values[1] }}"
+        );
+        fs::write(&path, &source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(expected + 14)),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn owned_indexed_compound_stores_preserve_value_first_effects() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (source, expected) in [
+        (
+            "var calls: Int = 0;\nfn index() -> Int { calls += 1; return 0; }\nfn value() -> Int { calls += 1; return calls; }\nfn main() -> Int { let values: [Int] = [10]; index-modify-value-first(values, index(), value(), \"+\"); return values[0] * 10 + calls; }",
+            112,
+        ),
+        (
+            "var calls: Int = 0;\nfn index() -> Int { calls += 1; return 0; }\nfn value() -> Int { throw 5; }\nfn main() -> Int { let values: [Int] = [10]; try { index-modify-value-first(values, index(), value(), \"+\"); return 9; } catch e { return calls + 42; } }",
+            42,
+        ),
+        (
+            "fn value(values: [Int]) -> Int { values[0] = 100; return 1; }\nfn main() -> Int { let values: [Int] = [10]; index-modify-value-first(values, 0, value(values), \"+\"); return values[0]; }",
+            101,
+        ),
+        (
+            "fn main() -> Int { let values: [Int] = [0, 0, 0]; values[1 + 1] = 7; return values[2]; }",
+            7,
+        ),
+        (
+            "fn write(values: [Int]) -> Int { values[1] = 99; return 7; }\nfn main() -> Int { let values: [Int] = [10]; return write(values) + values[0]; }",
+            11,
+        ),
+    ] {
+        let path = temp_path("compound-store-effects.in");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(expected)),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn owned_rust_float_indexed_compound_assignment() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = temp_path("float-indexed-compound.rs");
+    fs::write(
+        &path,
+        "fn main() -> f64 { let mut values = [1.5]; values[0] += 2.0; values[0] }",
+    )
+    .unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    fs::remove_file(path).unwrap();
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.eval_result, Some(EvalValue::Float(3.5)));
+}

@@ -1329,7 +1329,17 @@ fn lower_expr_stmt(
         }
         syn::Expr::Binary(b) if assign_op_from_binop(&b.op).is_some() => {
             let op = assign_op_from_binop(&b.op).expect("checked");
-            if let Some(name) = assign_lhs_name(&b.left) {
+            if let syn::Expr::Index(index) = b.left.as_ref() {
+                out.push(Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("index-modify-value-first".into())),
+                    args: vec![
+                        lower_expr_with_types(&index.expr, local_types),
+                        lower_expr_with_types(&index.index, local_types),
+                        lower_expr_with_types(&b.right, local_types),
+                        Expr::StringLit(op.into()),
+                    ],
+                }));
+            } else if let Some(name) = assign_lhs_name(&b.left) {
                 out.push(Stmt::Assign(
                     name.clone(),
                     Expr::Binary {

@@ -59,3 +59,4 @@ agree conformance/control-flow/match-guard-effects.in
 agree conformance/control-flow/range-open-effects.in
 agree conformance/control-flow/array-repeat-effects.in
 agree conformance/classes/class-array-repeat.in
+agree conformance/control-flow/index-compound-effects.in

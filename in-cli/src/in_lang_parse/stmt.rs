@@ -144,7 +144,7 @@ pub(crate) fn parse_assign_stmt(s: &str) -> Option<Stmt> {
         return None;
     }
     let name = trim(&s[..eq_pos]);
-    if name.is_empty() || name.contains(char::is_whitespace) {
+    if name.is_empty() {
         return None;
     }
     let value = parse_expr(trim(&s[eq_pos + 1..]));
@@ -159,7 +159,8 @@ pub(crate) fn parse_assign_stmt(s: &str) -> Option<Stmt> {
             name: field,
             value,
         }),
-        _ => Some(Stmt::Assign(name.to_string(), value)),
+        Expr::Ident(name) if !name.contains(char::is_whitespace) => Some(Stmt::Assign(name, value)),
+        _ => None,
     }
 }
 

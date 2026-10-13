@@ -651,36 +651,57 @@ pub(crate) fn lower_index_assign(
             "native-lower: unsupported array assignment base in `{fn_name}`"
         ));
     };
-    let LocalSlot::Array { elem, offsets } = slot else {
-        return Err(format!(
-            "native-lower: unsupported array assignment base in `{fn_name}`"
-        ));
+    let elem = match &slot {
+        LocalSlot::Array { elem, .. } | LocalSlot::ArrayParam { elem, .. } => elem,
+        _ => {
+            return Err(format!(
+                "native-lower: unsupported array assignment base in `{fn_name}`"
+            ));
+        }
     };
-    if offsets.is_empty() {
-        return Err(format!(
-            "native-lower: unsupported empty array assignment in `{fn_name}`"
-        ));
-    }
     if let Some(value_ty) = expr_type(value)
-        && !array_item_matches(&elem, &value_ty)
+        && !array_item_matches(elem, &value_ty)
     {
         return Err(format!(
             "native-lower: array assignment item type mismatch in `{fn_name}`"
         ));
     }
+    // Preserve the index while lowering the value; nested expressions may use
+    // every scratch register. Call operands are handled by shared spilling.
+    let index_temp = ctx.acquire_binop_temp(fn_name)?;
+    lower_expr::lower_expr_into(emitter, ctx, index, 0, functions, pending_calls, fn_name)?;
+    emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, index_temp));
     lower_expr::lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
-    lower_expr::lower_expr_into(emitter, ctx, index, 4, functions, pending_calls, fn_name)?;
+    emitter.emit_u32(aarch64::ldr64(4, aarch64::REG_SP, index_temp));
+    ctx.release_binop_temp();
     emitter.emit_u32(aarch64::cmp_reg64(4, aarch64::REG_XZR));
     let negative_branch = emitter.emit_insn(aarch64::b_cond(11, 0));
-    emitter.emit_insns(&aarch64::load_i64(5, offsets.len() as i64));
+    match &slot {
+        LocalSlot::Array { offsets, .. } => {
+            emitter.emit_insns(&aarch64::load_i64(5, offsets.len() as i64))
+        }
+        LocalSlot::ArrayParam { len_offset, .. } => {
+            emitter.emit_u32(aarch64::ldr64(5, aarch64::REG_SP, *len_offset));
+        }
+        _ => unreachable!(),
+    }
     emitter.emit_u32(aarch64::cmp_reg64(4, 5));
     let oob_branch = emitter.emit_insn(aarch64::b_cond(10, 0));
-    let base_offset = offsets[0];
-    let base_reg = if base_offset == 0 {
-        aarch64::REG_SP
-    } else {
-        emitter.emit_u32(aarch64::add_imm64(6, aarch64::REG_SP, base_offset as u16));
-        6
+    let base_reg = match slot {
+        LocalSlot::Array { offsets, .. } => {
+            let base_offset = offsets.first().copied().unwrap_or(0);
+            if base_offset == 0 {
+                aarch64::REG_SP
+            } else {
+                emitter.emit_u32(aarch64::add_imm64(6, aarch64::REG_SP, base_offset as u16));
+                6
+            }
+        }
+        LocalSlot::ArrayParam { ptr_offset, .. } => {
+            emitter.emit_u32(aarch64::ldr64(6, aarch64::REG_SP, ptr_offset));
+            6
+        }
+        _ => unreachable!(),
     };
     emitter.emit_u32(aarch64::str64_reg_offset(0, base_reg, 4));
     let end_branch = emitter.emit_insn(aarch64::b(0));
