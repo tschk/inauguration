@@ -56,3 +56,4 @@ agree conformance/control-flow/range-bound-effects.in
 agree conformance/control-flow/range-inclusive.in
 agree conformance/types/bitwise-complement.in
 agree conformance/control-flow/match-guard-effects.in
+agree conformance/control-flow/range-open-effects.in

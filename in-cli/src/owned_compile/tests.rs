@@ -2397,3 +2397,102 @@ fn raw_x86_user_range_iterator_executes_the_function_result() {
     let result = super::jit::compile_jit(&module, "RangeCall", &request).unwrap();
     assert_eq!(result.eval_result, Some(EvalValue::Int(30)));
 }
+
+#[test]
+fn owned_rust_open_ranges_iterate_from_their_start() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (source, expected) in [
+        (
+            "fn main() -> i64 { for item in 1.. { return item; } return 2; }",
+            1,
+        ),
+        (
+            "fn main() -> i64 { let mut sum = 0; for mut item in 1.. { sum = sum + item; if item == 3 { break; } item = 99; } return sum; }",
+            6,
+        ),
+        (
+            "fn main() -> i64 { let mut sum = 0; for item in 1.. { if item < 3 { continue; } sum = sum + item; if item == 4 { break; } } return sum; }",
+            7,
+        ),
+        (
+            "fn main() -> i64 { let mut count = 0; for item in 9223372036854775807.. { count = count + 1; if count == 2 { return item; } } return 0; }",
+            i64::MIN,
+        ),
+    ] {
+        let path = temp_path("rust-open-range.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(expected)),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn owned_in_open_ranges_evaluate_the_start_once() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../conformance/control-flow/range-open-effects.in");
+    let report = compile_owned(&default_request(
+        path,
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.eval_result, Some(EvalValue::Int(8)));
+}
+
+#[test]
+fn owned_range_iterators_do_not_invent_missing_bounds() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (suffix, source) in [
+        (
+            "rs",
+            "fn main() -> i64 { for item in ..3 { return item; } return 42; }",
+        ),
+        (
+            "rs",
+            "fn main() -> i64 { for item in ..=3 { return item; } return 42; }",
+        ),
+        (
+            "rs",
+            "fn main() -> i64 { for item in .. { return item; } return 42; }",
+        ),
+        (
+            "in",
+            "fn main() -> Int { for item in ..3 { return item; } return 42; }",
+        ),
+        (
+            "in",
+            "fn main() -> Int { for item in 1..= { return item; } return 42; }",
+        ),
+    ] {
+        let path = temp_path(&format!("invalid-range.{suffix}"));
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(!report.success, "{source}: {report:?}");
+        assert_eq!(report.eval_result, None);
+    }
+}

@@ -182,8 +182,11 @@ pub(crate) fn expand_for_loop(
 ) -> Vec<Stmt> {
     let binding = binding.trim().to_string();
     if let Expr::Call { callee, args } = &iter {
-        if matches!(callee.as_ref(), Expr::Ident(name) if name == "range-exclusive" || name == "range-inclusive")
-            && args.len() == 2
+        let open =
+            matches!(callee.as_ref(), Expr::Ident(name) if name == "range-from") && args.len() == 1;
+        if open
+            || (matches!(callee.as_ref(), Expr::Ident(name) if name == "range-exclusive" || name == "range-inclusive")
+                && args.len() == 2)
         {
             let inclusive =
                 matches!(callee.as_ref(), Expr::Ident(name) if name == "range-inclusive");
@@ -198,6 +201,23 @@ pub(crate) fn expand_for_loop(
                     rhs: Box::new(Expr::IntLit(1)),
                 },
             );
+            if open {
+                // The iterator advances before yielding, independently of binding mutation
+                // and continue paths. Int arithmetic follows the native wrapping profile.
+                loop_body.insert(0, advance);
+                loop_body.insert(
+                    0,
+                    Stmt::Let(binding, Some(Typ::Int), Expr::Ident(index.clone())),
+                );
+                return vec![
+                    Stmt::Let(index, Some(Typ::Int), args[0].clone()),
+                    Stmt::Loop {
+                        kind: LoopKind::Infinite,
+                        cond: None,
+                        body: loop_body,
+                    },
+                ];
+            }
             // Stop before incrementing the inclusive endpoint, including Int::MAX.
             // The same advance also runs before continues targeting this loop.
             let advance = if inclusive {

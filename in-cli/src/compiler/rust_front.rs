@@ -1729,25 +1729,27 @@ fn lower_expr_with_types_inner(
             }
         }
         syn::Expr::Repeat(r) => Expr::ArrayLit(vec![lower_expr_with_types(&r.expr, local_types)]),
-        syn::Expr::Range(r) => Expr::Call {
-            callee: Box::new(Expr::Ident(
-                match r.limits {
-                    syn::RangeLimits::Closed(_) => "range-inclusive",
-                    syn::RangeLimits::HalfOpen(_) => "range-exclusive",
-                }
-                .into(),
-            )),
-            args: vec![
-                r.start
-                    .as_ref()
-                    .map(|s| lower_expr_with_types(s, local_types))
-                    .unwrap_or(Expr::IntLit(0)),
-                r.end
-                    .as_ref()
-                    .map(|s| lower_expr_with_types(s, local_types))
-                    .unwrap_or(Expr::IntLit(0)),
-            ],
-        },
+        syn::Expr::Range(range) => {
+            let inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));
+            let name = match (range.start.is_some(), range.end.is_some(), inclusive) {
+                (true, true, false) => "range-exclusive",
+                (true, true, true) => "range-inclusive",
+                (true, false, false) => "range-from",
+                (false, true, false) => "range-to",
+                (false, true, true) => "range-to-inclusive",
+                (false, false, false) => "range-full",
+                _ => "range-invalid",
+            };
+            Expr::Call {
+                callee: Box::new(Expr::Ident(name.into())),
+                args: range
+                    .start
+                    .iter()
+                    .chain(range.end.iter())
+                    .map(|value| lower_expr_with_types(value, local_types))
+                    .collect(),
+            }
+        }
         syn::Expr::Tuple(t) => Expr::ArrayLit(
             t.elems
                 .iter()

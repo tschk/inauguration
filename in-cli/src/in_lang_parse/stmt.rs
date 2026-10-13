@@ -459,13 +459,24 @@ fn parse_for_expanded(s: &str, context: &mut LoopParseContext<'_>) -> Result<Vec
     if range_segs.len() != 2 {
         return Err(".in: `for` range needs `start..end`".into());
     }
+    if trim(range_segs[0]).is_empty() {
+        return Err(".in: a range iterator needs a start value".into());
+    }
     let start_expr = parse_expr(trim(range_segs[0]));
     let end = trim(range_segs[1]);
-    let (range_name, end) = match end.strip_prefix('=') {
+    let (mut range_name, end) = match end.strip_prefix('=') {
         Some(end) => ("range-inclusive", trim(end)),
         None => ("range-exclusive", end),
     };
-    let end_expr = parse_expr(end);
+    let mut args = vec![start_expr];
+    if end.is_empty() {
+        if range_name == "range-inclusive" {
+            return Err(".in: an inclusive range needs an end value".into());
+        }
+        range_name = "range-from";
+    } else {
+        args.push(parse_expr(end));
+    }
     let (inner, _) = brace_content_bounds_after_open(rest, open)
         .ok_or_else(|| ".in: unclosed `for` body".to_string())?;
     let body = parse_function_body_with_context(inner, context)?;
@@ -474,7 +485,7 @@ fn parse_for_expanded(s: &str, context: &mut LoopParseContext<'_>) -> Result<Vec
         var_name,
         Expr::Call {
             callee: Box::new(Expr::Ident(range_name.into())),
-            args: vec![start_expr, end_expr],
+            args,
         },
         body,
         &mut counter,
