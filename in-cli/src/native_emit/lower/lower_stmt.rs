@@ -863,31 +863,29 @@ pub(crate) fn lower_struct_expr_into_slots(
                     }
                     continue;
                 }
-                // Check if this field references a nested struct variable
-                if let Expr::Ident(local) = value
-                    && let Some(LocalSlot::Struct {
-                        typ: local_typ,
-                        fields: local_fields,
-                    }) = ctx.locals.get(local)
-                    && *local_typ != typ
+                if let Typ::Named(inner) = field_typ.canonical()
+                    && ctx
+                        .structs
+                        .contains_key(super::lower_util::base_struct_name(&inner))
                 {
-                    // Copy nested struct: iterate subfields
-                    let nested_schema = native_struct_fields(ctx.structs, local_typ, fn_name)?;
-                    for (sub_field, _) in &nested_schema {
-                        let flat_key = format!("{field}.{sub_field}");
-                        let Some(&src) = find_field_offset(local_fields, sub_field) else {
-                            return Err(format!(
-                                "native-lower: nested struct field `{sub_field}` missing on `{local_typ}` in `{fn_name}`"
-                            ));
-                        };
-                        let Some(&dst) = find_field_offset(fields, &flat_key) else {
-                            return Err(format!(
-                                "native-lower: flattened field `{flat_key}` missing on `{typ}` in `{fn_name}`"
-                            ));
-                        };
-                        emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, src));
-                        emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, dst));
-                    }
+                    let prefix = format!("{field}.");
+                    let nested_fields = fields
+                        .iter()
+                        .filter_map(|(name, &offset)| {
+                            name.strip_prefix(&prefix)
+                                .map(|name| (name.to_string(), offset))
+                        })
+                        .collect();
+                    lower_struct_expr_into_slots(
+                        emitter,
+                        ctx,
+                        value,
+                        &inner,
+                        &nested_fields,
+                        functions,
+                        pending_calls,
+                        fn_name,
+                    )?;
                 } else {
                     let Some(&offset) = find_field_offset(fields, field) else {
                         return Err(format!(
@@ -935,10 +933,10 @@ pub(crate) fn lower_struct_expr_into_slots(
                     "native-lower: struct assignment type mismatch: expected `{typ}`, found `{local_typ}` in `{fn_name}`"
                 ));
             }
-            for (field, &src) in &local_fields {
-                let Some(&dst) = fields.get(field) else {
+            for (field, &dst) in fields {
+                let Some(&src) = local_fields.get(field) else {
                     return Err(format!(
-                        "native-lower: field `{field}` missing on destination struct `{typ}` in `{fn_name}`"
+                        "native-lower: field `{field}` missing on source struct `{typ}` in `{fn_name}`"
                     ));
                 };
                 emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, src));

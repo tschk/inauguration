@@ -139,6 +139,18 @@ pub(crate) fn lower_call(
                     pending_calls,
                     fn_name,
                 )?;
+            } else if !matches!(arg, Expr::IntLit(0)) {
+                // Zero-width values still evaluate their producers for effects.
+                lower_struct_expr_into_slots(
+                    emitter,
+                    ctx,
+                    arg,
+                    name,
+                    &HashMap::new(),
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )?;
             }
             words += count;
         } else {

@@ -1017,7 +1017,14 @@ fn lower_function(
         .push(emitter.len() + frame_instruction.len() as u32 - 4);
     emitter.emit_insns(&frame_instruction);
 
-    let param_regs = [RDI, RSI, RDX, RCX, 8, 9];
+    let param_regs: &[u8] = if x86_64::is_32bit() {
+        &[RDI, RSI, RDX, RCX]
+    } else {
+        &[RDI, RSI, RDX, RCX, 8, 9]
+    };
+    let stack_word = if x86_64::is_32bit() { 4 } else { 8 };
+    // Harden saves RBX before establishing FP, shifting incoming stack arguments.
+    let stack_arg_base = stack_word * (2 + usize::from(antidecomp::harden_active()));
     let mut struct_params = Vec::new();
     if !is_interrupt {
         for (i, (name, typ)) in func.params.iter().enumerate() {
@@ -1036,25 +1043,25 @@ fn lower_function(
                     return Err("x86_64-lower: struct parameter needs a supported scalar-field 64-bit layout".into());
                 }
                 let pointer_slot = ctx.alloc_slot();
-                if i < 6 {
+                if i < param_regs.len() {
                     emitter.emit_insns(&x86_64::str64(param_regs[i], pointer_slot as u16));
                 } else {
-                    emitter.emit_insns(&x86_64::mov_r_m(RAX, RBP, 16 + ((i - 6) * 8) as i32));
+                    emitter.emit_insns(&x86_64::mov_r_m(
+                        RAX,
+                        RBP,
+                        (stack_arg_base + (i - param_regs.len()) * stack_word) as i32,
+                    ));
                     emitter.emit_insns(&x86_64::str64(RAX, pointer_slot as u16));
                 }
                 struct_params.push((pointer_slot, fields));
-            } else if i < 6 {
+            } else if i < param_regs.len() {
                 if let Some(StackSlot::Scalar(offset)) = ctx.locals.get(name) {
                     emitter.emit_insns(&x86_64::str64(param_regs[i], *offset as u16));
                 }
             } else if let Some(StackSlot::Scalar(offset)) = ctx.locals.get(name) {
                 // Stack params: load from caller's argument area and store to the
                 // local slot so the body can reload via ldr64.
-                let stack_offset = if x86_64::is_32bit() {
-                    12 + ((i - 6) * 4) as i32
-                } else {
-                    16 + ((i - 6) * 8) as i32
-                };
+                let stack_offset = (stack_arg_base + (i - param_regs.len()) * stack_word) as i32;
                 emitter.emit_insns(&x86_64::mov_r_m(RAX, RBP, stack_offset));
                 emitter.emit_insns(&x86_64::str64(RAX, *offset as u16));
             }
@@ -1063,7 +1070,7 @@ fn lower_function(
         // Interrupt functions: do not write into [rbp+16+] (saved R15).
         // Store params to their stack slots so the body can reload via ldr64.
         for (i, (name, _)) in func.params.iter().enumerate() {
-            if i < 6 {
+            if i < param_regs.len() {
                 if let Some(StackSlot::Scalar(offset)) = ctx.locals.get(name) {
                     emitter.emit_insns(&x86_64::str64(param_regs[i], *offset as u16));
                 }
@@ -2953,24 +2960,56 @@ fn lower_call_args(
             ctx.fn_name
         ));
     }
-    if args.len() > nreg {
-        for arg in args[nreg..].iter().rev() {
+    let params = ctx
+        .functions
+        .get(target_name)
+        .map(|function| function.params.clone());
+    let mut staged = Vec::with_capacity(args.len());
+    // Capture every value in source order before selecting ABI registers or stack slots.
+    for (index, arg) in args.iter().enumerate() {
+        let slot = ctx.alloc_slot();
+        if let Some((param_name, typ)) = params.as_ref().and_then(|params| params.get(index))
+            && param_name != "self"
+            && let Typ::Named(name) = typ.canonical()
+            && let Some(schema) = ctx.structs.get(&name).cloned()
+        {
+            if x86_64::is_32bit()
+                || schema.iter().any(|(_, typ)| {
+                    !matches!(
+                        typ.canonical(),
+                        Typ::Int | Typ::Bool | Typ::Float | Typ::String
+                    )
+                })
+            {
+                return Err(
+                    "x86_64-lower: struct argument needs a scalar-field 64-bit layout".into(),
+                );
+            }
+            let fields: HashMap<_, _> = schema
+                .iter()
+                .rev()
+                .map(|(field, _)| (field.clone(), ctx.alloc_slot()))
+                .collect();
+            store_struct_value(emitter, ctx, arg, &fields, pending_calls)?;
+            let base = fields
+                .values()
+                .copied()
+                .max()
+                .unwrap_or_else(|| ctx.alloc_slot());
+            emitter.emit_insns(&x86_64::mov_rr(RAX, RBP));
+            emitter.emit_insns(&x86_64::sub_rmi32(RAX, base as i32 + 8));
+        } else {
             lower_call_argument(emitter, ctx, arg, RAX, pending_calls)?;
-            emitter.emit_insns(&x86_64::push_r(RAX));
         }
+        emitter.emit_insns(&x86_64::str64(RAX, slot as u16));
+        staged.push(slot);
     }
-    for (i, arg) in args[..nreg.min(args.len())].iter().enumerate() {
-        if i > 0 {
-            for j in 0..i {
-                emitter.emit_insns(&x86_64::push_r(arg_regs[j]));
-            }
-        }
-        lower_call_argument(emitter, ctx, arg, arg_regs[i], pending_calls)?;
-        if i > 0 {
-            for j in (0..i).rev() {
-                emitter.emit_insns(&x86_64::pop_r(arg_regs[j]));
-            }
-        }
+    for &slot in staged[nreg.min(staged.len())..].iter().rev() {
+        emitter.emit_insns(&x86_64::ldr64(RAX, slot as u16));
+        emitter.emit_insns(&x86_64::push_r(RAX));
+    }
+    for (&slot, &reg) in staged.iter().zip(arg_regs) {
+        emitter.emit_insns(&x86_64::ldr64(reg, slot as u16));
     }
     Ok(())
 }
@@ -4135,13 +4174,20 @@ fn main() -> Int {
 "#;
         let module = crate::in_lang_parse::parse_in_source(src).expect("parse");
         let result = lower_module(&module, "main").expect("lower");
-        let stack_arg = [0x48, 0xB8, 63, 0, 0, 0, 0, 0, 0, 0, 0x50];
+        // The outgoing value is reloaded from its staged frame slot before push rax.
         let stack_arg_end = result
             .code
-            .windows(stack_arg.len())
-            .position(|bytes| bytes == stack_arg)
-            .expect("stack argument")
-            + stack_arg.len();
+            .windows(5)
+            .position(|bytes| bytes[..3] == [0x48, 0x8B, 0x45] && bytes[4] == 0x50)
+            .map(|site| site + 5)
+            .or_else(|| {
+                result
+                    .code
+                    .windows(8)
+                    .position(|bytes| bytes[..3] == [0x48, 0x8B, 0x85] && bytes[7] == 0x50)
+                    .map(|site| site + 8)
+            })
+            .expect("staged stack argument");
         let call = result.code[stack_arg_end..]
             .iter()
             .position(|&byte| byte == 0xE8)

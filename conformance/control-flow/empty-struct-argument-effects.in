@@ -1,0 +1,10 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+struct Empty {}
+var calls: Int = 0;
+fn make() -> Empty { calls += 1; return Empty {}; }
+fn take(value: Empty, after: Int) -> Int { return calls + after; }
+fn main() -> Int { return take(make(), 41); }

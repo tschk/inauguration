@@ -1,0 +1,14 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+struct Point { Int x; Int y }
+var point: Point = 0;
+fn mutate() -> Int { point.x = 0; return 0; }
+fn sum(value: Point, after: Int) -> Int { return value.x + value.y + after; }
+fn main() -> Int {
+    point.x = 20;
+    point.y = 22;
+    return sum(point, mutate());
+}

@@ -1,0 +1,15 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var trace: Int = 0;
+fn step(value: Int) -> Int { trace = trace * 10 + value; return value; }
+fn encode(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int) -> Int {
+    return a * 10000000 + b * 1000000 + c * 100000 + d * 10000 + e * 1000 + f * 100 + g * 10 + h;
+}
+fn main() -> Int {
+    var result: Int = encode(step(1), step(2), step(3), step(4), step(5), step(6), step(7), step(8));
+    if trace == 12345678 && result == 12345678 { return 42; }
+    return trace;
+}

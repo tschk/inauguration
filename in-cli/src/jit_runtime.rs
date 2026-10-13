@@ -2896,6 +2896,55 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn call_arguments_capture_struct_values_and_evaluate_left_to_right() {
+        let sources = [
+            include_str!("../../conformance/control-flow/struct-argument-capture.in"),
+            include_str!("../../conformance/control-flow/stack-argument-order.in"),
+            "struct State { Bool flag; Float value }\nvar state: State = 0;\nfn mutate() -> Int { state.flag = false; state.value = 0.0; return 0; }\nfn check(value: State, after: Int) -> Int { if value.flag && value.value == 42.5 { return 42 + after; } return 0; }\nfn main() -> Int { state.flag = true; state.value = 42.5; return check(state, mutate()); }",
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nfn mutate() -> Int { point.x = 0; return 0; }\nfn sum(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, value: Point, after: Int) -> Int { return a + b + c + d + e + f + value.x + value.y + after; }\nfn main() -> Int { point.x = 20; point.y = 22; return sum(0, 0, 0, 0, 0, 0, point, mutate()); }",
+            "var trace: Int = 0;\nfn fail() -> Int { trace = 1; throw 9; }\nfn later() -> Int { trace = trace * 10 + 2; return 0; }\nfn take(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int) -> Int { trace = 999; return 0; }\nfn main() -> Int { try { take(fail(), 0, 0, 0, 0, 0, 0, later()); } catch 9 { if trace == 1 { return 42; } return trace; } return 0; }",
+            include_str!("../../conformance/control-flow/empty-struct-argument-effects.in"),
+            "struct Empty {}\nvar calls: Int = 0;\nfn make() -> Empty { calls += 1; return Empty {}; }\nfn take(value: Empty, after: Int) -> Int { return calls + after; }\nfn main() -> Int { var local: Empty = make(); return take(local, 41); }",
+        ];
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let actual = sources.map(|source| invoke_source(source, profile, &[]));
+            assert!(
+                actual.iter().all(|value| *value == Some(42)),
+                "{profile:?}: {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, target_arch = "aarch64"))]
+    fn nested_struct_argument_producers_preserve_fields_effects_and_throws() {
+        for source in [
+            "struct Empty {}\nstruct Wrapper { Empty inner }\nvar calls: Int = 0;\nfn make() -> Empty { calls += 1; return Empty {}; }\nfn take(value: Wrapper, after: Int) -> Int { return calls + after; }\nfn main() -> Int { var inner: Empty = make(); return take(Wrapper { inner: inner }, 41); }",
+            "struct Empty {}\nstruct Wrapper { Empty inner }\nvar calls: Int = 0;\nfn make() -> Empty { calls += 1; return Empty {}; }\nfn take(value: Wrapper, after: Int) -> Int { return calls + after; }\nfn main() -> Int { var local: Wrapper = Wrapper { inner: make() }; return take(local, 41); }",
+            "struct Inner { Int value }\nstruct Wrapper { Inner inner; Int tail }\nvar calls: Int = 0;\nfn make() -> Inner { calls += 1; return Inner { value: 20 }; }\nfn take(value: Wrapper) -> Int { return value.inner.value + value.tail; }\nfn main() -> Int { return take(Wrapper { inner: make(), tail: 22 }) + calls - 1; }",
+            "struct Empty {}\nstruct Wrapper { Empty inner }\nvar calls: Int = 0;\nfn make() -> Empty { calls += 1; return Empty {}; }\nfn take(value: Wrapper, after: Int) -> Int { return calls + after; }\nfn main() -> Int { return take(Wrapper { inner: make() }, 41); }",
+            "struct Empty {}\nstruct Wrapper { Empty inner }\nvar calls: Int = 0;\nfn fail() -> Empty { calls += 1; throw 9; }\nfn next() -> Int { calls += 10; return 0; }\nfn take(value: Wrapper, after: Int) -> Int { return calls + after; }\nfn main() -> Int { try { take(Wrapper { inner: fail() }, next()); } catch 9 { return calls + 41; } return 0; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
     #[cfg(all(unix, target_arch = "x86_64"))]
     fn struct_parameter_sentinels_return_failure_without_reading_memory() {
         let module = crate::in_lang_parse::parse_in_source("struct Point { Int x; Int y }\nfn main(point: Point) -> Int { return point.x + point.y; }").unwrap();

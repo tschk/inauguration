@@ -77,3 +77,6 @@ agree conformance/control-flow/struct-field-call-effects.in
 agree conformance/types/global-struct-scalars.in
 agree conformance/types/global-struct-values.in
 agree conformance/types/global-struct-assignment.in
+agree conformance/control-flow/struct-argument-capture.in
+agree conformance/control-flow/stack-argument-order.in
+agree conformance/control-flow/empty-struct-argument-effects.in
