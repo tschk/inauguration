@@ -704,6 +704,14 @@ fn check_expr(
                     ),
                 ));
             }
+            if matches!(op.as_str(), "int-to-float" | "float-to-int") {
+                let expected = if op == "int-to-float" {
+                    Typ::Int
+                } else {
+                    Typ::Float
+                };
+                require_type(fn_name, "numeric conversion", &expected, expr, facts, env)?;
+            }
             if op == "bool-to-int" {
                 require_type(fn_name, "boolean promotion", &Typ::Bool, expr, facts, env)?;
             }
@@ -1051,7 +1059,8 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
         }
         Expr::Unary { op, expr, .. } => match op.as_str() {
             "!" => Some(Typ::Bool),
-            "bool-to-int" => Some(Typ::Int),
+            "bool-to-int" | "float-to-int" => Some(Typ::Int),
+            "int-to-float" => Some(Typ::Float),
             "-" => {
                 if expr_type(expr, facts, env) == Some(Typ::Float) {
                     Some(Typ::Float)
@@ -2046,5 +2055,41 @@ mod tests {
 
         assert!(!report.ok);
         assert_eq!(report.reason_code.as_deref(), Some("unresolved-symbol"));
+    }
+    #[test]
+    fn numeric_conversions_require_matching_operand_types() {
+        for (op, ret, good, bad) in [
+            (
+                "int-to-float",
+                Typ::Float,
+                Expr::IntLit(42),
+                Expr::BoolLit(true),
+            ),
+            (
+                "float-to-int",
+                Typ::Int,
+                Expr::FloatLit(crate::core_ir::FloatVal(42.9)),
+                Expr::IntLit(42),
+            ),
+        ] {
+            for (operand, accepted) in [(good, true), (bad, false)] {
+                let expr = Expr::Unary {
+                    op: op.into(),
+                    expr: Box::new(operand),
+                };
+                let report = verify_module(
+                    &module(vec![function_with_ret(
+                        "main",
+                        ret.clone(),
+                        vec![Stmt::Return(Some(expr))],
+                    )]),
+                    &default_options(),
+                );
+                assert_eq!(report.ok, accepted, "{op}: {report:?}");
+                if !accepted {
+                    assert_eq!(report.reason_code.as_deref(), Some("type-mismatch"));
+                }
+            }
+        }
     }
 }

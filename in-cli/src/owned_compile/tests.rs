@@ -3853,3 +3853,47 @@ fn owned_c_do_while_keeps_posttest_effects_continue_and_scope() {
         }
     }
 }
+
+#[test]
+fn owned_c_numeric_conversions_preserve_effects_and_truncate() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for source in [
+            "double widen(int value) { return value; } int narrow(double value) { return value; } int main() { return narrow(widen(40) + 2.75); }",
+            "int main() { double value = 41; value = value + 1.9; int result = value; return result; }",
+            "int main() { double value = -42.9; return -value; }",
+            "int main() { double value = true; return value + 41; }",
+            "int calls = 0; double next() { calls++; return 41.9; } int take(int value) { return value; } int main() { return take(next()) + calls; }",
+            "int main() { double value = 40.75; return value + 1.5; }",
+            "double value = 42; int main() { return value; }",
+            "int main() { double value = -0.5; return -value * 84; }",
+            "int narrow(double value) { return value; } int main() { return narrow(-42.9) + 84; }",
+            "int main() { double value = 42.75; return (value > 42) + 41; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let path = temp_path(&format!("c-numeric-conversion.{extension}"));
+                fs::write(&path, source).unwrap();
+                let mut request =
+                    default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                fs::remove_file(path).unwrap();
+                assert!(
+                    report.success,
+                    "{extension}: {profile:?}: {source}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{extension}: {profile:?}: {source}"
+                );
+            }
+        }
+    }
+}

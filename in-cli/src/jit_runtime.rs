@@ -2121,6 +2121,50 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn numeric_conversions_execute_without_constant_folding() {
+        let narrow =
+            crate::in_lang_parse::parse_in_source("fn main(value: Float) -> Int { return value; }")
+                .unwrap();
+        let narrow =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::C, &narrow);
+        let roundtrip = crate::in_lang_parse::parse_in_source("fn widen(value: Int) -> Float { return value; }\nfn main(value: Int) -> Int { return widen(value); }").unwrap();
+        let roundtrip =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::C, &roundtrip);
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (value, expected) in [
+                (42.9f64, 42i64),
+                (-42.9, -42),
+                (-0.0, 0),
+                (i64::MIN as f64, i64::MIN),
+                (9223372036854774784.0, 9223372036854774784),
+            ] {
+                assert_eq!(
+                    invoke_module(&narrow, profile, &[value.to_bits() as i64]),
+                    Some(expected),
+                    "{profile:?}: {value}"
+                );
+            }
+            for (value, expected) in [
+                (42, 42),
+                (-42, -42),
+                (9007199254740993, 9007199254740992),
+                (i64::MIN, i64::MIN),
+            ] {
+                assert_eq!(
+                    invoke_module(&roundtrip, profile, &[value]),
+                    Some(expected),
+                    "{profile:?}: {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

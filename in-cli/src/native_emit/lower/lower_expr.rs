@@ -488,6 +488,22 @@ pub(crate) fn lower_unary(
 ) -> Result<(), String> {
     lower_expr_into(emitter, ctx, expr, rd, functions, pending_calls, fn_name)?;
     match op {
+        "int-to-float" => {
+            if native_expr_type(expr, ctx, functions) != Some(Typ::Int) {
+                return Err("native-lower: integer conversion needs Int".into());
+            }
+            emitter.emit_u32(aarch64::scvtf_d(rd, rd));
+            emitter.emit_u32(aarch64::fmov_to_gp(rd, rd));
+            Ok(())
+        }
+        "float-to-int" => {
+            if native_expr_type(expr, ctx, functions) != Some(Typ::Float) {
+                return Err("native-lower: floating conversion needs Float".into());
+            }
+            emitter.emit_u32(aarch64::fmov_from_gp(rd, rd));
+            emitter.emit_u32(aarch64::fcvtzs_d(rd, rd));
+            Ok(())
+        }
         "bool-to-int" => {
             if native_expr_type(expr, ctx, functions) != Some(Typ::Bool) {
                 return Err("native-lower: boolean promotion needs Bool".into());
@@ -807,7 +823,10 @@ pub(crate) fn native_expr_type(
         },
         Expr::Unary { op, expr } if op == "-" => native_expr_type(expr, ctx, functions),
         Expr::Unary { op, .. } if op == "!" => Some(Typ::Bool),
-        Expr::Unary { op, .. } if op == "~" || op == "bool-to-int" => Some(Typ::Int),
+        Expr::Unary { op, .. } if op == "~" || op == "bool-to-int" || op == "float-to-int" => {
+            Some(Typ::Int)
+        }
+        Expr::Unary { op, .. } if op == "int-to-float" => Some(Typ::Float),
         Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&" | "|" | "^") => {
             crate::core_ir::bitwise_result_type(
                 native_expr_type(lhs, ctx, functions),

@@ -195,6 +195,10 @@ pub fn scvtf_d(rd_v: u8, rn_x: u8) -> u32 {
     0x9E62_0000 | ((rn_x as u32) << 5) | (rd_v as u32)
 }
 
+pub fn fcvtzs_d(rd_x: u8, rn_v: u8) -> u32 {
+    0x9E78_0000 | ((rn_v as u32) << 5) | (rd_x as u32)
+}
+
 pub fn fneg_d(rd: u8, rn: u8) -> u32 {
     0x1E61_4000 | ((rn as u32) << 5) | (rd as u32)
 }
@@ -355,6 +359,7 @@ mod tests {
         assert_eq!(fmov_from_gp(3, 7), 0x9E6700E3);
         assert_eq!(fmov_to_gp(3, 7), 0x9E6600E3);
         assert_eq!(scvtf_d(3, 7), 0x9E6200E3);
+        assert_eq!(fcvtzs_d(3, 7), 0x9E7800E3);
         assert_eq!(fneg_d(3, 7), 0x1E6140E3);
         assert_eq!(fadd_s(3, 7, 9), 0x1E2928E3);
         assert_eq!(fsub_s(3, 7, 9), 0x1E2938E3);

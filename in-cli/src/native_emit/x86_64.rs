@@ -143,6 +143,14 @@ pub fn cvtsi2sd(xmm: u8, gpr: u8) -> Vec<u8> {
     code
 }
 
+/// Truncate a scalar double to a signed integer register.
+pub fn cvttsd2si(gpr: u8, xmm: u8) -> Vec<u8> {
+    let mut code = vec![0xf2];
+    push_rex_wr(&mut code, gpr, xmm);
+    code.extend_from_slice(&[0x0f, 0x2c, modrm(3, gpr, xmm)]);
+    code
+}
+
 /// Scalar double arithmetic: ADD/SUB/MUL/DIV opcode, destination XMM, source XMM.
 pub fn scalar_double(opcode: u8, dst: u8, src: u8) -> Vec<u8> {
     let mut code = vec![0xf2];
@@ -779,6 +787,10 @@ mod tests {
         assert_eq!(
             super::cvtsi2sd(1, super::RAX),
             [0xf2, 0x48, 0x0f, 0x2a, 0xc8]
+        );
+        assert_eq!(
+            super::cvttsd2si(super::R9, 8),
+            [0xf2, 0x4d, 0x0f, 0x2c, 0xc8]
         );
         assert_eq!(super::scalar_double(0x58, 0, 1), [0xf2, 0x0f, 0x58, 0xc1]);
         assert_eq!(super::ucomisd(0, 1), [0x66, 0x0f, 0x2e, 0xc1]);

@@ -181,9 +181,31 @@ impl TypeChecker {
             return;
         }
         let actual = actual.map(|typ| typ.canonical());
-        let zero = match (expected.canonical(), actual) {
+        let zero = match (expected.canonical(), actual.clone()) {
             (Typ::Bool, Some(Typ::Int)) => Some(Expr::IntLit(0)),
             (Typ::Bool, Some(Typ::Float)) => Some(Expr::FloatLit(crate::core_ir::FloatVal(0.0))),
+            (Typ::Float, Some(Typ::Int | Typ::Bool)) => {
+                let value = if actual == Some(Typ::Bool) {
+                    Expr::Unary {
+                        op: "bool-to-int".into(),
+                        expr: Box::new(expr.clone()),
+                    }
+                } else {
+                    expr.clone()
+                };
+                *expr = Expr::Unary {
+                    op: "int-to-float".into(),
+                    expr: Box::new(value),
+                };
+                return;
+            }
+            (Typ::Int, Some(Typ::Float)) => {
+                *expr = Expr::Unary {
+                    op: "float-to-int".into(),
+                    expr: Box::new(expr.clone()),
+                };
+                return;
+            }
             (Typ::Int, Some(Typ::Bool)) => {
                 *expr = Expr::Unary {
                     op: "bool-to-int".into(),
@@ -228,7 +250,9 @@ impl TypeChecker {
                     self.resolve_c_value(expr, &Typ::Bool, facts, env)
                 }
                 Expr::Unary { op, expr } if matches!(op.as_str(), "-" | "~") => {
-                    self.resolve_c_value(expr, &Typ::Int, facts, env)
+                    if self.expr_type(expr, facts, env) == Some(Typ::Bool) {
+                        self.resolve_c_value(expr, &Typ::Int, facts, env)
+                    }
                 }
                 Expr::Binary { op, lhs, rhs }
                     if matches!(
@@ -250,8 +274,19 @@ impl TypeChecker {
                             | ">="
                     ) =>
                 {
-                    self.resolve_c_value(lhs, &Typ::Int, facts, env);
-                    self.resolve_c_value(rhs, &Typ::Int, facts, env);
+                    let floating = matches!(
+                        op.as_str(),
+                        "+" | "-" | "*" | "/" | "==" | "!=" | "<" | ">" | "<=" | ">="
+                    ) && [lhs.as_ref(), rhs.as_ref()]
+                        .iter()
+                        .any(|operand| self.expr_type(operand, facts, env) == Some(Typ::Float));
+                    for operand in [lhs, rhs] {
+                        if floating {
+                            self.resolve_c_value(operand, &Typ::Float, facts, env);
+                        } else if self.expr_type(operand, facts, env) == Some(Typ::Bool) {
+                            self.resolve_c_value(operand, &Typ::Int, facts, env);
+                        }
+                    }
                 }
                 Expr::Call { callee, args } => {
                     if let Expr::Ident(name) = callee.as_ref()
@@ -832,6 +867,22 @@ impl TypeChecker {
             }
             Expr::Unary { op, expr: inner } => {
                 self.check_expr(fn_name, inner, facts, env, errors);
+                if matches!(op.as_str(), "int-to-float" | "float-to-int")
+                    && let Some(actual) = self.expr_type(inner, facts, env)
+                {
+                    let expected = if op == "int-to-float" {
+                        Typ::Int
+                    } else {
+                        Typ::Float
+                    };
+                    if actual.canonical() != expected {
+                        errors.push(TypeError::TypeMismatch {
+                            context: format!("numeric conversion in `{fn_name}`"),
+                            expected,
+                            got: actual,
+                        });
+                    }
+                }
                 if op == "bool-to-int"
                     && let Some(actual) = self.expr_type(inner, facts, env)
                     && actual.canonical() != Typ::Bool
@@ -1167,7 +1218,8 @@ impl TypeChecker {
             }
             Expr::Unary { op, expr, .. } => match op.as_str() {
                 "!" => Some(Typ::Bool),
-                "bool-to-int" => Some(Typ::Int),
+                "bool-to-int" | "float-to-int" => Some(Typ::Int),
+                "int-to-float" => Some(Typ::Float),
                 "-" => self.expr_type(expr, facts, env),
                 _ => self.expr_type(expr, facts, env),
             },

@@ -1168,6 +1168,19 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
             e
         }
         Expr::Unary { op, expr, .. } => {
+            if op == "int-to-float"
+                && let Expr::IntLit(value) = expr.as_ref()
+            {
+                return Expr::FloatLit(crate::core_ir::FloatVal(*value as f64));
+            }
+            if op == "float-to-int"
+                && let Expr::FloatLit(value) = expr.as_ref()
+                && value.0.is_finite()
+                && value.0 >= i64::MIN as f64
+                && value.0 < -(i64::MIN as f64)
+            {
+                return Expr::IntLit(value.0 as i64);
+            }
             if op == "bool-to-int"
                 && let Expr::BoolLit(value) = expr.as_ref()
             {
@@ -3820,5 +3833,38 @@ mod tests {
             src.contains("\"^\"") && src.contains("\"&\""),
             "harden MBA should rewrite x+y into xor/and form: {src}"
         );
+    }
+    #[test]
+    fn folds_numeric_conversions_only_in_defined_integer_range() {
+        assert_eq!(
+            fold_expr(unary("int-to-float", Expr::IntLit(42))),
+            Expr::FloatLit(crate::core_ir::FloatVal(42.0))
+        );
+        for (value, expected) in [
+            (42.9, 42),
+            (-42.9, -42),
+            (-0.0, 0),
+            (i64::MIN as f64, i64::MIN),
+        ] {
+            assert_eq!(
+                fold_expr(unary(
+                    "float-to-int",
+                    Expr::FloatLit(crate::core_ir::FloatVal(value))
+                )),
+                Expr::IntLit(expected)
+            );
+        }
+        for value in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -(i64::MIN as f64),
+        ] {
+            let expr = unary(
+                "float-to-int",
+                Expr::FloatLit(crate::core_ir::FloatVal(value)),
+            );
+            assert_eq!(fold_expr(expr.clone()), expr);
+        }
     }
 }

@@ -2159,7 +2159,10 @@ fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
         },
         Expr::Unary { op, expr } if op == "-" => scalar_expr_type(expr, ctx),
         Expr::Unary { op, .. } if op == "!" => Some(Typ::Bool),
-        Expr::Unary { op, .. } if op == "~" || op == "bool-to-int" => Some(Typ::Int),
+        Expr::Unary { op, .. } if op == "~" || op == "bool-to-int" || op == "float-to-int" => {
+            Some(Typ::Int)
+        }
+        Expr::Unary { op, .. } if op == "int-to-float" => Some(Typ::Float),
         Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&" | "|" | "^") => {
             crate::core_ir::bitwise_result_type(
                 scalar_expr_type(lhs, ctx),
@@ -3095,6 +3098,20 @@ fn lower_unary_expr(
 ) -> Result<(), String> {
     lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
     match op {
+        "int-to-float" => {
+            if scalar_expr_type(expr, ctx) != Some(Typ::Int) {
+                return Err("x86_64-lower: integer conversion needs Int".into());
+            }
+            emitter.emit_insns(&x86_64::cvtsi2sd(0, RAX));
+            emitter.emit_insns(&x86_64::movq_xmm_gpr(0, RAX, false));
+        }
+        "float-to-int" => {
+            if scalar_expr_type(expr, ctx) != Some(Typ::Float) {
+                return Err("x86_64-lower: floating conversion needs Float".into());
+            }
+            emitter.emit_insns(&x86_64::movq_xmm_gpr(0, RAX, true));
+            emitter.emit_insns(&x86_64::cvttsd2si(RAX, 0));
+        }
         "bool-to-int" => {
             if scalar_expr_type(expr, ctx) != Some(Typ::Bool) {
                 return Err("x86_64-lower: boolean promotion needs Bool".into());

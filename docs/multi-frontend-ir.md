@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## C-like numeric conversions
+
+Typed C/C++ initializers, assignments, returns, and call arguments convert between canonical signed Int64 and Float64 through shared unary IR operations. Mixed floating arithmetic and comparisons promote integer and boolean operands to Float64. Floating-to-integer conversion truncates toward zero; only finite values whose truncated result fits Int64 have defined cross-backend behavior. Source integer widths, unsigned conversion, and Float32 arithmetic remain outside this canonical subset.
+
 ## C-like post-test loops
 
 `do` loops lower through the shared loop representation with a hygienic first-iteration flag. The flag skips the initial condition check; later loop headers evaluate the condition after the preceding body, including after `continue`. The body retains its own scope so local shadowing cannot change which binding the condition reads. Breaks and returns skip the next condition check, and nested-loop continues keep their original target.
