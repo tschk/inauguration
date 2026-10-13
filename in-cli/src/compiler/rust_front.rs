@@ -8,7 +8,7 @@ use crate::boundary_ir::{
 };
 use crate::boundary_verify::boundary_ir_verify;
 use crate::core_ir::{CatchArm, Expr, LoopKind, MatchArm, Stmt, Typ};
-use crate::core_ir::{Decl, UnifiedModule};
+use crate::core_ir::{Decl, FloatVal, UnifiedModule};
 use quote::ToTokens;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
@@ -1403,6 +1403,10 @@ fn lower_expr_with_types_inner(
                 .base10_parse::<i64>()
                 .map(Expr::IntLit)
                 .unwrap_or_else(|_| Expr::Ident(i.to_token_stream().to_string())),
+            syn::Lit::Float(value) => value
+                .base10_parse::<f64>()
+                .map(|value| Expr::FloatLit(FloatVal(value)))
+                .unwrap_or_else(|_| Expr::Ident(value.to_token_stream().to_string())),
             syn::Lit::Bool(b) => Expr::BoolLit(b.value),
             syn::Lit::Str(s) => Expr::StringLit(s.value()),
             _ => Expr::Ident(l.lit.to_token_stream().to_string()),

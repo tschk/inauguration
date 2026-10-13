@@ -507,7 +507,8 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
             .clone()
             .or_else(|| module_has_function(&module, "main").then(|| "main".to_string()));
         let keep_all = request.linkage == crate::native_emit::NativeLinkage::StaticLib
-            || matches!(request.emit, Some(OwnedEmit::Sci { .. }));
+            || matches!(request.emit, Some(OwnedEmit::Sci { .. }))
+            || (matches!(request.target, CompileTarget::Jit) && entry.is_none());
         crate::core_opt::optimize_with_linkage(
             &mut module.decls,
             entry.as_deref(),

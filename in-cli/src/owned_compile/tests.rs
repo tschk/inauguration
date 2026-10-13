@@ -1802,3 +1802,95 @@ fn harden_native_preserves_host_target_and_executes_at_runtime() {
     fs::remove_file(out).unwrap();
     assert_eq!(status.code(), Some(42));
 }
+
+#[test]
+fn owned_rust_jit_executes_primitive_entries() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (source, expected) in [
+        ("fn main() -> i64 { return 42; }", EvalValue::Int(42)),
+        (
+            "fn main() -> f64 { return 1.25 + 2.5; }",
+            EvalValue::Float(3.75),
+        ),
+        ("fn main() -> bool { return true; }", EvalValue::Bool(true)),
+        (
+            "fn main() -> i64 { let mut sum = 0; for mut item in 1..4 { sum = sum + item; item = 99; } return sum; }",
+            EvalValue::Int(6),
+        ),
+        (
+            "struct Point { x: i64 } fn unused(point: Point) -> Point { return point; } fn main() -> i64 { return 42; }",
+            EvalValue::Int(42),
+        ),
+    ] {
+        let path = temp_path("rust-jit.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{report:?}");
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("jit-executed"),
+            "{report:?}"
+        );
+        assert_eq!(report.eval_result, Some(expected));
+    }
+}
+
+#[test]
+fn owned_rust_jit_retains_compile_only_for_uninvocable_entries() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "struct Point { x: i64 } fn main() -> Point { return Point { x: 42 }; }",
+        "fn main(value: i64) -> i64 { return value; }",
+        "fn helper() -> i64 { return 42; }",
+        "type Result = i64; fn Result(value: i64) -> i64 { if value == 0 { return 42; } return Result(value - 1); } fn main() -> i64 { return Result(2); }",
+    ] {
+        let path = temp_path("rust-abi.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            None,
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-compiled-only"));
+        assert_eq!(report.eval_exit_code, None);
+        assert_eq!(report.eval_result, None);
+    }
+}
+
+#[test]
+fn owned_rust_jit_verifies_before_execution() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = temp_path("rust-unresolved.rs");
+    fs::write(&path, "fn main() -> i64 { return missing_value; }").unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    fs::remove_file(&path).unwrap();
+    assert!(!report.success, "{report:?}");
+    assert!(
+        report
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("jit-verification-failed:")),
+        "{report:?}"
+    );
+    assert_eq!(report.eval_exit_code, None);
+}

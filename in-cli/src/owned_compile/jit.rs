@@ -103,6 +103,36 @@ pub fn compile_jit(
         .unwrap_or("main");
     let resolved_entry = resolve_jit_entry(expanded_module, entry);
 
+    // Rust aggregate ABIs are not consistently represented by every native backend.
+    let compile_only = request
+        .path
+        .extension()
+        .is_some_and(|extension| extension == "rs")
+        && !rust_entry_can_execute(expanded_module, &resolved_entry, entry);
+    if !compile_only
+        && request
+            .path
+            .extension()
+            .is_some_and(|extension| extension == "rs")
+    {
+        let reachable = super::native::native_entry_module(expanded_module, &resolved_entry);
+        let verification = crate::core_ir_verifier::verify_module(
+            &reachable,
+            &crate::core_ir_verifier::VerifyOptions {
+                entry: Some(resolved_entry.clone()),
+                require_entry: true,
+            },
+        );
+        if !verification.ok {
+            return Err(format!(
+                "jit-verification-failed: {}",
+                verification
+                    .reason
+                    .unwrap_or_else(|| "invalid Rust Core IR".into())
+            ));
+        }
+    }
+
     native_link::bootstrap_jit_native();
 
     // Scalar results arrive in the integer result register; Float uses its bits
@@ -188,22 +218,18 @@ pub fn compile_jit(
     )
     .map_err(|e| format!("jit-load-failed: {e}"))?;
 
-    // ponytail: skip invoke for Rust programs — the JIT-compiled Rust std lib
-    // code doesn't handle struct layouts correctly and crashes at runtime.
-    // Only JIT-execute non-Rust (in-lang, icore) programs.
-    let is_rust = request.path.extension().is_some_and(|e| e == "rs");
     // Code the lowerer replaced with a trap cannot be executed: the trap writes
     // to stderr and exits, which would take the compiler process down with it.
     // Only traps the entry can reach matter; unreachable ones are dead code.
-    if !is_rust && let Some(first) = degradations.iter().find(|d| d.reachable) {
+    if !compile_only && let Some(first) = degradations.iter().find(|d| d.reachable) {
         let live = degradations.iter().filter(|d| d.reachable).count();
         return Err(format!(
             "jit-degraded: {live} reachable function(s) could not be compiled to native code, starting with `{}` ({}); refusing to execute code that would trap",
             first.function, first.code
         ));
     }
-    let (exit_code, eval_result) = if is_rust {
-        (0, None)
+    let (exit_code, eval_result) = if compile_only {
+        (None, None)
     } else {
         let raw = unsafe { rt.invoke(&resolved_entry, &[]) }.ok_or_else(|| {
             format!("jit-invocation-failed: entry `{resolved_entry}` could not be invoked")
@@ -214,38 +240,38 @@ pub fn compile_jit(
             ));
         }
         match entry_result_kind {
-            EntryResultKind::Int => (raw as u8, Some(EvalValue::Int(raw))),
-            EntryResultKind::Bool => (raw as u8, Some(EvalValue::Bool(raw != 0))),
-            EntryResultKind::Float => (0, Some(EvalValue::Float(f64::from_bits(raw as u64)))),
+            EntryResultKind::Int => (Some(raw as u8), Some(EvalValue::Int(raw))),
+            EntryResultKind::Bool => (Some(raw as u8), Some(EvalValue::Bool(raw != 0))),
+            EntryResultKind::Float => (Some(0), Some(EvalValue::Float(f64::from_bits(raw as u64)))),
             EntryResultKind::String => {
                 let string = decode_jit_string(raw).ok_or_else(|| {
                     format!("jit-string-result-invalid: entry `{resolved_entry}` returned an invalid string reference")
                 })?;
                 // The decoded string is the value; the pointer is not an exit status.
-                (0, Some(EvalValue::Str(string)))
+                (Some(0), Some(EvalValue::Str(string)))
             }
             EntryResultKind::None => {
                 // The entry returns something an exit status cannot carry (Void,
                 // an aggregate). Run it for its effects, report no result.
-                (0, None)
+                (Some(0), None)
             }
         }
     };
 
-    let reason_code = if is_rust {
+    let reason_code = if compile_only {
         "jit-compiled-only"
     } else {
         "jit-executed"
     };
-    let reason = if is_rust {
-        "JIT-compiled without runtime execution (Rust programs need native linking)"
+    let reason = if compile_only {
+        "JIT-compiled without execution: Rust module uses Core IR or invocation ABI features that cannot yet be executed"
     } else {
         "JIT-compiled native function executed via in-memory MAP_JIT page"
     };
 
     Ok(NativeCompileResult {
         artifact_path: String::new(),
-        eval_exit_code: Some(exit_code),
+        eval_exit_code: exit_code,
         eval_result,
         abi_path: None,
         backend_level: "owned-native-jit".to_string(),
@@ -253,6 +279,50 @@ pub fn compile_jit(
         reason_code: reason_code.to_string(),
         reason: reason.to_string(),
         degradations,
+    })
+}
+
+fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, requested: &str) -> bool {
+    use crate::core_ir::Typ;
+    let scalar = |typ: &Typ| {
+        matches!(
+            typ.canonical(),
+            Typ::Int | Typ::Bool | Typ::Float | Typ::String | Typ::Void
+        )
+    };
+    if entry != requested && !entry.ends_with(&format!(".{requested}")) {
+        return false;
+    }
+    let Some(params) = module.decls.iter().find_map(|decl| match decl {
+        Decl::Function { name, params, .. } if name == entry => Some(params),
+        _ => None,
+    }) else {
+        return false;
+    };
+    if !params.is_empty() {
+        return false;
+    }
+    let reachable = super::native::native_entry_module(module, entry);
+    let mut names = std::collections::HashSet::new();
+    for decl in &reachable.decls {
+        let name = match decl {
+            Decl::Struct { name, .. }
+            | Decl::Class { name, .. }
+            | Decl::Function { name, .. }
+            | Decl::Global { name, .. } => name,
+            _ => continue,
+        };
+        // Rust type and value namespaces can collide in the flat Core IR namespace.
+        // Such modules cannot yet pass the verification required for execution.
+        if !names.insert(name) {
+            return false;
+        }
+    }
+    reachable.decls.iter().all(|decl| match decl {
+        Decl::Function { params, ret, .. } => {
+            scalar(ret) && params.iter().all(|(_, typ)| scalar(typ))
+        }
+        _ => true,
     })
 }
 
