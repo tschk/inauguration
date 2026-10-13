@@ -399,6 +399,7 @@ impl Ctx {
             Expr::Unary { op, expr } => {
                 let e = self.expr_str(expr);
                 match op.as_str() {
+                    "bool-to-int" => format!("((int64_t)({e}))"),
                     "neg" | "-" => format!("(-{})", e),
                     "not" | "!" => format!("(!{})", e),
                     "bnot" | "~" => format!("(~{})", e),

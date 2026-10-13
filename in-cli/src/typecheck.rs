@@ -124,6 +124,14 @@ impl TypeChecker {
 
     /// Resolve type-dependent complement into the canonical boolean or integer operator.
     pub(crate) fn resolve_complements(&self, module: &mut UnifiedModule) {
+        self.resolve_typed_operators(module, false);
+    }
+
+    fn resolve_c_boolean_promotions(&self, module: &mut UnifiedModule) {
+        self.resolve_typed_operators(module, true);
+    }
+
+    fn resolve_typed_operators(&self, module: &mut UnifiedModule, promote_c_bool: bool) {
         let facts = self.collect_facts(module);
         let globals: HashMap<String, Typ> = module
             .decls
@@ -138,25 +146,65 @@ impl TypeChecker {
                 Decl::Function { params, body, .. } => {
                     let mut env = globals.clone();
                     env.extend(params.iter().cloned());
-                    self.resolve_complement_body(body, &facts, &mut env);
+                    self.resolve_typed_body(body, &facts, &mut env, promote_c_bool);
                 }
                 Decl::Global {
                     init: Some(expr), ..
-                } => self.resolve_complement_expr(expr, &facts, &globals),
+                } => self.resolve_typed_expr(expr, &facts, &globals, promote_c_bool),
                 _ => {}
             }
         }
     }
 
-    fn resolve_complement_expr(&self, expr: &mut Expr, facts: &Facts, env: &HashMap<String, Typ>) {
+    fn resolve_typed_expr(
+        &self,
+        expr: &mut Expr,
+        facts: &Facts,
+        env: &HashMap<String, Typ>,
+        promote_c_bool: bool,
+    ) {
         if let Expr::Closure { params, body, .. } = expr {
             let mut inner = env.clone();
             inner.extend(params.iter().cloned());
-            self.resolve_complement_body(body, facts, &mut inner);
+            self.resolve_typed_body(body, facts, &mut inner, promote_c_bool);
         } else {
             crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
-                self.resolve_complement_expr(child, facts, env)
+                self.resolve_typed_expr(child, facts, env, promote_c_bool)
             });
+        }
+        if promote_c_bool
+            && let Expr::Binary { op, lhs, rhs } = expr
+            && matches!(op.as_str(), "&" | "|" | "^" | "<<" | ">>" | "%")
+        {
+            for operand in [lhs, rhs] {
+                if self
+                    .expr_type(operand, facts, env)
+                    .is_some_and(|typ| typ.canonical() == Typ::Bool)
+                {
+                    **operand = Expr::Unary {
+                        op: "bool-to-int".into(),
+                        expr: Box::new((**operand).clone()),
+                    };
+                }
+            }
+        }
+        if promote_c_bool
+            && let Expr::Call { callee, args } = expr
+            && let Expr::Ident(name) = callee.as_ref()
+            && let Some((params, _)) = facts.functions.get(name)
+        {
+            for (arg, (_, expected)) in args.iter_mut().zip(params) {
+                if expected.canonical() == Typ::Int
+                    && self
+                        .expr_type(arg, facts, env)
+                        .is_some_and(|typ| typ.canonical() == Typ::Bool)
+                {
+                    *arg = Expr::Unary {
+                        op: "bool-to-int".into(),
+                        expr: Box::new(arg.clone()),
+                    };
+                }
+            }
         }
         if let Expr::Unary { op, expr } = expr
             && op == "complement"
@@ -169,16 +217,17 @@ impl TypeChecker {
         }
     }
 
-    fn resolve_complement_body(
+    fn resolve_typed_body(
         &self,
         body: &mut [Stmt],
         facts: &Facts,
         env: &mut HashMap<String, Typ>,
+        promote_c_bool: bool,
     ) {
         for stmt in body {
             match stmt {
                 Stmt::Let(name, typ, expr) => {
-                    self.resolve_complement_expr(expr, facts, env);
+                    self.resolve_typed_expr(expr, facts, env, promote_c_bool);
                     if let Some(typ) = typ.clone().or_else(|| self.expr_type(expr, facts, env)) {
                         env.insert(name.clone(), typ);
                     }
@@ -186,15 +235,17 @@ impl TypeChecker {
                 Stmt::Assign(_, expr)
                 | Stmt::Expr(expr)
                 | Stmt::Throw(expr)
-                | Stmt::Return(Some(expr)) => self.resolve_complement_expr(expr, facts, env),
+                | Stmt::Return(Some(expr)) => {
+                    self.resolve_typed_expr(expr, facts, env, promote_c_bool)
+                }
                 Stmt::IndexAssign { base, index, value } => {
                     for expr in [base, index, value] {
-                        self.resolve_complement_expr(expr, facts, env);
+                        self.resolve_typed_expr(expr, facts, env, promote_c_bool);
                     }
                 }
                 Stmt::FieldAssign { base, value, .. } => {
                     for expr in [base, value] {
-                        self.resolve_complement_expr(expr, facts, env);
+                        self.resolve_typed_expr(expr, facts, env, promote_c_bool);
                     }
                 }
                 Stmt::If {
@@ -202,18 +253,18 @@ impl TypeChecker {
                     then_body,
                     else_body,
                 } => {
-                    self.resolve_complement_expr(cond, facts, env);
-                    self.resolve_complement_body(then_body, facts, &mut env.clone());
-                    self.resolve_complement_body(else_body, facts, &mut env.clone());
+                    self.resolve_typed_expr(cond, facts, env, promote_c_bool);
+                    self.resolve_typed_body(then_body, facts, &mut env.clone(), promote_c_bool);
+                    self.resolve_typed_body(else_body, facts, &mut env.clone(), promote_c_bool);
                 }
                 Stmt::Loop { cond, body, .. } => {
                     if let Some(cond) = cond {
-                        self.resolve_complement_expr(cond, facts, env);
+                        self.resolve_typed_expr(cond, facts, env, promote_c_bool);
                     }
-                    self.resolve_complement_body(body, facts, &mut env.clone());
+                    self.resolve_typed_body(body, facts, &mut env.clone(), promote_c_bool);
                 }
                 Stmt::Match { scrutinee, arms } => {
-                    self.resolve_complement_expr(scrutinee, facts, env);
+                    self.resolve_typed_expr(scrutinee, facts, env, promote_c_bool);
                     for arm in arms {
                         let mut inner = env.clone();
                         if let Ok(pattern) = MatchPattern::parse(&arm.pattern) {
@@ -230,11 +281,11 @@ impl TypeChecker {
                                 inner.insert(name, typ);
                             }
                         }
-                        self.resolve_complement_body(&mut arm.body, facts, &mut inner);
+                        self.resolve_typed_body(&mut arm.body, facts, &mut inner, promote_c_bool);
                     }
                 }
                 Stmt::Try { body, catches } => {
-                    self.resolve_complement_body(body, facts, &mut env.clone());
+                    self.resolve_typed_body(body, facts, &mut env.clone(), promote_c_bool);
                     for catch in catches {
                         let mut inner = env.clone();
                         if let Ok(pattern) = MatchPattern::parse(&catch.pattern) {
@@ -246,7 +297,7 @@ impl TypeChecker {
                                 &mut Vec::new(),
                             );
                         }
-                        self.resolve_complement_body(&mut catch.body, facts, &mut inner);
+                        self.resolve_typed_body(&mut catch.body, facts, &mut inner, promote_c_bool);
                     }
                 }
                 Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
@@ -643,6 +694,16 @@ impl TypeChecker {
             }
             Expr::Unary { op, expr: inner } => {
                 self.check_expr(fn_name, inner, facts, env, errors);
+                if op == "bool-to-int"
+                    && let Some(actual) = self.expr_type(inner, facts, env)
+                    && actual.canonical() != Typ::Bool
+                {
+                    errors.push(TypeError::TypeMismatch {
+                        context: format!("boolean promotion in `{fn_name}`"),
+                        expected: Typ::Bool,
+                        got: actual,
+                    });
+                }
                 if matches!(op.as_str(), "complement" | "~")
                     && let Some(actual) = self.expr_type(inner, facts, env)
                 {
@@ -695,7 +756,23 @@ impl TypeChecker {
                                 }
                             }
                         }
-                        "-" | "*" | "/" | "^" | "<<" | ">>" | "&" | "|" => {
+                        "&" | "|" | "^" => {
+                            if is_concrete(&l)
+                                && is_concrete(&r)
+                                && crate::core_ir::bitwise_result_type(
+                                    Some(l.clone()),
+                                    Some(r.clone()),
+                                )
+                                .is_none()
+                            {
+                                errors.push(TypeError::TypeMismatch {
+                                    context: format!("binary `{op}` operands in `{fn_name}`"),
+                                    expected: if l == Typ::Bool { Typ::Bool } else { Typ::Int },
+                                    got: r,
+                                });
+                            }
+                        }
+                        "-" | "*" | "/" | "<<" | ">>" => {
                             if l != Typ::Int && l != Typ::Float && is_concrete(&l) {
                                 errors.push(TypeError::TypeMismatch {
                                     context: format!("binary `{op}` lhs in `{fn_name}`"),
@@ -952,6 +1029,7 @@ impl TypeChecker {
             }
             Expr::Unary { op, expr, .. } => match op.as_str() {
                 "!" => Some(Typ::Bool),
+                "bool-to-int" => Some(Typ::Int),
                 "-" => self.expr_type(expr, facts, env),
                 _ => self.expr_type(expr, facts, env),
             },
@@ -965,7 +1043,11 @@ impl TypeChecker {
                         _ => Some(Typ::Int),
                     }
                 }
-                "-" | "*" | "/" | "%" | "^" | "<<" | ">>" | "&" | "|" => {
+                "&" | "|" | "^" => crate::core_ir::bitwise_result_type(
+                    self.expr_type(lhs, facts, env),
+                    self.expr_type(rhs, facts, env),
+                ),
+                "-" | "*" | "/" | "%" | "<<" | ">>" => {
                     let l = self.expr_type(lhs, facts, env);
                     let r = self.expr_type(rhs, facts, env);
                     if l == Some(Typ::Float) || r == Some(Typ::Float) {
@@ -1322,7 +1404,14 @@ pub fn normalize_module(parser_id: ParserId, module: &UnifiedModule) -> UnifiedM
         .iter()
         .map(|decl| normalize_decl(parser_id, decl))
         .collect();
-    UnifiedModule::with_identity(decls, module.identity.clone())
+    let mut normalized = UnifiedModule::with_identity(decls, module.identity.clone());
+    if matches!(
+        parser_id,
+        ParserId::C | ParserId::Cpp | ParserId::ObjC | ParserId::ObjCpp
+    ) {
+        TypeChecker::new().resolve_c_boolean_promotions(&mut normalized);
+    }
+    normalized
 }
 
 fn normalize_decl(parser_id: ParserId, decl: &Decl) -> Decl {

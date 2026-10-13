@@ -2159,10 +2159,14 @@ fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
         },
         Expr::Unary { op, expr } if op == "-" => scalar_expr_type(expr, ctx),
         Expr::Unary { op, .. } if op == "!" => Some(Typ::Bool),
-        Expr::Unary { op, .. } if op == "~" => Some(Typ::Int),
-        Expr::Binary { op, lhs, rhs }
-            if matches!(op.as_str(), "&" | "|" | "^" | "<<" | ">>" | "%") =>
-        {
+        Expr::Unary { op, .. } if op == "~" || op == "bool-to-int" => Some(Typ::Int),
+        Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&" | "|" | "^") => {
+            crate::core_ir::bitwise_result_type(
+                scalar_expr_type(lhs, ctx),
+                scalar_expr_type(rhs, ctx),
+            )
+        }
+        Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "<<" | ">>" | "%") => {
             if scalar_expr_type(lhs, ctx) == Some(Typ::Int)
                 && scalar_expr_type(rhs, ctx) == Some(Typ::Int)
             {
@@ -3091,6 +3095,11 @@ fn lower_unary_expr(
 ) -> Result<(), String> {
     lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
     match op {
+        "bool-to-int" => {
+            if scalar_expr_type(expr, ctx) != Some(Typ::Bool) {
+                return Err("x86_64-lower: boolean promotion needs Bool".into());
+            }
+        }
         "-" => {
             if scalar_expr_type(expr, ctx) == Some(Typ::Float) {
                 emitter.emit_insns(&x86_64::load_i64(RDX, i64::MIN));

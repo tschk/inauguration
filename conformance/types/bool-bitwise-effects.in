@@ -1,0 +1,13 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var calls: Int = 0;
+fn left() -> Bool { calls = calls * 10 + 1; return false; }
+fn right() -> Bool { calls = calls * 10 + 2; return true; }
+fn main() -> Int {
+    let result: Bool = left() & right();
+    if !result { return calls + 30; }
+    return 99;
+}

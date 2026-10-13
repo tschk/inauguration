@@ -704,6 +704,9 @@ fn check_expr(
                     ),
                 ));
             }
+            if op == "bool-to-int" {
+                require_type(fn_name, "boolean promotion", &Typ::Bool, expr, facts, env)?;
+            }
             if op == "~" {
                 require_type(
                     fn_name,
@@ -733,7 +736,24 @@ fn check_expr(
                 "-" | "*" | "/" | "<" | ">" | "<=" | ">=" => {
                     check_numeric_binop_operands(fn_name, lhs, rhs, facts, env)
                 }
-                "%" => {
+                "&" | "|" | "^" => {
+                    if crate::core_ir::bitwise_result_type(
+                        expr_type(lhs, facts, env),
+                        expr_type(rhs, facts, env),
+                    )
+                    .is_some()
+                    {
+                        Ok(())
+                    } else {
+                        Err((
+                            "type-mismatch".into(),
+                            format!(
+                                "binary `{op}` in `{fn_name}` needs matching Int or Bool operands"
+                            ),
+                        ))
+                    }
+                }
+                "<<" | ">>" | "%" => {
                     require_type(fn_name, "binary operand", &Typ::Int, lhs, facts, env)?;
                     require_type(fn_name, "binary operand", &Typ::Int, rhs, facts, env)
                 }
@@ -1031,6 +1051,7 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
         }
         Expr::Unary { op, expr, .. } => match op.as_str() {
             "!" => Some(Typ::Bool),
+            "bool-to-int" => Some(Typ::Int),
             "-" => {
                 if expr_type(expr, facts, env) == Some(Typ::Float) {
                     Some(Typ::Float)
@@ -1052,7 +1073,8 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
                 {
                     Some(Typ::Float)
                 }
-                "+" | "-" | "*" | "/" | "%" | "^" | "<<" | ">>" | "&" | "|" => Some(Typ::Int),
+                "&" | "|" | "^" => crate::core_ir::bitwise_result_type(lhs_typ, rhs_typ),
+                "+" | "-" | "*" | "/" | "%" | "<<" | ">>" => Some(Typ::Int),
                 "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => Some(Typ::Bool),
                 _ => None,
             }

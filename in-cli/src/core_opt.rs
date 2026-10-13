@@ -780,7 +780,7 @@ fn simplify_binary_expr(original: Expr, op: &str, lhs: &Expr, rhs: &Expr) -> Exp
             if is_zero(rhs) {
                 return lhs.clone();
             }
-            if lhs == rhs && matches!(lhs, Expr::Ident(_) | Expr::IntLit(_) | Expr::BoolLit(_)) {
+            if lhs == rhs && matches!(lhs, Expr::IntLit(_)) {
                 return Expr::IntLit(0);
             }
         }
@@ -1075,6 +1075,17 @@ fn fold_stmt_matches(s: Stmt) -> Vec<Stmt> {
 pub(crate) fn fold_expr(e: Expr) -> Expr {
     match &e {
         Expr::Binary { op, lhs, rhs, .. } => {
+            if let (Expr::BoolLit(lhs), Expr::BoolLit(rhs)) = (lhs.as_ref(), rhs.as_ref()) {
+                let value = match op.as_str() {
+                    "&" | "band" => Some(*lhs & *rhs),
+                    "|" | "bor" => Some(*lhs | *rhs),
+                    "^" | "xor" => Some(*lhs ^ *rhs),
+                    _ => None,
+                };
+                if let Some(value) = value {
+                    return Expr::BoolLit(value);
+                }
+            }
             if let (Expr::FloatLit(a), Expr::FloatLit(b)) = (lhs.as_ref(), rhs.as_ref()) {
                 let av = a.0;
                 let bv = b.0;
@@ -1145,6 +1156,11 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
             e
         }
         Expr::Unary { op, expr, .. } => {
+            if op == "bool-to-int"
+                && let Expr::BoolLit(value) = expr.as_ref()
+            {
+                return Expr::IntLit(i64::from(*value));
+            }
             if let Expr::IntLit(n) = expr.as_ref() {
                 let result = match op.as_str() {
                     "neg" | "-" => n.checked_neg(),
@@ -3348,7 +3364,16 @@ mod tests {
             lhs: Box::new(ident("a")),
             rhs: Box::new(ident("a")),
         });
-        assert_eq!(self_xor, Expr::IntLit(0));
+        // An untyped identifier may be boolean, so keep its result type.
+        assert_eq!(self_xor, bin("^", ident("a"), ident("a")));
+        assert_eq!(
+            fold_expr(bin("^", Expr::BoolLit(true), Expr::BoolLit(true))),
+            Expr::BoolLit(false)
+        );
+        assert_eq!(
+            simplify_expr(bin("^", Expr::IntLit(7), Expr::IntLit(7))),
+            Expr::IntLit(0)
+        );
 
         let self_sub = simplify_expr(Expr::Binary {
             op: "-".into(),

@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## Boolean bitwise operations
+
+Core IR `&`, `|`, and `^` preserve the operand type: two `Bool` operands produce `Bool`, and two `Int` operands produce `Int`. Mixed types and floating operands are refused. Boolean bitwise operations evaluate both operands in order; `&&` and `||` retain conditional evaluation. Verification, native type inference, and constant folding share this distinction. C-like frontends insert explicit `bool-to-int` promotions where bitwise operands or integer call parameters require integer values.
+
 ## Guarded matches
 
 `Stmt::Match` arms contain a pattern, an optional `guard: Expr`, and a body. The subject is evaluated once. A guard runs only when its pattern matches; a false guard continues to the next arm. The first successful arm runs its body, and later guards and bodies are skipped. Guard conditions must be boolean.

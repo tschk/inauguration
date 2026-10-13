@@ -61,3 +61,4 @@ agree conformance/control-flow/array-repeat-effects.in
 agree conformance/classes/class-array-repeat.in
 agree conformance/control-flow/index-compound-effects.in
 agree conformance/control-flow/field-compound-effects.in
+agree conformance/types/bool-bitwise-effects.in

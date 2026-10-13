@@ -2945,3 +2945,131 @@ fn owned_field_compound_throw_preserves_original_field() {
     assert!(report.success, "{report:?}");
     assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
 }
+
+#[test]
+fn owned_rust_boolean_bitwise_operations_preserve_boolean_results() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (source, expected) in [
+        ("fn main() -> bool { true & false }", false),
+        ("fn main() -> bool { true | false }", true),
+        ("fn main() -> bool { true ^ true }", false),
+        (
+            "fn combine(a: bool, b: bool) -> bool { for i in 0..1 { if i == 0 { return a ^ b; } } return false; } fn main() -> bool { combine(true, false) }",
+            true,
+        ),
+        (
+            "fn combine(a: bool) -> bool { for i in 0..1 { if i == 0 { return a ^ a; } } return true; } fn main() -> bool { combine(true) }",
+            false,
+        ),
+        (
+            "fn main() -> bool { let mut values = [true]; values[0] &= false; values[0] }",
+            false,
+        ),
+        (
+            "struct Flag { value: bool } fn main() -> bool { let mut flag = Flag { value: false }; flag.value |= true; flag.value }",
+            true,
+        ),
+    ] {
+        let path = temp_path("bool-bitwise.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Bool(expected)),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn owned_boolean_bitwise_operators_evaluate_both_operands() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (op, left, right, negate) in [
+        ("&", "false", "true", "!"),
+        ("|", "true", "false", ""),
+        ("^", "true", "false", ""),
+    ] {
+        let source = format!(
+            "var calls: Int = 0;\nfn left() -> Bool {{ calls = calls * 10 + 1; return {left}; }}\nfn right() -> Bool {{ calls = calls * 10 + 2; return {right}; }}\nfn main() -> Int {{ let result: Bool = left() {op} right(); if {negate}result {{ return calls + 30; }} return 99; }}"
+        );
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let path = temp_path("bool-bitwise-effects.in");
+            fs::write(&path, &source).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{source}: {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{source}: {profile:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn owned_bitwise_operands_do_not_mix_boolean_float_and_integer_types() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main() -> bool { true & 1 }",
+        "fn main() -> i64 { 1 | false }",
+        "fn main() -> i64 { 1.5 ^ 2.0 }",
+        "fn main() -> i64 { true << false }",
+    ] {
+        let path = temp_path("invalid-bitwise.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(!report.success, "{source}: {report:?}");
+        assert_eq!(report.eval_result, None);
+    }
+    for (source, expected) in [
+        ("int main() { return true & false; }", 0),
+        ("int main() { return true | 4; }", 5),
+        ("int main() { return true << 2; }", 4),
+        (
+            "int combine(bool left, bool right) { return left | right; } int main() { return combine(true, false); }",
+            1,
+        ),
+    ] {
+        let path = temp_path("cpp-bool-bitwise.cpp");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(expected)),
+            "{source}"
+        );
+    }
+}

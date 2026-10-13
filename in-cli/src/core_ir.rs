@@ -111,6 +111,15 @@ impl Typ {
     }
 }
 
+/// Bitwise operations preserve either the integer or boolean operand type.
+pub(crate) fn bitwise_result_type(lhs: Option<Typ>, rhs: Option<Typ>) -> Option<Typ> {
+    match (lhs?.canonical(), rhs?.canonical()) {
+        (Typ::Int, Typ::Int) => Some(Typ::Int),
+        (Typ::Bool, Typ::Bool) => Some(Typ::Bool),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     IntLit(i64),

@@ -355,6 +355,7 @@ fn compile_expr(
         Expr::Unary { op, expr } => {
             compile_expr(c, expr, slots)?;
             match op.as_str() {
+                "bool-to-int" => {}
                 "-" | "neg" => c.code.push(OP_NEG),
                 "!" | "not" => c.code.push(OP_NOT),
                 "~" => {
