@@ -41,7 +41,7 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 ## Fields of produced struct values
 
-x86 global scalar struct fields use the same writable data-section slots for reads and writes. Local bindings shadow global field paths. Both native backends copy, return, and pass complete global structs with scalar fields using the existing internal struct ABI.
+x86 global scalar struct fields use the same writable data-section slots for reads and writes. Local bindings shadow global field paths. Both native backends copy, return, and pass complete global structs with scalar fields using the existing internal struct ABI. Whole-global assignments stage the complete source before committing fields, including constructors, local or global values, function results, and zero reset. Assignment respects local and parameter shadowing.
 
 Constant folding projects a constructor field only when every initializer is a scalar literal. Calls, reads, and possible failures in unselected fields remain in the IR; unsupported runtime global initializers stay refused.
 

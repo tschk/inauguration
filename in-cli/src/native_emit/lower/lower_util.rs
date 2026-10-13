@@ -240,8 +240,8 @@ pub(crate) fn native_struct_fields(
     };
     let cleaned = fields
         .iter()
-        .map(|(name, field_ty)| match field_ty {
-            Typ::Int | Typ::Bool | Typ::String | Typ::Float => Ok((name.clone(), field_ty.clone())),
+        .map(|(name, field_ty)| match field_ty.canonical() {
+            typ @ (Typ::Int | Typ::Bool | Typ::String | Typ::Float) => Ok((name.clone(), typ)),
             Typ::Named(inner) if structs.contains_key(inner.as_str()) => {
                 Ok((name.clone(), field_ty.clone()))
             }

@@ -2816,6 +2816,86 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn global_struct_assignments_copy_values_after_evaluating_sources() {
+        for source in [
+            "struct Empty {}\nvar empty: Empty = 0;\nvar calls: Int = 0;\nfn make() -> Empty { calls += 1; return Empty {}; }\nfn main() -> Int { empty = Empty {}; empty = empty; empty = make(); return calls + 41; }",
+            include_str!("../../conformance/types/global-struct-assignment.in"),
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nfn main() -> Int { point.x = 7; point.y = 8; point = 0; return point.x + point.y + 42; }",
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nfn fail() -> Int { throw 9; }\nfn main() -> Int { point.x = 20; point.y = 22; try { point = Point { x: 0, y: fail() }; } catch 9 { return point.x + point.y; } return 0; }",
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nfn main() -> Int { point = Point { x: 20, y: 22 }; return point.x + point.y; }",
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nfn main() -> Int { var local: Point = Point { x: 20, y: 22 }; point = local; local.x = 0; return point.x + point.y; }",
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nvar other: Point = 0;\nfn main() -> Int { other.x = 20; other.y = 22; point = other; other.x = 0; point = point; return point.x + point.y; }",
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nfn make() -> Point { return Point { x: 20, y: 22 }; }\nfn main() -> Int { point = make(); return point.x + point.y; }",
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nvar calls: Int = 0;\nfn first() -> Int { calls += 1; return 20; }\nfn second() -> Int { calls += 1; return point.x + 21; }\nfn main() -> Int { point.x = 1; point.y = 2; point = Point { x: first(), y: second() }; return point.x + point.y + calls - 2; }",
+            "struct State { Bool flag; Float value }\nvar state: State = 0;\nfn main() -> Int { state = State { flag: true, value: 42.5 }; if state.flag && state.value == 42.5 { return 42; } return 0; }",
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nfn read() -> Int { return point.x; }\nfn main() -> Int { point.x = 20; var point: Point = Point { x: 0, y: 0 }; point = Point { x: 20, y: 2 }; return point.x + point.y + read(); }",
+            "var value: Int = 20;\nfn read() -> Int { return value; }\nfn set(value: Int) -> Int { value = 22; return value; }\nfn main() -> Int { return set(0) + read(); }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn global_struct_primitive_field_aliases_preserve_complete_values() {
+        let mut module = crate::in_lang_parse::parse_in_source("struct Point { Int x; Int y }\nvar point: Point = 0;\nfn main() -> Int { point = Point { x: 20, y: 22 }; var copied: Point = point; return copied.x + copied.y; }").unwrap();
+        for decl in &mut module.decls {
+            if let crate::core_ir::Decl::Struct { fields, .. } = decl {
+                for (_, typ) in fields {
+                    *typ = crate::core_ir::Typ::Named("Int".into());
+                }
+            }
+        }
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(
+                invoke_module(&module, profile, &[]),
+                Some(42),
+                "{profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn primitive_global_alias_assignment_uses_scalar_storage() {
+        let mut module = crate::in_lang_parse::parse_in_source(
+            "var value: Int = 0;\nfn main() -> Int { value = 42; return value; }",
+        )
+        .unwrap();
+        for decl in &mut module.decls {
+            if let crate::core_ir::Decl::Global { typ, .. } = decl {
+                *typ = crate::core_ir::Typ::Named("Int".into());
+            }
+        }
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(
+                invoke_module(&module, profile, &[]),
+                Some(42),
+                "{profile:?}"
+            );
+        }
+    }
+
+    #[test]
     #[cfg(all(unix, target_arch = "x86_64"))]
     fn struct_parameter_sentinels_return_failure_without_reading_memory() {
         let module = crate::in_lang_parse::parse_in_source("struct Point { Int x; Int y }\nfn main(point: Point) -> Int { return point.x + point.y; }").unwrap();

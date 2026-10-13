@@ -145,6 +145,72 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_global_struct_assignments_are_refused_by_both_backends() {
+        for field in ["Inner inner", "[Int] items"] {
+            let source = format!(
+                "struct Inner {{ Int value }}\nstruct Outer {{ {field} }}\nvar outer: Outer = 0;\nfn main() -> Int {{ outer = 0; return 42; }}"
+            );
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            assert!(
+                crate::native_emit::lower::lower_module(
+                    &module,
+                    "main",
+                    crate::native_emit::NativeLinkage::Executable
+                )
+                .err()
+                .unwrap()
+                .contains("global struct values require a known scalar-field layout")
+            );
+            assert!(
+                crate::native_emit::x86_64_lower::lower_module(&module, "main")
+                    .err()
+                    .unwrap()
+                    .contains("global struct assignment needs a scalar-field 64-bit layout")
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_global_struct_sources_are_refused_by_both_backends() {
+        for malformed in [
+            Expr::Ident("value".into()),
+            Expr::StructInit {
+                name: "Point".into(),
+                fields: vec![("x".into(), Expr::IntLit(20))],
+            },
+            Expr::StructInit {
+                name: "Point".into(),
+                fields: vec![
+                    ("x".into(), Expr::IntLit(20)),
+                    ("x".into(), Expr::IntLit(22)),
+                ],
+            },
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source("struct Point { Int x; Int y }\nvar point: Point = 0;\nfn main() -> Int { var value: Int = 7; point = Point { x: 20, y: 22 }; return point.x + point.y; }").unwrap();
+            for decl in &mut module.decls {
+                if let Decl::Function { body, .. } = decl {
+                    for stmt in body {
+                        if let crate::core_ir::Stmt::Assign(name, expr) = stmt
+                            && name == "point"
+                        {
+                            *expr = malformed.clone();
+                        }
+                    }
+                }
+            }
+            assert!(
+                crate::native_emit::lower::lower_module(
+                    &module,
+                    "main",
+                    crate::native_emit::NativeLinkage::Executable
+                )
+                .is_err()
+            );
+            assert!(crate::native_emit::x86_64_lower::lower_module(&module, "main").is_err());
+        }
+    }
+
+    #[test]
     fn parsed_global_literals_initialize_shared_data() {
         let module = crate::in_lang_parse::parse_in_source("var count: Int = 3;\nvar value: Float = 1.5;\nconst enabled: Bool = true;\nfn main() -> Int { return count; }").expect("parse");
         let globals = collect_globals(&module, &HashMap::new());

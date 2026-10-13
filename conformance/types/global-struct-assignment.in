@@ -1,0 +1,16 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+struct Point { Int x; Int y }
+var point: Point = 0;
+var calls: Int = 0;
+fn first() -> Int { calls += 1; return 20; }
+fn second() -> Int { calls += 1; return point.x + 21; }
+fn main() -> Int {
+    point.x = 1;
+    point.y = 2;
+    point = Point { x: first(), y: second() };
+    return point.x + point.y + calls - 2;
+}

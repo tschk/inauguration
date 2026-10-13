@@ -203,6 +203,46 @@ pub(crate) fn lower_stmt(
         Stmt::Assign(name, expr) => {
             if !ctx.locals.contains_key(name) && !ctx.params.contains_key(name) {
                 if let Some(offset) = ctx.globals.get(name).copied() {
+                    if let Some(Typ::Named(typ)) = ctx.global_types.get(name).map(Typ::canonical) {
+                        ctx.validate_global_struct(name)?;
+                        let schema = native_struct_fields(ctx.structs, &typ, fn_name)?;
+                        let base = ctx.acquire_call_arg_slots(fn_name, schema.len().max(8))?;
+                        let fields = super::lower_call::aggregate_scratch_fields(
+                            ctx,
+                            &typ,
+                            ctx.call_arg_temps[base],
+                            fn_name,
+                        )?;
+                        // Finish the RHS before writing any field of the destination.
+                        if matches!(expr, Expr::IntLit(0)) {
+                            emitter.emit_insns(&aarch64::load_i64(0, 0));
+                            for &slot in fields.values() {
+                                emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, slot));
+                            }
+                        } else {
+                            lower_struct_expr_into_slots(
+                                emitter,
+                                ctx,
+                                expr,
+                                &typ,
+                                &fields,
+                                functions,
+                                pending_calls,
+                                fn_name,
+                            )?;
+                        }
+                        for (field, slot) in fields {
+                            let key = format!("{name}.{field}");
+                            let offset = ctx.globals.get(&key).copied().ok_or_else(|| {
+                                format!("native-lower: missing global struct field `{key}`")
+                            })?;
+                            emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, slot));
+                            ctx.emit_global_address(emitter, 1, offset);
+                            emitter.emit_u32(aarch64::str64(0, 1, 0));
+                        }
+                        ctx.release_call_arg_temps();
+                        return Ok(());
+                    }
                     lower_expr::lower_expr_into(
                         emitter,
                         ctx,
@@ -761,8 +801,17 @@ pub(crate) fn lower_struct_expr_into_slots(
             name: _init,
             fields: values,
         } => {
-            // Skip type check — emit schema fields regardless of init name
+            // Generic aliases may differ in name, but every slot must be initialized.
             let schema = native_struct_fields(ctx.structs, typ, fn_name)?;
+            if values.len() != schema.len()
+                || schema
+                    .iter()
+                    .any(|(field, _)| values.iter().filter(|(name, _)| name == field).count() != 1)
+            {
+                return Err(format!(
+                    "native-lower: incomplete struct initializer for `{typ}`"
+                ));
+            }
             for (field, value) in values {
                 let Some((_, field_typ)) = schema.iter().find(|(name, _)| name == field) else {
                     continue; // skip unknown fields
@@ -877,8 +926,9 @@ pub(crate) fn lower_struct_expr_into_slots(
                 fields: local_fields,
             }) = ctx.locals.get(local).cloned()
             else {
-                emitter.emit_insns(&crate::native_emit::aarch64::load_i64(0, 0));
-                return Ok(());
+                return Err(format!(
+                    "native-lower: struct value `{local}` needs a known local or global layout in `{fn_name}`"
+                ));
             };
             if local_typ != typ {
                 return Err(format!(

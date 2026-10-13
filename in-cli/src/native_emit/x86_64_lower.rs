@@ -1320,8 +1320,46 @@ fn lower_stmt(
             Ok(())
         }
         Stmt::Assign(name, expr) => {
-            // Check if this is a global variable
-            if let Some(&offset) = ctx.globals.get(name) {
+            // Local bindings and parameters shadow globals.
+            if !ctx.locals.contains_key(name)
+                && let Some(&offset) = ctx.globals.get(name)
+            {
+                if let Some(Typ::Named(typ)) = ctx.scalar_types.get(name).map(Typ::canonical) {
+                    let schema = ctx.structs.get(&typ).cloned().ok_or_else(||
+                        "x86_64-lower: global struct assignment needs a known scalar-field layout".to_string())?;
+                    if x86_64::is_32bit()
+                        || schema.iter().any(|(_, typ)| {
+                            !matches!(
+                                typ.canonical(),
+                                Typ::Int | Typ::Bool | Typ::Float | Typ::String
+                            )
+                        })
+                    {
+                        return Err("x86_64-lower: global struct assignment needs a scalar-field 64-bit layout".into());
+                    }
+                    let fields: HashMap<_, _> = schema
+                        .iter()
+                        .rev()
+                        .map(|(field, _)| (field.clone(), ctx.alloc_slot()))
+                        .collect();
+                    // Stage the complete source before mutating the global.
+                    store_struct_value(emitter, ctx, expr, &fields, pending_calls)?;
+                    for (field, slot) in fields {
+                        let key = format!("{name}.{field}");
+                        let offset = ctx.globals.get(&key).copied().ok_or_else(|| {
+                            format!("x86_64-lower: missing global struct field `{key}`")
+                        })?;
+                        emitter.emit_insns(&x86_64::ldr64(RAX, slot as u16));
+                        let site = emitter.len() + 2;
+                        emitter.emit_insns(&x86_64::mov_abs_from_rax(0));
+                        ctx.pending_globals.push(PendingGlobal {
+                            site,
+                            width: 8,
+                            offset,
+                        });
+                    }
+                    return Ok(());
+                }
                 lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
                 let addr_offset = if x86_64::is_32bit() { 1 } else { 2 };
                 let site = emitter.len() + addr_offset;
@@ -3099,13 +3137,28 @@ fn store_struct_value(
         Expr::Ident(name)
             if matches!(ctx.locals.get(name), Some(StackSlot::Struct { .. }))
                 || (!ctx.locals.contains_key(name) && ctx.globals.contains_key(name)) => {}
-        Expr::StructInit { .. } | Expr::Call { .. } => {}
+        Expr::StructInit { fields, .. } => {
+            let schema = &ctx.structs[&name];
+            if fields.len() != schema.len()
+                || schema
+                    .iter()
+                    .any(|(field, _)| fields.iter().filter(|(name, _)| name == field).count() != 1)
+            {
+                return Err(format!(
+                    "x86_64-lower: incomplete struct initializer for `{name}`"
+                ));
+            }
+        }
+        Expr::Call { .. } => {}
         _ => {
             return Err(
                 "x86_64-lower: struct value needs an addressable local, constructor, or call"
                     .into(),
             );
         }
+    }
+    if offsets.is_empty() && ctx.structs[&name].is_empty() && !matches!(expr, Expr::Call { .. }) {
+        return Ok(());
     }
     lower_call_argument(emitter, ctx, expr, RAX, pending_calls)?;
     emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 1));

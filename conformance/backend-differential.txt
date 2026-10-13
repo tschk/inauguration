@@ -76,3 +76,4 @@ agree conformance/types/in-scientific-literals.in
 agree conformance/control-flow/struct-field-call-effects.in
 agree conformance/types/global-struct-scalars.in
 agree conformance/types/global-struct-values.in
+agree conformance/types/global-struct-assignment.in
