@@ -1228,7 +1228,11 @@ fn ast_match(
             .or_else(|| first_body_child(c, shape))
             .map(|n| ast_stmt_or_body(src, n, shape, &mut scoped))
             .unwrap_or_default();
-        arms.push(MatchArm { pattern, body });
+        arms.push(MatchArm {
+            guard: None,
+            pattern,
+            body,
+        });
     }
     Some(Stmt::Match { scrutinee, arms })
 }

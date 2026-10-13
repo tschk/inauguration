@@ -282,7 +282,7 @@ pub fn compile_jit(
     })
 }
 
-fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, requested: &str) -> bool {
+pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, requested: &str) -> bool {
     use crate::core_ir::Typ;
     let scalar = |typ: &Typ| {
         matches!(

@@ -1,7 +1,7 @@
 //! **icore** — JSON interchange for [`crate::core_ir::UnifiedModule`].
 //!
 //! File extension **`.icore`** (or `#!in parser=icore`) loads a versioned JSON document so any
-//! front (codegen, tree-sitter bridge, another compiler) can feed the same Core IR + SIL path
+//! front (codegen, tree-sitter bridge, another compiler) can feed the same Core IR native pipeline
 //! without re-implementing the `.in` lexer.
 
 use crate::boundary_ir::{BoundaryModule, CompileArtifact};
@@ -222,6 +222,41 @@ fn parse_v2_stmt(value: &Value, context: &str) -> Result<Stmt, String> {
         }
         "call" => Ok(Stmt::Expr(parse_v2_expr(value, context)?)),
         "if" => parse_if_stmt(object, context),
+        "match" => {
+            let scrutinee = parse_v2_expr(required_field(object, "scrutinee", context)?, context)?;
+            let arms = required_field(object, "arms", context)?
+                .as_array()
+                .ok_or_else(|| format!("{context}: `match` needs an `arms` array"))?;
+            let arms = arms
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let ctx = format!("{context}.arms[{index}]");
+                    let arm = value_object(value, &ctx)?;
+                    let pattern = string_field(arm, "pattern", &ctx)?.to_string();
+                    crate::core_ir::MatchPattern::parse(&pattern)
+                        .map_err(|error| format!("{ctx}: {error}"))?;
+                    let guard = arm
+                        .get("guard")
+                        .map(|value| parse_v2_expr(value, &format!("{ctx}.guard")))
+                        .transpose()?;
+                    let body = required_field(arm, "body", &ctx)?
+                        .as_array()
+                        .ok_or_else(|| format!("{ctx}: `body` must be an array"))?;
+                    let body = body
+                        .iter()
+                        .enumerate()
+                        .map(|(index, stmt)| parse_v2_stmt(stmt, &format!("{ctx}.body[{index}]")))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(crate::core_ir::MatchArm {
+                        pattern,
+                        guard,
+                        body,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(Stmt::Match { scrutinee, arms })
+        }
         other => Err(format!("{context}: unsupported statement kind `{other}`")),
     }
 }

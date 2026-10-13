@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::core_ir::{
-    CatchArm, CoreModuleIdentity, Decl, Expr, LoopKind, Stmt, Typ, UnifiedModule,
+    CatchArm, CoreModuleIdentity, Decl, Expr, LoopKind, MatchArm, Stmt, Typ, UnifiedModule,
 };
 
 #[test]
@@ -135,10 +135,12 @@ fn emits_match_int_arms() {
             scrutinee: Expr::Ident("x".into()),
             arms: vec![
                 MatchArm {
+                    guard: None,
                     pattern: "0".into(),
                     body: vec![Stmt::Return(Some(Expr::IntLit(1)))],
                 },
                 MatchArm {
+                    guard: None,
                     pattern: "_".into(),
                     body: vec![Stmt::Return(Some(Expr::IntLit(2)))],
                 },
@@ -460,6 +462,90 @@ fn typed_complements_survive_c_emission_and_execution() {
     std::fs::create_dir(&dir).unwrap();
     let c = dir.join("complement.c");
     let binary = dir.join("complement");
+    std::fs::write(&c, source).unwrap();
+    let build = Command::new("clang")
+        .arg(&c)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let status = Command::new(&binary).status().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(status.code(), Some(42));
+}
+
+#[test]
+fn guarded_match_lowering_has_linear_emitted_size() {
+    fn module(count: usize) -> UnifiedModule {
+        let mut arms: Vec<MatchArm> = (0..count)
+            .map(|index| MatchArm {
+                pattern: index.to_string(),
+                guard: Some(Expr::BoolLit(false)),
+                body: vec![Stmt::Return(Some(Expr::IntLit(1)))],
+            })
+            .collect();
+        arms.push(MatchArm {
+            pattern: "_".into(),
+            guard: None,
+            body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+        });
+        UnifiedModule::new(vec![Decl::Function {
+            name: "answer".into(),
+            params: vec![("value".into(), Typ::Int)],
+            ret: Typ::Int,
+            body: vec![Stmt::Match {
+                scrutinee: Expr::Ident("value".into()),
+                arms,
+            }],
+            type_params: vec![],
+        }])
+    }
+    let small = emit_c_module(&module(100)).unwrap().len();
+    let large = emit_c_module(&module(1000)).unwrap().len();
+    assert!(large > small);
+    assert!(
+        large < small * 12,
+        "100 arms: {small} bytes, 1000 arms: {large} bytes"
+    );
+}
+
+#[test]
+fn guarded_match_effects_survive_c_emission_and_execution() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let mut module = crate::in_lang_parse::parse_in_source(include_str!(
+        "../../../conformance/control-flow/match-guard-effects.in"
+    ))
+    .unwrap();
+    for decl in &mut module.decls {
+        if let Decl::Function { name, .. } = decl
+            && name == "main"
+        {
+            *name = "answer".into();
+        }
+    }
+    let source = format!(
+        "{}\nint main(void) {{ return (int)answer(); }}\n",
+        emit_c_module(&module).unwrap()
+    );
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-guard-c-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let c = dir.join("guard.c");
+    let binary = dir.join("guard");
     std::fs::write(&c, source).unwrap();
     let build = Command::new("clang")
         .arg(&c)

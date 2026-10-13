@@ -244,6 +244,7 @@ mod tests {
                 Stmt::Match {
                     scrutinee: Expr::Ident("x".to_string()),
                     arms: vec![crate::core_ir::MatchArm {
+                        guard: None,
                         pattern: "1".to_string(),
                         body: vec![Stmt::Expr(Expr::Call {
                             callee: Box::new(Expr::Ident("dummy_crate::func3::func3".to_string())),

@@ -164,13 +164,19 @@ fn rust_match_stmt(src: &[u8], n: Node<'_>) -> Option<Stmt> {
     let scrutinee = n.child_by_field_name("value")?;
     let scrut_expr = rust_expr_from_node(src, scrutinee)?;
     let mut arms = Vec::new();
-    let mut w = n.walk();
-    for child in n.named_children(&mut w) {
+    let block = n.child_by_field_name("body")?;
+    let mut w = block.walk();
+    for child in block.named_children(&mut w) {
         if child.kind() == "match_arm" {
-            let pat = child
-                .child_by_field_name("pattern")
+            let pattern = child.child_by_field_name("pattern")?;
+            let pat = pattern
+                .named_child(0)
                 .map(|p| node_txt(src, p).trim().to_string())
                 .unwrap_or_default();
+            let guard = match pattern.child_by_field_name("condition") {
+                Some(condition) => Some(rust_expr_from_node(src, condition)?),
+                None => None,
+            };
             let body_node = child.child_by_field_name("value")?;
             let body = if body_node.kind() == "block" {
                 ast_block_to_stmts(src, body_node)
@@ -180,7 +186,11 @@ fn rust_match_stmt(src: &[u8], n: Node<'_>) -> Option<Stmt> {
                     .map(|e| vec![Stmt::Expr(e)])
                     .unwrap_or_default()
             };
-            arms.push(MatchArm { pattern: pat, body });
+            arms.push(MatchArm {
+                guard,
+                pattern: pat,
+                body,
+            });
         }
     }
     Some(Stmt::Match {

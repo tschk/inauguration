@@ -396,6 +396,8 @@ fn lower_module_impl(
     layout: X86StringLayout,
     runtime_error_slot: bool,
 ) -> Result<X86_64CompileResult, String> {
+    let prepared = crate::lower_core::prepared_guard_module(module);
+    let module = prepared.as_ref();
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
     let globals = collect_globals(module, &structs);

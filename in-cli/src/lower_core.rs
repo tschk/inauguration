@@ -1,10 +1,15 @@
-//! Lower [`crate::core_ir::UnifiedModule`] to textual SIL.
+//! Shared Core IR desugaring before native lowering.
 
 use crate::core_ir::{Decl, LoopKind, MatchPattern, Typ, UnifiedModule};
 use crate::core_ir::{Expr, Stmt, for_each_expr_child};
 use std::collections::{HashMap, HashSet};
 
+#[path = "lower_core/match_guards.rs"]
+mod match_guards;
+pub(crate) use match_guards::{lower_guarded_decls, prepared_guard_module};
+
 pub fn desugar_module(module: &mut UnifiedModule) {
+    lower_guarded_decls(&mut module.decls);
     let mut method_map: HashMap<String, String> = HashMap::new();
     let mut new_decls: Vec<Decl> = Vec::new();
 
@@ -2007,10 +2012,12 @@ mod tests {
                         scrutinee: Expr::Ident("tag".into()),
                         arms: vec![
                             crate::core_ir::MatchArm {
+                                guard: None,
                                 pattern: "1".into(),
                                 body: vec![Stmt::Assign("out".into(), Expr::IntLit(10))],
                             },
                             crate::core_ir::MatchArm {
+                                guard: None,
                                 pattern: "_".into(),
                                 body: vec![Stmt::Assign("out".into(), Expr::IntLit(20))],
                             },
@@ -2395,10 +2402,12 @@ mod tests {
                     scrutinee: Expr::Ident("p".into()),
                     arms: vec![
                         crate::core_ir::MatchArm {
+                            guard: None,
                             pattern: "Point { x, y: 0 }".into(),
                             body: vec![Stmt::Return(Some(Expr::Ident("x".into())))],
                         },
                         crate::core_ir::MatchArm {
+                            guard: None,
                             pattern: "_".into(),
                             body: vec![Stmt::Return(Some(Expr::IntLit(-1)))],
                         },
@@ -2433,14 +2442,17 @@ mod tests {
                     scrutinee: Expr::Ident("arr".into()),
                     arms: vec![
                         crate::core_ir::MatchArm {
+                            guard: None,
                             pattern: "[1, 2, 3]".into(),
                             body: vec![Stmt::Return(Some(Expr::IntLit(100)))],
                         },
                         crate::core_ir::MatchArm {
+                            guard: None,
                             pattern: "[a, b, ..]".into(),
                             body: vec![Stmt::Return(Some(Expr::Ident("a".into())))],
                         },
                         crate::core_ir::MatchArm {
+                            guard: None,
                             pattern: "_".into(),
                             body: vec![Stmt::Return(Some(Expr::IntLit(0)))],
                         },
@@ -2471,10 +2483,12 @@ mod tests {
                     scrutinee: Expr::Ident("pair".into()),
                     arms: vec![
                         crate::core_ir::MatchArm {
+                            guard: None,
                             pattern: "(0, 0)".into(),
                             body: vec![Stmt::Return(Some(Expr::IntLit(10)))],
                         },
                         crate::core_ir::MatchArm {
+                            guard: None,
                             pattern: "(x, _)".into(),
                             body: vec![Stmt::Return(Some(Expr::Ident("x".into())))],
                         },

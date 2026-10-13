@@ -32,6 +32,7 @@ pub fn optimize_with_linkage(
     profile: EmitProfile,
     keep_all_functions: bool,
 ) {
+    crate::lower_core::lower_guarded_decls(decls);
     crate::core_bindings::normalize_decls(decls);
     match profile {
         EmitProfile::Default => {
@@ -311,6 +312,7 @@ fn map_stmt<F: FnMut(Expr) -> Expr + Copy>(s: Stmt, f: &mut F) -> Stmt {
             arms: arms
                 .into_iter()
                 .map(|a| MatchArm {
+                    guard: a.guard.map(|guard| map_expr(guard, f)),
                     pattern: a.pattern,
                     body: a.body.into_iter().map(|s| map_stmt(s, f)).collect(),
                 })

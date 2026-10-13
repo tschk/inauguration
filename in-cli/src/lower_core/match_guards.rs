@@ -1,0 +1,249 @@
+use crate::core_ir::{Decl, Expr, MatchArm, Stmt, Typ, UnifiedModule};
+use std::borrow::Cow;
+use std::collections::HashSet;
+
+pub(crate) fn prepared_guard_module(module: &UnifiedModule) -> Cow<'_, UnifiedModule> {
+    if !module.decls.iter().any(decl_has_guard) {
+        return Cow::Borrowed(module);
+    }
+    let mut lowered = module.clone();
+    lower_guarded_decls(&mut lowered.decls);
+    crate::core_bindings::normalize_decls(&mut lowered.decls);
+    crate::typecheck::TypeChecker::new().resolve_complements(&mut lowered);
+    Cow::Owned(lowered)
+}
+
+pub(crate) fn lower_guarded_decls(decls: &mut [Decl]) {
+    if !decls.iter().any(decl_has_guard) {
+        return;
+    }
+    let mut names = crate::core_bindings::module_names(decls);
+    reserve_members(decls, &mut names);
+    lower_members(decls, &names, &mut 0);
+}
+
+fn reserve_members(decls: &[Decl], names: &mut HashSet<String>) {
+    for decl in decls {
+        match decl {
+            Decl::Function {
+                name, params, body, ..
+            } => {
+                names.insert(name.clone());
+                names.extend(params.iter().map(|(name, _)| name.clone()));
+                crate::core_bindings::reserve_body(body, names);
+            }
+            Decl::Class { methods, .. } => reserve_members(methods, names),
+            Decl::Global {
+                init: Some(expr), ..
+            } => crate::core_bindings::reserve_expr(expr, names),
+            _ => {}
+        }
+    }
+}
+
+fn decl_has_guard(decl: &Decl) -> bool {
+    match decl {
+        Decl::Function { body, .. } => body.iter().any(stmt_has_guard),
+        Decl::Class { methods, .. } => methods.iter().any(decl_has_guard),
+        Decl::Global {
+            init: Some(expr), ..
+        } => expr_has_guard(expr),
+        _ => false,
+    }
+}
+
+fn expr_has_guard(expr: &Expr) -> bool {
+    if let Expr::Closure { body, .. } = expr {
+        return body.iter().any(stmt_has_guard);
+    }
+    let mut found = false;
+    crate::core_ir::for_each_expr_child(expr, &mut |child| {
+        if !found {
+            found = expr_has_guard(child);
+        }
+    });
+    found
+}
+
+fn stmt_has_guard(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let(_, _, expr)
+        | Stmt::Assign(_, expr)
+        | Stmt::Expr(expr)
+        | Stmt::Return(Some(expr))
+        | Stmt::Throw(expr) => expr_has_guard(expr),
+        Stmt::IndexAssign { base, index, value } => {
+            [base, index, value].into_iter().any(expr_has_guard)
+        }
+        Stmt::FieldAssign { base, value, .. } => [base, value].into_iter().any(expr_has_guard),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            expr_has_guard(cond)
+                || then_body.iter().any(stmt_has_guard)
+                || else_body.iter().any(stmt_has_guard)
+        }
+        Stmt::Loop { cond, body, .. } => {
+            cond.as_ref().is_some_and(expr_has_guard) || body.iter().any(stmt_has_guard)
+        }
+        Stmt::Match { scrutinee, arms } => {
+            expr_has_guard(scrutinee)
+                || arms
+                    .iter()
+                    .any(|arm| arm.guard.is_some() || arm.body.iter().any(stmt_has_guard))
+        }
+        Stmt::Try { body, catches } => {
+            body.iter().any(stmt_has_guard)
+                || catches
+                    .iter()
+                    .any(|catch| catch.body.iter().any(stmt_has_guard))
+        }
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => false,
+    }
+}
+
+fn lower_members(decls: &mut [Decl], names: &HashSet<String>, counter: &mut usize) {
+    for decl in decls {
+        match decl {
+            Decl::Function { body, .. } => lower_body(body, names, counter),
+            Decl::Class { methods, .. } => lower_members(methods, names, counter),
+            Decl::Global {
+                init: Some(expr), ..
+            } => lower_expr(expr, names, counter),
+            _ => {}
+        }
+    }
+}
+
+fn lower_expr(expr: &mut Expr, names: &HashSet<String>, counter: &mut usize) {
+    if let Expr::Closure { body, .. } = expr {
+        lower_body(body, names, counter);
+    } else {
+        crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
+            lower_expr(child, names, counter)
+        });
+    }
+}
+
+fn lower_body(body: &mut Vec<Stmt>, names: &HashSet<String>, counter: &mut usize) {
+    let mut out = Vec::with_capacity(body.len());
+    for mut stmt in std::mem::take(body) {
+        match &mut stmt {
+            Stmt::Let(_, _, expr)
+            | Stmt::Assign(_, expr)
+            | Stmt::Expr(expr)
+            | Stmt::Return(Some(expr))
+            | Stmt::Throw(expr) => lower_expr(expr, names, counter),
+            Stmt::IndexAssign { base, index, value } => {
+                for expr in [base, index, value] {
+                    lower_expr(expr, names, counter);
+                }
+            }
+            Stmt::FieldAssign { base, value, .. } => {
+                for expr in [base, value] {
+                    lower_expr(expr, names, counter);
+                }
+            }
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                lower_expr(cond, names, counter);
+                lower_body(then_body, names, counter);
+                lower_body(else_body, names, counter);
+            }
+            Stmt::Loop { cond, body, .. } => {
+                if let Some(cond) = cond {
+                    lower_expr(cond, names, counter);
+                }
+                lower_body(body, names, counter);
+            }
+            Stmt::Match { scrutinee, arms } => {
+                lower_expr(scrutinee, names, counter);
+                for arm in arms {
+                    if let Some(guard) = &mut arm.guard {
+                        lower_expr(guard, names, counter);
+                    }
+                    lower_body(&mut arm.body, names, counter);
+                }
+            }
+            Stmt::Try { body, catches } => {
+                lower_body(body, names, counter);
+                for catch in catches {
+                    lower_body(&mut catch.body, names, counter);
+                }
+            }
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
+        }
+        if let Stmt::Match { scrutinee, arms } = stmt {
+            if arms.iter().any(|arm| arm.guard.is_some()) {
+                out.extend(expand_match(scrutinee, arms, names, counter));
+            } else {
+                out.push(Stmt::Match { scrutinee, arms });
+            }
+        } else {
+            out.push(stmt);
+        }
+    }
+    *body = out;
+}
+
+fn expand_match(
+    scrutinee: Expr,
+    arms: Vec<MatchArm>,
+    names: &HashSet<String>,
+    counter: &mut usize,
+) -> Vec<Stmt> {
+    while ["__match_value_", "__match_done_"]
+        .iter()
+        .any(|prefix| names.contains(&format!("{prefix}{counter}")))
+    {
+        *counter += 1;
+    }
+    let value = format!("__match_value_{counter}");
+    let done = format!("__match_done_{counter}");
+    *counter += 1;
+    let mut out = vec![
+        Stmt::Let(value.clone(), None, scrutinee),
+        Stmt::Let(done.clone(), Some(Typ::Bool), Expr::BoolLit(false)),
+    ];
+    // One gate per arm avoids duplicating the remaining arms on every guard failure.
+    for arm in arms {
+        let mut selected = vec![Stmt::Assign(done.clone(), Expr::BoolLit(true))];
+        selected.extend(arm.body);
+        let body = match arm.guard {
+            Some(cond) => vec![Stmt::If {
+                cond,
+                then_body: selected,
+                else_body: vec![],
+            }],
+            None => selected,
+        };
+        out.push(Stmt::If {
+            cond: Expr::Unary {
+                op: "!".into(),
+                expr: Box::new(Expr::Ident(done.clone())),
+            },
+            then_body: vec![Stmt::Match {
+                scrutinee: Expr::Ident(value.clone()),
+                arms: vec![
+                    MatchArm {
+                        pattern: arm.pattern,
+                        guard: None,
+                        body,
+                    },
+                    MatchArm {
+                        pattern: "_".into(),
+                        guard: None,
+                        body: vec![],
+                    },
+                ],
+            }],
+            else_body: vec![],
+        });
+    }
+    out
+}

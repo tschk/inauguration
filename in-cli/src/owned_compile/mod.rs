@@ -460,20 +460,31 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     report.module_identity = Some(module.identity_report(&request.module_id));
     report.parsed_function_count = count_functions(&module);
 
-    // ponytail: skip Core IR verification for Rust files (self-hosting demo).
-    // The syn-based Rust frontend lowers complex Rust constructs that the verifier
-    // can't fully type-check yet (stdlib imports, generics, Result types).
-    // Every other source verifies on every target, JIT included: the verifier is
-    // what turns unresolved symbols into coded refusals instead of silent wrong
-    // answers from lowering fallbacks. IN_SKIP_VERIFY remains an escape hatch.
+    // Validate invocable Rust entries before optimizations can erase invalid conditions.
+    // Complex Rust programs keep their compile-only path; unrelated unsupported functions
+    // do not prevent verification of a supported entry's reachable functions.
     let effective_entry = request.entry.clone().or(pkg_entry);
+    let requested_entry = effective_entry.as_deref().unwrap_or("main");
+    let rust_entry = if is_rust_source && matches!(request.target, CompileTarget::Jit) {
+        let entry = jit::resolve_jit_entry(&module, requested_entry);
+        jit::rust_entry_can_execute(&module, &entry, requested_entry).then_some(entry)
+    } else {
+        None
+    };
     let skip_verify = is_rust_source || crate::config::env_config().skip_verify;
-    if !is_rust_source && !skip_verify {
-        let verify_opts = core_ir_verifier::VerifyOptions {
-            entry: effective_entry.clone(),
-            require_entry: effective_entry.is_some(),
+    if !skip_verify || rust_entry.is_some() {
+        let reachable;
+        let (verified_module, entry) = if let Some(entry) = rust_entry {
+            reachable = native::native_entry_module(&module, &entry);
+            (&reachable, Some(entry))
+        } else {
+            (&module, effective_entry.clone())
         };
-        let verify_report = core_ir_verifier::verify_module(&module, &verify_opts);
+        let verify_opts = core_ir_verifier::VerifyOptions {
+            require_entry: entry.is_some(),
+            entry,
+        };
+        let verify_report = core_ir_verifier::verify_module(verified_module, &verify_opts);
         if !verify_report.ok {
             report.reason_code = Some(format!(
                 "verify-{}",

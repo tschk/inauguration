@@ -1,8 +1,8 @@
 # Multi-frontend IR (conceptual)
 
-Multiple source languages can feed the same hybrid pipeline by lowering to **textual SIL** that `hybrid_sil` already parses (`sil @…`, `bbN:`, `function_ref @…`, unique SSA ids across the merged module).
+Multiple source languages lower to **Core IR** and share desugaring, verification, optimization, and native JIT/emission. Guarded matches use the same native pipeline as ordinary control flow.
 
-## Textual SIL merge behavior (`hybrid_sil`)
+## Historical textual SIL merge behavior (`hybrid_sil`)
 
 `parse_textual_sil` keeps the legacy top-level **`function_id`** as whichever **`sil @name`** line appeared **last** in the input, and still exposes flattened block / instruction vectors for existing callers. It also records explicit per-function entries in **`SilArtifact::functions`**, each with its own blocks and instructions. **`extract_call_graph`** prefers those per-function records, then falls back to **`instruction_callers`**, then to the legacy **`function_id`** behavior for old artifacts. Emitters still typically place **`sil @main` last** so single-function views line up with `main`. For full detail see [in-language.md](in-language.md#hybrid_sil-and-merged-textual-sil).
 
@@ -12,7 +12,7 @@ Rust type: `in_cli::core_ir::UnifiedModule`.
 
 | Field | Meaning |
 |-------|--------|
-| `decls: Vec<Decl>` | Top-level declarations in source order (before lowering sorts functions for SIL). |
+| `decls: Vec<Decl>` | Top-level declarations in source order. |
 
 `.in` also has a parser-side surface fact helper for `import`, `capability`, and `extern` declarations. Local relative `.in` imports merge imported declarations into the current `UnifiedModule`; `std.io` / `std.fs` / `std.http` / `std.json` / `std.process` / `std.cli` imports synthesize bounded extern-style declarations; imports and capabilities are exposed through `in agent` JSON, and extern `requires` contracts produce agent diagnostics when required capabilities are missing. Extern bindings lower into empty `Function` declarations today so call graph extraction can observe explicit `.in` calls without expanding the Core IR schema.
 
@@ -24,6 +24,14 @@ Rust type: `in_cli::core_ir::UnifiedModule`.
 | `Function` | `name`, `params`, `ret`, `body` | **`.in`**, `icoreVersion: 2`, dedicated Rust/Go/V fronts, and selected Tree-sitter fronts fill bounded statement lists; lowering follows `lower_core`. |
 
 **`Typ`**: `Int`, `String`, `Bool`, `Void`, `Named(String)`.
+
+## Guarded matches
+
+`Stmt::Match` arms contain a pattern, an optional `guard: Expr`, and a body. The subject is evaluated once. A guard runs only when its pattern matches; a false guard continues to the next arm. The first successful arm runs its body, and later guards and bodies are skipped. Guard conditions must be boolean.
+
+Rust preserves `pattern if condition => value`. `.in` accepts `pattern if condition { statements }`. Version 2/3 `.icore` accepts a `match` statement with `scrutinee` and `arms`; each arm has a string `pattern`, an optional expression `guard`, and a statement-array `body`. Expression operands use the parser's `lhs`/`rhs` fields. See [the JSON fixture](../conformance/control-flow/match-guard.icore).
+
+Shared lowering saves the subject and uses one completion flag with one conditional gate per arm, avoiding duplication of the remaining arms. Generated names avoid user globals, parameters, bindings, and captures. Native and C emitters also prepare raw guarded Core IR through this lowering.
 
 ## Boundary IR (`icoreVersion: 3`)
 

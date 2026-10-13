@@ -1315,10 +1315,12 @@ fn lowers_numeric_match_with_default_arm() {
                     scrutinee: Expr::Ident("tag".into()),
                     arms: vec![
                         crate::core_ir::MatchArm {
+                            guard: None,
                             pattern: "1".into(),
                             body: vec![Stmt::Assign("out".into(), Expr::IntLit(10))],
                         },
                         crate::core_ir::MatchArm {
+                            guard: None,
                             pattern: "_".into(),
                             body: vec![Stmt::Assign("out".into(), Expr::IntLit(20))],
                         },

@@ -1889,7 +1889,7 @@ fn owned_rust_jit_verifies_before_execution() {
         report
             .error
             .as_deref()
-            .is_some_and(|error| error.starts_with("jit-verification-failed:")),
+            .is_some_and(|error| error.contains("unresolved identifier")),
         "{report:?}"
     );
     assert_eq!(report.eval_exit_code, None);
@@ -2142,14 +2142,13 @@ fn owned_rust_jit_preserves_conditional_returns_and_tail_values() {
 }
 
 #[test]
-fn owned_rust_jit_refuses_missing_values_and_unlowered_guards() {
+fn owned_rust_jit_refuses_missing_values() {
     if !native_backend::native_subset_host_available() {
         return;
     }
     for source in [
         "fn main() -> i64 { 42; }",
         "fn answer(value: i64) -> i64 { match value { 1 => 41, 2 => 42 } } fn main() -> i64 { answer(3) }",
-        "fn main() -> i64 { match true { true if false => 1, _ => 42 } }",
     ] {
         let path = temp_path("rust-missing-value.rs");
         fs::write(&path, source).unwrap();
@@ -2225,4 +2224,101 @@ fn owned_rust_jit_tail_branches_preserve_primitive_result_types() {
         assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
         assert_eq!(report.eval_result, Some(expected));
     }
+}
+
+#[test]
+fn owned_rust_jit_match_guards_select_the_first_successful_arm() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main() -> i64 { match true { true if false => 1, _ => 42 } }",
+        "fn accepted(value: i64) -> bool { if value == 3 { return true; } else { return false; } } fn main() -> i64 { match 3 { value if value < 0 => 1, value if accepted(value) => value + 39, _ => 2 } }",
+        "fn main() -> i64 { let value = 42; match 3 { value if false => 1, _ => value } }",
+        "fn main() -> i64 { let __match_value_0 = 40; let __match_done_0 = 2; match 3 { value if value > 0 => __match_value_0 + __match_done_0, _ => 0 } }",
+    ] {
+        let path = temp_path("rust-match-guards.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+        assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{source}");
+    }
+}
+
+#[test]
+fn owned_guarded_matches_share_lowering_across_frontends() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for fixture in ["match-guard-effects.in", "match-guard.icore"] {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../conformance/control-flow")
+            .join(fixture);
+        let report = compile_owned(&default_request(
+            path,
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        assert!(report.success, "{report:?}");
+        assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{fixture}");
+    }
+}
+
+#[test]
+fn owned_match_guards_require_boolean_conditions() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (suffix, source) in [
+        (
+            "rs",
+            "fn bad() -> bool { return 1; } fn main() -> i64 { match true { true if bad() => 1, _ => 42 } }",
+        ),
+        ("rs", "fn main() -> i64 { if 1 { 42 } else { 0 } }"),
+        (
+            "rs",
+            "fn main() -> i64 { match 3 { value if 1 => 1, _ => 42 } }",
+        ),
+        (
+            "in",
+            "fn main() -> Int { match 3 { value if 1 { return 1; } _ { return 42; } } }",
+        ),
+    ] {
+        let path = temp_path(&format!("invalid-guard.{suffix}"));
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(!report.success, "{report:?}");
+        assert_eq!(report.eval_result, None);
+    }
+}
+
+#[test]
+fn raw_native_guard_lowering_preserves_effect_order() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let source = include_str!("../../../conformance/control-flow/match-guard-effects.in");
+    let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+    let request = default_request(
+        PathBuf::from("direct-guard.in"),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    );
+    let result = super::jit::compile_jit(&module, "GuardEffects", &request).unwrap();
+    assert_eq!(result.eval_result, Some(EvalValue::Int(42)));
 }

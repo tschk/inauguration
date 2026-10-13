@@ -48,7 +48,7 @@ pub(crate) fn normalize_function(
     bindings.body(body, &mut scope);
 }
 
-fn reserve_expr(expr: &Expr, names: &mut HashSet<String>) {
+pub(crate) fn reserve_expr(expr: &Expr, names: &mut HashSet<String>) {
     match expr {
         Expr::Ident(name) => {
             names.insert(name.clone());
@@ -108,6 +108,9 @@ pub(crate) fn reserve_body(body: &[Stmt], names: &mut HashSet<String>) {
                 reserve_expr(scrutinee, names);
                 for arm in arms {
                     reserve_pattern(&arm.pattern, names);
+                    if let Some(guard) = &arm.guard {
+                        reserve_expr(guard, names);
+                    }
                     reserve_body(&arm.body, names);
                 }
             }
@@ -321,6 +324,9 @@ impl Bindings<'_> {
                     for arm in arms {
                         let mut inner = scope.clone();
                         self.pattern(&mut arm.pattern, &mut inner);
+                        if let Some(guard) = &mut arm.guard {
+                            self.expr(guard, &inner);
+                        }
                         self.body(&mut arm.body, &mut inner);
                     }
                 }
@@ -355,6 +361,7 @@ mod tests {
             Stmt::Match {
                 scrutinee: Expr::Ident("x".into()),
                 arms: vec![crate::core_ir::MatchArm {
+                    guard: None,
                     pattern: "Point { x }".into(),
                     body: vec![Stmt::Return(Some(Expr::Ident("x".into())))],
                 }],

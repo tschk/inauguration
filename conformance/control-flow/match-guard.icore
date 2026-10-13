@@ -1,0 +1,82 @@
+{
+  "icoreVersion": 2,
+  "decls": [
+    {
+      "kind": "function",
+      "name": "main",
+      "params": [],
+      "return": "Int",
+      "body": [
+        {
+          "kind": "match",
+          "scrutinee": {
+            "kind": "int",
+            "value": 3
+          },
+          "arms": [
+            {
+              "pattern": "value",
+              "guard": {
+                "kind": "bool",
+                "value": false
+              },
+              "body": [
+                {
+                  "kind": "return",
+                  "value": {
+                    "kind": "int",
+                    "value": 1
+                  }
+                }
+              ]
+            },
+            {
+              "pattern": "value",
+              "guard": {
+                "kind": "binary",
+                "op": ">",
+                "lhs": {
+                  "kind": "ident",
+                  "name": "value"
+                },
+                "rhs": {
+                  "kind": "int",
+                  "value": 2
+                }
+              },
+              "body": [
+                {
+                  "kind": "return",
+                  "value": {
+                    "kind": "binary",
+                    "op": "+",
+                    "lhs": {
+                      "kind": "ident",
+                      "name": "value"
+                    },
+                    "rhs": {
+                      "kind": "int",
+                      "value": 39
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "pattern": "_",
+              "body": [
+                {
+                  "kind": "return",
+                  "value": {
+                    "kind": "int",
+                    "value": 0
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

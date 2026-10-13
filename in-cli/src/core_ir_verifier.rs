@@ -618,6 +618,10 @@ fn check_stmt(
                         expr_type(scrutinee, facts, env).unwrap_or(Typ::Named("Any".into())),
                     );
                 }
+                if let Some(guard) = &arm.guard {
+                    check_expr(fn_name, guard, facts, &arm_env, call_edges)?;
+                    require_type(fn_name, "match guard", &Typ::Bool, guard, facts, &arm_env)?;
+                }
                 check_stmts(
                     fn_name,
                     &arm.body,

@@ -1,0 +1,19 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var calls: Int = 0;
+fn subject() -> Int { calls = calls * 10 + 1; return 3; }
+fn failed() -> Bool { calls = calls * 10 + 2; return false; }
+fn skipped() -> Bool { calls = calls * 10 + 3; return true; }
+fn main() -> Int {
+    var result: Int = 0;
+    match subject() {
+        0 if skipped() { result = 10; }
+        3 if failed() { result = 20; }
+        value if value == 3 { result = 30; }
+        _ if skipped() { result = 40; }
+    }
+    return result + calls;
+}

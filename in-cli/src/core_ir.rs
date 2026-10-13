@@ -385,6 +385,8 @@ impl MatchPattern {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchArm {
     pub pattern: String,
+    /// Evaluated after a pattern matches; false proceeds to the next arm.
+    pub guard: Option<Expr>,
     pub body: Vec<Stmt>,
 }
 

@@ -589,6 +589,23 @@ impl TypeChecker {
                     if let Ok(pattern) = MatchPattern::parse(&arm.pattern) {
                         self.check_match_pattern(fn_name, &pattern, facts, &mut env_arm, errors);
                     }
+                    if let Ok(MatchPattern::IdentPat(name)) = MatchPattern::parse(&arm.pattern)
+                        && let Some(typ) = self.expr_type(scrutinee, facts, env)
+                    {
+                        env_arm.insert(name, typ);
+                    }
+                    if let Some(guard) = &arm.guard {
+                        self.check_expr(fn_name, guard, facts, &env_arm, errors);
+                        if let Some(actual) = self.expr_type(guard, facts, &env_arm)
+                            && actual.canonical() != Typ::Bool
+                        {
+                            errors.push(TypeError::TypeMismatch {
+                                context: format!("match guard in `{fn_name}`"),
+                                expected: Typ::Bool,
+                                got: actual,
+                            });
+                        }
+                    }
                     self.check_stmts(fn_name, fn_ret, &arm.body, facts, &mut env_arm, errors);
                 }
             }
@@ -1782,6 +1799,7 @@ mod tests {
             vec![Stmt::Match {
                 scrutinee: Expr::IntLit(1),
                 arms: vec![crate::core_ir::MatchArm {
+                    guard: None,
                     pattern: "_".into(),
                     body: vec![Stmt::Return(None)],
                 }],

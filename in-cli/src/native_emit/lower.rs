@@ -583,6 +583,8 @@ pub fn lower_module_with_jobs(
     linkage: NativeLinkage,
     jobs: usize,
 ) -> Result<LoweredModule, String> {
+    let prepared = crate::lower_core::prepared_guard_module(module);
+    let module = prepared.as_ref();
     // Clear any stale external refs from previous invocations
     TL_EXTERNAL_REFS.with(|refs| refs.borrow_mut().clear());
     TL_ERROR_SLOT_REFS.with(|refs| refs.borrow_mut().clear());

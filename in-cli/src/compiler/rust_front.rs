@@ -1090,16 +1090,17 @@ fn stmt_ensures_return(stmt: &Stmt) -> bool {
             ..
         } => !else_body.is_empty() && all_paths_return(then_body) && all_paths_return(else_body),
         Stmt::Match { arms, .. } => {
-            let wildcard = arms.iter().any(|arm| {
+            let wildcard = arms.iter().filter(|arm| arm.guard.is_none()).any(|arm| {
                 matches!(
                     crate::core_ir::MatchPattern::parse(&arm.pattern),
                     Ok(crate::core_ir::MatchPattern::WildPat
                         | crate::core_ir::MatchPattern::IdentPat(_))
                 )
             });
-            let bool_complete = ["true", "false"]
-                .iter()
-                .all(|value| arms.iter().any(|arm| arm.pattern.trim() == *value));
+            let bool_complete = ["true", "false"].iter().all(|value| {
+                arms.iter()
+                    .any(|arm| arm.guard.is_none() && arm.pattern.trim() == *value)
+            });
             !arms.is_empty()
                 && (wildcard || bool_complete)
                 && arms.iter().all(|arm| all_paths_return(&arm.body))
@@ -1142,14 +1143,6 @@ fn lower_match_with_types(
     out: &mut Vec<Stmt>,
     local_types: &mut HashMap<String, String>,
 ) {
-    if value.arms.iter().any(|arm| arm.guard.is_some()) {
-        // Preserve an explicit refusal until guard conditions are represented in Core IR.
-        out.push(Stmt::Expr(Expr::Call {
-            callee: Box::new(Expr::Ident("rust-match-guard-not-lowered".into())),
-            args: vec![],
-        }));
-        return;
-    }
     let scrutinee = lower_expr_with_types(&value.expr, local_types);
     let arms = value
         .arms
@@ -1157,12 +1150,17 @@ fn lower_match_with_types(
         .map(|arm| {
             let mut body = Vec::new();
             let mut inner = local_types.clone();
+            let guard = arm
+                .guard
+                .as_ref()
+                .map(|(_, guard)| lower_expr_with_types(guard, &mut inner));
             if tail {
                 lower_tail_expr_with_types(&arm.body, &mut body, &mut inner);
             } else {
                 lower_expr_stmt(&arm.body, &mut body, &mut inner);
             }
             MatchArm {
+                guard,
                 pattern: arm.pat.to_token_stream().to_string(),
                 body,
             }
@@ -1206,10 +1204,12 @@ fn lower_if_with_types(
             .unwrap_or_default();
         let arms = vec![
             MatchArm {
+                guard: None,
                 pattern: expr_let.pat.to_token_stream().to_string(),
                 body: then_body,
             },
             MatchArm {
+                guard: None,
                 pattern: "_".to_string(),
                 body: else_body,
             },

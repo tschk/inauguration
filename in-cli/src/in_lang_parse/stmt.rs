@@ -254,11 +254,20 @@ fn parse_match_arms(
         if pattern.is_empty() {
             return Err(".in: match arm pattern missing".into());
         }
+        // Quoted patterns containing ` if ` are not guard separators.
+        let guard = if let Some((_, index)) = find_top_level_binary_op(&pattern, &[" if "]) {
+            let guard = parse_expr(trim(&pattern[index + 4..]));
+            pattern = trim(&pattern[..index]).to_string();
+            Some(guard)
+        } else {
+            None
+        };
         crate::core_ir::MatchPattern::parse(&pattern)
             .map_err(|_| format!(".in: unknown pattern `{pattern}` in match arm"))?;
         let (body_inner, close) = brace_content_bounds_after_open(inner, open)
             .ok_or_else(|| ".in: unclosed match arm body".to_string())?;
         arms.push(crate::core_ir::MatchArm {
+            guard,
             pattern: pattern.to_string(),
             body: parse_function_body_with_context(body_inner, context)?,
         });
