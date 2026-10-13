@@ -36,13 +36,16 @@ pub(crate) fn find_field_offset<'a>(
         return Some(offset);
     }
     // Try prefix match for nested structs: "inner" → "inner.val"
-    field_map.iter().find_map(|(k, v)| {
-        if k.len() > name.len() && k.starts_with(name) && k.as_bytes()[name.len()] == b'.' {
-            Some(v)
-        } else {
-            None
-        }
-    })
+    field_map
+        .iter()
+        .filter_map(|(k, v)| {
+            if k.len() > name.len() && k.starts_with(name) && k.as_bytes()[name.len()] == b'.' {
+                Some(v)
+            } else {
+                None
+            }
+        })
+        .min()
 }
 
 /// Branch condition that tests `op` against flags already set by a compare.
@@ -210,9 +213,13 @@ pub(crate) fn native_param_abi_slots(
             )),
         }
     }
-    for (_, typ) in params {
-        let mut visited = Vec::new();
-        slots += count_type_slots(typ, structs, fn_name, &mut visited, 0)?;
+    for (name, typ) in params {
+        if name == "self" && matches!(typ, Typ::Named(_)) {
+            slots += 1;
+        } else {
+            let mut visited = Vec::new();
+            slots += count_type_slots(typ, structs, fn_name, &mut visited, 0)?;
+        }
     }
     Ok(slots)
 }

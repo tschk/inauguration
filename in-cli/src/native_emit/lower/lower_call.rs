@@ -652,6 +652,14 @@ pub(crate) fn lower_struct_ptr_arg(
             "native-lower: self argument needs addressable struct storage in `{fn_name}`"
         ));
     };
+    if !ctx.locals.contains_key(local)
+        && !ctx.params.contains_key(local)
+        && let Some(&offset) = ctx.globals.get(local)
+    {
+        ctx.validate_global_struct(local)?;
+        ctx.emit_global_address(emitter, reg, offset);
+        return Ok(reg + 1);
+    }
     match ctx.locals.get(local) {
         Some(LocalSlot::Struct { fields: slots, .. }) => {
             let Some(&first_off) = slots.values().min() else {

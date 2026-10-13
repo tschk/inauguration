@@ -237,6 +237,7 @@ pub(crate) struct LoopBranches {
 pub(crate) struct LowerCtx<'a> {
     /// Parameter name → stack offset (params fully spilled, no register residency)
     pub(crate) params: HashMap<String, u32>,
+    pub(crate) receiver_pointers: HashMap<String, u32>,
     pub(crate) param_types: HashMap<String, Typ>,
     pub(crate) param_stores: Vec<(u8, u32)>,
     /// Stack-based params: (incoming_stack_offset, local_stack_offset)
@@ -293,6 +294,7 @@ pub(crate) fn alloc_nested_struct_slots(
         fn_name,
         &mut Vec::new(),
         &mut slots,
+        true,
     )?;
     if slots.is_empty() {
         slots.insert("__base".to_string(), ctx.alloc_slot());
@@ -309,6 +311,7 @@ fn alloc_nested_struct_slots_inner(
     _fn_name: &str,
     visited: &mut Vec<String>,
     slots: &mut HashMap<String, u32>,
+    store_params: bool,
 ) -> Result<(), String> {
     let base_name = base_struct_name(struct_name);
     if visited.contains(&base_name.to_string()) {
@@ -320,10 +323,12 @@ fn alloc_nested_struct_slots_inner(
         match field_ty {
             Typ::Int | Typ::Bool | Typ::String | Typ::Float => {
                 let offset = ctx.alloc_slot();
-                if *abi_idx < 8 {
-                    ctx.param_stores.push((*abi_idx as u8, offset));
-                } else {
-                    ctx.stack_params.push(((*abi_idx - 8) as u32, offset));
+                if store_params {
+                    if *abi_idx < 8 {
+                        ctx.param_stores.push((*abi_idx as u8, offset));
+                    } else {
+                        ctx.stack_params.push(((*abi_idx - 8) as u32, offset));
+                    }
                 }
                 slots.insert(field.clone(), offset);
                 *abi_idx += 1;
@@ -354,6 +359,7 @@ fn alloc_nested_struct_slots_inner(
                     _fn_name,
                     visited,
                     &mut inner_slots,
+                    store_params,
                 )?;
                 // Flatten: nested struct fields go into parent's slot map with <field>.<subfield> keys
                 for (sub_field, sub_offset) in inner_slots {
@@ -366,6 +372,7 @@ fn alloc_nested_struct_slots_inner(
             }
         }
     }
+    visited.pop();
     if slots.is_empty() {
         slots.insert("__base".to_string(), ctx.alloc_slot());
     }
@@ -437,6 +444,7 @@ impl<'a> LowerCtx<'a> {
     ) -> Result<Self, String> {
         let mut ctx = Self {
             params: HashMap::new(),
+            receiver_pointers: HashMap::new(),
             param_types: HashMap::new(),
             param_stores: Vec::new(),
             stack_params: Vec::new(),
@@ -529,14 +537,39 @@ impl<'a> LowerCtx<'a> {
                         abi_idx += 1;
                         continue;
                     };
-                    let slots = alloc_nested_struct_slots(
-                        &mut ctx,
-                        struct_name,
-                        fields,
-                        structs,
-                        &mut abi_idx,
-                        fn_name,
-                    )?;
+                    let slots = if name == "self" {
+                        let pointer_slot = ctx.alloc_slot();
+                        if abi_idx < 8 {
+                            ctx.param_stores.push((abi_idx as u8, pointer_slot));
+                        } else {
+                            ctx.stack_params.push(((abi_idx - 8) as u32, pointer_slot));
+                        }
+                        ctx.receiver_pointers.insert(name.clone(), pointer_slot);
+                        ctx.param_types.insert(name.clone(), typ.clone());
+                        abi_idx += 1;
+                        let mut slots = HashMap::new();
+                        alloc_nested_struct_slots_inner(
+                            &mut ctx,
+                            struct_name,
+                            fields,
+                            structs,
+                            &mut 0,
+                            fn_name,
+                            &mut Vec::new(),
+                            &mut slots,
+                            false,
+                        )?;
+                        slots
+                    } else {
+                        alloc_nested_struct_slots(
+                            &mut ctx,
+                            struct_name,
+                            fields,
+                            structs,
+                            &mut abi_idx,
+                            fn_name,
+                        )?
+                    };
                     ctx.locals.insert(
                         name.clone(),
                         LocalSlot::Struct {

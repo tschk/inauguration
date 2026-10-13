@@ -1,0 +1,14 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+class Pair {
+    x: Int;
+    y: Int;
+    fn answer(value: Int) -> Int { return x + y + value; }
+}
+fn main() -> Int {
+    var pair: Pair = Pair { x: 20, y: 15 };
+    return pair.answer(7);
+}

@@ -2945,6 +2945,117 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn class_method_receivers_preserve_layout_and_argument_positions() {
+        for source in [
+            "class Pair { x: Int; y: Int; fn answer() -> Int { var copied: Pair = self; return copied.x + copied.y; } }\nfn main() -> Int { var pair: Pair = Pair { x: 20, y: 22 }; return pair.answer(); }",
+            "class State { flag: Bool; value: Float; fn answer(expected: Float) -> Int { if flag && value == expected { return 42; } return 0; } }\nfn main() -> Int { var state: State = State { flag: true, value: 42.5 }; return state.answer(42.5); }",
+            "class Pair { x: Int; y: Int; fn answer(value: Int) -> Int { return x + y + value; } }\nfn main() -> Int { var pair: Pair = Pair { x: 20, y: 15 }; return pair.answer(7); }",
+            "class Empty { fn answer(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int) -> Int { return a + b + c + d + e + f + g + h; } }\nfn main() -> Int { var empty: Empty = Empty {}; return empty.answer(1, 2, 3, 4, 5, 6, 7, 14); }",
+            "class Empty { fn answer(value: Int) -> Int { return value; } fn forward(value: Int) -> Int { return self.answer(value); } }\nfn main() -> Int { var empty: Empty = Empty {}; return empty.forward(42); }",
+            "class Empty { fn answer(value: Int) -> Int { return value; } }\nvar empty: Empty = 0;\nfn main() -> Int { return empty.answer(42); }",
+            "class Pair { x: Int; y: Int; fn answer(value: Int) -> Int { return x + y + value; } }\nvar pair: Pair = 0;\nfn main() -> Int { pair.x = 20; pair.y = 15; return pair.answer(7); }",
+            "class Empty { fn answer() -> Int { return 42; } }\nfn main() -> Int { var empty: Empty = Empty {}; return empty.answer(); }",
+            "class Empty { fn answer(value: Int) -> Int { return value; } }\nfn main() -> Int { var empty: Empty = Empty {}; return empty.answer(42); }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                crate::lower_core::desugar_module(&mut module);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, target_arch = "aarch64"))]
+    fn nested_class_receiver_fields_preserve_method_addresses() {
+        for source in [
+            "class Inner { x: Int; y: Int; fn get() -> Int { return x + y; } }\nclass Wrapper { left: Inner; right: Inner; fn answer() -> Int { return right.get(); } }\nfn take(value: Wrapper) -> Int { return value.answer(); }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { left: Inner { x: 0, y: 0 }, right: Inner { x: 20, y: 22 } }; return take(wrapper); }",
+            "class Inner { value: Int; fn get(after: Int) -> Int { return value + after; } }\nclass Wrapper { inner: Inner; fn answer() -> Int { return inner.get(22); } }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { inner: Inner { value: 20 } }; return wrapper.answer(); }",
+            "class Inner { x: Int; y: Int; fn get() -> Int { return x + y; } }\nclass Wrapper { inner: Inner; tail: Int; fn answer() -> Int { return inner.get(); } }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { inner: Inner { x: 20, y: 22 }, tail: 0 }; return wrapper.answer(); }",
+            "class Empty {}\nclass Wrapper { inner: Empty; value: Int; fn answer() -> Int { return value; } }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { inner: Empty {}, value: 42 }; return wrapper.answer(); }",
+            "class Empty {}\nclass Wrapper { inner: Empty; value: Int; fn answer() -> Int { return value; } }\nfn take(value: Wrapper) -> Int { return value.answer(); }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { inner: Empty {}, value: 42 }; return take(wrapper); }",
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, target_arch = "aarch64"))]
+    fn recursive_receiver_layout_compilation_is_bounded() {
+        let module = crate::in_lang_parse::parse_in_source("struct Node { Node next }\nfn unused(self: Node) -> Int { return 0; }\nfn main() -> Int { return 42; }").unwrap();
+        assert_eq!(
+            invoke_module(&module, crate::emit_profile::EmitProfile::Default, &[]),
+            Some(42)
+        );
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn receiver_sentinels_return_failure_before_reading_fields() {
+        for source in [
+            "struct Empty {}\nfn main(self: Empty) -> Int { return 42; }",
+            "struct Point { Int value }\nfn main(self: Point) -> Int { return self.value; }",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                for pointer in [0, 1] {
+                    assert_eq!(
+                        invoke_module(&module, profile, &[pointer]),
+                        Some(1),
+                        "{profile:?}: {pointer}: {source}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn empty_receivers_do_not_read_address_only_storage() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "struct Empty {}\nfn main(self: Empty) -> Int { return 42; }",
+        )
+        .unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            // A zero-width receiver may have an aligned dangling address; it has no data to read.
+            assert_eq!(
+                invoke_module(&module, profile, &[8]),
+                Some(42),
+                "{profile:?}"
+            );
+        }
+    }
+
+    #[test]
     #[cfg(all(unix, target_arch = "x86_64"))]
     fn struct_parameter_sentinels_return_failure_without_reading_memory() {
         let module = crate::in_lang_parse::parse_in_source("struct Point { Int x; Int y }\nfn main(point: Point) -> Int { return point.x + point.y; }").unwrap();

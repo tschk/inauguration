@@ -154,6 +154,7 @@ struct LowerCtx<'a> {
     /// Map local name → stack offset (negative from RBP)
     locals: HashMap<String, StackSlot>,
     scalar_types: HashMap<String, Typ>,
+    empty_struct_bases: HashMap<String, u32>,
     /// Current stack frame size (negative, grows down)
     frame_size: u32,
     /// Set when a return statement has been emitted
@@ -219,6 +220,7 @@ impl<'a> LowerCtx<'a> {
         let mut ctx = Self {
             locals: HashMap::new(),
             scalar_types: HashMap::new(),
+            empty_struct_bases: HashMap::new(),
             frame_size: 0,
             emitted_return: false,
             error_branches: Vec::new(),
@@ -296,6 +298,10 @@ impl<'a> LowerCtx<'a> {
                     return Ok(());
                 };
                 let mut slots = HashMap::new();
+                if fields.is_empty() {
+                    let base = self.alloc_slot();
+                    self.empty_struct_bases.insert(name.to_string(), base);
+                }
                 // Frame offsets grow downward; reverse allocation keeps declared
                 // fields in increasing memory order from the struct address.
                 for (field, _field_ty) in fields.into_iter().rev() {
@@ -2075,7 +2081,8 @@ fn lower_ident_ref(
             .values()
             .max()
             .copied()
-            .ok_or("x86_64-lower: empty struct has no addressable fields")?;
+            .or_else(|| ctx.empty_struct_bases.get(name).copied())
+            .ok_or("x86_64-lower: struct has no addressable storage")?;
         emitter.emit_insns(&x86_64::mov_rr(target_reg, RBP));
         emitter.emit_insns(&x86_64::sub_rmi32(target_reg, base as i32 + 8));
         return Ok(());

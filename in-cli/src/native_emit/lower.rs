@@ -992,44 +992,42 @@ fn lower_function(
     for (reg, offset) in &ctx.param_stores {
         emitter.emit_u32(aarch64::str64(*reg, aarch64::REG_SP, *offset));
     }
-    // ponytail: for &self parameters, the register holds a pointer, not field value.
-    // Dereference the stored pointer to load actual field values into the slots.
-    // Load the pointer ONCE into x15, then use it for all field loads.
-    for (name, typ) in &func.params {
-        if let Typ::Named(struct_name) = typ {
-            if name == "self" || name.starts_with("self:") {
-                if let Some(LocalSlot::Struct {
-                    fields: field_map, ..
-                }) = ctx.locals.get(name)
-                {
-                    let pointer_slot = ctx.param_stores.iter().find_map(|(_, off)| {
-                        if field_map.values().any(|v| v == off) {
-                            Some(*off)
-                        } else {
-                            None
-                        }
-                    });
-                    if let Some(ptr_slot) = pointer_slot {
-                        emitter.emit_u32(aarch64::ldr64(15, aarch64::REG_SP, ptr_slot));
-                        let schema = native_struct_fields(structs, struct_name, &func.name)
-                            .unwrap_or_default();
-                        for (i, (field, _)) in schema.iter().enumerate() {
-                            if let Some(&off) = find_field_offset(field_map, field) {
-                                emitter.emit_u32(aarch64::ldr64(14, 15, (i * 8) as u32));
-                                emitter.emit_u32(aarch64::str64(14, aarch64::REG_SP, off));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // Load stack-based params (>8) from caller's stack area
+    // Load incoming stack words before dereferencing any receiver pointer.
     let stack_base = ctx.stack_reserve() + 16;
     for (arg_idx, local_off) in &ctx.stack_params {
         let incoming_off = stack_base + 8 * arg_idx;
         emitter.emit_u32(aarch64::ldr64(15, aarch64::REG_SP, incoming_off));
         emitter.emit_u32(aarch64::str64(15, aarch64::REG_SP, *local_off));
+    }
+    for (name, typ) in &func.params {
+        if name == "self"
+            && let Typ::Named(struct_name) = typ
+            && let Some(LocalSlot::Struct { fields, .. }) = ctx.locals.get(name)
+            && let Some(&pointer_slot) = ctx.receiver_pointers.get(name)
+        {
+            emitter.emit_u32(aarch64::ldr64(15, aarch64::REG_SP, pointer_slot));
+            emitter.emit_insns(&aarch64::load_i64(14, 1));
+            emitter.emit_u32(aarch64::cmp_reg64(15, 14));
+            let valid = emitter.emit_insn(aarch64::b_cond(8, 0));
+            emit_failure_return(emitter, ctx.prologue_stack_reserve);
+            emitter.patch_u32(
+                valid,
+                aarch64::b_cond(8, emitter.len() as i32 - valid as i32),
+            );
+            if structs
+                .get(base_struct_name(struct_name))
+                .is_some_and(|fields| fields.is_empty())
+            {
+                continue;
+            }
+            let mut offsets: Vec<_> = fields.values().copied().collect();
+            offsets.sort_unstable();
+            // Receiver layout uses contiguous local storage, including empty address slots.
+            for (index, offset) in offsets.into_iter().enumerate() {
+                emitter.emit_u32(aarch64::ldr64(14, 15, (index * 8) as u32));
+                emitter.emit_u32(aarch64::str64(14, aarch64::REG_SP, offset));
+            }
+        }
     }
     // Handle implicit return: last stmt is an Expr with multi-field struct init
     let last_is_struct_init = func

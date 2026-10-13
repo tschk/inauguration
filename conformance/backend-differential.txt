@@ -80,3 +80,5 @@ agree conformance/types/global-struct-assignment.in
 agree conformance/control-flow/struct-argument-capture.in
 agree conformance/control-flow/stack-argument-order.in
 agree conformance/control-flow/empty-struct-argument-effects.in
+agree conformance/control-flow/empty-class-receiver.in
+agree conformance/control-flow/class-receiver-arguments.in

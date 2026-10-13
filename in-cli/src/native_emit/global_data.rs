@@ -211,6 +211,21 @@ mod tests {
     }
 
     #[test]
+    fn nested_global_receiver_layouts_are_refused_by_both_backends() {
+        let mut module = crate::in_lang_parse::parse_in_source("struct Inner { Int value }\nclass Wrapper { inner: Inner; fn answer() -> Int { return inner.value; } }\nvar wrapper: Wrapper = 0;\nfn main() -> Int { return wrapper.answer(); }").unwrap();
+        crate::lower_core::desugar_module(&mut module);
+        assert!(
+            crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .is_err()
+        );
+        assert!(crate::native_emit::x86_64_lower::lower_module(&module, "main").is_err());
+    }
+
+    #[test]
     fn parsed_global_literals_initialize_shared_data() {
         let module = crate::in_lang_parse::parse_in_source("var count: Int = 3;\nvar value: Float = 1.5;\nconst enabled: Bool = true;\nfn main() -> Int { return count; }").expect("parse");
         let globals = collect_globals(&module, &HashMap::new());
