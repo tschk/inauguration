@@ -201,19 +201,36 @@ pub(crate) fn lower_index(
         ctx.release_binop_temp();
         return Ok(());
     }
-    if let Expr::Call { callee, args } = base {
+    if matches!(base, Expr::Call { .. } | Expr::ArrayLit(_)) {
         let ptr_slot = ctx.acquire_binop_temp(fn_name)?;
         let len_slot = ctx.acquire_binop_temp(fn_name)?;
-        lower_call::lower_call(
-            emitter,
-            ctx,
-            callee,
-            args,
-            0,
-            functions,
-            pending_calls,
-            fn_name,
-        )?;
+        if let Expr::Call { callee, args } = base {
+            lower_call::lower_call(
+                emitter,
+                ctx,
+                callee,
+                args,
+                0,
+                functions,
+                pending_calls,
+                fn_name,
+            )?;
+        } else {
+            let Some(Typ::Array(elem)) = native_expr_type(base, ctx, functions) else {
+                return Err(format!(
+                    "native-lower: cannot infer indexed array type in `{fn_name}`"
+                ));
+            };
+            super::lower_stmt::lower_array_expr_into_regs(
+                emitter,
+                ctx,
+                base,
+                &elem,
+                functions,
+                pending_calls,
+                fn_name,
+            )?;
+        }
         emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, ptr_slot));
         emitter.emit_u32(aarch64::str64(1, aarch64::REG_SP, len_slot));
         let index_reg = if rd == 2 { 3 } else { 2 };

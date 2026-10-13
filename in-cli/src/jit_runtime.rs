@@ -2464,6 +2464,51 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn direct_array_literal_index_preserves_element_and_index_effects() {
+        for source in [
+            include_str!("../../conformance/types/array-literal-index.in"),
+            "var calls: Int = 0;\nfn item() -> Int { calls += 1; return 39; }\nfn index() -> Int { calls += 1; return 1; }\nfn main() -> Int { return [item(), 40][index()] + calls; }",
+            "var trace: Int = 0;\nfn item(value: Int) -> Int { trace = trace * 10 + value; return value; }\nfn index() -> Int { trace = trace * 10 + 3; return 1; }\nfn main() -> Int { var value: Int = [item(1), item(2)][index()]; return trace + value - 83; }",
+            "fn index() -> Int { return 1; }\nfn main() -> Int { if [40.5, 42.5][index()] == 42.5 { return 42; } return 0; }",
+            "fn index() -> Int { return 1; }\nfn main() -> Int { if [false, true][index()] { return 42; } return 0; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn direct_array_literal_index_checks_bounds() {
+        for index in [-1, 2, i64::MAX] {
+            let source = format!(
+                "fn index() -> Int {{ return {index}; }}\nfn main() -> Int {{ return [20, 42][index()]; }}"
+            );
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(&source, profile, &[]),
+                    Some(if cfg!(target_arch = "aarch64") { 1 } else { 0 }),
+                    "{profile:?}: {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

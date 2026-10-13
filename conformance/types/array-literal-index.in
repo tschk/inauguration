@@ -1,0 +1,12 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var trace: Int = 0;
+fn item(value: Int) -> Int { trace = trace * 10 + value; return value; }
+fn index() -> Int { trace = trace * 10 + 3; return 1; }
+fn main() -> Int {
+    var value: Int = [item(1), item(2)][index()];
+    return trace + value - 83;
+}

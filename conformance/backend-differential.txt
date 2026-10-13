@@ -67,3 +67,4 @@ agree conformance/control-flow/in-index-compound-effects.in
 agree conformance/types/array-return-writable.in
 agree conformance/types/array-direct-argument.in
 agree conformance/types/array-local-return.in
+agree conformance/types/array-literal-index.in
