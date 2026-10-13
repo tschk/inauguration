@@ -704,6 +704,17 @@ fn check_expr(
                     ),
                 ));
             }
+            if op.starts_with("int-cast-") && crate::core_ir::integer_cast_spec(op).is_none() {
+                return Err((
+                    "unsupported-integer-cast".into(),
+                    format!("unsupported integer cast `{op}` in `{fn_name}`"),
+                ));
+            }
+            if crate::core_ir::integer_cast_spec(op).is_some()
+                && expr_type(expr, facts, env) != Some(Typ::Bool)
+            {
+                require_type(fn_name, "integer cast", &Typ::Int, expr, facts, env)?;
+            }
             if matches!(op.as_str(), "int-to-float" | "float-to-int") {
                 let expected = if op == "int-to-float" {
                     Typ::Int
@@ -1061,6 +1072,7 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
             "!" => Some(Typ::Bool),
             "bool-to-int" | "float-to-int" => Some(Typ::Int),
             "int-to-float" => Some(Typ::Float),
+            op if crate::core_ir::integer_cast_spec(op).is_some() => Some(Typ::Int),
             "-" => {
                 if expr_type(expr, facts, env) == Some(Typ::Float) {
                     Some(Typ::Float)
@@ -2090,6 +2102,41 @@ mod tests {
                     assert_eq!(report.reason_code.as_deref(), Some("type-mismatch"));
                 }
             }
+        }
+    }
+    #[test]
+    fn integer_casts_require_integral_operands_and_known_widths() {
+        for (op, operand, reason) in [
+            (
+                "int-cast-u8",
+                Expr::FloatLit(crate::core_ir::FloatVal(42.0)),
+                "type-mismatch",
+            ),
+            (
+                "int-cast-i8",
+                Expr::StringLit("text".into()),
+                "type-mismatch",
+            ),
+            (
+                "int-cast-u128",
+                Expr::IntLit(42),
+                "unsupported-integer-cast",
+            ),
+        ] {
+            let expr = Expr::Unary {
+                op: op.into(),
+                expr: Box::new(operand),
+            };
+            let report = verify_module(
+                &module(vec![function_with_ret(
+                    "main",
+                    Typ::Int,
+                    vec![Stmt::Return(Some(expr))],
+                )]),
+                &default_options(),
+            );
+            assert!(!report.ok, "{report:?}");
+            assert_eq!(report.reason_code.as_deref(), Some(reason));
         }
     }
 }

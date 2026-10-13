@@ -397,6 +397,11 @@ impl Ctx {
                 }
             }
             Expr::Unary { op, expr } => {
+                if crate::core_ir::integer_cast_spec(op).is_some() {
+                    let value =
+                        crate::core_ir::integer_cast_expr(expr.as_ref().clone(), op).unwrap();
+                    return format!("((int64_t)({}))", self.expr_str(&value));
+                }
                 let e = self.expr_str(expr);
                 match op.as_str() {
                     "bool-to-int" | "float-to-int" => format!("((int64_t)({e}))"),

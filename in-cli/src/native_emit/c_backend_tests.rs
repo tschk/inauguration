@@ -562,3 +562,71 @@ fn guarded_match_effects_survive_c_emission_and_execution() {
     std::fs::remove_dir_all(dir).unwrap();
     assert_eq!(status.code(), Some(42));
 }
+
+#[test]
+fn integer_cast_projection_executes_operand_once() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let mut module = crate::in_lang_parse::parse_in_source("var calls: Int = 0;\nfn next() -> Int { calls += 1; return 297; }\nfn main() -> Int { return next() + calls; }").unwrap();
+    let Decl::Function { name, body, .. } = &mut module.decls[2] else {
+        panic!("function");
+    };
+    *name = "answer".into();
+    let Stmt::Return(Some(Expr::Binary { lhs, .. })) = &mut body[0] else {
+        panic!("return");
+    };
+    *lhs = Box::new(Expr::Unary {
+        op: "int-cast-u8".into(),
+        expr: lhs.clone(),
+    });
+    for target in [
+        "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "isize", "usize",
+    ] {
+        let source =
+            format!("fn cast_{target}(value: i64) -> i64 {{ return (value as {target}) as i64; }}");
+        module.decls.extend(
+            crate::compiler::rust_front::parse_rust_source(&source)
+                .unwrap()
+                .decls,
+        );
+    }
+    module.decls.extend(
+        crate::compiler::rust_front::parse_rust_source(
+            "fn cast_bool(value: bool) -> i64 { return (value as u8) as i64; }",
+        )
+        .unwrap()
+        .decls,
+    );
+    let source = format!(
+        "{}\nint main(void) {{ if (cast_i8(170) != -86 || cast_i8(-129) != 127 || cast_u8(-1) != 255 || cast_i16(65535) != -1 || cast_u16(-1) != 65535 || cast_i32(2147483648LL) != -2147483648LL || cast_u32(-1) != 4294967295LL || cast_i64(INT64_MIN) != INT64_MIN || cast_u64(INT64_MIN) != INT64_MIN || cast_isize(-1) != -1 || cast_usize(-1) != -1 || cast_bool(1) != 1 || cast_bool(0) != 0) return 99; return (int)answer(); }}\n",
+        emit_c_module(&module).unwrap()
+    );
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-integer-cast-c-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let c = dir.join("cast.c");
+    let binary = dir.join("cast");
+    std::fs::write(&c, source).unwrap();
+    let build = Command::new("clang")
+        .arg(&c)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let status = Command::new(&binary).status().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(status.code(), Some(42));
+}

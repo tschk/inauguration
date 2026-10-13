@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## Rust integer casts
+
+Explicit Rust casts to signed and unsigned 8-, 16-, 32-, and 64-bit integers truncate low bits and then sign- or zero-extend into the canonical Int64 word. Boolean operands become zero or one. `isize`/`usize` use the supported 64-bit target word. Shared bit operations implement these conversions for both native backends and C projection, with one evaluation of the operand. General source-width arithmetic and floating-point cast semantics remain separate coverage gaps.
+
 ## C-style numeric casts
 
 C/C++ `(type)value` casts to primitive numeric types lower through the same typed conversions as implicit value contexts. Nested casts, boolean truth conversion, and qualifiers preserve operand evaluation once. Pointer, reference, object, typedef, void, and extended-precision casts remain refused. Numeric casts use canonical Int64/Float64, with the source-width and unsigned limitations described below.

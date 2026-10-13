@@ -2185,6 +2185,85 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn integer_casts_execute_truncation_and_extension_once() {
+        use crate::core_ir::{Decl, Expr, Stmt};
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (target, input, expected) in [
+                ("u8", 298, 42),
+                ("i8", 170, -86),
+                ("i8", -129, 127),
+                ("u8", -1, 255),
+                ("u16", 65578, 42),
+                ("i16", 65535, -1),
+                ("u16", -1, 65535),
+                ("u32", 4294967338, 42),
+                ("i32", 2147483648, -2147483648),
+                ("u32", -1, 4294967295),
+                ("i64", i64::MIN, i64::MIN),
+                ("u64", i64::MIN, i64::MIN),
+                ("isize", -1, -1),
+                ("usize", -1, -1),
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(
+                    "fn main(value: Int) -> Int { return value; }",
+                )
+                .unwrap();
+                let Decl::Function { body, .. } = &mut module.decls[0] else {
+                    panic!("function");
+                };
+                body[0] = Stmt::Return(Some(Expr::Unary {
+                    op: format!("int-cast-{target}"),
+                    expr: Box::new(Expr::Ident("value".into())),
+                }));
+                assert_eq!(
+                    invoke_module(&module, profile, &[input]),
+                    Some(expected),
+                    "{profile:?}: {target}: {input}"
+                );
+            }
+            let mut boolean = crate::in_lang_parse::parse_in_source(
+                "fn main(value: Bool) -> Int { return value; }",
+            )
+            .unwrap();
+            let Decl::Function { body, .. } = &mut boolean.decls[0] else {
+                panic!("function");
+            };
+            body[0] = Stmt::Return(Some(Expr::Unary {
+                op: "int-cast-u8".into(),
+                expr: Box::new(Expr::Ident("value".into())),
+            }));
+            for value in [0, 1] {
+                assert_eq!(
+                    invoke_module(&boolean, profile, &[value]),
+                    Some(value),
+                    "{profile:?}: boolean operand"
+                );
+            }
+            let mut module = crate::in_lang_parse::parse_in_source("var calls: Int = 0;\nfn next() -> Int { calls += 1; return 297; }\nfn main() -> Int { return next() + calls; }").unwrap();
+            let Decl::Function { body, .. } = &mut module.decls[2] else {
+                panic!("function");
+            };
+            let Stmt::Return(Some(Expr::Binary { lhs, .. })) = &mut body[0] else {
+                panic!("return");
+            };
+            *lhs = Box::new(Expr::Unary {
+                op: "int-cast-u8".into(),
+                expr: lhs.clone(),
+            });
+            assert_eq!(
+                invoke_module(&module, profile, &[]),
+                Some(42),
+                "{profile:?}: evaluation count"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

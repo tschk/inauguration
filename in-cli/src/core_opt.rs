@@ -1168,6 +1168,19 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
             e
         }
         Expr::Unary { op, expr, .. } => {
+            if crate::core_ir::integer_cast_spec(&op).is_some() {
+                let value = match expr.as_ref() {
+                    Expr::IntLit(value) => Some(Expr::IntLit(*value)),
+                    Expr::BoolLit(value) => Some(Expr::IntLit(i64::from(*value))),
+                    _ => None,
+                };
+                if let Some(value) = value {
+                    return map_expr(
+                        crate::core_ir::integer_cast_expr(value, &op).unwrap(),
+                        &mut |expr| fold_expr(expr),
+                    );
+                }
+            }
             if op == "int-to-float"
                 && let Expr::IntLit(value) = expr.as_ref()
             {
@@ -3866,5 +3879,27 @@ mod tests {
             );
             assert_eq!(fold_expr(expr.clone()), expr);
         }
+    }
+    #[test]
+    fn integer_cast_constants_match_truncation_and_extension() {
+        for (target, value, expected) in [
+            ("u8", 298, 42),
+            ("i8", 170, -86),
+            ("i8", -129, 127),
+            ("u16", -1, 65535),
+            ("i16", 65535, -1),
+            ("u32", -1, 4294967295),
+            ("i32", 2147483648, -2147483648),
+            ("u64", i64::MIN, i64::MIN),
+        ] {
+            assert_eq!(
+                fold_expr(unary(&format!("int-cast-{target}"), Expr::IntLit(value))),
+                Expr::IntLit(expected)
+            );
+        }
+        assert_eq!(
+            fold_expr(unary("int-cast-u8", Expr::BoolLit(true))),
+            Expr::IntLit(1)
+        );
     }
 }

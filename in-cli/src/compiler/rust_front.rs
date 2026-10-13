@@ -1742,8 +1742,28 @@ fn lower_expr_with_types_inner(
             index: Box::new(lower_expr_with_types(&index.index, local_types)),
         },
         syn::Expr::Cast(cast) => {
-            // ponytail: ignore integer casts, types all match at register width
-            lower_expr_with_types(&cast.expr, local_types)
+            let value = lower_expr_with_types(&cast.expr, local_types);
+            let target = cast.ty.to_token_stream().to_string().replace(' ', "");
+            let target = target.strip_prefix("::").unwrap_or(&target);
+            let target = target
+                .strip_prefix("core::primitive::")
+                .or_else(|| target.strip_prefix("std::primitive::"))
+                .unwrap_or(target);
+            let op = format!("int-cast-{target}");
+            if crate::core_ir::integer_cast_spec(&op).is_some() {
+                Expr::Unary {
+                    op,
+                    expr: Box::new(value),
+                }
+            } else if matches!(target, "f32" | "f64") {
+                // shortcut: floating casts still erase their target, replace with typed rounding and conversion.
+                value
+            } else {
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("unsupported-rust-cast".into())),
+                    args: vec![value],
+                }
+            }
         }
         syn::Expr::Try(t) => lower_expr_with_types(&t.expr, local_types),
         syn::Expr::Await(a) => lower_expr_with_types(&a.base, local_types),
@@ -2431,5 +2451,59 @@ fn main() {
         let src = format!("{body:?}");
         assert!(src.contains("Assign"), "expected Assign from +=: {src}");
         assert!(src.contains('+') || src.contains("\"+\""), "{src}");
+    }
+    #[test]
+    fn integer_cast_source_acceptance_is_host_independent() {
+        for (source, expected) in [
+            (
+                "fn main() -> i64 { let value: i64 = 298; return (value as u8) as i64; }",
+                Some(42),
+            ),
+            (
+                "fn main() -> i64 { let value: bool = true; return value as i32 as i64; }",
+                Some(1),
+            ),
+            (
+                "fn main() -> i64 { return (170 as ::core::primitive::i8) as i64; }",
+                Some(-86),
+            ),
+            ("fn main() -> i64 { return (42 as i128) as i64; }", None),
+            (
+                "fn main() -> i64 { return (42 as *const u8) as i64; }",
+                None,
+            ),
+            ("fn main() -> i64 { return (42u32 as char) as i64; }", None),
+        ] {
+            let module = parse_rust_source(source).unwrap();
+            let accepted = expected.is_some();
+            let typed = crate::typecheck::TypeChecker::new().check_module(&module);
+            assert_eq!(typed.is_ok(), accepted, "{source}: {typed:?}");
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert_eq!(verified.ok, accepted, "{source}: {verified:?}");
+            if !accepted {
+                assert_eq!(verified.reason_code.as_deref(), Some("unresolved-symbol"));
+            }
+            if let Some(expected) = expected {
+                let mut optimized = module.clone();
+                crate::core_opt::optimize_with_profile(
+                    &mut optimized.decls,
+                    Some("main"),
+                    crate::emit_profile::EmitProfile::Default,
+                );
+                let body = optimized
+                    .decls
+                    .iter()
+                    .find_map(|decl| match decl {
+                        Decl::Function { name, body, .. } if name == "main" => Some(body),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    body.last(),
+                    Some(&Stmt::Return(Some(Expr::IntLit(expected)))),
+                    "{source}: {body:?}"
+                );
+            }
+        }
     }
 }

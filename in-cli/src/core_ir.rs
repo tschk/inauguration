@@ -120,6 +120,39 @@ pub(crate) fn bitwise_result_type(lhs: Option<Typ>, rhs: Option<Typ>) -> Option<
     }
 }
 
+pub(crate) fn integer_cast_spec(op: &str) -> Option<(u8, bool)> {
+    match op.strip_prefix("int-cast-")? {
+        "i8" => Some((8, true)),
+        "u8" => Some((8, false)),
+        "i16" => Some((16, true)),
+        "u16" => Some((16, false)),
+        "i32" => Some((32, true)),
+        "u32" => Some((32, false)),
+        "i64" | "isize" => Some((64, true)),
+        "u64" | "usize" => Some((64, false)),
+        _ => None,
+    }
+}
+
+pub(crate) fn integer_cast_expr(value: Expr, op: &str) -> Option<Expr> {
+    let (width, signed) = integer_cast_spec(op)?;
+    if width == 64 {
+        return Some(value);
+    }
+    let binary = |op: &str, lhs, rhs| Expr::Binary {
+        op: op.into(),
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    };
+    let value = binary("&", value, Expr::IntLit((1i64 << width) - 1));
+    Some(if signed {
+        let sign = Expr::IntLit(1i64 << (width - 1));
+        binary("-", binary("^", value, sign.clone()), sign)
+    } else {
+        value
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     IntLit(i64),

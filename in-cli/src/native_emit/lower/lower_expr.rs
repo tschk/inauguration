@@ -486,6 +486,18 @@ pub(crate) fn lower_unary(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if crate::core_ir::integer_cast_spec(op).is_some() {
+        let value = match native_expr_type(expr, ctx, functions) {
+            Some(Typ::Int) => expr.clone(),
+            Some(Typ::Bool) => Expr::Unary {
+                op: "bool-to-int".into(),
+                expr: Box::new(expr.clone()),
+            },
+            _ => return Err("native-lower: integer cast needs Int or Bool".into()),
+        };
+        let value = crate::core_ir::integer_cast_expr(value, op).unwrap();
+        return lower_expr_into(emitter, ctx, &value, rd, functions, pending_calls, fn_name);
+    }
     lower_expr_into(emitter, ctx, expr, rd, functions, pending_calls, fn_name)?;
     match op {
         "int-to-float" => {
@@ -823,7 +835,12 @@ pub(crate) fn native_expr_type(
         },
         Expr::Unary { op, expr } if op == "-" => native_expr_type(expr, ctx, functions),
         Expr::Unary { op, .. } if op == "!" => Some(Typ::Bool),
-        Expr::Unary { op, .. } if op == "~" || op == "bool-to-int" || op == "float-to-int" => {
+        Expr::Unary { op, .. }
+            if op == "~"
+                || op == "bool-to-int"
+                || op == "float-to-int"
+                || crate::core_ir::integer_cast_spec(op).is_some() =>
+        {
             Some(Typ::Int)
         }
         Expr::Unary { op, .. } if op == "int-to-float" => Some(Typ::Float),

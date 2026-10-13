@@ -3960,3 +3960,43 @@ fn owned_c_numeric_casts_refuse_pointer_object_and_extended_types() {
         }
     }
 }
+
+#[test]
+fn owned_rust_integer_casts_truncate_and_extend() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main() -> i64 { let value: i64 = 298; return (value as u8) as i64; }",
+        "fn main() -> i64 { let value: i64 = 170; return (value as i8) as i64 + 128; }",
+        "fn main() -> i64 { let value: i64 = 65578; return (value as u16) as i64; }",
+        "fn main() -> i64 { let value: i64 = 32768; return (value as i16) as i64 + 32810; }",
+        "fn main() -> i64 { let value: i64 = 4294967338; return (value as u32) as i64; }",
+        "fn main() -> i64 { let value: i64 = 2147483648; return (value as i32) as i64 + 2147483690; }",
+        "fn main() -> i64 { let value: i64 = -214; return (value as u8) as i64; }",
+        "fn main() -> i64 { let value: bool = true; return (value as u8) as i64 + 41; }",
+        "fn main() -> i64 { let value: bool = false; return (value as i64) + 42; }",
+        "fn main() -> i64 { let value: i64 = 42; return (value as usize) as isize as i64; }",
+        "fn main() -> i64 { let value: i64 = 298; return (value as core::primitive::u8) as i64; }",
+        "fn main() -> i64 { let value: i64 = 298; return (value as ::std::primitive::u8) as i64; }",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let path = temp_path("rust-integer-cast.rs");
+            fs::write(&path, source).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{profile:?}: {source}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{profile:?}: {source}"
+            );
+        }
+    }
+}

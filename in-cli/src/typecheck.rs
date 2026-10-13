@@ -891,6 +891,16 @@ impl TypeChecker {
             }
             Expr::Unary { op, expr: inner } => {
                 self.check_expr(fn_name, inner, facts, env, errors);
+                if crate::core_ir::integer_cast_spec(op).is_some()
+                    && let Some(actual) = self.expr_type(inner, facts, env)
+                    && !matches!(actual.canonical(), Typ::Int | Typ::Bool)
+                {
+                    errors.push(TypeError::TypeMismatch {
+                        context: format!("integer cast in `{fn_name}`"),
+                        expected: Typ::Int,
+                        got: actual,
+                    });
+                }
                 if matches!(op.as_str(), "int-to-float" | "float-to-int")
                     && let Some(actual) = self.expr_type(inner, facts, env)
                 {
@@ -1244,6 +1254,7 @@ impl TypeChecker {
                 "!" => Some(Typ::Bool),
                 "bool-to-int" | "float-to-int" => Some(Typ::Int),
                 "int-to-float" => Some(Typ::Float),
+                op if crate::core_ir::integer_cast_spec(op).is_some() => Some(Typ::Int),
                 "-" => self.expr_type(expr, facts, env),
                 _ => self.expr_type(expr, facts, env),
             },
