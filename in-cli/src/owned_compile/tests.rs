@@ -3731,3 +3731,52 @@ fn owned_native_calls_stage_many_scalar_and_aggregate_words() {
         assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{source}");
     }
 }
+
+#[test]
+fn owned_c_decimal_floating_literals_reach_native_values() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for source in [
+            "double value = 1.5; int main() { if (value > 1.0) return 42; return 0; }",
+            "double value = 1.25e1; int main() { if (value == 12.5) return 42; return 0; }",
+            "double value = .5; int main() { if (value + .5 == 1.) return 42; return 0; }",
+            "double value = 1e-3; int main() { if (value == 0.001) return 42; return 0; }",
+            "float value = 0.1f; int main() { if (value > 0.1) return 42; return 0; }",
+            "double twice(double value) { for (int i = 0; i < 1; i++) return value * 2.0; return 0.0; } int main() { if (twice(1.5) == 3.0) return 42; return 0; }",
+            "bool value = .5; int main() { if (value) return 42; return 0; }",
+        ] {
+            let path = temp_path(&format!("c-float-literal.{extension}"));
+            fs::write(&path, source).unwrap();
+            let report = compile_owned(&default_request(
+                path.clone(),
+                CompileTarget::Jit,
+                Some("main"),
+                None,
+            ));
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{extension}: {source}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{extension}: {source}"
+            );
+        }
+    }
+    let path = temp_path("cpp-float-separator.cpp");
+    fs::write(
+        &path,
+        "double value = 1'2.5; int main() { if (value == 12.5) return 42; return 0; }",
+    )
+    .unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    fs::remove_file(path).unwrap();
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
+}

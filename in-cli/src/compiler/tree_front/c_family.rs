@@ -626,7 +626,7 @@ fn c_else_body(src: &[u8], n: Node<'_>) -> Vec<Stmt> {
 fn c_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
     match expr.kind() {
         "identifier" => Some(Expr::Ident(node_txt(src, expr).trim().to_string())),
-        "number_literal" => parse_c_integer_literal(node_txt(src, expr)).map(Expr::IntLit),
+        "number_literal" => parse_c_number_literal(node_txt(src, expr)),
         "string_literal" => Some(Expr::StringLit(
             node_txt(src, expr).trim().trim_matches('"').to_string(),
         )),
@@ -717,6 +717,44 @@ fn c_peel_statement_shell<'a>(n: Node<'a>) -> Option<Node<'a>> {
     }
 }
 
+fn parse_c_number_literal(text: &str) -> Option<Expr> {
+    if let Some(value) = parse_c_integer_literal(text) {
+        return Some(Expr::IntLit(value));
+    }
+    let text = text.trim();
+    if text.starts_with("0x") || text.starts_with("0X") || !text.contains(['.', 'e', 'E']) {
+        return None;
+    }
+    let (number, single) = match text.strip_suffix(['f', 'F']) {
+        Some(number) => (number, true),
+        None => (text, false),
+    };
+    let bytes = number.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\''
+            && (index == 0
+                || index + 1 == bytes.len()
+                || !bytes[index - 1].is_ascii_digit()
+                || !bytes[index + 1].is_ascii_digit())
+        {
+            return None;
+        }
+    }
+    let number = if number.contains('\'') {
+        std::borrow::Cow::Owned(number.replace('\'', ""))
+    } else {
+        std::borrow::Cow::Borrowed(number)
+    };
+    let value = if single {
+        f64::from(number.parse::<f32>().ok()?)
+    } else {
+        number.parse::<f64>().ok()?
+    };
+    value
+        .is_finite()
+        .then_some(Expr::FloatLit(crate::core_ir::FloatVal(value)))
+}
+
 fn parse_c_integer_literal(text: &str) -> Option<i64> {
     let text = text.trim();
     let number = text.trim_end_matches(['u', 'U', 'l', 'L']);
@@ -782,6 +820,27 @@ pub(super) fn objc_like<'a>(src: &[u8], n: Node<'a>) -> Option<Decl> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decimal_floats_keep_suffix_rounding_and_reject_malformed_forms() {
+        for text in ["1.5", "1.5f", "1.5F", "15e-1", ".15e1", "1'5e-1"] {
+            assert_eq!(
+                parse_c_number_literal(text),
+                Some(Expr::FloatLit(crate::core_ir::FloatVal(1.5))),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            parse_c_number_literal("0.1f"),
+            Some(Expr::FloatLit(crate::core_ir::FloatVal(f64::from(0.1f32))))
+        );
+        assert_eq!(parse_c_number_literal("0x2F"), Some(Expr::IntLit(47)));
+        for text in [
+            "42f", "1.5L", "1.5foo", "1e", "1e+", "1e400", "1e39f", "1'.5", "1.''5", "0x1.8p1",
+        ] {
+            assert_eq!(parse_c_number_literal(text), None, "{text}");
+        }
+    }
 
     #[test]
     fn integer_literal_radices_suffixes_and_separators_preserve_values() {

@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## C-like decimal floating literals
+
+Decimal floating literals, exponent forms, and valid digit separators lower to canonical `Float`. An `f` suffix rounds the literal as an `f32` value before widening into the existing `f64` representation. Shared constant folding handles literal floating comparisons with NaN and signed-zero semantics, including static boolean initializers. Hexadecimal floating literals, long-double suffixes, non-finite overflow literals, and full source-width arithmetic remain unsupported. Ordinary literals borrow their digit text; only separators require a copy.
+
 ## AArch64 argument staging
 
 Known native calls save every ABI argument word in the reserved caller frame before evaluating later arguments. Register arguments are reloaded only after evaluation completes, and stack arguments are copied from those saved words into a 16-byte-aligned outgoing area. Scalar arguments and flattened struct words share this staging, including the 32-word call limit. Nested calls reserve disjoint portions of the existing 64-word temporary pool and refuse exhausted capacity rather than reusing live argument slots.

@@ -1089,6 +1089,18 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
             if let (Expr::FloatLit(a), Expr::FloatLit(b)) = (lhs.as_ref(), rhs.as_ref()) {
                 let av = a.0;
                 let bv = b.0;
+                let comparison = match op.as_str() {
+                    "==" | "eq" => Some(av == bv),
+                    "!=" | "neq" => Some(av != bv),
+                    "<" | "lt" => Some(av < bv),
+                    ">" | "gt" => Some(av > bv),
+                    "<=" | "le" => Some(av <= bv),
+                    ">=" | "ge" => Some(av >= bv),
+                    _ => None,
+                };
+                if let Some(value) = comparison {
+                    return Expr::BoolLit(value);
+                }
                 let result = match op.as_str() {
                     "+" | "add" => Some(av + bv),
                     "-" | "sub" => Some(av - bv),
@@ -2922,6 +2934,35 @@ mod tests {
             index: Box::new(Expr::IntLit(2)),
         });
         assert_eq!(e, Expr::IntLit(3));
+    }
+
+    #[test]
+    fn fold_float_comparisons_preserve_nan_and_signed_zero() {
+        for (lhs, rhs) in [
+            (f64::NAN, 0.0),
+            (f64::NAN, f64::NAN),
+            (-0.0, 0.0),
+            (1.5, 0.0),
+        ] {
+            for (op, expected) in [
+                ("==", lhs == rhs),
+                ("!=", lhs != rhs),
+                ("<", lhs < rhs),
+                (">", lhs > rhs),
+                ("<=", lhs <= rhs),
+                (">=", lhs >= rhs),
+            ] {
+                assert_eq!(
+                    fold_expr(bin(
+                        op,
+                        Expr::FloatLit(crate::core_ir::FloatVal(lhs)),
+                        Expr::FloatLit(crate::core_ir::FloatVal(rhs))
+                    )),
+                    Expr::BoolLit(expected),
+                    "{lhs:?} {op} {rhs:?}"
+                );
+            }
+        }
     }
 
     #[test]
