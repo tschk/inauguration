@@ -423,3 +423,56 @@ fn rejects_extreme_nesting() {
     let err = emit_c_module(&module).expect_err("depth guard");
     assert!(err.contains("nesting"), "err={err}");
 }
+
+#[test]
+fn unresolved_complement_is_refused_instead_of_emitting_identity() {
+    let mut module =
+        crate::compiler::rust_front::parse_rust_source("fn main() -> f64 { return !1.25; }")
+            .unwrap();
+    crate::lower_core::desugar_module(&mut module);
+    let error = emit_c_module(&module).unwrap_err();
+    assert!(
+        error.contains("complement requires a resolved Int or Bool operand"),
+        "{error}"
+    );
+}
+
+#[test]
+fn typed_complements_survive_c_emission_and_execution() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let mut module = crate::compiler::rust_front::parse_rust_source("fn inverse(value: i64) -> i64 { return !value; } fn predicate(value: bool) -> bool { return !value; } fn answer() -> i64 { if predicate(false) { return inverse(1) + 44; } else { return 0; } }").unwrap();
+    crate::lower_core::desugar_module(&mut module);
+    let source = format!(
+        "{}\nint main(void) {{ return (int)answer(); }}\n",
+        emit_c_module(&module).unwrap()
+    );
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-complement-c-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let c = dir.join("complement.c");
+    let binary = dir.join("complement");
+    std::fs::write(&c, source).unwrap();
+    let build = Command::new("clang")
+        .arg(&c)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let status = Command::new(&binary).status().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(status.code(), Some(42));
+}

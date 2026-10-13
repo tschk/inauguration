@@ -80,6 +80,7 @@ pub fn desugar_module(module: &mut UnifiedModule) {
     new_decls.extend(extra_decls);
 
     module.decls = new_decls;
+    crate::typecheck::TypeChecker::new().resolve_complements(module);
 }
 
 fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize, names: &HashSet<String>) {

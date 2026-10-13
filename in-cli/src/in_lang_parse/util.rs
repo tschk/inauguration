@@ -280,6 +280,11 @@ pub(crate) fn find_top_level_binary_op<'a>(s: &str, ops: &[&'a str]) -> Option<(
                         // Kebab-case identifiers: `foo-bar` is one name.
                         // Keep numeric subtraction (`1-2`) and spaced minus (`a - b`).
                         if *op == "-" {
+                            // A sign after a prefix or binary operator belongs to the RHS.
+                            let prev_token = s[..i].trim_end().chars().next_back();
+                            if prev_token.is_none_or(|c| "!~+-*/%&|^<>=".contains(c)) {
+                                continue;
+                            }
                             let prev = s[..i].chars().next_back();
                             let next = s[i + 1..].chars().next();
                             if let (Some(p), Some(n)) = (prev, next) {

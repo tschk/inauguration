@@ -1990,3 +1990,107 @@ fn owned_rust_jit_loop_temporaries_preserve_user_names() {
         );
     }
 }
+
+#[test]
+fn owned_rust_jit_complement_preserves_operand_type() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (source, expected) in [
+        (
+            "fn main() -> bool { let len = true; return !len; }",
+            EvalValue::Bool(false),
+        ),
+        ("fn main() -> i64 { return !1_i64; }", EvalValue::Int(-2)),
+        (
+            "fn main() -> i64 { let value = 3; return !value; }",
+            EvalValue::Int(-4),
+        ),
+        (
+            "fn invert(value: i64) -> i64 { return !value; } fn main() -> i64 { return invert(3); }",
+            EvalValue::Int(-4),
+        ),
+        (
+            "fn number(value: i64) -> i64 { if value == 0 { return 1; } else { return 2; } } fn main() -> i64 { return !number(0); }",
+            EvalValue::Int(-2),
+        ),
+        ("fn main() -> i64 { return !(1 + 2); }", EvalValue::Int(-4)),
+        ("fn main() -> i64 { return !!1; }", EvalValue::Int(1)),
+        (
+            "fn main() -> bool { return !true; }",
+            EvalValue::Bool(false),
+        ),
+        (
+            "fn invert(value: bool) -> bool { return !value; } fn main() -> bool { return invert(false); }",
+            EvalValue::Bool(true),
+        ),
+        (
+            "fn main() -> bool { return !(1 < 2); }",
+            EvalValue::Bool(false),
+        ),
+        (
+            "fn main() -> i64 { let values = [1, 2]; return !values[0]; }",
+            EvalValue::Int(-2),
+        ),
+    ] {
+        let path = temp_path("rust-complement.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+        assert_eq!(report.eval_result, Some(expected), "{source}");
+    }
+}
+
+#[test]
+fn owned_rust_jit_complement_refuses_nonintegral_operands() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main() -> f64 { return !1.25; }",
+        "fn main() -> String { return !\"text\"; }",
+    ] {
+        let path = temp_path("rust-invalid-complement.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(!report.success, "{report:?}");
+        assert!(
+            report
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("complement operand")),
+            "{report:?}"
+        );
+        assert_eq!(report.eval_result, None);
+    }
+}
+
+#[test]
+fn owned_in_jit_bitwise_complement_handles_negative_operands() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../conformance/types/bitwise-complement.in");
+    let report = compile_owned(&default_request(
+        path,
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
+}

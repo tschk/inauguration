@@ -78,6 +78,11 @@ pub fn eor_reg64(rd: u8, rn: u8, rm: u8) -> u32 {
     0xCA00_0000 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
 }
 
+/// MVN Xd, Xm (ORN Xd, XZR, Xm).
+pub fn mvn_reg64(rd: u8, rm: u8) -> u32 {
+    0xAA20_03E0 | ((rm as u32) << 16) | (rd as u32)
+}
+
 pub fn lsl_reg64(rd: u8, rn: u8, rm: u8) -> u32 {
     0x9AC0_2000 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
 }
@@ -327,6 +332,7 @@ mod tests {
         assert_eq!(and_reg64(3, 7, 9), 0x8A0900E3);
         assert_eq!(orr_reg64(3, 7, 9), 0xAA0900E3);
         assert_eq!(eor_reg64(3, 7, 9), 0xCA0900E3);
+        assert_eq!(mvn_reg64(3, 9), 0xAA2903E3);
         assert_eq!(lsl_reg64(3, 7, 9), 0x9AC920E3);
         assert_eq!(lsr_reg64(3, 7, 9), 0x9AC924E3);
         assert_eq!(ret(), 0xD65F03C0);

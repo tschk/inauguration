@@ -207,7 +207,12 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
     depth_ok(depth)?;
     bump(nodes)?;
     match e {
-        Expr::Unary { expr, .. } => count_expr(expr, depth + 1, nodes),
+        Expr::Unary { op, expr } => {
+            if op == "complement" {
+                return Err("c-backend: complement requires a resolved Int or Bool operand".into());
+            }
+            count_expr(expr, depth + 1, nodes)
+        }
         Expr::Binary { lhs, rhs, .. } => {
             count_expr(lhs, depth + 1, nodes)?;
             count_expr(rhs, depth + 1, nodes)

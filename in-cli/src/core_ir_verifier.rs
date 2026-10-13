@@ -688,7 +688,28 @@ fn check_expr(
                 ))
             }
         }
-        Expr::Unary { expr, .. } => check_expr(fn_name, expr, facts, env, call_edges),
+        Expr::Unary { op, expr } => {
+            check_expr(fn_name, expr, facts, env, call_edges)?;
+            if op == "complement" {
+                return Err((
+                    "unsupported-complement".into(),
+                    format!(
+                        "complement operand in `{fn_name}` must have a resolved Int or Bool type"
+                    ),
+                ));
+            }
+            if op == "~" {
+                require_type(
+                    fn_name,
+                    "bitwise complement operand",
+                    &Typ::Int,
+                    expr,
+                    facts,
+                    env,
+                )?;
+            }
+            Ok(())
+        }
         Expr::Binary { op, lhs, rhs, .. } => {
             check_expr(fn_name, lhs, facts, env, call_edges)?;
             check_expr(fn_name, rhs, facts, env, call_edges)?;

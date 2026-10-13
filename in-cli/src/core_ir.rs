@@ -578,6 +578,44 @@ pub fn for_each_expr_child<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
     }
 }
 
+/// Visit immediate expression children for in-place Core IR normalization.
+pub(crate) fn for_each_expr_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
+    match e {
+        Expr::Call { callee, args, .. } => {
+            f(callee);
+            for a in args {
+                f(a);
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            f(lhs);
+            f(rhs);
+        }
+        Expr::Unary { expr, .. } => f(expr),
+        Expr::Field { base, .. } => f(base),
+        Expr::Index { base, index, .. } => {
+            f(base);
+            f(index);
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, fe) in fields {
+                f(fe);
+            }
+        }
+        Expr::ArrayLit(items) => {
+            for i in items {
+                f(i);
+            }
+        }
+        Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::StringLit(_)
+        | Expr::BoolLit(_)
+        | Expr::Ident(_)
+        | Expr::Closure { .. } => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

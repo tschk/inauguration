@@ -122,6 +122,138 @@ impl TypeChecker {
         }
     }
 
+    /// Resolve type-dependent complement into the canonical boolean or integer operator.
+    pub(crate) fn resolve_complements(&self, module: &mut UnifiedModule) {
+        let facts = self.collect_facts(module);
+        let globals: HashMap<String, Typ> = module
+            .decls
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::Global { name, typ, .. } => Some((name.clone(), typ.clone())),
+                _ => None,
+            })
+            .collect();
+        for decl in &mut module.decls {
+            match decl {
+                Decl::Function { params, body, .. } => {
+                    let mut env = globals.clone();
+                    env.extend(params.iter().cloned());
+                    self.resolve_complement_body(body, &facts, &mut env);
+                }
+                Decl::Global {
+                    init: Some(expr), ..
+                } => self.resolve_complement_expr(expr, &facts, &globals),
+                _ => {}
+            }
+        }
+    }
+
+    fn resolve_complement_expr(&self, expr: &mut Expr, facts: &Facts, env: &HashMap<String, Typ>) {
+        if let Expr::Closure { params, body, .. } = expr {
+            let mut inner = env.clone();
+            inner.extend(params.iter().cloned());
+            self.resolve_complement_body(body, facts, &mut inner);
+        } else {
+            crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
+                self.resolve_complement_expr(child, facts, env)
+            });
+        }
+        if let Expr::Unary { op, expr } = expr
+            && op == "complement"
+        {
+            match self.expr_type(expr, facts, env).map(|typ| typ.canonical()) {
+                Some(Typ::Int) => *op = "~".into(),
+                Some(Typ::Bool) => *op = "!".into(),
+                _ => {} // Verification refuses an unresolved operand type.
+            }
+        }
+    }
+
+    fn resolve_complement_body(
+        &self,
+        body: &mut [Stmt],
+        facts: &Facts,
+        env: &mut HashMap<String, Typ>,
+    ) {
+        for stmt in body {
+            match stmt {
+                Stmt::Let(name, typ, expr) => {
+                    self.resolve_complement_expr(expr, facts, env);
+                    if let Some(typ) = typ.clone().or_else(|| self.expr_type(expr, facts, env)) {
+                        env.insert(name.clone(), typ);
+                    }
+                }
+                Stmt::Assign(_, expr)
+                | Stmt::Expr(expr)
+                | Stmt::Throw(expr)
+                | Stmt::Return(Some(expr)) => self.resolve_complement_expr(expr, facts, env),
+                Stmt::IndexAssign { base, index, value } => {
+                    for expr in [base, index, value] {
+                        self.resolve_complement_expr(expr, facts, env);
+                    }
+                }
+                Stmt::FieldAssign { base, value, .. } => {
+                    for expr in [base, value] {
+                        self.resolve_complement_expr(expr, facts, env);
+                    }
+                }
+                Stmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                } => {
+                    self.resolve_complement_expr(cond, facts, env);
+                    self.resolve_complement_body(then_body, facts, &mut env.clone());
+                    self.resolve_complement_body(else_body, facts, &mut env.clone());
+                }
+                Stmt::Loop { cond, body, .. } => {
+                    if let Some(cond) = cond {
+                        self.resolve_complement_expr(cond, facts, env);
+                    }
+                    self.resolve_complement_body(body, facts, &mut env.clone());
+                }
+                Stmt::Match { scrutinee, arms } => {
+                    self.resolve_complement_expr(scrutinee, facts, env);
+                    for arm in arms {
+                        let mut inner = env.clone();
+                        if let Ok(pattern) = MatchPattern::parse(&arm.pattern) {
+                            self.check_match_pattern(
+                                "",
+                                &pattern,
+                                facts,
+                                &mut inner,
+                                &mut Vec::new(),
+                            );
+                            if let MatchPattern::IdentPat(name) = pattern
+                                && let Some(typ) = self.expr_type(scrutinee, facts, env)
+                            {
+                                inner.insert(name, typ);
+                            }
+                        }
+                        self.resolve_complement_body(&mut arm.body, facts, &mut inner);
+                    }
+                }
+                Stmt::Try { body, catches } => {
+                    self.resolve_complement_body(body, facts, &mut env.clone());
+                    for catch in catches {
+                        let mut inner = env.clone();
+                        if let Ok(pattern) = MatchPattern::parse(&catch.pattern) {
+                            self.check_match_pattern(
+                                "",
+                                &pattern,
+                                facts,
+                                &mut inner,
+                                &mut Vec::new(),
+                            );
+                        }
+                        self.resolve_complement_body(&mut catch.body, facts, &mut inner);
+                    }
+                }
+                Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
+            }
+        }
+    }
+
     fn collect_facts(&self, module: &UnifiedModule) -> Facts {
         let mut functions: HashMap<String, (Vec<(String, Typ)>, Typ)> = HashMap::new();
         let mut structs: HashMap<String, Vec<(String, Typ)>> = HashMap::new();
@@ -486,8 +618,26 @@ impl TypeChecker {
                     });
                 }
             }
-            Expr::Unary { expr: inner, .. } => {
+            Expr::Unary { op, expr: inner } => {
                 self.check_expr(fn_name, inner, facts, env, errors);
+                if matches!(op.as_str(), "complement" | "~")
+                    && let Some(actual) = self.expr_type(inner, facts, env)
+                {
+                    let canonical = actual.canonical();
+                    let valid =
+                        canonical == Typ::Int || (op == "complement" && canonical == Typ::Bool);
+                    if !valid {
+                        errors.push(TypeError::TypeMismatch {
+                            context: format!("complement operand in `{fn_name}`"),
+                            expected: if op == "~" {
+                                Typ::Int
+                            } else {
+                                Typ::Named("Int-or-Bool".into())
+                            },
+                            got: actual,
+                        });
+                    }
+                }
             }
             Expr::Binary { op, lhs, rhs, .. } => {
                 self.check_expr(fn_name, lhs, facts, env, errors);
@@ -742,13 +892,10 @@ impl TypeChecker {
             Expr::FloatLit(_) => Some(Typ::Float),
             Expr::StringLit(_) => Some(Typ::String),
             Expr::BoolLit(_) => Some(Typ::Bool),
-            Expr::Ident(name) => {
-                if is_builtin_fn(name) {
-                    Some(builtin_return_type(name))
-                } else {
-                    env.get(name).cloned()
-                }
-            }
+            Expr::Ident(name) => env
+                .get(name)
+                .cloned()
+                .or_else(|| is_builtin_fn(name).then(|| builtin_return_type(name))),
             Expr::StructInit { name, .. } => Some(Typ::Named(name.clone())),
             Expr::Field { base, name, .. } => {
                 if let Some(base_typ) = self.expr_type(base, facts, env)
@@ -2876,5 +3023,51 @@ mod tests {
             },
         ]);
         assert!(typecheck_for_parser(ParserId::TypeScript, &module).is_ok());
+    }
+    #[test]
+    fn complement_does_not_reuse_an_outer_catch_binding_type() {
+        let mut module = UnifiedModule::new(vec![Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![
+                Stmt::Let("value".into(), Some(Typ::Int), Expr::IntLit(1)),
+                Stmt::Try {
+                    body: vec![Stmt::Throw(Expr::BoolLit(true))],
+                    catches: vec![crate::core_ir::CatchArm {
+                        pattern: "value".into(),
+                        body: vec![Stmt::Return(Some(Expr::Unary {
+                            op: "complement".into(),
+                            expr: Box::new(Expr::Ident("value".into())),
+                        }))],
+                    }],
+                },
+            ],
+        }]);
+        TypeChecker::new().resolve_complements(&mut module);
+        let verification = crate::core_ir_verifier::verify_module(
+            &module,
+            &crate::core_ir_verifier::VerifyOptions {
+                entry: Some("main".into()),
+                require_entry: true,
+            },
+        );
+        assert!(!verification.ok);
+        assert_eq!(
+            verification.reason_code.as_deref(),
+            Some("unsupported-complement")
+        );
+    }
+    #[test]
+    fn complement_requires_integral_operand_types() {
+        for source in [
+            "fn main() -> f64 { return !1.25; }",
+            "fn main() -> String { return !\"text\"; }",
+        ] {
+            let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let errors = TypeChecker::new().check_module(&module).unwrap_err();
+            assert!(errors.iter().any(|error| matches!(error, TypeError::TypeMismatch { context, .. } if context.contains("complement operand"))), "{errors:?}");
+        }
     }
 }

@@ -1612,7 +1612,10 @@ fn lower_expr_with_types_inner(
             }
         }
         syn::Expr::Unary(u) => Expr::Unary {
-            op: u.op.to_token_stream().to_string(),
+            op: match u.op {
+                syn::UnOp::Not(_) => "complement".into(),
+                _ => u.op.to_token_stream().to_string(),
+            },
             expr: Box::new(lower_expr_with_types(&u.expr, local_types)),
         },
         syn::Expr::Binary(b) => Expr::Binary {

@@ -1,0 +1,7 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+fn invert(value: Int) -> Int { return ~value; }
+fn main() -> Int { return invert(1) + 44 + (~-1) + (2 * -1 + 2); }

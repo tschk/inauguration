@@ -41,6 +41,14 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
             expr: Box::new(parse_expr(rest)),
         };
     }
+    if let Some(rest) = s.strip_prefix('~')
+        && !trim(rest).is_empty()
+    {
+        return Expr::Unary {
+            op: "~".into(),
+            expr: Box::new(parse_expr(rest)),
+        };
+    }
     if let Some(rest) = s.strip_prefix('-')
         && !trim(rest).is_empty()
         && rest.parse::<i64>().is_err()

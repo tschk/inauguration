@@ -515,6 +515,15 @@ pub(crate) fn lower_unary(
             emitter.patch_u32(false_branch, aarch64::b_cond(1, end_offset));
             Ok(())
         }
+        "~" => {
+            if native_expr_type(expr, ctx, functions) != Some(Typ::Int) {
+                return Err(format!(
+                    "native-lower: bitwise complement requires Int in `{fn_name}`"
+                ));
+            }
+            emitter.emit_u32(aarch64::mvn_reg64(rd, rd));
+            Ok(())
+        }
         "void" | "typeof" => {
             // void: evaluate and discard (return 0)
             // typeof: emit 0 (can't return proper type string)
