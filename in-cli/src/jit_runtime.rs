@@ -2714,6 +2714,28 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn inferred_in_arithmetic_and_bitwise_bindings_keep_runtime_types() {
+        for source in [
+            "fn main() -> Int { var value = 1e+3 * 2.0; if value == 2000.0 { return 42; } return 0; }",
+            "fn main() -> Int { var value = -(1e+3 * 2.0); if value == -2000.0 { return 42; } return 0; }",
+            "fn main() -> Int { var flag = true & false; var value = flag | true; if value { return 42; } return 0; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

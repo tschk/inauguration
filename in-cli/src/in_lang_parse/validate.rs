@@ -467,11 +467,22 @@ pub(crate) fn infer_in_expr_type(
         }
         Expr::Unary { op, expr, .. } => match op.as_str() {
             "!" => Some(Typ::Bool),
-            "-" => Some(Typ::Int),
             _ => infer_in_expr_type(expr, env, structs, fn_rets),
         },
-        Expr::Binary { op, .. } => match op.as_str() {
-            "+" | "-" | "*" | "/" | "%" | "^" | "<<" | ">>" | "&" | "|" => Some(Typ::Int),
+        Expr::Binary { op, lhs, rhs } => match op.as_str() {
+            "&" | "|" | "^" => crate::core_ir::bitwise_result_type(
+                infer_in_expr_type(lhs, env, structs, fn_rets),
+                infer_in_expr_type(rhs, env, structs, fn_rets),
+            ),
+            "+" | "-" | "*" | "/" | "%" | "<<" | ">>" => {
+                let left = infer_in_expr_type(lhs, env, structs, fn_rets);
+                let right = infer_in_expr_type(rhs, env, structs, fn_rets);
+                match (left, right) {
+                    (Some(Typ::String), Some(Typ::String)) if op == "+" => Some(Typ::String),
+                    (Some(Typ::Float), _) | (_, Some(Typ::Float)) => Some(Typ::Float),
+                    _ => Some(Typ::Int),
+                }
+            }
             "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => Some(Typ::Bool),
             _ => None,
         },

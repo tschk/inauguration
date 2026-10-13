@@ -2152,3 +2152,46 @@ fn scientific_literals_keep_exponent_signs_out_of_binary_operators() {
         );
     }
 }
+
+#[test]
+fn method_receiver_inference_preserves_arithmetic_value_kinds() {
+    use super::validate::infer_in_expr_type;
+    use std::collections::HashMap;
+    let env = HashMap::from([
+        ("value".into(), Typ::Float),
+        ("flag".into(), Typ::Bool),
+        ("n".into(), Typ::Int),
+        ("point".into(), Typ::Named("Point".into())),
+    ]);
+    let structs = HashMap::from([(
+        "Point".into(),
+        HashMap::from([("value".into(), Typ::Float)]),
+    )]);
+    let functions = HashMap::from([("float-value".into(), Typ::Float)]);
+    for (source, expected) in [
+        ("value * 2.0", Typ::Float),
+        ("value + value", Typ::Float),
+        ("-value", Typ::Float),
+        ("float-value() / 2.0", Typ::Float),
+        ("point.value - 2.0", Typ::Float),
+        ("[value * 2.0][0]", Typ::Float),
+        ("flag & true", Typ::Bool),
+        ("flag | false", Typ::Bool),
+        ("flag ^ true", Typ::Bool),
+        ("\"a\" + \"b\"", Typ::String),
+        ("n * 2", Typ::Int),
+    ] {
+        assert_eq!(
+            infer_in_expr_type(&parse_expr(source), &env, &structs, &functions),
+            Some(expected),
+            "{source}"
+        );
+    }
+    for source in ["flag & n", "value | value", "missing ^ true"] {
+        assert_eq!(
+            infer_in_expr_type(&parse_expr(source), &env, &structs, &functions),
+            None,
+            "{source}"
+        );
+    }
+}
