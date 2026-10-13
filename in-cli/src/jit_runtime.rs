@@ -2621,6 +2621,26 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn in_assignment_scans_preserve_unicode_and_quoted_calls() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(
+                invoke_source(
+                    include_str!("../../conformance/control-flow/in-assignment-scan.in"),
+                    profile,
+                    &[]
+                ),
+                Some(42),
+                "{profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

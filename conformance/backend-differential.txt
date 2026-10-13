@@ -70,3 +70,4 @@ agree conformance/types/array-local-return.in
 agree conformance/types/array-literal-index.in
 agree conformance/control-flow/array-bounds-effects.in
 agree conformance/control-flow/in-bit-compound-effects.in
+agree conformance/control-flow/in-assignment-scan.in

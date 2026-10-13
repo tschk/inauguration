@@ -49,6 +49,8 @@ AArch64 and x86 native array reads and writes return 1 from the current function
 
 ## Indexed compound update order
 
+Assignment scans share the character-aware operator scanner with expressions, respecting nested delimiters, escaped strings, and Unicode identifiers. Comparisons inside an assignment RHS retain their expression meaning.
+
 `.in` supports `&=`, `|=`, and `^=` for Int and Bool values through the existing bitwise IR operations. Boolean updates evaluate their RHS eagerly.
 
 `.in` indexed compound assignments share the indexed-store spill machinery. The array/base, index, and old element are saved once before RHS effects, then the update stores through the saved place. This retains `.in` read-before-RHS order while eliminating duplicate index evaluation and unsupported call operands. Rust's value-before-place order remains distinct in the same lowering path.

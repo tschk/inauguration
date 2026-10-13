@@ -236,6 +236,10 @@ pub(crate) fn strip_enclosing_parens(s: &str) -> Option<&str> {
 }
 
 pub(crate) fn find_top_level_binary_op<'a>(s: &str, ops: &[&'a str]) -> Option<(&'a str, usize)> {
+    find_top_level_ops(s, ops).pop()
+}
+
+pub(crate) fn find_top_level_ops<'a>(s: &str, ops: &[&'a str]) -> Vec<(&'a str, usize)> {
     let mut depth = 0i32;
     let mut in_string = false;
     let mut escape = false;
@@ -314,7 +318,7 @@ pub(crate) fn find_top_level_binary_op<'a>(s: &str, ops: &[&'a str]) -> Option<(
             _ => {}
         }
     }
-    matches.into_iter().last()
+    matches
 }
 
 pub(crate) fn find_top_level_field_dot(s: &str) -> Option<usize> {

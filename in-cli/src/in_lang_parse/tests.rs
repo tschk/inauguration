@@ -2074,3 +2074,33 @@ fn shift_compound_assignments_keep_both_operator_characters() {
         assert_eq!(rhs.as_ref(), &Expr::IntLit(1));
     }
 }
+
+#[test]
+fn assignment_scanner_respects_unicode_strings_and_nesting() {
+    use super::stmt::parse_assign_stmt;
+    for source in ["café += 2", "变量 &= 42", "🦀 ^= 0"] {
+        assert!(matches!(
+            parse_assign_stmt(source),
+            Some(Stmt::Assign(_, Expr::Binary { .. }))
+        ));
+    }
+    for source in [
+        "consume(\"a &= b\")",
+        "consume(\"a = b\")",
+        "consume(\"a \\\" = b\")",
+        "consume(value == 42)",
+        "value <= 42",
+        "value >= 42",
+        "value != 42",
+        "value == 42",
+        "consume({ key: \"x += y\" })",
+    ] {
+        assert_eq!(parse_assign_stmt(source), None, "{source}");
+    }
+    assert!(
+        matches!(parse_assign_stmt("value = other == 42"), Some(Stmt::Assign(name, Expr::Binary { op, .. })) if name == "value" && op == "==")
+    );
+    assert!(
+        matches!(parse_assign_stmt("values[index(\"a += b\")] += 2"), Some(Stmt::Expr(Expr::Call { callee, .. })) if matches!(callee.as_ref(), Expr::Ident(name) if name == "index-modify-place-first"))
+    );
+}

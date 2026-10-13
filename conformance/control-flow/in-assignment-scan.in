@@ -1,0 +1,18 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var calls: Int = 0;
+fn consume(text: String) -> void { calls += 1; return; }
+fn main() -> Int {
+    var café: Int = 40;
+    var 变量: Int = 2;
+    café += 变量;
+    consume("a = b");
+    consume("a &= b");
+    var equal: Bool = false;
+    equal = café == 42;
+    if equal && calls == 2 { return café; }
+    return 0;
+}

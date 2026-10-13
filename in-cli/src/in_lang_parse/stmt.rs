@@ -68,28 +68,11 @@ pub(crate) fn parse_return_stmt(s: &str) -> Result<Stmt, String> {
 const COMPOUND_ASSIGN_OPS: [&str; 10] =
     ["<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="];
 
-/// Find the first top-level compound assignment operator, skipping string
-/// literals so `"a += b"` inside an expression is not mistaken for one.
 fn find_compound_assign_op(s: &str) -> Option<(usize, &'static str)> {
-    let bytes = s.as_bytes();
-    let mut in_string = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => in_string = !in_string,
-            b'\\' if in_string => i += 1,
-            _ if !in_string => {
-                for op in COMPOUND_ASSIGN_OPS {
-                    if s[i..].starts_with(op) {
-                        return Some((i, op));
-                    }
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
+    find_top_level_ops(s, &COMPOUND_ASSIGN_OPS)
+        .into_iter()
+        .next()
+        .map(|(op, index)| (index, op))
 }
 
 fn compound_binary(op: &str, lhs: Expr, rhs: Expr) -> Expr {
@@ -132,15 +115,9 @@ pub(crate) fn parse_assign_stmt(s: &str) -> Option<Stmt> {
             _ => None,
         };
     }
-    let eq_pos = s.find('=')?;
-    if s.get(eq_pos + 1..)
-        .is_some_and(|tail| tail.starts_with('='))
-    {
-        return None;
-    }
-    if eq_pos > 0 && s.get(eq_pos - 1..eq_pos) == Some("!") {
-        return None;
-    }
+    let eq_pos = find_top_level_ops(s, &["==", "!=", "<=", ">=", "=>", "="])
+        .into_iter()
+        .find_map(|(op, index)| (op == "=").then_some(index))?;
     let name = trim(&s[..eq_pos]);
     if name.is_empty() {
         return None;
