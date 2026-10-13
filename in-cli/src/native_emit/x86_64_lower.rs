@@ -1379,6 +1379,12 @@ fn lower_stmt(
             lower_expr_into(emitter, ctx, value, RSI, pending_calls)?;
             emitter.emit_insns(&x86_64::ldr64(RDI, base_slot as u16));
             emitter.emit_insns(&x86_64::ldr64(RAX, index_slot as u16));
+            if scalar_expr_type(base, ctx) == Some(Typ::Int) {
+                emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
+                emitter.emit_insns(&x86_64::add_rr(RDI, RAX));
+                emitter.emit_insns(&x86_64::mov_m_r(RDI, 0, RSI));
+                return Ok(());
+            }
             emitter.emit_insns(&x86_64::test_rr(RDI, RDI));
             let null = emitter.len();
             emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
@@ -3178,6 +3184,12 @@ fn lower_index_expr(
     emitter.emit_insns(&x86_64::str64(RAX, base_slot as u16));
     lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
     emitter.emit_insns(&x86_64::ldr64(RDI, base_slot as u16));
+    if scalar_expr_type(base, ctx) == Some(Typ::Int) {
+        emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
+        emitter.emit_insns(&x86_64::add_rr(RDI, RAX));
+        emitter.emit_insns(&x86_64::mov_r_m(target_reg, RDI, 0));
+        return Ok(());
+    }
     emitter.emit_insns(&x86_64::test_rr(RDI, RDI));
     let null = emitter.len();
     emitter.emit_insns(&x86_64::jcc_near(0x04, 0));

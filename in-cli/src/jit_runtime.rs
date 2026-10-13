@@ -999,6 +999,46 @@ mod tests {
 
     #[cfg(all(unix, target_arch = "x86_64"))]
     #[test]
+    fn integer_address_indexing_keeps_headerless_word_layout() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (source, expected) in [
+                (
+                    "fn main(base: Int) -> Int { base[1] = 7; return base[1]; }",
+                    7,
+                ),
+                (
+                    "var calls: Int = 0;\nfn address(base: Int) -> Int { calls = calls * 10 + 1; return base; }\nfn index() -> Int { calls = calls * 10 + 2; return 1; }\nfn value() -> Int { calls = calls * 10 + 3; return 7; }\nfn main(base: Int) -> Int { address(base)[index()] = value(); return base[1] + calls; }",
+                    130,
+                ),
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                for optimized in [false, true] {
+                    if optimized {
+                        crate::core_opt::optimize_with_profile(
+                            &mut module.decls,
+                            Some("main"),
+                            profile,
+                        );
+                    }
+                    let rt = runtime_for_module(&module, profile);
+                    let mut words = [10_i64, 20, 30, 40];
+                    assert_eq!(
+                        unsafe { rt.invoke("main", &[words.as_mut_ptr() as i64]) },
+                        Some(expected)
+                    );
+                    assert_eq!(words, [10, 7, 30, 40]);
+                    assert!(rt.invocation_error().is_none());
+                }
+            }
+        }
+    }
+
+    #[cfg(all(unix, target_arch = "x86_64"))]
+    #[test]
     fn array_length_calls_preserve_returned_lengths_and_effects() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,
