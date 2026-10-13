@@ -2641,6 +2641,50 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn in_shifts_and_comparisons_preserve_precedence() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(
+                invoke_source(
+                    include_str!("../../conformance/control-flow/in-shift-precedence.in"),
+                    profile,
+                    &[]
+                ),
+                Some(42)
+            );
+        }
+        for condition in [
+            "8 == 16 >> 1",
+            "2 < 1 << 2",
+            "true == 1 < 2",
+            "false == 2 > 3",
+            "16 >> 1 >> 1 == 4",
+            "1 << 1 + 1 == 4",
+            "4 == 1 << 1 + 1",
+            "(1 == 2) == false",
+            "(1 < 2) == true",
+        ] {
+            let source =
+                format!("fn main() -> Int {{ if {condition} {{ return 42; }} return 0; }}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(&source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

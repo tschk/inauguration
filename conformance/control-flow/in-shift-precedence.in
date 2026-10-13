@@ -1,0 +1,14 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var calls: Int = 0;
+var trace: Int = 0;
+fn value(n: Int) -> Int { calls += 1; trace = trace * 100 + n; return n; }
+fn main() -> Int {
+    if 8 == value(16) >> value(1) && true == value(2) < value(3) {
+        if calls == 4 && trace == 16010203 { return 42; }
+    }
+    return 0;
+}

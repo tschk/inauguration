@@ -11,17 +11,26 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
     if let Some(closure) = try_parse_closure_expr(s) {
         return closure;
     }
+    let operators = find_top_level_ops(
+        s,
+        &[
+            "||", "&&", "|", "^", "&", "==", "!=", ">=", "<=", ">", "<", "<<", ">>", "+", "-", "*",
+            "/", "%",
+        ],
+    );
     for ops in [
         &["||"][..],
         &["&&"][..],
         &["|"][..],
         &["^"][..],
         &["&"][..],
-        &["<<", ">>", "==", "!=", ">=", "<=", ">", "<"][..],
+        &["==", "!="][..],
+        &[">=", "<=", ">", "<"][..],
+        &["<<", ">>"][..],
         &["+", "-"][..],
         &["*", "/", "%"][..],
     ] {
-        if let Some((op, idx)) = find_top_level_binary_op(s, ops) {
+        if let Some(&(op, idx)) = operators.iter().rev().find(|(op, _)| ops.contains(op)) {
             let lhs = trim(&s[..idx]);
             let rhs = trim(&s[idx + op.len()..]);
             if !lhs.is_empty() && !rhs.is_empty() {

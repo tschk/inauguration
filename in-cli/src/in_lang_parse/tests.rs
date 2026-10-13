@@ -2104,3 +2104,24 @@ fn assignment_scanner_respects_unicode_strings_and_nesting() {
         matches!(parse_assign_stmt("values[index(\"a += b\")] += 2"), Some(Stmt::Expr(Expr::Call { callee, .. })) if matches!(callee.as_ref(), Expr::Ident(name) if name == "index-modify-place-first"))
     );
 }
+
+#[test]
+fn shifts_bind_before_comparisons_and_equality() {
+    for (source, root, right) in [
+        ("8 == 16 >> 1", "==", ">>"),
+        ("2 < 1 << 2", "<", "<<"),
+        ("true == 1 < 2", "==", "<"),
+        ("true != 2 >= 1", "!=", ">="),
+    ] {
+        assert!(
+            matches!(parse_expr(source), Expr::Binary { op, rhs, .. } if op == root && matches!(rhs.as_ref(), Expr::Binary { op, .. } if op == right)),
+            "{source}"
+        );
+    }
+    assert!(
+        matches!(parse_expr("16 >> 1 >> 1"), Expr::Binary { op, lhs, .. } if op == ">>" && matches!(lhs.as_ref(), Expr::Binary { op, .. } if op == ">>"))
+    );
+    assert!(
+        matches!(parse_expr("1 << 1 + 1"), Expr::Binary { op, rhs, .. } if op == "<<" && matches!(rhs.as_ref(), Expr::Binary { op, .. } if op == "+"))
+    );
+}

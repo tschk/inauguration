@@ -71,3 +71,4 @@ agree conformance/types/array-literal-index.in
 agree conformance/control-flow/array-bounds-effects.in
 agree conformance/control-flow/in-bit-compound-effects.in
 agree conformance/control-flow/in-assignment-scan.in
+agree conformance/control-flow/in-shift-precedence.in

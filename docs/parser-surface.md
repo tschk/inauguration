@@ -75,3 +75,22 @@ All 37 languages run the same pipeline: grammar → `UnifiedModule` → `family_
 | 4 | Tree-sitter body extraction + family typecheck + SIL artifact emission | All other 31 languages |
 
 Run **`in languages --json`** for the full machine-readable split.
+
+## `.in` binary operator precedence
+
+Lowest precedence first. Operators on one row associate left to right; parentheses override grouping.
+
+| Level | Operators |
+| --- | --- |
+| 1 | `\|\|` |
+| 2 | `&&` |
+| 3 | `\|` |
+| 4 | `^` |
+| 5 | `&` |
+| 6 | `==`, `!=` |
+| 7 | `<`, `>`, `<=`, `>=` |
+| 8 | `<<`, `>>` |
+| 9 | `+`, `-` |
+| 10 | `*`, `/`, `%` |
+
+For example, `8 == 16 >> 1` means `8 == (16 >> 1)`, and `true == 1 < 2` means `true == (1 < 2)`.
