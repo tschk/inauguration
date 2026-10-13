@@ -1166,12 +1166,12 @@ fn lower_rejects_loop_jump_outside_loop() {
 }
 
 #[test]
-fn lower_rejects_loop_jump_across_try_scope() {
+fn lower_accepts_loop_jump_across_try_scope() {
     for jump in ["break", "continue"] {
         let module = crate::in_lang_parse::parse_in_source(&format!("fn main() -> Int {{ let i = 0; while i < 1 {{ try {{ {jump}; }} catch (e) {{ }} i = i + 1; }} return i; }}")).expect("parse");
-        let error =
-            lower_module(&module, "main", NativeLinkage::Executable).expect_err("reject unwind");
-        assert!(error.contains("across a try scope"), "{error}");
+        let lowered =
+            lower_module(&module, "main", NativeLinkage::Executable).expect("lower unwind");
+        assert!(lowered.degradations.is_empty());
     }
 }
 
@@ -1187,6 +1187,20 @@ fn native_executable_executes_continue() {
     let output = run_native_exe(&path);
     let _ = std::fs::remove_file(&path);
     assert_eq!(output.status.code(), Some(5), "{output:?}");
+}
+
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_executable_executes_continue_across_nested_try_scopes() {
+    let module = crate::in_lang_parse::parse_in_source(include_str!(
+        "../../../../conformance/control-flow/continue-try.in"
+    ))
+    .expect("parse");
+    let path = temp_executable("continue-try");
+    compile_native_executable(&module, "main", &path).expect("compile");
+    let output = run_native_exe(&path);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(output.status.code(), Some(43), "{output:?}");
 }
 
 #[test]

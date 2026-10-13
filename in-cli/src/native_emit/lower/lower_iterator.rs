@@ -108,7 +108,10 @@ pub(crate) fn lower_vec_for(
     }
     emitter.emit_u32(aarch64::add_imm64(2, 2, 1));
     emitter.emit_u32(aarch64::str64(2, aarch64::REG_SP, slots.index));
-    ctx.loop_branches.push(Default::default());
+    ctx.loop_branches.push(super::lower_ctx::LoopBranches {
+        try_depth: ctx.active_try_flags.len(),
+        ..Default::default()
+    });
     for stmt in body {
         lower_stmt(
             emitter,

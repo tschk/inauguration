@@ -1044,6 +1044,12 @@ fn lower_function(
         lower_stmt(emitter, &mut ctx, stmt, pending_calls)?;
     }
 
+    if !ctx.break_sites.is_empty() || !ctx.continue_sites.is_empty() {
+        return Err(format!(
+            "x86_64-lower: loop jump outside a loop in `{}`",
+            func.name
+        ));
+    }
     if ctx.frame_size > u16::MAX as u32 {
         return Err("x86_64-lower: stack frame exceeds supported slot offsets".into());
     }
@@ -1186,6 +1192,15 @@ fn lower_stmt(
             Ok(())
         }
         Stmt::Let(name, typ, expr) => {
+            if let Expr::Ident(source) = expr
+                && let Some(slot @ StackSlot::InlineArray { .. }) = ctx.locals.get(source).cloned()
+            {
+                ctx.locals.insert(name.clone(), slot);
+                if let Some(array_type) = ctx.scalar_types.get(source).cloned() {
+                    ctx.scalar_types.insert(name.clone(), array_type);
+                }
+                return Ok(());
+            }
             if let Expr::ArrayLit(items) = expr
                 && let Some(StackSlot::InlineArray { offsets }) = ctx.locals.get(name).cloned()
             {
@@ -1401,88 +1416,27 @@ fn lower_stmt(
             cond,
             body,
         } => {
-            // Owned x86 path: desugar should have rewritten range/array fors.
-            // Remaining iterator forms still compile as a while over array-len.
-            let iter = cond.clone().unwrap_or(Expr::ArrayLit(vec![]));
-            let iter_type =
-                scalar_expr_type(&iter, ctx).ok_or("x86_64-lower: unknown for collection type")?;
-            let item_type = match iter_type.canonical() {
-                Typ::Array(item) | Typ::Vector(item) => *item,
-                _ => return Err("x86_64-lower: for collection must be an array".into()),
-            };
-            let collection = format!("__x86_for_items_{}", ctx.frame_size);
-            if let Expr::Ident(source) = &iter
-                && let Some(slot @ StackSlot::InlineArray { .. }) = ctx.locals.get(source).cloned()
+            let mut counter = ctx.frame_size as usize;
+            while [format!("__for_{counter}"), format!("__for_items_{counter}")]
+                .iter()
+                .any(|name| {
+                    ctx.locals.contains_key(name)
+                        || ctx.globals.contains_key(name)
+                        || ctx.functions.contains_key(name)
+                })
             {
-                ctx.scalar_types.insert(collection.clone(), iter_type);
-                ctx.locals.insert(collection.clone(), slot);
-            } else {
-                let capture = Stmt::Let(collection.clone(), Some(iter_type), iter);
-                alloc_declared_locals(ctx, std::slice::from_ref(&capture))?;
-                lower_stmt(emitter, ctx, &capture, pending_calls)?;
+                counter += 1;
             }
-            let iter = Expr::Ident(collection);
-            let idx = format!("__x86_for_{binding}");
-            ctx.alloc_local(&idx, &Typ::Int)?;
-            ctx.alloc_local(binding, &item_type)?;
-            emitter.emit_insns(&x86_64::load_i64(RAX, 0));
-            if let Ok(off) = ctx.slot_offset(&idx) {
-                emitter.emit_insns(&x86_64::str64(RAX, off as u16));
-            }
-            let head = emitter.len();
-            let len_expr = Expr::Call {
-                callee: Box::new(Expr::Ident("array-len".into())),
-                args: vec![iter.clone()],
-            };
-            lower_expr_into(
-                emitter,
-                ctx,
-                &Expr::Binary {
-                    op: "<".into(),
-                    lhs: Box::new(Expr::Ident(idx.clone())),
-                    rhs: Box::new(len_expr),
-                },
-                RAX,
-                pending_calls,
-            )?;
-            emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 0));
-            let exit = emitter.len();
-            emitter.emit_bytes(&[0x0F, 0x84, 0, 0, 0, 0]);
-            lower_expr_into(
-                emitter,
-                ctx,
-                &Expr::Index {
-                    base: Box::new(iter),
-                    index: Box::new(Expr::Ident(idx.clone())),
-                },
-                RAX,
-                pending_calls,
-            )?;
-            if let Ok(off) = ctx.slot_offset(binding) {
-                emitter.emit_insns(&x86_64::str64(RAX, off as u16));
-            }
-            for stmt in body {
+            let expanded = crate::lower_core::expand_for_loop(
+                binding.clone(),
+                cond.clone().unwrap_or(Expr::ArrayLit(Vec::new())),
+                body.clone(),
+                &mut counter,
+            );
+            alloc_declared_locals(ctx, &expanded)?;
+            for stmt in &expanded {
                 lower_stmt(emitter, ctx, stmt, pending_calls)?;
             }
-            lower_expr_into(
-                emitter,
-                ctx,
-                &Expr::Binary {
-                    op: "+".into(),
-                    lhs: Box::new(Expr::Ident(idx.clone())),
-                    rhs: Box::new(Expr::IntLit(1)),
-                },
-                RAX,
-                pending_calls,
-            )?;
-            if let Ok(off) = ctx.slot_offset(&idx) {
-                emitter.emit_insns(&x86_64::str64(RAX, off as u16));
-            }
-            let back = emitter.len();
-            let delta = head as i32 - back as i32 - 5;
-            emitter.emit_insns(&x86_64::jmp_rel32(delta));
-            let after = emitter.len();
-            emitter.patch_u32(exit + 2, (after as i32 - exit as i32 - 6) as u32);
             Ok(())
         }
         Stmt::Propagate => emit_error_check(emitter, ctx),
@@ -3521,6 +3475,27 @@ fn main() -> void { return 0 }
     }
 
     #[test]
+    fn rejects_loop_jumps_outside_lexical_loops() {
+        for jump in ["break", "continue"] {
+            for body in [
+                format!("{jump};"),
+                format!("while false {{ {jump}; }} {jump};"),
+            ] {
+                let module = crate::in_lang_parse::parse_in_source(&format!(
+                    "fn main() -> Int {{ {body} return 0; }}"
+                ))
+                .unwrap();
+                assert!(
+                    lower_module(&module, "main")
+                        .err()
+                        .unwrap()
+                        .contains("outside a loop")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn keeps_32bit_local_arrays_without_allocator_imports() {
         struct WidthGuard(bool);
         impl Drop for WidthGuard {
@@ -3530,9 +3505,26 @@ fn main() -> void { return 0 }
         }
         let _width = WidthGuard(x86_64::is_32bit());
         x86_64::set_32bit(true);
-        let module = crate::in_lang_parse::parse_in_source("fn main(index: Int) -> Int { let xs: [Int] = [1, 2]; xs[index] = 7; return xs[index] + array_len(xs); }").unwrap();
+        let module = crate::in_lang_parse::parse_in_source("fn main(index: Int) -> Int { let xs: [Int] = [1, 2]; let alias = xs; alias[index] = 7; return xs[index] + array_len(alias); }").unwrap();
         let result = lower_native_module(&module, "main").unwrap();
         assert!(result.externs.is_empty());
+        let mut loop_module = crate::in_lang_parse::parse_in_source("fn main(item: Int) -> Int { let xs: [Int] = [1, 2]; var sum: Int = 0; while false { if item == 1 { continue; } sum += item; } return sum; }").unwrap();
+        let crate::core_ir::Decl::Function { body, .. } = &mut loop_module.decls[0] else {
+            panic!("function");
+        };
+        let Stmt::Loop { kind, cond, .. } = &mut body[2] else {
+            panic!("loop");
+        };
+        *kind = LoopKind::For {
+            binding: "item".into(),
+        };
+        *cond = Some(Expr::Ident("xs".into()));
+        assert!(
+            lower_native_module(&loop_module, "main")
+                .unwrap()
+                .externs
+                .is_empty()
+        );
         let escaped = crate::in_lang_parse::parse_in_source(
             "fn main() -> [Int] { let xs = [1, 2]; return xs; }",
         )

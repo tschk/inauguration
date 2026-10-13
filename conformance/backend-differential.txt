@@ -51,3 +51,4 @@ agree conformance/types/string-concat.in
 agree conformance/types/string-length.in
 agree conformance/types/string-ops.in
 agree conformance/types/array-length-effects.in
+agree conformance/control-flow/continue-try.in

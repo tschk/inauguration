@@ -1,0 +1,18 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 43
+
+fn main() -> Int {
+    var i: Int = 0;
+    var sum: Int = 0;
+    while i < 3 {
+        i += 1;
+        try {
+            try { if i == 2 { throw 9; } }
+            catch 9 { continue; }
+        } catch _ { return 998; }
+        sum += i;
+    }
+    return sum * 10 + i;
+}

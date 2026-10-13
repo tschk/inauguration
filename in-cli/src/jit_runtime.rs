@@ -872,6 +872,131 @@ mod tests {
         }
     }
 
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn desugared_for_continues_advance_only_their_own_loop() {
+        use crate::core_ir::{Decl, Expr, LoopKind, Stmt};
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (continuation, expected) in [
+                ("if item == 2 { continue; }", 43),
+                ("if item == 2 { if visits == 2 { continue; } }", 43),
+                ("match item { 2 { continue; } _ { } }", 43),
+                (
+                    "if item == 2 { try { throw 9; } catch 9 { continue; } }",
+                    43,
+                ),
+                (
+                    "if item == 2 { try { continue; } catch _ { return 998; } }",
+                    43,
+                ),
+                (
+                    "var inner: Int = 0; while inner < 2 { inner += 1; if inner == 1 { continue; } } if item == 2 { continue; }",
+                    43,
+                ),
+                ("if item == 2 { break; }", 12),
+                ("if item == 2 { return 42; }", 42),
+            ] {
+                for iter in [
+                    Expr::ArrayLit(vec![Expr::IntLit(1), Expr::IntLit(2), Expr::IntLit(3)]),
+                    Expr::Call {
+                        callee: Box::new(Expr::Ident("range".into())),
+                        args: vec![Expr::IntLit(1), Expr::IntLit(4)],
+                    },
+                ] {
+                    let source = format!(
+                        "fn main(item: Int) -> Int {{ var sum: Int = 0; var visits: Int = 0; while true {{ visits += 1; if visits > 5 {{ return 999; }} {continuation} sum += item; }} return sum * 10 + visits; }}"
+                    );
+                    let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                    let body = module
+                        .decls
+                        .iter_mut()
+                        .find_map(|decl| match decl {
+                            Decl::Function { name, body, .. } if name == "main" => Some(body),
+                            _ => None,
+                        })
+                        .unwrap();
+                    let Stmt::Loop { kind, cond, .. } = &mut body[2] else {
+                        panic!("loop");
+                    };
+                    *kind = LoopKind::For {
+                        binding: "item".into(),
+                    };
+                    *cond = Some(iter);
+                    let verify = |module: &crate::core_ir::UnifiedModule| {
+                        let rt = runtime_for_module(module, profile);
+                        assert_eq!(
+                            unsafe { rt.invoke("main", &[0]) },
+                            Some(expected),
+                            "{continuation}"
+                        );
+                        assert!(rt.invocation_error().is_none(), "{continuation}");
+                    };
+                    #[cfg(target_arch = "x86_64")]
+                    verify(&module);
+                    crate::lower_core::desugar_module(&mut module);
+                    verify(&module);
+                    crate::core_opt::optimize_with_profile(
+                        &mut module.decls,
+                        Some("main"),
+                        profile,
+                    );
+                    verify(&module);
+                }
+            }
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn loop_jumps_unwind_only_exited_try_scopes() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (source, expected) in [
+                (
+                    "fn main() -> Int { var sum: Int = 0; var i: Int = 0; try { while i < 3 { i += 1; try { if i == 2 { continue; } } catch _ { return 998; } sum += i; } } catch _ { return 999; } return sum * 10 + i; }",
+                    43,
+                ),
+                (
+                    "fn main() -> Int { var sum: Int = 0; var i: Int = 0; while i < 3 { i += 1; try { try { if i == 2 { throw 9; } } catch 9 { break; } } catch _ { return 999; } sum += i; } return sum * 10 + i; }",
+                    12,
+                ),
+                (
+                    "fn main() -> Int { var sum: Int = 0; var i: Int = 0; try { throw 9; } catch 9 { while i < 3 { i += 1; try { if i == 2 { continue; } } catch _ { return 998; } sum += i; } } return sum * 10 + i; }",
+                    43,
+                ),
+                (
+                    "fn fail() -> Int { throw 7; }\nfn main() -> Int { var sum: Int = 0; var i: Int = 0; try { while i < 3 { i += 1; try { if i == 2 { continue; } } catch _ { return 998; } if i == 3 { fail(); } sum += i; } } catch 7 { return sum * 10 + i; } return 999; }",
+                    13,
+                ),
+                (
+                    "fn main() -> Int { var sum: Int = 0; var i: Int = 0; try { while i < 3 { i += 1; var inner: Int = 0; while inner < 3 { inner += 1; try { if inner == 2 { break; } } catch _ { return 998; } sum += 10; } sum += i; } } catch _ { return 999; } return sum; }",
+                    36,
+                ),
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                let verify = |module: &crate::core_ir::UnifiedModule| {
+                    let rt = runtime_for_module(module, profile);
+                    assert_eq!(
+                        unsafe { rt.invoke("main", &[]) },
+                        Some(expected),
+                        "{source}"
+                    );
+                    assert!(rt.invocation_error().is_none(), "{source}");
+                };
+                verify(&module);
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                verify(&module);
+            }
+        }
+    }
+
     #[cfg(all(unix, target_arch = "x86_64"))]
     #[test]
     fn array_length_calls_preserve_returned_lengths_and_effects() {

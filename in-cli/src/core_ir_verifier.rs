@@ -105,7 +105,7 @@ pub fn verify_module(module: &UnifiedModule, options: &VerifyOptions) -> VerifyR
 
             let mut env: HashMap<String, Typ> = params.iter().cloned().collect();
             if let Err((code, reason)) =
-                check_stmts(name, body, &facts, ret, &mut env, &mut call_edges)
+                check_stmts(name, body, &facts, ret, &mut env, &mut call_edges, 0)
             {
                 return fail_report(parsed_function_count, call_edges, &code, reason);
             }
@@ -405,9 +405,10 @@ fn check_stmts(
     ret: &Typ,
     env: &mut HashMap<String, Typ>,
     call_edges: &mut Vec<(String, String)>,
+    loop_depth: usize,
 ) -> Result<(), (String, String)> {
     for stmt in stmts {
-        check_stmt(fn_name, stmt, facts, ret, env, call_edges)?;
+        check_stmt(fn_name, stmt, facts, ret, env, call_edges, loop_depth)?;
     }
     Ok(())
 }
@@ -419,6 +420,7 @@ fn check_stmt(
     ret: &Typ,
     env: &mut HashMap<String, Typ>,
     call_edges: &mut Vec<(String, String)>,
+    loop_depth: usize,
 ) -> Result<(), (String, String)> {
     match stmt {
         Stmt::Let(name, typ, expr) => {
@@ -525,6 +527,10 @@ fn check_stmt(
             }
         }
         Stmt::Expr(expr) => check_expr(fn_name, expr, facts, env, call_edges),
+        Stmt::Break | Stmt::Continue if loop_depth == 0 => Err((
+            "invalid-control-flow".into(),
+            format!("loop jump outside a loop in `{fn_name}`"),
+        )),
         Stmt::Break | Stmt::Continue => Ok(()),
         Stmt::Return(Some(expr)) => {
             check_expr(fn_name, expr, facts, env, call_edges)?;
@@ -564,15 +570,39 @@ fn check_stmt(
         } => {
             check_expr(fn_name, cond, facts, env, call_edges)?;
             require_type(fn_name, "if condition", &Typ::Bool, cond, facts, env)?;
-            check_stmts(fn_name, then_body, facts, ret, &mut env.clone(), call_edges)?;
-            check_stmts(fn_name, else_body, facts, ret, &mut env.clone(), call_edges)
+            check_stmts(
+                fn_name,
+                then_body,
+                facts,
+                ret,
+                &mut env.clone(),
+                call_edges,
+                loop_depth,
+            )?;
+            check_stmts(
+                fn_name,
+                else_body,
+                facts,
+                ret,
+                &mut env.clone(),
+                call_edges,
+                loop_depth,
+            )
         }
         Stmt::Loop { cond, body, .. } => {
             if let Some(cond) = cond {
                 check_expr(fn_name, cond, facts, env, call_edges)?;
                 require_type(fn_name, "loop condition", &Typ::Bool, cond, facts, env)?;
             }
-            check_stmts(fn_name, body, facts, ret, &mut env.clone(), call_edges)
+            check_stmts(
+                fn_name,
+                body,
+                facts,
+                ret,
+                &mut env.clone(),
+                call_edges,
+                loop_depth + 1,
+            )
         }
         Stmt::Match {
             scrutinee, arms, ..
@@ -588,13 +618,29 @@ fn check_stmt(
                         expr_type(scrutinee, facts, env).unwrap_or(Typ::Named("Any".into())),
                     );
                 }
-                check_stmts(fn_name, &arm.body, facts, ret, &mut arm_env, call_edges)?;
+                check_stmts(
+                    fn_name,
+                    &arm.body,
+                    facts,
+                    ret,
+                    &mut arm_env,
+                    call_edges,
+                    loop_depth,
+                )?;
             }
             Ok(())
         }
         Stmt::Throw(expr) => check_expr(fn_name, expr, facts, env, call_edges),
         Stmt::Try { body, catches } => {
-            check_stmts(fn_name, body, facts, ret, &mut env.clone(), call_edges)?;
+            check_stmts(
+                fn_name,
+                body,
+                facts,
+                ret,
+                &mut env.clone(),
+                call_edges,
+                loop_depth,
+            )?;
             for catch in catches {
                 let mut catch_env = env.clone();
                 let pattern = crate::core_ir::MatchPattern::parse(&catch.pattern)
@@ -603,7 +649,15 @@ fn check_stmt(
                 if let crate::core_ir::MatchPattern::IdentPat(name) = pattern {
                     catch_env.insert(name, Typ::Named("Any".into()));
                 }
-                check_stmts(fn_name, &catch.body, facts, ret, &mut catch_env, call_edges)?;
+                check_stmts(
+                    fn_name,
+                    &catch.body,
+                    facts,
+                    ret,
+                    &mut catch_env,
+                    call_edges,
+                    loop_depth,
+                )?;
             }
             Ok(())
         }
@@ -1824,6 +1878,36 @@ mod tests {
             report.ok,
             "empty body + non-void return should be allowed: {report:?}"
         );
+    }
+
+    #[test]
+    fn rejects_loop_jumps_outside_lexical_loops() {
+        for jump in ["break", "continue"] {
+            for body in [
+                format!("{jump};"),
+                format!("if false {{ {jump}; }}"),
+                format!("try {{ {jump}; }} catch _ {{ }}"),
+                format!("try {{ throw 7; }} catch _ {{ {jump}; }}"),
+                format!("while false {{ {jump}; }} {jump};"),
+            ] {
+                let module = crate::in_lang_parse::parse_in_source(&format!(
+                    "fn main() -> Int {{ {body} return 0; }}"
+                ))
+                .unwrap();
+                let report = verify_module(&module, &default_options());
+                assert!(!report.ok, "{body}");
+                assert_eq!(
+                    report.reason_code.as_deref(),
+                    Some("invalid-control-flow"),
+                    "{body}"
+                );
+            }
+            let module = crate::in_lang_parse::parse_in_source(&format!(
+                "fn main() -> Int {{ while true {{ try {{ {jump}; }} catch _ {{ }} }} return 0; }}"
+            ))
+            .unwrap();
+            assert!(verify_module(&module, &default_options()).ok);
+        }
     }
 
     #[test]

@@ -955,8 +955,10 @@ fn lower_function(
     for index in 0..ctx.binop_temps.len() {
         ctx.binop_temps[index] = ctx.alloc_slot();
     }
-    ctx.saved_flag_offset = ctx.stack_size + 8;
-    ctx.stack_size += 16;
+    for _ in 0..lower_ctx::max_try_depth(&func.body) {
+        let slot = ctx.alloc_slot();
+        ctx.try_flag_slots.push(slot);
+    }
     for index in 0..ctx.call_arg_temps.len() {
         ctx.call_arg_temps[index] = ctx.alloc_slot();
     }

@@ -1,0 +1,5 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect build-error: outside a loop
+
+fn main() -> Int { if false { continue; } return 0; }

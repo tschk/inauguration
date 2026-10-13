@@ -6,6 +6,35 @@ use crate::core_ir::{Expr, LoopKind, Stmt, Typ};
 use crate::native_emit::aarch64::{self, CodeEmitter};
 use std::collections::HashMap;
 
+pub(crate) fn max_try_depth(body: &[Stmt]) -> usize {
+    body.iter()
+        .map(|stmt| match stmt {
+            Stmt::Try { body, catches } => {
+                1 + max_try_depth(body).max(
+                    catches
+                        .iter()
+                        .map(|catch| max_try_depth(&catch.body))
+                        .max()
+                        .unwrap_or(0),
+                )
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => max_try_depth(then_body).max(max_try_depth(else_body)),
+            Stmt::Loop { body, .. } => max_try_depth(body),
+            Stmt::Match { arms, .. } => arms
+                .iter()
+                .map(|arm| max_try_depth(&arm.body))
+                .max()
+                .unwrap_or(0),
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 pub(crate) fn append_static_arrays(emitter: &mut CodeEmitter, arrays: Vec<PendingStaticArray>) {
     for array in arrays {
         while !emitter.len().is_multiple_of(8) {
@@ -216,6 +245,7 @@ impl VecForPlan {
 pub(crate) struct LoopBranches {
     pub(crate) breaks: Vec<u32>,
     pub(crate) continues: Vec<u32>,
+    pub(crate) try_depth: usize,
 }
 
 pub(crate) struct LowerCtx<'a> {
@@ -243,7 +273,8 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) ret_typ: Typ,
     pub(crate) loop_branches: Vec<LoopBranches>,
     pub(crate) _params_src: &'a [(String, Typ)],
-    pub(crate) saved_flag_offset: u32,
+    pub(crate) try_flag_slots: Vec<u32>,
+    pub(crate) active_try_flags: Vec<u32>,
     pub(crate) prologue_stack_reserve: u32,
     /// Stack offset for saving binary operation lhs (preserved across rhs eval)
     pub(crate) binop_temp: u32,
@@ -442,7 +473,8 @@ impl<'a> LowerCtx<'a> {
             ret_typ: Typ::Int,
             loop_branches: Vec::new(),
             _params_src: params,
-            saved_flag_offset: 0,
+            try_flag_slots: Vec::new(),
+            active_try_flags: Vec::new(),
             prologue_stack_reserve: 0,
             binop_temp: 0,
             binop_temps: [0; 64],

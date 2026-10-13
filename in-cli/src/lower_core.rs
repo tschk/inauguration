@@ -133,7 +133,7 @@ fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize) {
     *body = out;
 }
 
-fn expand_for_loop(
+pub(crate) fn expand_for_loop(
     binding: String,
     iter: Expr,
     mut loop_body: Vec<Stmt>,
@@ -144,14 +144,16 @@ fn expand_for_loop(
         if matches!(callee.as_ref(), Expr::Ident(name) if name == "range") && args.len() >= 2 {
             let start = args[0].clone();
             let end = args[1].clone();
-            loop_body.push(Stmt::Assign(
+            let advance = Stmt::Assign(
                 binding.clone(),
                 Expr::Binary {
                     op: "+".into(),
                     lhs: Box::new(Expr::Ident(binding.clone())),
                     rhs: Box::new(Expr::IntLit(1)),
                 },
-            ));
+            );
+            advance_for_continues(&mut loop_body, &advance);
+            loop_body.push(advance);
             return vec![
                 Stmt::Let(binding.clone(), Some(Typ::Int), start),
                 Stmt::Loop {
@@ -183,14 +185,16 @@ fn expand_for_loop(
         },
     )];
     body.append(&mut loop_body);
-    body.push(Stmt::Assign(
+    let advance = Stmt::Assign(
         idx.clone(),
         Expr::Binary {
             op: "+".into(),
             lhs: Box::new(Expr::Ident(idx.clone())),
             rhs: Box::new(Expr::IntLit(1)),
         },
-    ));
+    );
+    advance_for_continues(&mut body, &advance);
+    body.push(advance);
     vec![
         Stmt::Let(collection, None, iter),
         Stmt::Let(idx.clone(), Some(Typ::Int), Expr::IntLit(0)),
@@ -204,6 +208,38 @@ fn expand_for_loop(
             body,
         },
     ]
+}
+
+// Nested-loop continues must not advance the enclosing for loop.
+fn advance_for_continues(body: &mut Vec<Stmt>, advance: &Stmt) {
+    let mut rewritten = Vec::with_capacity(body.len());
+    for mut stmt in std::mem::take(body) {
+        match &mut stmt {
+            Stmt::Continue => rewritten.push(advance.clone()),
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                advance_for_continues(then_body, advance);
+                advance_for_continues(else_body, advance);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    advance_for_continues(&mut arm.body, advance);
+                }
+            }
+            Stmt::Try { body, catches } => {
+                advance_for_continues(body, advance);
+                for catch in catches {
+                    advance_for_continues(&mut catch.body, advance);
+                }
+            }
+            _ => {}
+        }
+        rewritten.push(stmt);
+    }
+    *body = rewritten;
 }
 
 /// Rewrite bare field reads and writes inside a class method body to

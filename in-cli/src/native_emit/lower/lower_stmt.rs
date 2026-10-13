@@ -303,11 +303,14 @@ pub(crate) fn lower_stmt(
         }
         Stmt::Try { body, catches, .. } => {
             emit_error_slot_adr(emitter, fn_name)?;
-            // ponytail: reject jumps across try scopes until error-flag unwind is lowered.
-            let outer_loops = std::mem::take(&mut ctx.loop_branches);
+            let saved_flag_offset = *ctx
+                .try_flag_slots
+                .get(ctx.active_try_flags.len())
+                .ok_or("native-lower: missing saved flag slot for try scope")?;
+            ctx.active_try_flags.push(saved_flag_offset);
             // Save previous error flag from global location to stack
             emitter.emit_u32(aarch64::ldrb(1, 27, 0));
-            emitter.emit_u32(aarch64::strb(1, aarch64::REG_SP, ctx.saved_flag_offset));
+            emitter.emit_u32(aarch64::strb(1, aarch64::REG_SP, saved_flag_offset));
             // Clear global error flag
             emitter.emit_u32(aarch64::strb(aarch64::REG_XZR, 27, 0));
 
@@ -430,19 +433,23 @@ pub(crate) fn lower_stmt(
             emitter.patch_u32(end_branch, aarch64::b(end_delta));
 
             // Restore previous error flag from stack to global location
-            emitter.emit_u32(aarch64::ldrb(1, aarch64::REG_SP, ctx.saved_flag_offset));
+            emitter.emit_u32(aarch64::ldrb(1, aarch64::REG_SP, saved_flag_offset));
             emitter.emit_u32(aarch64::strb(1, 27, 0));
 
-            ctx.loop_branches = outer_loops;
+            ctx.active_try_flags.pop();
             Ok(())
         }
         Stmt::Propagate => emit_error_check(emitter, ctx, fn_name),
         Stmt::Break | Stmt::Continue => {
             let Some(branches) = ctx.loop_branches.last_mut() else {
                 return Err(format!(
-                    "native-lower: loop jump outside a loop or across a try scope in `{fn_name}`"
+                    "native-lower: loop jump outside a loop in `{fn_name}`"
                 ));
             };
+            for &offset in ctx.active_try_flags[branches.try_depth..].iter().rev() {
+                emitter.emit_u32(aarch64::ldrb(1, aarch64::REG_SP, offset));
+                emitter.emit_u32(aarch64::strb(1, 27, 0));
+            }
             let site = emitter.emit_insn(aarch64::b(0));
             if matches!(stmt, Stmt::Break) {
                 branches.breaks.push(site);
@@ -1218,7 +1225,10 @@ pub(crate) fn lower_loop(
     } else {
         None
     };
-    ctx.loop_branches.push(Default::default());
+    ctx.loop_branches.push(super::lower_ctx::LoopBranches {
+        try_depth: ctx.active_try_flags.len(),
+        ..Default::default()
+    });
     for stmt in body {
         lower_stmt(
             emitter,
