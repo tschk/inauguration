@@ -53,3 +53,4 @@ agree conformance/types/string-ops.in
 agree conformance/types/array-length-effects.in
 agree conformance/control-flow/continue-try.in
 agree conformance/control-flow/range-bound-effects.in
+agree conformance/control-flow/range-inclusive.in

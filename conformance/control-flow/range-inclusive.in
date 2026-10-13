@@ -1,0 +1,18 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 20
+
+var calls: Int = 0;
+fn start() -> Int { calls = calls * 10 + 1; return 1; }
+fn limit() -> Int { calls = calls * 10 + 2; return 3; }
+fn main() -> Int {
+    var sum: Int = 0;
+    for item in start()..=limit() { sum += item; item = 99; }
+    var count: Int = 0;
+    for item in 9223372036854775806..=9223372036854775807 {
+        count += 1;
+        continue;
+    }
+    return sum + calls + count;
+}

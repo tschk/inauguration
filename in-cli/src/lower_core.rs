@@ -141,7 +141,11 @@ pub(crate) fn expand_for_loop(
 ) -> Vec<Stmt> {
     let binding = binding.trim().to_string();
     if let Expr::Call { callee, args } = &iter {
-        if matches!(callee.as_ref(), Expr::Ident(name) if name == "range") && args.len() == 2 {
+        if matches!(callee.as_ref(), Expr::Ident(name) if name == "range" || name == "range-inclusive")
+            && args.len() == 2
+        {
+            let inclusive =
+                matches!(callee.as_ref(), Expr::Ident(name) if name == "range-inclusive");
             let index = format!("__for_{counter}");
             let end = format!("__for_end_{counter}");
             *counter += 1;
@@ -153,6 +157,21 @@ pub(crate) fn expand_for_loop(
                     rhs: Box::new(Expr::IntLit(1)),
                 },
             );
+            // Stop before incrementing the inclusive endpoint, including Int::MAX.
+            // The same advance also runs before continues targeting this loop.
+            let advance = if inclusive {
+                Stmt::If {
+                    cond: Expr::Binary {
+                        op: "==".into(),
+                        lhs: Box::new(Expr::Ident(index.clone())),
+                        rhs: Box::new(Expr::Ident(end.clone())),
+                    },
+                    then_body: vec![Stmt::Break],
+                    else_body: vec![advance],
+                }
+            } else {
+                advance
+            };
             loop_body.insert(
                 0,
                 Stmt::Let(binding, Some(Typ::Int), Expr::Ident(index.clone())),
@@ -165,7 +184,7 @@ pub(crate) fn expand_for_loop(
                 Stmt::Loop {
                     kind: LoopKind::While,
                     cond: Some(Expr::Binary {
-                        op: "<".into(),
+                        op: if inclusive { "<=" } else { "<" }.into(),
                         lhs: Box::new(Expr::Ident(index)),
                         rhs: Box::new(Expr::Ident(end)),
                     }),

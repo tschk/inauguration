@@ -451,7 +451,12 @@ fn parse_for_expanded(s: &str, context: &mut LoopParseContext<'_>) -> Result<Vec
         return Err(".in: `for` range needs `start..end`".into());
     }
     let start_expr = parse_expr(trim(range_segs[0]));
-    let end_expr = parse_expr(trim(range_segs[1]));
+    let end = trim(range_segs[1]);
+    let (range_name, end) = match end.strip_prefix('=') {
+        Some(end) => ("range-inclusive", trim(end)),
+        None => ("range", end),
+    };
+    let end_expr = parse_expr(end);
     let (inner, _) = brace_content_bounds_after_open(rest, open)
         .ok_or_else(|| ".in: unclosed `for` body".to_string())?;
     let body = parse_function_body_with_context(inner, context)?;
@@ -459,7 +464,7 @@ fn parse_for_expanded(s: &str, context: &mut LoopParseContext<'_>) -> Result<Vec
     Ok(crate::lower_core::expand_for_loop(
         var_name,
         Expr::Call {
-            callee: Box::new(Expr::Ident("range".into())),
+            callee: Box::new(Expr::Ident(range_name.into())),
             args: vec![start_expr, end_expr],
         },
         body,

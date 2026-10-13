@@ -1672,7 +1672,13 @@ fn lower_expr_with_types_inner(
         }
         syn::Expr::Repeat(r) => Expr::ArrayLit(vec![lower_expr_with_types(&r.expr, local_types)]),
         syn::Expr::Range(r) => Expr::Call {
-            callee: Box::new(Expr::Ident("range".into())),
+            callee: Box::new(Expr::Ident(
+                match r.limits {
+                    syn::RangeLimits::Closed(_) => "range-inclusive",
+                    syn::RangeLimits::HalfOpen(_) => "range",
+                }
+                .into(),
+            )),
             args: vec![
                 r.start
                     .as_ref()

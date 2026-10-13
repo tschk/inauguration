@@ -1894,3 +1894,53 @@ fn owned_rust_jit_verifies_before_execution() {
     );
     assert_eq!(report.eval_exit_code, None);
 }
+
+#[test]
+fn owned_rust_jit_inclusive_ranges_include_the_endpoint() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (source, expected) in [
+        (
+            "fn main() -> i64 { let mut sum = 0; for i in 1..=3 { sum = sum + i; } return sum; }",
+            6,
+        ),
+        (
+            "fn main() -> i64 { let mut count = 0; for i in 7..=3 { count = count + 1; } return count; }",
+            0,
+        ),
+        (
+            "fn main() -> i64 { let mut count = 0; for i in 9223372036854775807..=9223372036854775807 { count = count + 1; } return count; }",
+            1,
+        ),
+        (
+            "fn main() -> i64 { let mut count = 0; for i in 9223372036854775806..=9223372036854775807 { count = count + 1; continue; } return count; }",
+            2,
+        ),
+        (
+            "fn main() -> i64 { let mut end = 3; let mut sum = 0; for mut i in 1..=end { sum = sum + i; end = 0; i = 99; } return sum; }",
+            6,
+        ),
+        (
+            "fn main() -> i64 { let mut count = 0; for i in 1..=2 { for i in 1..=2 { count = count + 1; continue; } } return count; }",
+            4,
+        ),
+    ] {
+        let path = temp_path("rust-inclusive.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(expected)),
+            "{source}"
+        );
+    }
+}
