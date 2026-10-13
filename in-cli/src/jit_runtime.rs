@@ -2736,6 +2736,54 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn field_reads_materialize_effectful_struct_values_once() {
+        for source in [
+            "struct Point { Int x; Int y }\nfn main() -> Int { var point: Point = Point { x: 20, y: 22 }; var copied: Point = point; return copied.x + copied.y; }",
+            "struct Point { Int x; Int y }\nvar calls: Int = 0;\nfn make() -> Point { calls += 1; return Point { x: 41, y: 10 }; }\nfn main() -> Int { return make().x + calls; }",
+            "struct Point { Int x; Int y }\nfn sum(point: Point) -> Int { return point.x + point.y; }\nfn main() -> Int { var point: Point = Point { x: 20, y: 22 }; return sum(point); }",
+            "struct Point { Int x; Int y }\nfn make(n: Int) -> Point { var point: Point = Point { x: n, y: 21 }; return point; }\nfn main() -> Int { var first: Point = make(20); var second: Point = make(21); first.y = 22; return first.x + first.y; }",
+            "struct Point { Int x; Int y }\nfn make(n: Int) -> Point { return Point { x: n, y: 21 }; }\nfn main() -> Int { var first: Point = Point { x: 0, y: 0 }; first = make(20); var copied: Point = first; copied.y = 0; return first.x + copied.x + first.y + copied.y - 19; }",
+            "struct Point { Int x; Int y }\nfn make() -> Point { throw 9; return Point { x: 0, y: 0 }; }\nfn main() -> Int { try { return make().y; } catch 9 { return 42; } return 0; }",
+            "struct Point { Int x; Int y }\nvar calls: Int = 0;\nfn fail() -> Int { calls += 1; throw 9; return 0; }\nfn next() -> Int { calls += 10; return 0; }\nfn main() -> Int { try { return Point { x: fail(), y: next() }.y; } catch 9 { if calls == 1 { return 42; } } return 0; }",
+            include_str!("../../conformance/control-flow/struct-field-call-effects.in"),
+            "struct Point { Bool flag; Int value }\nvar trace: Int = 0;\nfn guard() -> Bool { trace = trace * 10 + 1; return true; }\nfn make() -> Point { trace = trace * 10 + 2; return Point { flag: true, value: 41 }; }\nfn main() -> Int { if guard() && make().flag { return trace + 30; } return 0; }",
+            "struct Point { Bool flag; Int value }\nvar trace: Int = 0;\nfn guard() -> Bool { trace += 1; return false; }\nfn make() -> Point { trace += 10; return Point { flag: true, value: 41 }; }\nfn main() -> Int { if guard() && make().flag { return 0; } if trace == 1 { return 42; } return 0; }",
+            "struct Point { Int x; Int y }\nvar calls: Int = 0;\nfn make() -> Point { calls += 1; return Point { x: 10, y: 41 }; }\nfn main() -> Int { return make().y + calls; }",
+            "struct Point { Int x; Int y }\nvar trace: Int = 0;\nfn item(n: Int) -> Int { trace = trace * 10 + n; return n; }\nfn main() -> Int { var value: Int = Point { x: item(1), y: item(2) }.y; return value + trace + 28; }",
+            "struct Point { Bool flag; Float value }\nvar calls: Int = 0;\nfn make() -> Point { calls += 1; return Point { flag: true, value: 42.5 }; }\nfn main() -> Int { if make().value == 42.5 && calls == 1 { return 42; } return 0; }",
+            "struct Point { Bool flag; Int value }\nvar calls: Int = 0;\nfn make() -> Point { calls += 1; return Point { flag: true, value: 41 }; }\nfn main() -> Int { if false && make().flag { return 0; } if calls == 0 { return 42; } return 0; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, target_arch = "x86_64"))]
+    fn struct_parameter_sentinels_return_failure_without_reading_memory() {
+        let module = crate::in_lang_parse::parse_in_source("struct Point { Int x; Int y }\nfn main(point: Point) -> Int { return point.x + point.y; }").unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for pointer in [0, 1] {
+                assert_eq!(invoke_module(&module, profile, &[pointer]), Some(1));
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

@@ -73,3 +73,4 @@ agree conformance/control-flow/in-bit-compound-effects.in
 agree conformance/control-flow/in-assignment-scan.in
 agree conformance/control-flow/in-shift-precedence.in
 agree conformance/types/in-scientific-literals.in
+agree conformance/control-flow/struct-field-call-effects.in

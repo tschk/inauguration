@@ -29,6 +29,10 @@ fn expr_needs_spills(expr: &Expr) -> bool {
     {
         return true;
     }
+    if matches!(expr, Expr::Field { base, .. } if matches!(base.as_ref(), Expr::Call { .. } | Expr::StructInit { .. }))
+    {
+        return true;
+    }
     if let Expr::Closure { body, .. } = expr {
         return body.iter().any(stmt_needs_spills);
     }

@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## Fields of produced struct values
+
+Field reads from calls and struct constructors materialize their base once through shared operand spills. This evaluates every constructor field, preserves surrounding operand order, and keeps producers inside short-circuit branches. Native backends read the resulting local struct through their existing field paths. x86 hosted 64-bit results with scalar fields use owned heap storage and an internal data-pointer ABI; bindings and assignments copy all fields into their local layout. JIT storage lives in the runtime arena, and native storage uses the existing process-lifetime allocation policy.
+
 ## Writable array literal results
 
 AArch64 materializes array literal results in writable storage instead of returning pointers into read-only code. Elements can be dynamic and retain their evaluation order; a saved cursor survives element calls. JIT storage belongs to the runtime arena, while native hosted artifacts use the existing process-lifetime heap policy. The internal AArch64 data-pointer/length array ABI remains unchanged. Array-returning functions initialize local literal arrays in owned storage, so returns through aliases and other calls survive frame release. Inline arrays materialized elsewhere copy their current elements into owned storage. Direct indexing of literals evaluates elements before the index and uses the same pointer/length bounds checks as call results. Direct literal and call-result array arguments use this same materializer; argument staging preserves earlier values across later calls.

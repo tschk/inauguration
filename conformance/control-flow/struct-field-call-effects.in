@@ -1,0 +1,9 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+struct Point { Int x; Int y }
+var calls: Int = 0;
+fn make() -> Point { calls += 1; return Point { x: 10, y: 41 }; }
+fn main() -> Int { return calls + make().y + calls; }

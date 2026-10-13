@@ -95,7 +95,7 @@ fn emit_function_epilogue(emitter: &mut CodeEmitter, is_interrupt: bool) {
     }
 }
 
-fn emit_array_bounds_failure(emitter: &mut CodeEmitter, is_interrupt: bool) {
+fn emit_failure_return(emitter: &mut CodeEmitter, is_interrupt: bool) {
     emitter.emit_insns(&x86_64::load_i64(RAX, 1));
     emit_function_epilogue(emitter, is_interrupt);
 }
@@ -1074,6 +1074,11 @@ fn lower_function(
     // All incoming registers have been saved before copying aggregate fields.
     for (pointer_slot, fields) in struct_params {
         emitter.emit_insns(&x86_64::ldr64(RAX, pointer_slot as u16));
+        emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 1));
+        let valid = emitter.len();
+        emitter.emit_insns(&x86_64::jcc_near(0x07, 0));
+        emit_failure_return(emitter, ctx.is_interrupt);
+        emitter.patch_u32(valid + 2, emitter.len() - valid - 6);
         let mut offsets: Vec<_> = fields.values().copied().collect();
         offsets.sort_unstable_by(|lhs, rhs| rhs.cmp(lhs));
         for (index, offset) in offsets.into_iter().enumerate() {
@@ -1221,8 +1226,32 @@ fn lower_stmt(
         Stmt::Return(expr) => {
             if let Some(expr) = expr {
                 let ret_typ = ctx.ret_typ.canonical();
-                if matches!(ret_typ, Typ::Named(_)) {
-                    // ponytail: struct return still requires an aggregate ABI.
+                if let Typ::Named(name) = &ret_typ
+                    && ctx.structs.contains_key(name)
+                {
+                    if ctx.structs[name].iter().any(|(_, typ)| {
+                        !matches!(
+                            typ.canonical(),
+                            Typ::Int | Typ::Bool | Typ::Float | Typ::String
+                        )
+                    }) {
+                        return Err(
+                            "x86_64-lower: struct return needs a supported scalar-field layout"
+                                .into(),
+                        );
+                    }
+                    let schema = ctx.structs[name].clone();
+                    let fields: HashMap<_, _> = schema
+                        .iter()
+                        .rev()
+                        .map(|(field, _)| (field.clone(), ctx.alloc_slot()))
+                        .collect();
+                    store_struct_value(emitter, ctx, expr, &fields, pending_calls)?;
+                    let mut offsets: Vec<_> = fields.values().copied().collect();
+                    offsets.sort_unstable_by(|a, b| b.cmp(a));
+                    lower_heap_array(emitter, ctx, &offsets, pending_calls)?;
+                    emitter.emit_insns(&x86_64::add_rmi8(RAX, 16));
+                } else if matches!(ret_typ, Typ::Named(_)) {
                     emitter.emit_insns(&x86_64::load_i64(RAX, 0));
                 } else {
                     lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
@@ -1277,23 +1306,14 @@ fn lower_stmt(
                 let resolved = typ.clone().unwrap_or(Typ::Int);
                 ctx.alloc_local(name, &resolved)?;
             }
+            if let Some(StackSlot::Struct { fields }) = ctx.locals.get(name).cloned() {
+                return store_struct_value(emitter, ctx, expr, &fields, pending_calls);
+            }
             lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
             store_local_error_type(emitter, ctx, name, expr)?;
             match ctx.locals.get(name) {
                 Some(StackSlot::Scalar(offset)) => {
                     emitter.emit_insns(&x86_64::str64(RAX, *offset as u16));
-                }
-                Some(StackSlot::Struct { fields }) => {
-                    // ponytail: struct let — store RAX to first field, zero the rest
-                    let mut sorted: Vec<&u32> = fields.values().collect();
-                    sorted.sort();
-                    if let Some(first) = sorted.first() {
-                        emitter.emit_insns(&x86_64::str64(RAX, **first as u16));
-                    }
-                    for off in sorted.iter().skip(1) {
-                        emitter.emit_insns(&x86_64::load_i64(RAX, 0));
-                        emitter.emit_insns(&x86_64::str64(RAX, **off as u16));
-                    }
                 }
                 _ => {}
             }
@@ -1318,7 +1338,9 @@ fn lower_stmt(
                 lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
                 return Ok(());
             }
-            // ponytail: Assign to non-scalar local (struct field) emits expr but skips store
+            if let Some(StackSlot::Struct { fields }) = ctx.locals.get(name).cloned() {
+                return store_struct_value(emitter, ctx, expr, &fields, pending_calls);
+            }
             let offset = match ctx.locals.get(name) {
                 Some(StackSlot::Scalar(off)) => Some(*off),
                 _ => None,
@@ -1413,7 +1435,7 @@ fn lower_stmt(
                 let end = emitter.len();
                 emitter.emit_insns(&x86_64::jmp_rel32(0));
                 emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
-                emit_array_bounds_failure(emitter, ctx.is_interrupt);
+                emit_failure_return(emitter, ctx.is_interrupt);
                 emitter.patch_u32(end + 1, emitter.len() - end - 5);
                 return Ok(());
             }
@@ -1446,7 +1468,7 @@ fn lower_stmt(
             emitter.emit_insns(&x86_64::jmp_rel32(0));
             emitter.patch_u32(null + 2, emitter.len() - null - 6);
             emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
-            emit_array_bounds_failure(emitter, ctx.is_interrupt);
+            emit_failure_return(emitter, ctx.is_interrupt);
             emitter.patch_u32(end + 1, emitter.len() - end - 5);
             Ok(())
         }
@@ -2010,7 +2032,7 @@ fn lower_ident_ref(
             .copied()
             .ok_or("x86_64-lower: empty struct has no addressable fields")?;
         emitter.emit_insns(&x86_64::mov_rr(target_reg, RBP));
-        emitter.emit_insns(&x86_64::sub_rmi32(target_reg, base as i32));
+        emitter.emit_insns(&x86_64::sub_rmi32(target_reg, base as i32 + 8));
         return Ok(());
     }
     // Check if this is a global variable
@@ -3031,6 +3053,59 @@ fn lower_call_expr(
     Ok(())
 }
 
+fn store_struct_value(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    expr: &Expr,
+    fields: &HashMap<String, u32>,
+    pending_calls: &mut Vec<PendingCall>,
+) -> Result<(), String> {
+    let mut offsets: Vec<_> = fields.values().copied().collect();
+    offsets.sort_unstable_by(|a, b| b.cmp(a));
+    if matches!(expr, Expr::IntLit(0)) {
+        emitter.emit_insns(&x86_64::zero_reg(RCX));
+        for offset in offsets {
+            emitter.emit_insns(&x86_64::str64(RCX, offset as u16));
+        }
+        return Ok(());
+    }
+    let Some(Typ::Named(name)) = scalar_expr_type(expr, ctx) else {
+        return Err("x86_64-lower: struct value needs a known scalar-field layout".into());
+    };
+    if !ctx.structs.get(&name).is_some_and(|schema| {
+        schema.iter().all(|(_, typ)| {
+            matches!(
+                typ.canonical(),
+                Typ::Int | Typ::Bool | Typ::Float | Typ::String
+            )
+        })
+    }) {
+        return Err("x86_64-lower: struct value needs a known scalar-field layout".into());
+    }
+    match expr {
+        Expr::Ident(name) if matches!(ctx.locals.get(name), Some(StackSlot::Struct { .. })) => {}
+        Expr::StructInit { .. } | Expr::Call { .. } => {}
+        _ => {
+            return Err(
+                "x86_64-lower: struct value needs an addressable local, constructor, or call"
+                    .into(),
+            );
+        }
+    }
+    lower_call_argument(emitter, ctx, expr, RAX, pending_calls)?;
+    emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 1));
+    let valid = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(0x07, 0));
+    emit_failure_return(emitter, ctx.is_interrupt);
+    emitter.patch_u32(valid + 2, emitter.len() - valid - 6);
+
+    for (index, offset) in offsets.into_iter().enumerate() {
+        emitter.emit_insns(&x86_64::mov_r_m(RCX, RAX, (index * 8) as i32));
+        emitter.emit_insns(&x86_64::str64(RCX, offset as u16));
+    }
+    Ok(())
+}
+
 fn lower_struct_init(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -3217,12 +3292,12 @@ fn lower_array_elem_read(
                 return Ok(());
             }
         }
-        emit_array_bounds_failure(emitter, ctx.is_interrupt);
+        emit_failure_return(emitter, ctx.is_interrupt);
         return Ok(());
     }
     let Some(&first) = offsets.first() else {
         lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
-        emit_array_bounds_failure(emitter, ctx.is_interrupt);
+        emit_failure_return(emitter, ctx.is_interrupt);
         return Ok(());
     };
     lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
@@ -3239,7 +3314,7 @@ fn lower_array_elem_read(
     let end = emitter.len();
     emitter.emit_insns(&x86_64::jmp_rel32(0));
     emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
-    emit_array_bounds_failure(emitter, ctx.is_interrupt);
+    emit_failure_return(emitter, ctx.is_interrupt);
     emitter.patch_u32(end + 1, emitter.len() - end - 5);
     if target_reg != RAX {
         emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
@@ -3306,7 +3381,7 @@ fn lower_heap_array(
         emitter.emit_insns(&x86_64::ldr64(RDX, *offset as u16));
         emitter.emit_insns(&x86_64::mov_m_r(RAX, 16 + index as i32 * 8, RDX));
     }
-    // ponytail: native arrays are process-owned; add release semantics with language ownership.
+    // shortcut: native heap values live until process exit, add release with language ownership.
     Ok(())
 }
 
@@ -3373,7 +3448,7 @@ fn lower_index_expr(
     emitter.emit_insns(&x86_64::jmp_rel32(0));
     emitter.patch_u32(null + 2, emitter.len() - null - 6);
     emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
-    emit_array_bounds_failure(emitter, ctx.is_interrupt);
+    emit_failure_return(emitter, ctx.is_interrupt);
     emitter.patch_u32(end + 1, emitter.len() - end - 5);
     if target_reg != RAX {
         emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
@@ -4155,5 +4230,15 @@ mod profile_smoke_tests {
             !d.code.windows(3).any(|w| w == [0x48, 0x89, 0xE5]),
             "default must not use classic mov rbp, rsp"
         );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn refuses_struct_copies_with_non_scalar_fields() {
+    let module = crate::in_lang_parse::parse_in_source("struct Inner { Int x }\nstruct Outer { Inner inner }\nfn main() -> Int { var source: Outer = Outer { inner: Inner { x: 42 } }; var copied: Outer = source; return 42; }").unwrap();
+    match lower_module(&module, "main") {
+        Err(error) => assert!(error.contains("scalar-field layout"), "{error}"),
+        Ok(_) => panic!("non-scalar struct copy accepted"),
     }
 }
