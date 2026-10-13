@@ -11,6 +11,11 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
     if let Some(closure) = try_parse_closure_expr(s) {
         return closure;
     }
+    if s.contains(['.', 'e', 'E'])
+        && let Ok(value) = s.parse::<f64>()
+    {
+        return Expr::FloatLit(FloatVal(value));
+    }
     let operators = find_top_level_ops(
         s,
         &[
@@ -86,11 +91,6 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
         if let Ok(n) = i64::from_str_radix(hex, 16) {
             return Expr::IntLit(n);
         }
-    }
-    if s.contains('.')
-        && let Ok(f) = s.parse::<f64>()
-    {
-        return Expr::FloatLit(FloatVal(f));
     }
     if let Some(value) = crate::core_ir::decode_string_literal(s) {
         return Expr::StringLit(value);

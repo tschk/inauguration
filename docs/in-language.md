@@ -285,6 +285,8 @@ fn halt_loop() -> void {
 
 ### Expressions and operators
 
+Float literals support decimal and scientific notation, including `1e3`, `1e+3`, and `1.25E-2`. Exponent signs remain part of the literal inside arithmetic expressions; names such as `e` and hexadecimal integers remain ordinary operands.
+
 ```in
 fn ops(a: Int, b: Int) -> Bool {
   let sum = a + b;

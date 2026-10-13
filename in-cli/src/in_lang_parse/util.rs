@@ -235,6 +235,35 @@ pub(crate) fn strip_enclosing_parens(s: &str) -> Option<&str> {
     }
 }
 
+fn is_exponent_sign(s: &str, index: usize) -> bool {
+    let prefix = &s[..index];
+    let Some(mantissa_prefix) = prefix
+        .strip_suffix('e')
+        .or_else(|| prefix.strip_suffix('E'))
+    else {
+        return false;
+    };
+    let mantissa = mantissa_prefix
+        .rsplit(|c: char| !c.is_ascii_digit() && c != '.')
+        .next()
+        .unwrap_or("");
+    let start = mantissa_prefix.len() - mantissa.len();
+    let before = &s[..start];
+    let boundary = match before.chars().next_back() {
+        Some('-') => before[..before.len() - 1]
+            .chars()
+            .next_back()
+            .is_none_or(|c| {
+                c.is_ascii_digit() || "!~+-*/%&|^<>=".contains(c) || !is_ident_continue(c)
+            }),
+        Some(c) => !is_ident_continue(c),
+        None => true,
+    };
+    mantissa.parse::<f64>().is_ok()
+        && boundary
+        && s[index + 1..].starts_with(|c: char| c.is_ascii_digit())
+}
+
 pub(crate) fn find_top_level_binary_op<'a>(s: &str, ops: &[&'a str]) -> Option<(&'a str, usize)> {
     find_top_level_ops(s, ops).pop()
 }
@@ -278,6 +307,9 @@ pub(crate) fn find_top_level_ops<'a>(s: &str, ops: &[&'a str]) -> Vec<(&'a str, 
                 let mut best: Option<(&'a str, usize)> = None;
                 for op in ops {
                     if s[i..].starts_with(op) {
+                        if matches!(*op, "+" | "-") && is_exponent_sign(s, i) {
+                            continue;
+                        }
                         if *op == "-" && s[i + 1..].starts_with('>') {
                             continue;
                         }

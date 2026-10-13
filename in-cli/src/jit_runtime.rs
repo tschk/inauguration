@@ -2685,6 +2685,35 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn in_scientific_literals_preserve_arithmetic_and_operand_effects() {
+        for source in [
+            include_str!("../../conformance/types/in-scientific-literals.in"),
+            "fn main() -> Int { var name-1e: Int = 39; return name-1e+3; }",
+            "fn main() -> Int { var value: Float = 2.0-1e+3; if value == -998.0 { return 42; } return 0; }",
+            "fn main() -> Int { var value: Float = 1e+3 * 2.0; if value == 2000.0 { return 42; } return 0; }",
+            "fn main() -> Int { var value: Float = -1e+3 * 2.0; if value == -2000.0 { return 42; } return 0; }",
+            "fn main() -> Int { var value: Float = 1.25E-2 * 2.0; if value == 0.025 { return 42; } return 0; }",
+            "var calls: Int = 0;\nfn value() -> Float { calls += 1; return 2.0; }\nfn main() -> Int { if 1e+3 * value() == 2000.0 && calls == 1 { return 42; } return 0; }",
+            "fn main() -> Int { var e: Int = 39; return e+3; }",
+            "fn main() -> Int { var caféE: Int = 39; return caféE+3; }",
+            "fn main() -> Int { return 0x1e+12; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

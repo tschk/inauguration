@@ -2125,3 +2125,30 @@ fn shifts_bind_before_comparisons_and_equality() {
         matches!(parse_expr("1 << 1 + 1"), Expr::Binary { op, rhs, .. } if op == "<<" && matches!(rhs.as_ref(), Expr::Binary { op, .. } if op == "+"))
     );
 }
+
+#[test]
+fn scientific_literals_keep_exponent_signs_out_of_binary_operators() {
+    for (source, expected) in [
+        ("1e3", 1000.0),
+        ("1e+3", 1000.0),
+        ("1.25E-2", 0.0125),
+        ("-1e+3", -1000.0),
+    ] {
+        assert!(
+            matches!(parse_expr(source), Expr::FloatLit(value) if value.0 == expected),
+            "{source}"
+        );
+    }
+    for source in ["1e+3 * 2.0", "1.25E-2 * 2.0", "-1e+3 * 2.0"] {
+        assert!(
+            matches!(parse_expr(source), Expr::Binary { op, lhs, .. } if op == "*" && matches!(lhs.as_ref(), Expr::FloatLit(_))),
+            "{source}"
+        );
+    }
+    for source in ["e+3", "nameE+3", "caféE+3", "0x1e+3", "name-1e+3"] {
+        assert!(
+            matches!(parse_expr(source), Expr::Binary { op, .. } if op == "+"),
+            "{source}"
+        );
+    }
+}

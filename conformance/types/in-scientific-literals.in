@@ -1,0 +1,14 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var calls: Int = 0;
+fn factor() -> Float { calls += 1; return 2.0; }
+fn main() -> Int {
+    var value: Float = -1e+3 * factor();
+    var small: Float = 1.25E-2 * 2.0;
+    var e: Int = 39;
+    if value == -2000.0 && small == 0.025 && calls == 1 { return e+3; }
+    return 0;
+}
