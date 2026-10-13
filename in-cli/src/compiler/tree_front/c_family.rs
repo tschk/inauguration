@@ -360,6 +360,7 @@ fn c_stmt(src: &[u8], stmt: Node<'_>) -> Option<Stmt> {
         "expression_statement" => c_expr_statement(src, stmt),
         "if_statement" => c_if_statement(src, stmt),
         "while_statement" => c_while_statement(src, stmt),
+        "do_statement" => c_do_statement(src, stmt),
         "break_statement" => Some(Stmt::Break),
         "continue_statement" => Some(Stmt::Continue),
         _ => None,
@@ -593,6 +594,39 @@ fn c_while_statement(src: &[u8], stmt: Node<'_>) -> Option<Stmt> {
         .map(|node| c_stmt_or_body(src, node))
         .unwrap_or_default();
     c_condition_loop(src, condition, body)
+}
+
+fn c_do_statement(src: &[u8], stmt: Node<'_>) -> Option<Stmt> {
+    let cond = c_expr(src, stmt.child_by_field_name("condition")?)?;
+    let body = c_stmt_or_body(src, stmt.child_by_field_name("body")?);
+    let mut first = format!("__c_do_first_{}", stmt.start_byte());
+    let source = std::str::from_utf8(src).ok()?;
+    while source.contains(&first) {
+        first.push('_');
+    }
+    Some(Stmt::If {
+        cond: Expr::BoolLit(true),
+        then_body: vec![
+            Stmt::Let(first.clone(), Some(Typ::Bool), Expr::BoolLit(true)),
+            Stmt::Loop {
+                kind: crate::core_ir::LoopKind::While,
+                cond: Some(Expr::Binary {
+                    op: "||".into(),
+                    lhs: Box::new(Expr::Ident(first.clone())),
+                    rhs: Box::new(cond),
+                }),
+                body: vec![
+                    Stmt::Assign(first, Expr::BoolLit(false)),
+                    Stmt::If {
+                        cond: Expr::BoolLit(true),
+                        then_body: body,
+                        else_body: vec![],
+                    },
+                ],
+            },
+        ],
+        else_body: vec![],
+    })
 }
 
 fn c_condition_loop(src: &[u8], condition: Node<'_>, body: Vec<Stmt>) -> Option<Stmt> {

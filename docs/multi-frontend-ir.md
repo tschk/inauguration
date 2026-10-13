@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## C-like post-test loops
+
+`do` loops lower through the shared loop representation with a hygienic first-iteration flag. The flag skips the initial condition check; later loop headers evaluate the condition after the preceding body, including after `continue`. The body retains its own scope so local shadowing cannot change which binding the condition reads. Breaks and returns skip the next condition check, and nested-loop continues keep their original target.
+
 ## C++ while declaration conditions
 
 A `while` declaration condition lowers to a declaration at the start of every loop iteration, followed by the converted condition and a break on false. Its binding remains scoped to the body, and `continue` reevaluates the initializer. The existing shared loop and boolean lowering handle returns and breaks. Declaration conditions in `for` headers remain unavailable in the installed C++ grammar.

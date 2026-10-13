@@ -3813,3 +3813,43 @@ fn owned_cpp_while_declarations_reevaluate_and_keep_scope() {
         }
     }
 }
+
+#[test]
+fn owned_c_do_while_keeps_posttest_effects_continue_and_scope() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for source in [
+            "int main() { int value = 0; do { value++; } while (0); return value + 41; }",
+            "int calls = 0; int condition() { calls++; return 0; } int main() { int value = 0; do { value = 1; continue; } while (condition()); return value + calls + 40; }",
+            "int calls = 0; int condition() { calls++; return 1; } int main() { do { break; } while (condition()); return calls + 42; }",
+            "int value = 0; int main() { int iterations = 0; do { int value = 7; iterations++; if (iterations > 1) return 99; continue; } while (value); return iterations + 41; }",
+            "int main() { int value = 0; do { value++; int inner = 0; while (inner < 2) { inner++; continue; } } while (value < 2); return value + 40; }",
+            "int main() { int value = 0; do value++; while (value < 2); return value + 40; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let path = temp_path(&format!("c-do-while.{extension}"));
+                fs::write(&path, source).unwrap();
+                let mut request =
+                    default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                fs::remove_file(path).unwrap();
+                assert!(
+                    report.success,
+                    "{extension}: {profile:?}: {source}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{extension}: {profile:?}: {source}"
+                );
+            }
+        }
+    }
+}
