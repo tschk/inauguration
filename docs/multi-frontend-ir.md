@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## AArch64 argument staging
+
+Known native calls save every ABI argument word in the reserved caller frame before evaluating later arguments. Register arguments are reloaded only after evaluation completes, and stack arguments are copied from those saved words into a 16-byte-aligned outgoing area. Scalar arguments and flattened struct words share this staging, including the 32-word call limit. Nested calls reserve disjoint portions of the existing 64-word temporary pool and refuse exhausted capacity rather than reusing live argument slots.
+
 ## C-like scalar boolean conversion
 
 C-like boolean declarations retain `Bool` in Core IR. Typed normalization converts numeric conditions and logical operands with `value != 0`, preserving single evaluation and the conditional right operand of `&&` and `||`. The same conversion handles numeric values stored or passed as booleans; boolean arithmetic and integer destinations use explicit `bool-to-int` promotion. Function returns, arguments, locals, globals, and field or index stores use their expected types. Global types participate in normal primitive normalization. C++ `if` initializers and declaration conditions preserve their evaluation and scoped bindings before conversion. C type keywords are matched as keywords, preserving nominal names. Unsupported named boolean conversions and reference values are refused. Other frontends retain strict boolean operands; pointer, object, and general numeric casts remain outside this conversion.

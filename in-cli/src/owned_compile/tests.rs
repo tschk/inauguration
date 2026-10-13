@@ -3648,3 +3648,86 @@ fn owned_c_parameter_assignment_reuses_the_parameter_frame_slot() {
         }
     }
 }
+
+#[test]
+fn owned_stack_arguments_survive_later_argument_calls() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let source = r#"int helper(int a, int b, int c, int d, int e, int f, int g, int h, int i) {
+    for (int n = 0; n < 1; n++) { return 2; }
+    return 0;
+}
+int combine(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j) {
+    return i * 10 + j;
+}
+int main() { return combine(0,0,0,0,0,0,0,0,4,helper(0,0,0,0,0,0,0,0,99)); }
+"#;
+    for extension in ["c", "cpp"] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let path = temp_path(&format!("stack-argument-effects.{extension}"));
+            fs::write(&path, source).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{extension}: {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{extension}: {profile:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn owned_native_calls_stage_many_scalar_and_aggregate_words() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let params = (0..32)
+        .map(|index| format!("int p{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let args = (0..32)
+        .map(|index| if index == 0 || index == 31 { "21" } else { "0" })
+        .collect::<Vec<_>>()
+        .join(",");
+    let scalar = format!(
+        "int combine({params}) {{ for (int i = 0; i < 1; i++) {{ return p0 + p31; }} return 0; }} int main() {{ return combine({args}); }}"
+    );
+    let fields = (0..10)
+        .map(|index| format!("Int f{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let values = (0..10)
+        .map(|index| {
+            format!(
+                "f{index}: {}",
+                if index == 0 || index == 9 { 21 } else { 0 }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let aggregate = format!(
+        "struct Wide {{\n{fields}\n}}\nfn combine(value: Wide) -> Int {{ for i in 0..1 {{ return value.f0 + value.f9; }} return 0; }}\nfn main() -> Int {{ let value: Wide = Wide {{ {values} }}; return combine(value); }}"
+    );
+    for (extension, source) in [("c", scalar), ("in", aggregate)] {
+        let path = temp_path(&format!("many-argument-words.{extension}"));
+        fs::write(&path, &source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{source}");
+    }
+}

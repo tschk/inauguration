@@ -113,39 +113,65 @@ pub(crate) fn lower_call(
     // ponytail: allow mismatched argument counts (rust front generates dup functions with varying sigs)
     let max_args = args.len().min(target_info.params.len());
 
-    let temp_base = ctx.acquire_call_arg_temps(fn_name)?;
-    let mut reg = 0u8;
+    let temp_base = ctx.acquire_call_arg_slots(fn_name, abi_arg_count.max(8))?;
+    let mut words = 0usize;
     for (arg, (param_name, typ)) in args.iter().take(max_args).zip(&target_info.params) {
-        let first_reg = reg;
-        reg = lower_call_arg(
-            emitter,
-            ctx,
-            arg,
-            typ,
-            reg,
-            functions,
-            pending_calls,
-            fn_name,
-            param_name,
-        )?;
-        for current in first_reg..reg.min(8) {
-            emitter.emit_u32(aarch64::str64(
-                current,
-                aarch64::REG_SP,
-                ctx.call_arg_temps[temp_base + current as usize],
-            ));
+        if let Typ::Named(name) = typ
+            && param_name != "self"
+            && ctx.structs.contains_key(base_struct_name(name))
+        {
+            let count =
+                native_param_abi_slots(&[(param_name.clone(), typ.clone())], ctx.structs, target)?;
+            if count > 0 {
+                let fields = aggregate_scratch_fields(
+                    ctx,
+                    name,
+                    ctx.call_arg_temps[temp_base + words],
+                    fn_name,
+                )?;
+                lower_struct_expr_into_slots(
+                    emitter,
+                    ctx,
+                    arg,
+                    name,
+                    &fields,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )?;
+            }
+            words += count;
+        } else {
+            let count = lower_call_arg(
+                emitter,
+                ctx,
+                arg,
+                typ,
+                0,
+                functions,
+                pending_calls,
+                fn_name,
+                param_name,
+            )? as usize;
+            for current in 0..count {
+                emitter.emit_u32(aarch64::str64(
+                    current as u8,
+                    aarch64::REG_SP,
+                    ctx.call_arg_temps[temp_base + words + current],
+                ));
+            }
+            words += count;
         }
     }
-    // Load first 8 args into registers x0-x7
-    for current in 0..reg.min(8) {
+    // Each argument is saved before a later argument can clobber its registers.
+    for current in 0..words.min(8) {
         emitter.emit_u32(aarch64::ldr64(
-            current,
+            current as u8,
             aarch64::REG_SP,
-            ctx.call_arg_temps[temp_base + current as usize],
+            ctx.call_arg_temps[temp_base + current],
         ));
     }
-    // Stack-based args (beyond 8): allocate stack space and store
-    let stack_slots = if reg > 8 { reg as usize - 8 } else { 0 };
+    let stack_slots = words.saturating_sub(8);
     let stack_bytes = (stack_slots * 8).next_multiple_of(16) as u16;
     if stack_slots > 0 {
         emitter.emit_u32(aarch64::sub_imm64(
@@ -153,9 +179,10 @@ pub(crate) fn lower_call(
             aarch64::REG_SP,
             stack_bytes,
         ));
-        for i in 0..stack_slots {
-            let slot_reg = 8 + i as u8;
-            emitter.emit_u32(aarch64::str64(slot_reg, aarch64::REG_SP, i as u32 * 8));
+        for index in 0..stack_slots {
+            let offset = ctx.call_arg_temps[temp_base + 8 + index] + u32::from(stack_bytes);
+            emitter.emit_u32(aarch64::ldr64(15, aarch64::REG_SP, offset));
+            emitter.emit_u32(aarch64::str64(15, aarch64::REG_SP, index as u32 * 8));
         }
     }
 

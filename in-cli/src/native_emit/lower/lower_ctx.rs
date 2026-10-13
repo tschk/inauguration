@@ -282,6 +282,7 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) binop_depth: usize,
     pub(crate) call_arg_temps: [u32; 64],
     pub(crate) call_arg_depth: usize,
+    call_arg_frames: Vec<usize>,
     pub(crate) vec_literal_header_offset: Option<u32>,
     pub(crate) aggregate_vector_scratch: Option<(u32, usize)>,
     pub(crate) iterator_chain_header_offset: Option<u32>,
@@ -481,6 +482,7 @@ impl<'a> LowerCtx<'a> {
             binop_depth: 0,
             call_arg_temps: [0; 64],
             call_arg_depth: 0,
+            call_arg_frames: Vec::new(),
             vec_literal_header_offset: None,
             aggregate_vector_scratch: None,
             iterator_chain_header_offset: None,
@@ -802,18 +804,30 @@ impl<'a> LowerCtx<'a> {
     }
 
     pub(crate) fn acquire_call_arg_temps(&mut self, fn_name: &str) -> Result<usize, String> {
-        let base = self.call_arg_depth * 8;
-        if base + 8 > self.call_arg_temps.len() {
+        self.acquire_call_arg_slots(fn_name, 8)
+    }
+
+    pub(crate) fn acquire_call_arg_slots(
+        &mut self,
+        fn_name: &str,
+        slots: usize,
+    ) -> Result<usize, String> {
+        let base = self.call_arg_depth;
+        if base + slots > self.call_arg_temps.len() {
             return Err(format!(
                 "native-lower: call nesting is too deep in `{fn_name}`"
             ));
         }
-        self.call_arg_depth += 1;
+        self.call_arg_depth += slots;
+        self.call_arg_frames.push(slots);
         Ok(base)
     }
 
     pub(crate) fn release_call_arg_temps(&mut self) {
-        self.call_arg_depth -= 1;
+        self.call_arg_depth -= self
+            .call_arg_frames
+            .pop()
+            .expect("balanced call argument slots");
     }
 
     pub(crate) fn next_vec_for_slots(&mut self, fn_name: &str) -> Result<VecForSlots, String> {
