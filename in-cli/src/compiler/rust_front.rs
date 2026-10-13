@@ -1339,6 +1339,19 @@ fn lower_expr_stmt(
                         Expr::StringLit(op.into()),
                     ],
                 }));
+            } else if let syn::Expr::Field(field) = b.left.as_ref() {
+                out.push(Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("field-modify-value-first".into())),
+                    args: vec![
+                        lower_expr_with_types(&field.base, local_types),
+                        Expr::StringLit(match &field.member {
+                            syn::Member::Unnamed(index) => format!("_{}", index.index),
+                            syn::Member::Named(name) => name.to_string(),
+                        }),
+                        lower_expr_with_types(&b.right, local_types),
+                        Expr::StringLit(op.into()),
+                    ],
+                }));
             } else if let Some(name) = assign_lhs_name(&b.left) {
                 out.push(Stmt::Assign(
                     name.clone(),

@@ -2853,3 +2853,95 @@ fn owned_rust_float_indexed_compound_assignment() {
     assert!(report.success, "{report:?}");
     assert_eq!(report.eval_result, Some(EvalValue::Float(3.5)));
 }
+
+#[test]
+fn owned_rust_field_compound_assignments_update_original_storage() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (op, initial, rhs, expected) in [
+        ("+", 21, 21, 42),
+        ("-", 21, 7, 14),
+        ("*", 7, 3, 21),
+        ("/", 21, 3, 7),
+        ("%", 21, 4, 1),
+        ("&", 7, 3, 3),
+        ("|", 4, 3, 7),
+        ("^", 7, 3, 4),
+        ("<<", 3, 2, 12),
+        (">>", 12, 2, 3),
+    ] {
+        let path = temp_path("field-compound.rs");
+        let source = format!(
+            "struct Counter {{ value: i64 }} fn main() -> i64 {{ let mut counter = Counter {{ value: {initial} }}; counter.value {op}= {rhs}; counter.value }}"
+        );
+        fs::write(&path, &source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(expected)),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn owned_field_compounds_read_after_rhs_effects() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = temp_path("field-compound-effects.in");
+    fs::write(&path, "struct Counter {\n Int value\n}\nvar counter: Counter = 0;\nfn value() -> Int { counter.value = 100; return 1; }\nfn main() -> Int { counter.value = 21; field-modify-value-first(counter, \"value\", value(), \"+\"); return counter.value; }").unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    fs::remove_file(path).unwrap();
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.eval_result, Some(EvalValue::Int(101)));
+}
+
+#[test]
+fn owned_rust_float_field_compound_assignment() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = temp_path("float-field-compound.rs");
+    fs::write(&path, "struct Counter { value: f64 } fn main() -> f64 { let mut counter = Counter { value: 1.5 }; counter.value += 2.0; counter.value }").unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    fs::remove_file(path).unwrap();
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.eval_result, Some(EvalValue::Float(3.5)));
+}
+
+#[test]
+fn owned_field_compound_throw_preserves_original_field() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = temp_path("field-compound-throw.in");
+    fs::write(&path, "struct Counter {\n Int value\n}\nvar counter: Counter = 0;\nfn value() -> Int { throw 5; }\nfn main() -> Int { counter.value = 21; try { field-modify-value-first(counter, \"value\", value(), \"+\"); return 9; } catch e { return counter.value + 21; } }").unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    fs::remove_file(path).unwrap();
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
+}

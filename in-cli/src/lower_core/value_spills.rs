@@ -16,8 +16,12 @@ fn is_value_first_store(expr: &Expr) -> bool {
     matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "index-assign-value-first" || name == "index-modify-value-first"))
 }
 
+fn is_field_modify(expr: &Expr) -> bool {
+    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "field-modify-value-first"))
+}
+
 fn expr_needs_spills(expr: &Expr) -> bool {
-    if is_repeat(expr) || is_value_first_store(expr) {
+    if is_repeat(expr) || is_value_first_store(expr) || is_field_modify(expr) {
         return true;
     }
     if let Expr::Closure { body, .. } = expr {
@@ -383,6 +387,35 @@ impl Lower {
                     value
                 };
                 stmt = Stmt::IndexAssign { base, index, value };
+            }
+            if let Stmt::Expr(expr) = &stmt
+                && is_field_modify(expr)
+                && let Expr::Call { args, .. } = expr
+                && args.len() == 4
+                && let (Expr::StringLit(field), Expr::StringLit(op)) = (&args[1], &args[3])
+                && matches!(
+                    op.as_str(),
+                    "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"
+                )
+            {
+                let mut value = args[2].clone();
+                self.expr(&mut value, &mut prefix);
+                let value = self.save(value, &mut prefix);
+                // Keep the original place. Saving a struct as a value would
+                // make a copy and update that copy instead of the source object.
+                let base = args[0].clone();
+                stmt = Stmt::FieldAssign {
+                    base: base.clone(),
+                    name: field.clone(),
+                    value: Expr::Binary {
+                        op: op.clone(),
+                        lhs: Box::new(Expr::Field {
+                            base: Box::new(base),
+                            name: field.clone(),
+                        }),
+                        rhs: Box::new(value),
+                    },
+                };
             }
             match &mut stmt {
                 Stmt::Let(_, _, expr)

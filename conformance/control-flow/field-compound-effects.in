@@ -1,0 +1,15 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+struct Counter {
+    Int value
+}
+var counter: Counter = 0;
+fn value() -> Int { counter.value = 40; return 2; }
+fn main() -> Int {
+    counter.value = 20;
+    field-modify-value-first(counter, "value", value(), "+");
+    return counter.value;
+}
