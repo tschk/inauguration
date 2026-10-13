@@ -191,6 +191,16 @@ pub(crate) fn lower_index(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if native_expr_type(base, ctx, functions).is_some_and(|typ| typ.canonical() == Typ::Int) {
+        let temp = ctx.acquire_binop_temp(fn_name)?;
+        lower_expr_into(emitter, ctx, base, 0, functions, pending_calls, fn_name)?;
+        emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, temp));
+        lower_expr_into(emitter, ctx, index, 1, functions, pending_calls, fn_name)?;
+        emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, temp));
+        emitter.emit_u32(aarch64::ldr64_reg_offset(rd, 0, 1));
+        ctx.release_binop_temp();
+        return Ok(());
+    }
     if let Expr::Call { callee, args } = base {
         lower_call::lower_call(
             emitter,

@@ -609,6 +609,23 @@ pub(crate) fn lower_index_assign(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if lower_expr::native_expr_type(base, ctx, functions)
+        .is_some_and(|typ| typ.canonical() == Typ::Int)
+    {
+        let base_temp = ctx.acquire_binop_temp(fn_name)?;
+        lower_expr::lower_expr_into(emitter, ctx, base, 0, functions, pending_calls, fn_name)?;
+        emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, base_temp));
+        let index_temp = ctx.acquire_binop_temp(fn_name)?;
+        lower_expr::lower_expr_into(emitter, ctx, index, 0, functions, pending_calls, fn_name)?;
+        emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, index_temp));
+        lower_expr::lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
+        emitter.emit_u32(aarch64::ldr64(2, aarch64::REG_SP, base_temp));
+        emitter.emit_u32(aarch64::ldr64(1, aarch64::REG_SP, index_temp));
+        emitter.emit_u32(aarch64::str64_reg_offset(0, 2, 1));
+        ctx.release_binop_temp();
+        ctx.release_binop_temp();
+        return Ok(());
+    }
     let Expr::Ident(name) = base else {
         return Err(format!(
             "native-lower: unsupported array assignment base in `{fn_name}`"

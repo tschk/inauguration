@@ -997,7 +997,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(unix, target_arch = "x86_64"))]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
     fn integer_address_indexing_keeps_headerless_word_layout() {
         for profile in [
@@ -1005,14 +1005,26 @@ mod tests {
             crate::emit_profile::EmitProfile::Lean,
             crate::emit_profile::EmitProfile::Harden,
         ] {
-            for (source, expected) in [
+            for (source, expected, writes) in [
                 (
                     "fn main(base: Int) -> Int { base[1] = 7; return base[1]; }",
                     7,
+                    true,
                 ),
                 (
                     "var calls: Int = 0;\nfn address(base: Int) -> Int { calls = calls * 10 + 1; return base; }\nfn index() -> Int { calls = calls * 10 + 2; return 1; }\nfn value() -> Int { calls = calls * 10 + 3; return 7; }\nfn main(base: Int) -> Int { address(base)[index()] = value(); return base[1] + calls; }",
                     130,
+                    true,
+                ),
+                (
+                    "fn main(base: Int) -> Int { base[1] = 7; return (base + 16)[-1]; }",
+                    7,
+                    true,
+                ),
+                (
+                    "var calls: Int = 0;\nfn address(base: Int) -> Int { calls = calls * 10 + 1; return base; }\nfn index() -> Int { calls = calls * 10 + 2; throw 9; }\nfn value() -> Int { calls = calls * 10 + 3; return 7; }\nfn main(base: Int) -> Int { try { address(base)[index()] = value(); } catch 9 { return calls; } return 999; }",
+                    12,
+                    false,
                 ),
             ] {
                 let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
@@ -1030,7 +1042,14 @@ mod tests {
                         unsafe { rt.invoke("main", &[words.as_mut_ptr() as i64]) },
                         Some(expected)
                     );
-                    assert_eq!(words, [10, 7, 30, 40]);
+                    assert_eq!(
+                        words,
+                        if writes {
+                            [10, 7, 30, 40]
+                        } else {
+                            [10, 20, 30, 40]
+                        }
+                    );
                     assert!(rt.invocation_error().is_none());
                 }
             }

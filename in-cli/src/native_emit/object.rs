@@ -480,6 +480,7 @@ mod tests {
         for (module, caller) in [
             (crate::in_lang_parse::parse_in_library_source("fn _answer() -> Int { return 42; }").unwrap(), "long long _answer(void); int main(void) { return (int)_answer(); }"),
             (scalar_answer_module(), "long long answer(void); int main(void) { return (int)answer(); }"),
+            (crate::in_lang_parse::parse_in_library_source("fn answer(base: Int) -> Int { base[1] = 7; return (base + 16)[-1] + 35; }").unwrap(), "long long answer(long long); int main(void) { long long words[] = {10, 20, 30, 40}; long long result = answer((long long)words); if (result != 42 || words[0] != 10 || words[1] != 7 || words[2] != 30 || words[3] != 40) return 99; return 42; }"),
             (crate::in_lang_parse::parse_in_library_source("fn answer() -> Int { return _add(5, 37); }").unwrap(), "long long _add(long long a, long long b) { return a + b; } long long answer(void); int main(void) { return (int)answer(); }"),
             (crate::in_lang_parse::parse_in_library_source("fn add(a: Int, b: Int) -> Int { return a + b; }\nfn answer() -> Int { return add(5, 37); }").unwrap(), "long long add(long long, long long); int main(void) { return (int)add(-5, 47); }"),
             (crate::in_lang_parse::parse_in_library_source("fn answer() -> Int { return labs(-42); }").unwrap(), "long long answer(void); int main(void) { return (int)answer(); }"),
