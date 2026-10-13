@@ -973,7 +973,7 @@ fn lower_block_inner_with_types_go(
     local_types: &mut HashMap<String, String>,
 ) -> Vec<Stmt> {
     let mut out = Vec::new();
-    for stmt in &block.stmts {
+    for (index, stmt) in block.stmts.iter().enumerate() {
         match stmt {
             syn::Stmt::Local(local) => {
                 if let Some(init) = &local.init {
@@ -1039,15 +1039,24 @@ fn lower_block_inner_with_types_go(
                     out.push(Stmt::Let(name, local_ty, expr));
                 }
             }
-            syn::Stmt::Expr(expr, _) => {
-                lower_expr_stmt(expr, &mut out, local_types);
+            syn::Stmt::Expr(expr, semi) => {
+                if wrap_implicit_return && semi.is_none() && index + 1 == block.stmts.len() {
+                    lower_tail_expr_with_types(expr, &mut out, local_types);
+                } else {
+                    lower_expr_stmt(expr, &mut out, local_types);
+                }
             }
             syn::Stmt::Macro(m) => {
                 let expr = syn::Expr::Macro(syn::ExprMacro {
                     attrs: vec![],
                     mac: m.mac.clone(),
                 });
-                lower_expr_stmt(&expr, &mut out, local_types);
+                if wrap_implicit_return && m.semi_token.is_none() && index + 1 == block.stmts.len()
+                {
+                    lower_tail_expr_with_types(&expr, &mut out, local_types);
+                } else {
+                    lower_expr_stmt(&expr, &mut out, local_types);
+                }
             }
             syn::Stmt::Item(item) => {
                 if let syn::Item::Fn(f) = item {
@@ -1059,48 +1068,17 @@ fn lower_block_inner_with_types_go(
             }
         }
     }
-    // Only add implicit Return(None) if not all paths already return
-    // and the function return type isn't void (no implicit wrapping for unit-like functions)
+    // A discarded expression does not provide the block's return value.
     if wrap_implicit_return && !all_paths_return(&out) {
-        if let Some(Stmt::Expr(expr)) = out.last().cloned() {
-            out.pop();
-            out.push(Stmt::Return(Some(expr)));
-        } else {
-            out.push(Stmt::Return(None));
-        }
+        out.push(Stmt::Return(None));
     }
     out
 }
 
 /// Check if all code paths through the statements end with a return.
 fn all_paths_return(stmts: &[Stmt]) -> bool {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Return(_) => return true,
-            Stmt::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                // If present: both branches must return
-                if else_body.is_empty() {
-                    return false; // no else → if may fall through
-                }
-                if !all_paths_return(then_body) || !all_paths_return(else_body) {
-                    return false;
-                }
-                // Check if there's more after this if (not a terminal if/else with returns)
-                // For simplicity, if the if/else both return, consider this a terminal return
-                // but we still need to check if it's the last stmt
-            }
-            _ => {
-                // Non-return statement → maybe followed by a return later
-                continue;
-            }
-        }
-    }
-    // Check if the last stmt(s) ensure all paths return
-    stmts.last().map_or(false, stmt_ensures_return)
+    // Paths that fall through a conditional can still reach a later return.
+    stmts.iter().any(stmt_ensures_return)
 }
 
 fn stmt_ensures_return(stmt: &Stmt) -> bool {
@@ -1112,10 +1090,145 @@ fn stmt_ensures_return(stmt: &Stmt) -> bool {
             ..
         } => !else_body.is_empty() && all_paths_return(then_body) && all_paths_return(else_body),
         Stmt::Match { arms, .. } => {
-            // ponytail: exhaustive match doesn't need implicit return
+            let wildcard = arms.iter().any(|arm| {
+                matches!(
+                    crate::core_ir::MatchPattern::parse(&arm.pattern),
+                    Ok(crate::core_ir::MatchPattern::WildPat
+                        | crate::core_ir::MatchPattern::IdentPat(_))
+                )
+            });
+            let bool_complete = ["true", "false"]
+                .iter()
+                .all(|value| arms.iter().any(|arm| arm.pattern.trim() == *value));
             !arms.is_empty()
+                && (wildcard || bool_complete)
+                && arms.iter().all(|arm| all_paths_return(&arm.body))
         }
         _ => false,
+    }
+}
+
+fn lower_tail_expr_with_types(
+    expr: &syn::Expr,
+    out: &mut Vec<Stmt>,
+    local_types: &mut HashMap<String, String>,
+) {
+    match expr {
+        syn::Expr::If(value) => lower_if_with_types(value, true, out, local_types),
+        syn::Expr::Match(value) => lower_match_with_types(value, true, out, local_types),
+        syn::Expr::Block(value) => out.extend(lower_block_with_types(
+            &value.block,
+            &mut local_types.clone(),
+        )),
+        syn::Expr::Paren(value) => lower_tail_expr_with_types(&value.expr, out, local_types),
+        syn::Expr::Group(value) => lower_tail_expr_with_types(&value.expr, out, local_types),
+        syn::Expr::Return(value) => lower_return_expr(value.expr.as_deref(), out, local_types),
+        syn::Expr::Tuple(value) if value.elems.is_empty() => out.push(Stmt::Return(None)),
+        syn::Expr::ForLoop(_) | syn::Expr::While(_) | syn::Expr::Loop(_) | syn::Expr::Assign(_) => {
+            lower_expr_stmt(expr, out, local_types);
+            out.push(Stmt::Return(None));
+        }
+        syn::Expr::Binary(value) if assign_op_from_binop(&value.op).is_some() => {
+            lower_expr_stmt(expr, out, local_types);
+            out.push(Stmt::Return(None));
+        }
+        _ => lower_return_expr(Some(expr), out, local_types),
+    }
+}
+
+fn lower_match_with_types(
+    value: &syn::ExprMatch,
+    tail: bool,
+    out: &mut Vec<Stmt>,
+    local_types: &mut HashMap<String, String>,
+) {
+    if value.arms.iter().any(|arm| arm.guard.is_some()) {
+        // Preserve an explicit refusal until guard conditions are represented in Core IR.
+        out.push(Stmt::Expr(Expr::Call {
+            callee: Box::new(Expr::Ident("rust-match-guard-not-lowered".into())),
+            args: vec![],
+        }));
+        return;
+    }
+    let scrutinee = lower_expr_with_types(&value.expr, local_types);
+    let arms = value
+        .arms
+        .iter()
+        .map(|arm| {
+            let mut body = Vec::new();
+            let mut inner = local_types.clone();
+            if tail {
+                lower_tail_expr_with_types(&arm.body, &mut body, &mut inner);
+            } else {
+                lower_expr_stmt(&arm.body, &mut body, &mut inner);
+            }
+            MatchArm {
+                pattern: arm.pat.to_token_stream().to_string(),
+                body,
+            }
+        })
+        .collect();
+    out.push(Stmt::Match { scrutinee, arms });
+}
+
+fn lower_if_with_types(
+    eif: &syn::ExprIf,
+    tail: bool,
+    out: &mut Vec<Stmt>,
+    local_types: &mut HashMap<String, String>,
+) {
+    // Handle `if let` (condition is Expr::Let)
+    if let syn::Expr::Let(expr_let) = &*eif.cond {
+        if eif.else_branch.is_none()
+            && let Some(binding) = err_pattern_binding(&expr_let.pat)
+        {
+            out.push(Stmt::Try {
+                body: vec![Stmt::Expr(lower_expr_with_types(
+                    &expr_let.expr,
+                    local_types,
+                ))],
+                catches: vec![CatchArm {
+                    pattern: binding,
+                    body: lower_block_no_implicit_return_with_types(&eif.then_branch, local_types),
+                }],
+            });
+            return;
+        }
+        // `if let Pat = Expr { ... } else { ... }`
+        // Lower to: let _pat = Expr; match _pat { Pat => ..., _ => else }
+        let scrutinee = lower_expr_with_types(&expr_let.expr, local_types);
+        let then_body =
+            lower_block_inner_with_types(&eif.then_branch, tail, &mut local_types.clone());
+        let else_body = eif
+            .else_branch
+            .as_ref()
+            .map(|(_tok, else_branch)| lower_else_body_with_types(else_branch, local_types, tail))
+            .unwrap_or_default();
+        let arms = vec![
+            MatchArm {
+                pattern: expr_let.pat.to_token_stream().to_string(),
+                body: then_body,
+            },
+            MatchArm {
+                pattern: "_".to_string(),
+                body: else_body,
+            },
+        ];
+        out.push(Stmt::Match { scrutinee, arms });
+    } else {
+        let cond = lower_expr_with_types(&eif.cond, local_types);
+        let then_body =
+            lower_block_inner_with_types(&eif.then_branch, tail, &mut local_types.clone());
+        let else_body = eif
+            .else_branch
+            .as_ref()
+            .map(|(_tok, else_branch)| lower_else_body_with_types(else_branch, local_types, tail))
+            .unwrap_or_default();
+        out.push(Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        });
     }
 }
 
@@ -1135,64 +1248,7 @@ fn lower_expr_stmt(
             )));
             out.push(Stmt::Propagate);
         }
-        syn::Expr::If(eif) => {
-            // Handle `if let` (condition is Expr::Let)
-            if let syn::Expr::Let(expr_let) = &*eif.cond {
-                if eif.else_branch.is_none()
-                    && let Some(binding) = err_pattern_binding(&expr_let.pat)
-                {
-                    out.push(Stmt::Try {
-                        body: vec![Stmt::Expr(lower_expr_with_types(
-                            &expr_let.expr,
-                            local_types,
-                        ))],
-                        catches: vec![CatchArm {
-                            pattern: binding,
-                            body: lower_block_no_implicit_return_with_types(
-                                &eif.then_branch,
-                                local_types,
-                            ),
-                        }],
-                    });
-                    return;
-                }
-                // `if let Pat = Expr { ... } else { ... }`
-                // Lower to: let _pat = Expr; match _pat { Pat => ..., _ => else }
-                let scrutinee = lower_expr_with_types(&expr_let.expr, local_types);
-                let then_body =
-                    lower_block_no_implicit_return_with_types(&eif.then_branch, local_types);
-                let else_body = eif
-                    .else_branch
-                    .as_ref()
-                    .map(|(_tok, else_branch)| lower_else_body_with_types(else_branch, local_types))
-                    .unwrap_or_default();
-                let arms = vec![
-                    MatchArm {
-                        pattern: expr_let.pat.to_token_stream().to_string(),
-                        body: then_body,
-                    },
-                    MatchArm {
-                        pattern: "_".to_string(),
-                        body: else_body,
-                    },
-                ];
-                out.push(Stmt::Match { scrutinee, arms });
-            } else {
-                let cond = lower_expr_with_types(&eif.cond, local_types);
-                let then_body =
-                    lower_block_no_implicit_return_with_types(&eif.then_branch, local_types);
-                let else_body = eif
-                    .else_branch
-                    .as_ref()
-                    .map(|(_tok, else_branch)| lower_else_body_with_types(else_branch, local_types))
-                    .unwrap_or_default();
-                out.push(Stmt::If {
-                    cond,
-                    then_body,
-                    else_body,
-                });
-            }
-        }
+        syn::Expr::If(eif) => lower_if_with_types(eif, false, out, local_types),
         syn::Expr::ForLoop(f) => {
             let body = lower_block_no_implicit_return_with_types(&f.body, local_types);
             out.push(Stmt::Loop {
@@ -1220,24 +1276,11 @@ fn lower_expr_stmt(
                 body: lower_block_no_implicit_return_with_types(&l.body, local_types),
             });
         }
-        syn::Expr::Match(m) => {
-            let arms = m
-                .arms
-                .iter()
-                .map(|arm| MatchArm {
-                    pattern: arm.pat.to_token_stream().to_string(),
-                    body: match arm.body.as_ref() {
-                        syn::Expr::Block(b) => lower_block_with_types(&b.block, local_types),
-                        body => vec![Stmt::Expr(lower_expr_with_types(body, local_types))],
-                    },
-                })
-                .collect();
-            out.push(Stmt::Match {
-                scrutinee: lower_expr_with_types(&m.expr, local_types),
-                arms,
-            });
-        }
-        syn::Expr::Block(b) => out.extend(lower_block_with_types(&b.block, local_types)),
+        syn::Expr::Match(value) => lower_match_with_types(value, false, out, local_types),
+        syn::Expr::Block(value) => out.extend(lower_block_no_implicit_return_with_types(
+            &value.block,
+            &mut local_types.clone(),
+        )),
         syn::Expr::Assign(a) => {
             if let Some(name) = assign_lhs_name(&a.left) {
                 out.push(Stmt::Assign(
@@ -1287,6 +1330,18 @@ fn lower_return_expr(
         out.push(Stmt::Return(None));
         return;
     };
+    if matches!(
+        expr,
+        syn::Expr::If(_)
+            | syn::Expr::Match(_)
+            | syn::Expr::Block(_)
+            | syn::Expr::Paren(_)
+            | syn::Expr::Group(_)
+    ) || matches!(expr, syn::Expr::Tuple(value) if value.elems.is_empty())
+    {
+        lower_tail_expr_with_types(expr, out, local_types);
+        return;
+    }
     let syn::Expr::Call(call) = expr else {
         out.push(Stmt::Return(Some(lower_expr_with_types(expr, local_types))));
         return;
@@ -1328,16 +1383,16 @@ fn rust_path_name(expr: &syn::Expr) -> Option<String> {
 fn lower_else_body_with_types(
     else_branch: &syn::Expr,
     local_types: &mut HashMap<String, String>,
+    tail: bool,
 ) -> Vec<Stmt> {
-    match else_branch {
-        syn::Expr::Block(b) => lower_block_with_types(&b.block, local_types),
-        syn::Expr::If(e) => {
-            let mut out = Vec::new();
-            lower_expr_stmt(&syn::Expr::If(e.clone()), &mut out, local_types);
-            out
-        }
-        other => vec![Stmt::Expr(lower_expr_with_types(other, local_types))],
+    let mut out = Vec::new();
+    let mut inner = local_types.clone();
+    if tail {
+        lower_tail_expr_with_types(else_branch, &mut out, &mut inner);
+    } else {
+        lower_expr_stmt(else_branch, &mut out, &mut inner);
     }
+    out
 }
 
 fn assign_op_from_binop(op: &syn::BinOp) -> Option<&'static str> {
@@ -1651,7 +1706,7 @@ fn lower_expr_with_types_inner(
             let else_body = eif
                 .else_branch
                 .as_ref()
-                .map(|(_, e)| lower_else_body_with_types(e, local_types))
+                .map(|(_, e)| lower_else_body_with_types(e, local_types, true))
                 .unwrap_or_default();
             Expr::Closure {
                 params: vec![],
@@ -1708,25 +1763,16 @@ fn lower_expr_with_types_inner(
                 captures: vec![],
             }
         }
-        syn::Expr::Match(m) => {
-            let arms = m
-                .arms
-                .iter()
-                .map(|arm| MatchArm {
-                    pattern: arm.pat.to_token_stream().to_string(),
-                    body: match arm.body.as_ref() {
-                        syn::Expr::Block(b) => lower_block_with_types(&b.block, local_types),
-                        body => vec![Stmt::Return(Some(lower_expr_with_types(body, local_types)))],
-                    },
-                })
-                .collect();
+        syn::Expr::Match(value) => {
+            let mut body = Vec::new();
+            lower_match_with_types(value, true, &mut body, local_types);
+            if !all_paths_return(&body) {
+                body.push(Stmt::Return(None));
+            }
             Expr::Closure {
                 params: vec![],
                 ret: Typ::Generic("_".into()),
-                body: vec![Stmt::Match {
-                    scrutinee: lower_expr_with_types(&m.expr, local_types),
-                    arms,
-                }],
+                body,
                 captures: vec![],
             }
         }
@@ -2244,12 +2290,13 @@ fn main() {
         ));
         assert!(matches!(
             body.get(1),
-            Some(Stmt::Return(Some(Expr::Call { callee, args })))
+            Some(Stmt::Expr(Expr::Call { callee, args }))
                 if matches!(callee.as_ref(), Expr::Ident(name) if name == "Vec::extend")
                     && matches!(args.as_slice(), [Expr::Ident(receiver), Expr::Call { callee, .. }]
                         if receiver == "values"
                             && matches!(callee.as_ref(), Expr::Ident(name) if name == "produced"))
         ));
+        assert!(matches!(body.last(), Some(Stmt::Return(None))));
     }
 
     #[test]

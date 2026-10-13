@@ -2094,3 +2094,135 @@ fn owned_in_jit_bitwise_complement_handles_negative_operands() {
     assert!(report.success, "{report:?}");
     assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
 }
+
+#[test]
+fn owned_rust_jit_preserves_conditional_returns_and_tail_values() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn answer(value: bool) -> i64 { if value { return 41; } return 42; } fn main() -> i64 { return answer(true) + answer(false); }",
+        "fn answer(value: bool) -> i64 { if value { return 41; } else { let ignored = 99; } return 42; } fn main() -> i64 { return answer(true) + answer(false); }",
+        "fn answer(value: bool) -> i64 { if value { 41 } else { 42 } } fn main() -> i64 { answer(true) + answer(false) }",
+        "fn answer(value: bool) -> i64 { return if value { 41 } else { 42 }; } fn main() -> i64 { answer(true) + answer(false) }",
+        "fn answer(value: bool) -> i64 { match value { true => 41, false => 42 } } fn main() -> i64 { answer(true) + answer(false) }",
+        "fn answer(value: bool) -> i64 { return match value { true => 41, false => 42 }; } fn main() -> i64 { answer(true) + answer(false) }",
+    ] {
+        let path = temp_path("rust-return-flow.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+        assert_eq!(report.eval_result, Some(EvalValue::Int(83)), "{source}");
+    }
+    for source in [
+        "fn main() -> i64 { { 99; } return 42; }",
+        "fn main() -> i64 { { let value = 42; value } }",
+        "fn main() -> i64 { match true { true => { let ignored = 1; }, false => { let ignored = 2; } }; return 42; }",
+        "fn main() -> i64 { if false { return 1; } else if false { return 2; } else { let ignored = 3; } return 42; }",
+    ] {
+        let path = temp_path("rust-statement-flow.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{source}");
+    }
+}
+
+#[test]
+fn owned_rust_jit_refuses_missing_values_and_unlowered_guards() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main() -> i64 { 42; }",
+        "fn answer(value: i64) -> i64 { match value { 1 => 41, 2 => 42 } } fn main() -> i64 { answer(3) }",
+        "fn main() -> i64 { match true { true if false => 1, _ => 42 } }",
+    ] {
+        let path = temp_path("rust-missing-value.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(!report.success, "{source}: {report:?}");
+        assert_eq!(report.eval_result, None);
+    }
+}
+
+#[test]
+fn owned_rust_jit_unit_tails_execute_in_the_enclosing_function() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main() { for item in 0..3 { let ignored = item; } }",
+        "fn main() { while false { } }",
+        "fn main() { loop { break; } }",
+        "fn main() { let mut value = 0; value = 1 }",
+        "fn main() { let mut value = 0; value += 1 }",
+    ] {
+        let path = temp_path("rust-unit-tail.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+        assert_eq!(report.eval_result, None);
+        assert_eq!(report.eval_exit_code, Some(0));
+    }
+}
+
+#[test]
+fn owned_rust_jit_tail_branches_preserve_primitive_result_types() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (source, expected) in [
+        (
+            "fn answer(value: bool) -> f64 { if value { 1.25 } else { 2.75 } } fn main() -> f64 { answer(true) + answer(false) }",
+            EvalValue::Float(4.0),
+        ),
+        (
+            "fn answer(value: bool) -> bool { if value { false } else { true } } fn main() -> bool { answer(false) }",
+            EvalValue::Bool(true),
+        ),
+        (
+            "fn answer(value: bool) -> &'static str { if value { \"left\" } else { \"right\" } } fn main() -> &'static str { answer(false) }",
+            EvalValue::Str("right".into()),
+        ),
+    ] {
+        let path = temp_path("rust-tail-types.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+        assert_eq!(report.eval_result, Some(expected));
+    }
+}
