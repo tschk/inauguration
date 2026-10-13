@@ -39,6 +39,12 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## C-like scalar boolean conversion
+
+C-like boolean declarations retain `Bool` in Core IR. Typed normalization converts numeric conditions and logical operands with `value != 0`, preserving single evaluation and the conditional right operand of `&&` and `||`. The same conversion handles numeric values stored or passed as booleans; boolean arithmetic and integer destinations use explicit `bool-to-int` promotion. Function returns, arguments, locals, globals, and field or index stores use their expected types. Global types participate in normal primitive normalization. C++ `if` initializers and declaration conditions preserve their evaluation and scoped bindings before conversion. C type keywords are matched as keywords, preserving nominal names. Unsupported named boolean conversions and reference values are refused. Other frontends retain strict boolean operands; pointer, object, and general numeric casts remain outside this conversion.
+
+AArch64 assignments reuse scalar parameter slots instead of growing the frame after reservation. Calls align outgoing stack arguments to 16 bytes, including odd numbers of argument words.
+
 ## C-like local declarations
 
 Every initialized identifier in a local C-like declaration lowers to an ordered `Stmt::Let`, using the declaration's common type. Later initializers can read earlier bindings, and unused bindings retain initializer side effects. The same extraction handles multiple bindings in `for` initializers while preserving their loop scope. Uninitialized, pointer, and aggregate declarators remain refused; they are not silently discarded when another declarator is supported.

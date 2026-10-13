@@ -3416,3 +3416,235 @@ fn owned_c_unsupported_later_declarators_are_not_discarded() {
         }
     }
 }
+
+#[test]
+fn owned_c_numeric_boolean_conversions_preserve_control_flow_and_effects() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for source in [
+            "int main() { if (42) return 42; return 0; }",
+            "int main() { if (0) return 0; return 42; }",
+            "int main() { int count = 2, sum = 0; while (count) { count--; sum += 21; } return sum; }",
+            "int main() { int sum = 0; for (int i = 2; i; i--) { sum += 21; } return sum; }",
+            "int main() { int result = !0; result = result && 7; return result * 42; }",
+            "int main() { return (!0) * 42; }",
+            "int main() { return (7 && 9) * 42; }",
+            "bool *identity(bool *value) { return value; } int main() { if (identity(0)) return 0; return 42; }",
+            "int main() { bool value = 2; return value * 42; }",
+            "bool value = 2; int main() { value = 7; return value * 42; }",
+            "int convert(bool value) { return value; } int main() { return convert(7) * 42; }",
+            "bool convert(int value) { return value; } int main() { return convert(7) * 42; }",
+            "double value; int main() { if (value) return 0; return 42; }",
+            "double value; int main() { bool result = value; if (!result) return 42; return 0; }",
+            "int calls = 0; int left() { calls = calls * 10 + 1; return 0; } int right() { calls = calls * 10 + 2; return 7; } int main() { if (left() && right()) return 0; return calls + 41; }",
+            "int calls = 0; int left() { calls = calls * 10 + 1; return 7; } int right() { calls = calls * 10 + 2; return 9; } int main() { if (left() || right()) return calls + 41; return 0; }",
+            "int calls = 0; int left() { calls = calls * 10 + 1; return 7; } int right() { calls = calls * 10 + 2; return 9; } int main() { if (left() && right()) return calls + 30; return 0; }",
+            "int calls = 0; int left() { calls = calls * 10 + 1; return 0; } int right() { calls = calls * 10 + 2; return 9; } int main() { if (left() || right()) return calls + 30; return 0; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let path = temp_path(&format!("c-numeric-bool.{extension}"));
+                fs::write(&path, source).unwrap();
+                let mut request =
+                    default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                fs::remove_file(path).unwrap();
+                assert!(
+                    report.success,
+                    "{extension}: {profile:?}: {source}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{extension}: {profile:?}: {source}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn owned_non_c_frontends_keep_strict_boolean_operands() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (extension, source) in [
+        ("rs", "fn main() -> i64 { if 42 { return 42; } return 0; }"),
+        (
+            "rs",
+            "fn main() -> i64 { if 1 && 2 { return 42; } return 0; }",
+        ),
+        ("in", "fn main() -> Int { if 42 { return 42; } return 0; }"),
+        (
+            "in",
+            "fn main() -> Int { let value: Bool = 2; if value { return 42; } return 0; }",
+        ),
+    ] {
+        let path = temp_path(&format!("strict-bool.{extension}"));
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(!report.success, "{extension}: {source}: {report:?}");
+        assert_eq!(report.eval_result, None);
+    }
+}
+
+#[test]
+fn raw_c_floating_conditions_preserve_zero_and_nan_truth_values() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (value, expected) in [
+        (0.0, 0),
+        (-0.0, 0),
+        (1.0, 42),
+        (-1.0, 42),
+        (f64::INFINITY, 42),
+        (f64::NEG_INFINITY, 42),
+        (f64::NAN, 42),
+    ] {
+        let mut module = crate::in_lang_parse::parse_in_source(
+            "var value: Float = 0.0;\nfn main() -> Int { if value { return 42; } return 0; }",
+        )
+        .unwrap();
+        let crate::core_ir::Decl::Global { init, .. } = &mut module.decls[0] else {
+            panic!("missing global");
+        };
+        *init = Some(Box::new(crate::core_ir::Expr::FloatLit(
+            crate::core_ir::FloatVal(value),
+        )));
+        let module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::C, &module);
+        let request = default_request(
+            PathBuf::from("raw-c-float-condition.icore"),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        );
+        let result = super::jit::compile_jit(&module, "FloatingConditions", &request).unwrap();
+        assert_eq!(
+            result.eval_result,
+            Some(EvalValue::Int(expected)),
+            "{value:?}"
+        );
+    }
+}
+
+#[test]
+fn raw_c_boolean_stores_use_field_and_element_types() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "struct Flag { Bool value }\nfn main() -> Int { let flag: Flag = Flag { value: false }; flag.value = 2; if flag.value { return 42; } return 0; }",
+        "fn main() -> Int { let flags = [false]; flags[0] = 2; if flags[0] { return 42; } return 0; }",
+    ] {
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        let module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::C, &module);
+        let request = default_request(
+            PathBuf::from("raw-c-bool-store.icore"),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        );
+        let result = super::jit::compile_jit(&module, "BooleanStores", &request).unwrap();
+        assert_eq!(result.eval_result, Some(EvalValue::Int(42)), "{source}");
+    }
+}
+
+#[test]
+fn owned_cpp_condition_initializers_keep_effects_bindings_and_scope() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "int value = 0; int helper() { value = 42; return 1; } int main() { if (int ignored = helper(); true) return value; return 0; }",
+        "int value = 0; int helper() { value = 42; return 1; } int main() { if (helper(); 7) return value; return 0; }",
+        "int value = 0; int helper() { value = 42; return 0; } int main() { if (int result = helper(); result) return 0; else return value; }",
+        "int result = 42; int main() { if (int result = 0; result) return 0; return result; }",
+        "int main() { if (int result = 42) return result; return 0; }",
+        "int main() { if (bool result = 7) return result * 42; return 0; }",
+        "int value = 0; int helper() { value = 42; return 1; } int main() { if (/* comment */ int ignored = helper(); true) return value; return 0; }",
+    ] {
+        let path = temp_path("cpp-condition-init.cpp");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{source}");
+    }
+}
+
+#[test]
+fn owned_cpp_scalar_conversion_does_not_guess_objects_or_references() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "struct Painting { operator bool() { return true; } }; Painting value; int main() { if (value) return 42; return 0; }",
+        "struct Double { operator bool() { return true; } }; Double value; int main() { if (value) return 42; return 0; }",
+        "struct Bool { operator bool() { return true; } }; Bool value; int main() { if (value) return 42; return 0; }",
+        "void clear(bool &value) { value = false; } int main() { bool value = true; clear(value); return value; }",
+        "long double value = 1; int main() { if (value / 2) return 42; return 0; }",
+    ] {
+        let path = temp_path("cpp-non-scalar-conversion.cpp");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(!report.success, "{source}: {report:?}");
+        assert_eq!(report.eval_result, None);
+    }
+}
+
+#[test]
+fn owned_c_parameter_assignment_reuses_the_parameter_frame_slot() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for source in [
+            "void reset(int value) { value = 0; } int main() { reset(1); return 42; }",
+            "int reset(int value) { value = 42; return value; } int main() { return reset(1); }",
+            "bool reset(bool value) { value = false; return value; } int main() { if (reset(true)) return 0; return 42; }",
+            "int last(int a, int b, int c, int d, int e, int f, int g, int h, int value) { value = 42; return value; } int main() { return last(0,0,0,0,0,0,0,0,1); }",
+        ] {
+            let path = temp_path(&format!("c-param-store.{extension}"));
+            fs::write(&path, source).unwrap();
+            let report = compile_owned(&default_request(
+                path.clone(),
+                CompileTarget::Jit,
+                Some("main"),
+                None,
+            ));
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{extension}: {source}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{extension}: {source}"
+            );
+        }
+    }
+}

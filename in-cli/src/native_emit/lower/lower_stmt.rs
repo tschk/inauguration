@@ -217,10 +217,6 @@ pub(crate) fn lower_stmt(
                     return Ok(());
                 }
             }
-            if !ctx.locals.contains_key(name) {
-                let offset = ctx.alloc_slot();
-                ctx.locals.insert(name.clone(), LocalSlot::Scalar(offset));
-            }
             lower_store_local(emitter, ctx, name, expr, functions, pending_calls, fn_name)
         }
         Stmt::IndexAssign {
@@ -475,6 +471,8 @@ pub(crate) fn lower_store_local(
             .get(name)
             .cloned()
             .ok_or_else(|| format!("native-lower: local `{name}` not found in `{fn_name}`"))?
+    } else if let Some(offset) = ctx.params.get(name) {
+        LocalSlot::Scalar(*offset)
     } else {
         let offset = ctx.alloc_slot();
         ctx.locals

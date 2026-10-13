@@ -143,16 +143,62 @@ impl TypeChecker {
             .collect();
         for decl in &mut module.decls {
             match decl {
-                Decl::Function { params, body, .. } => {
+                Decl::Function {
+                    params, ret, body, ..
+                } => {
                     let mut env = globals.clone();
                     env.extend(params.iter().cloned());
-                    self.resolve_typed_body(body, &facts, &mut env, promote_c_bool);
+                    self.resolve_typed_body(body, &facts, &mut env, Some(ret), promote_c_bool);
                 }
                 Decl::Global {
-                    init: Some(expr), ..
-                } => self.resolve_typed_expr(expr, &facts, &globals, promote_c_bool),
+                    typ,
+                    init: Some(expr),
+                    ..
+                } => {
+                    self.resolve_typed_expr(expr, &facts, &globals, promote_c_bool);
+                    if promote_c_bool {
+                        self.resolve_c_value(expr, typ, &facts, &globals);
+                    }
+                }
                 _ => {}
             }
+        }
+    }
+
+    fn resolve_c_value(
+        &self,
+        expr: &mut Expr,
+        expected: &Typ,
+        facts: &Facts,
+        env: &HashMap<String, Typ>,
+    ) {
+        let actual = self.expr_type(expr, facts, env);
+        if expected == &Typ::Bool && matches!(actual, Some(Typ::Named(_))) {
+            *expr = Expr::Call {
+                callee: Box::new(Expr::Ident("unsupported-c-boolean-conversion".into())),
+                args: vec![expr.clone()],
+            };
+            return;
+        }
+        let actual = actual.map(|typ| typ.canonical());
+        let zero = match (expected.canonical(), actual) {
+            (Typ::Bool, Some(Typ::Int)) => Some(Expr::IntLit(0)),
+            (Typ::Bool, Some(Typ::Float)) => Some(Expr::FloatLit(crate::core_ir::FloatVal(0.0))),
+            (Typ::Int, Some(Typ::Bool)) => {
+                *expr = Expr::Unary {
+                    op: "bool-to-int".into(),
+                    expr: Box::new(expr.clone()),
+                };
+                return;
+            }
+            _ => None,
+        };
+        if let Some(zero) = zero {
+            *expr = Expr::Binary {
+                op: "!=".into(),
+                lhs: Box::new(expr.clone()),
+                rhs: Box::new(zero),
+            };
         }
     }
 
@@ -166,44 +212,57 @@ impl TypeChecker {
         if let Expr::Closure { params, body, .. } = expr {
             let mut inner = env.clone();
             inner.extend(params.iter().cloned());
-            self.resolve_typed_body(body, facts, &mut inner, promote_c_bool);
+            self.resolve_typed_body(body, facts, &mut inner, None, promote_c_bool);
         } else {
             crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
                 self.resolve_typed_expr(child, facts, env, promote_c_bool)
             });
         }
-        if promote_c_bool
-            && let Expr::Binary { op, lhs, rhs } = expr
-            && matches!(op.as_str(), "&" | "|" | "^" | "<<" | ">>" | "%")
-        {
-            for operand in [lhs, rhs] {
-                if self
-                    .expr_type(operand, facts, env)
-                    .is_some_and(|typ| typ.canonical() == Typ::Bool)
-                {
-                    **operand = Expr::Unary {
-                        op: "bool-to-int".into(),
-                        expr: Box::new((**operand).clone()),
-                    };
+        if promote_c_bool {
+            match expr {
+                Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&&" | "||") => {
+                    self.resolve_c_value(lhs, &Typ::Bool, facts, env);
+                    self.resolve_c_value(rhs, &Typ::Bool, facts, env);
                 }
-            }
-        }
-        if promote_c_bool
-            && let Expr::Call { callee, args } = expr
-            && let Expr::Ident(name) = callee.as_ref()
-            && let Some((params, _)) = facts.functions.get(name)
-        {
-            for (arg, (_, expected)) in args.iter_mut().zip(params) {
-                if expected.canonical() == Typ::Int
-                    && self
-                        .expr_type(arg, facts, env)
-                        .is_some_and(|typ| typ.canonical() == Typ::Bool)
-                {
-                    *arg = Expr::Unary {
-                        op: "bool-to-int".into(),
-                        expr: Box::new(arg.clone()),
-                    };
+                Expr::Unary { op, expr } if op == "!" => {
+                    self.resolve_c_value(expr, &Typ::Bool, facts, env)
                 }
+                Expr::Unary { op, expr } if matches!(op.as_str(), "-" | "~") => {
+                    self.resolve_c_value(expr, &Typ::Int, facts, env)
+                }
+                Expr::Binary { op, lhs, rhs }
+                    if matches!(
+                        op.as_str(),
+                        "+" | "-"
+                            | "*"
+                            | "/"
+                            | "%"
+                            | "&"
+                            | "|"
+                            | "^"
+                            | "<<"
+                            | ">>"
+                            | "=="
+                            | "!="
+                            | "<"
+                            | ">"
+                            | "<="
+                            | ">="
+                    ) =>
+                {
+                    self.resolve_c_value(lhs, &Typ::Int, facts, env);
+                    self.resolve_c_value(rhs, &Typ::Int, facts, env);
+                }
+                Expr::Call { callee, args } => {
+                    if let Expr::Ident(name) = callee.as_ref()
+                        && let Some((params, _)) = facts.functions.get(name)
+                    {
+                        for (arg, (_, expected)) in args.iter_mut().zip(params) {
+                            self.resolve_c_value(arg, expected, facts, env);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         if let Expr::Unary { op, expr } = expr
@@ -222,30 +281,67 @@ impl TypeChecker {
         body: &mut [Stmt],
         facts: &Facts,
         env: &mut HashMap<String, Typ>,
+        return_type: Option<&Typ>,
         promote_c_bool: bool,
     ) {
         for stmt in body {
             match stmt {
                 Stmt::Let(name, typ, expr) => {
                     self.resolve_typed_expr(expr, facts, env, promote_c_bool);
+                    if promote_c_bool && let Some(typ) = typ.as_ref() {
+                        self.resolve_c_value(expr, typ, facts, env);
+                    }
                     if let Some(typ) = typ.clone().or_else(|| self.expr_type(expr, facts, env)) {
                         env.insert(name.clone(), typ);
                     }
                 }
-                Stmt::Assign(_, expr)
-                | Stmt::Expr(expr)
-                | Stmt::Throw(expr)
-                | Stmt::Return(Some(expr)) => {
+                Stmt::Assign(name, expr) => {
+                    self.resolve_typed_expr(expr, facts, env, promote_c_bool);
+                    if promote_c_bool && let Some(typ) = env.get(name) {
+                        self.resolve_c_value(expr, typ, facts, env);
+                    }
+                }
+                Stmt::Return(Some(expr)) => {
+                    self.resolve_typed_expr(expr, facts, env, promote_c_bool);
+                    if promote_c_bool && let Some(typ) = return_type {
+                        self.resolve_c_value(expr, typ, facts, env);
+                    }
+                }
+                Stmt::Expr(expr) | Stmt::Throw(expr) => {
                     self.resolve_typed_expr(expr, facts, env, promote_c_bool)
                 }
                 Stmt::IndexAssign { base, index, value } => {
-                    for expr in [base, index, value] {
+                    for expr in [&mut *base, &mut *index, &mut *value] {
                         self.resolve_typed_expr(expr, facts, env, promote_c_bool);
                     }
+                    if promote_c_bool
+                        && let Some(typ) = self.expr_type(
+                            &Expr::Index {
+                                base: Box::new(base.clone()),
+                                index: Box::new(index.clone()),
+                            },
+                            facts,
+                            env,
+                        )
+                    {
+                        self.resolve_c_value(value, &typ, facts, env);
+                    }
                 }
-                Stmt::FieldAssign { base, value, .. } => {
-                    for expr in [base, value] {
+                Stmt::FieldAssign { base, name, value } => {
+                    for expr in [&mut *base, &mut *value] {
                         self.resolve_typed_expr(expr, facts, env, promote_c_bool);
+                    }
+                    if promote_c_bool
+                        && let Some(typ) = self.expr_type(
+                            &Expr::Field {
+                                base: Box::new(base.clone()),
+                                name: name.clone(),
+                            },
+                            facts,
+                            env,
+                        )
+                    {
+                        self.resolve_c_value(value, &typ, facts, env);
                     }
                 }
                 Stmt::If {
@@ -254,14 +350,38 @@ impl TypeChecker {
                     else_body,
                 } => {
                     self.resolve_typed_expr(cond, facts, env, promote_c_bool);
-                    self.resolve_typed_body(then_body, facts, &mut env.clone(), promote_c_bool);
-                    self.resolve_typed_body(else_body, facts, &mut env.clone(), promote_c_bool);
+                    if promote_c_bool {
+                        self.resolve_c_value(cond, &Typ::Bool, facts, env);
+                    }
+                    self.resolve_typed_body(
+                        then_body,
+                        facts,
+                        &mut env.clone(),
+                        return_type,
+                        promote_c_bool,
+                    );
+                    self.resolve_typed_body(
+                        else_body,
+                        facts,
+                        &mut env.clone(),
+                        return_type,
+                        promote_c_bool,
+                    );
                 }
                 Stmt::Loop { cond, body, .. } => {
                     if let Some(cond) = cond {
                         self.resolve_typed_expr(cond, facts, env, promote_c_bool);
+                        if promote_c_bool {
+                            self.resolve_c_value(cond, &Typ::Bool, facts, env);
+                        }
                     }
-                    self.resolve_typed_body(body, facts, &mut env.clone(), promote_c_bool);
+                    self.resolve_typed_body(
+                        body,
+                        facts,
+                        &mut env.clone(),
+                        return_type,
+                        promote_c_bool,
+                    );
                 }
                 Stmt::Match { scrutinee, arms } => {
                     self.resolve_typed_expr(scrutinee, facts, env, promote_c_bool);
@@ -281,11 +401,23 @@ impl TypeChecker {
                                 inner.insert(name, typ);
                             }
                         }
-                        self.resolve_typed_body(&mut arm.body, facts, &mut inner, promote_c_bool);
+                        self.resolve_typed_body(
+                            &mut arm.body,
+                            facts,
+                            &mut inner,
+                            return_type,
+                            promote_c_bool,
+                        );
                     }
                 }
                 Stmt::Try { body, catches } => {
-                    self.resolve_typed_body(body, facts, &mut env.clone(), promote_c_bool);
+                    self.resolve_typed_body(
+                        body,
+                        facts,
+                        &mut env.clone(),
+                        return_type,
+                        promote_c_bool,
+                    );
                     for catch in catches {
                         let mut inner = env.clone();
                         if let Ok(pattern) = MatchPattern::parse(&catch.pattern) {
@@ -297,7 +429,13 @@ impl TypeChecker {
                                 &mut Vec::new(),
                             );
                         }
-                        self.resolve_typed_body(&mut catch.body, facts, &mut inner, promote_c_bool);
+                        self.resolve_typed_body(
+                            &mut catch.body,
+                            facts,
+                            &mut inner,
+                            return_type,
+                            promote_c_bool,
+                        );
                     }
                 }
                 Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
@@ -1437,6 +1575,19 @@ fn normalize_decl(parser_id: ParserId, decl: &Decl) -> Decl {
                 type_params: type_params.clone(),
             }
         }
+        Decl::Global {
+            name,
+            typ,
+            init,
+            mutable,
+            constant_value,
+        } => Decl::Global {
+            name: name.clone(),
+            typ: normalize_parser_type(parser_id, typ),
+            init: init.clone(),
+            mutable: *mutable,
+            constant_value: *constant_value,
+        },
         Decl::Class {
             name,
             fields,
@@ -1567,6 +1718,13 @@ fn normalize_type(typ: &Typ) -> Typ {
 }
 
 fn normalize_parser_type(parser_id: ParserId, typ: &Typ) -> Typ {
+    if matches!(
+        parser_id,
+        ParserId::C | ParserId::Cpp | ParserId::ObjC | ParserId::ObjCpp
+    ) && let Typ::Named(name) = typ
+    {
+        return crate::compiler::tree_front::normalize_c_type(name);
+    }
     if matches!(
         parser_id,
         ParserId::JavaScript | ParserId::Python | ParserId::Ruby | ParserId::Php

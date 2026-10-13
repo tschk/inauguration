@@ -230,19 +230,30 @@ fn c_strip_decl_storage(s: &str) -> String {
         .join(" ")
 }
 
-fn c_typ_from_decl_specifier_text(raw: &str) -> Typ {
+pub(crate) fn c_typ_from_decl_specifier_text(raw: &str) -> Typ {
     let s = c_strip_decl_storage(raw.trim());
     if s.is_empty() {
         return Typ::Void;
     }
-    let lower = s.to_ascii_lowercase();
-    if lower
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
+    if s.split(|c: char| !c.is_alphanumeric() && c != '_')
         .any(|w| w == "void")
     {
         return Typ::Void;
     }
-    if c_decl_specs_look_integral(&lower) {
+    if matches!(s.as_str(), "bool" | "_Bool") {
+        return Typ::Bool;
+    }
+    if matches!(s.as_str(), "float" | "double") {
+        return Typ::Float;
+    }
+    if s.starts_with("struct ")
+        || s.starts_with("union ")
+        || s.starts_with("reference ")
+        || s == "long double"
+    {
+        return Typ::Named(s);
+    }
+    if c_decl_specs_look_integral(&s) {
         return Typ::Int;
     }
     Typ::Named(
@@ -259,13 +270,21 @@ fn c_decl_specs_look_integral(lower: &str) -> bool {
         "uint64_t", "int8_t", "int16_t", "int32_t", "int64_t", "size_t", "ssize_t", "bool",
         "_bool",
     ];
-    KW.iter().any(|k| lower.contains(k))
+    lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|word| KW.contains(&word))
 }
 
 fn c_coarse_return_typ(src: &[u8], func_def: Node<'_>) -> Typ {
     let Some(decl) = func_def.child_by_field_name("declarator") else {
         return Typ::Void;
     };
+    if decl.kind() == "pointer_declarator" {
+        return Typ::Int;
+    }
+    if decl.kind() == "reference_declarator" {
+        return Typ::Named("reference return".into());
+    }
     let head = src
         .get(func_def.start_byte()..decl.start_byte())
         .and_then(|b| std::str::from_utf8(b).ok())
@@ -305,7 +324,15 @@ fn c_one_parameter(src: &[u8], pd: Node<'_>, idx: usize) -> Option<(String, Typ)
     if ty_text == "void" && decl.is_none() {
         return None;
     }
-    let ty = c_typ_from_decl_specifier_text(ty_text);
+    let ty = if decl.is_some_and(|decl| decl.kind() == "reference_declarator") {
+        Typ::Named(format!("reference {ty_text}"))
+    } else if decl
+        .is_some_and(|decl| matches!(decl.kind(), "pointer_declarator" | "array_declarator"))
+    {
+        Typ::Int
+    } else {
+        c_typ_from_decl_specifier_text(ty_text)
+    };
     let name = decl
         .and_then(|d| {
             named_descendant(d, "field_identifier").or_else(|| named_descendant(d, "identifier"))
@@ -446,15 +473,19 @@ fn c_declarations(src: &[u8], declaration: Node<'_>) -> Option<Vec<Stmt>> {
         if declaration.field_name_for_child(index as u32) != Some("declarator") {
             continue;
         }
-        if child.kind() != "init_declarator" {
-            return None;
-        }
-        let declarator = child.child_by_field_name("declarator")?;
+        let (declarator, value) = if child.kind() == "init_declarator" {
+            (
+                child.child_by_field_name("declarator")?,
+                child.child_by_field_name("value")?,
+            )
+        } else {
+            (child, declaration.child_by_field_name("value")?)
+        };
         if declarator.kind() != "identifier" {
             return None;
         }
         let name = node_txt(src, declarator).trim().to_string();
-        let value = c_expr(src, child.child_by_field_name("value")?)?;
+        let value = c_expr(src, value)?;
         out.push(Stmt::Let(name, Some(typ.clone()), value));
     }
     if out.is_empty() { None } else { Some(out) }
@@ -508,10 +539,25 @@ fn c_assignee_name(src: &[u8], n: Node<'_>) -> Option<String> {
 }
 
 fn c_if_statement(src: &[u8], stmt: Node<'_>) -> Option<Stmt> {
-    let cond = stmt
+    let condition = stmt
         .child_by_field_name("condition")
-        .and_then(|n| c_expr(src, n))
-        .or_else(|| first_named(stmt, "parenthesized_expression").and_then(|n| c_expr(src, n)))?;
+        .or_else(|| first_named(stmt, "parenthesized_expression"))?;
+    let value = condition.child_by_field_name("value").unwrap_or(condition);
+    let mut prefix = condition
+        .child_by_field_name("initializer")
+        .map(|initializer| c_stmts(src, initializer))
+        .unwrap_or_default();
+    let cond = if value.kind() == "declaration" {
+        let declarations = c_declarations(src, value)?;
+        let [Stmt::Let(name, _, _)] = declarations.as_slice() else {
+            return None;
+        };
+        let cond = Expr::Ident(name.clone());
+        prefix.extend(declarations);
+        cond
+    } else {
+        c_expr(src, value)?
+    };
     let then_body = stmt
         .child_by_field_name("consequence")
         .map(|n| c_stmt_or_body(src, n))
@@ -521,11 +567,21 @@ fn c_if_statement(src: &[u8], stmt: Node<'_>) -> Option<Stmt> {
         .or_else(|| first_named(stmt, "else_clause"))
         .map(|n| c_else_body(src, n))
         .unwrap_or_default();
-    Some(Stmt::If {
+    let branch = Stmt::If {
         cond,
         then_body,
         else_body,
-    })
+    };
+    if prefix.is_empty() {
+        Some(branch)
+    } else {
+        prefix.push(branch);
+        Some(Stmt::If {
+            cond: Expr::BoolLit(true),
+            then_body: prefix,
+            else_body: vec![],
+        })
+    }
 }
 
 fn c_while_statement(src: &[u8], stmt: Node<'_>) -> Option<Stmt> {
@@ -579,7 +635,7 @@ fn c_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
         "parenthesized_expression" | "expression" => {
             expr.named_child(0).and_then(|n| c_expr(src, n))
         }
-        "condition_clause" => expr
+        "condition_clause" if expr.child_by_field_name("initializer").is_none() => expr
             .child_by_field_name("value")
             .or_else(|| expr.named_child(0))
             .and_then(|value| c_expr(src, value)),
@@ -645,8 +701,11 @@ fn c_args(src: &[u8], args: Node<'_>) -> Option<Vec<Expr>> {
 
 fn c_peel_statement_shell<'a>(n: Node<'a>) -> Option<Node<'a>> {
     match n.kind() {
-        "statement" => {
-            let inner = n.named_child(0)?;
+        "statement" | "init_statement" => {
+            let mut cursor = n.walk();
+            let inner = n
+                .named_children(&mut cursor)
+                .find(|child| child.kind() != "comment")?;
             c_peel_statement_shell(inner)
         }
         "attributed_statement" => {

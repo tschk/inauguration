@@ -146,11 +146,12 @@ pub(crate) fn lower_call(
     }
     // Stack-based args (beyond 8): allocate stack space and store
     let stack_slots = if reg > 8 { reg as usize - 8 } else { 0 };
+    let stack_bytes = (stack_slots * 8).next_multiple_of(16) as u16;
     if stack_slots > 0 {
         emitter.emit_u32(aarch64::sub_imm64(
             aarch64::REG_SP,
             aarch64::REG_SP,
-            stack_slots as u16 * 8,
+            stack_bytes,
         ));
         for i in 0..stack_slots {
             let slot_reg = 8 + i as u8;
@@ -165,7 +166,7 @@ pub(crate) fn lower_call(
         emitter.emit_u32(aarch64::add_imm64(
             aarch64::REG_SP,
             aarch64::REG_SP,
-            stack_slots as u16 * 8,
+            stack_bytes,
         ));
     }
     pending_calls.push(PendingCall {
