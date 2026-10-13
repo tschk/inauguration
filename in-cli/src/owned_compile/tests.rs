@@ -3299,3 +3299,54 @@ fn owned_cpp_compound_assignment_reads_target_after_rhs_once() {
         );
     }
 }
+
+#[test]
+fn owned_c_integer_literal_radices_reach_native_unchanged() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for literal in [
+            "0x2A",
+            "0X2a",
+            "052",
+            "0b101010",
+            "42ULL",
+            "0x2Aul",
+            "0xFF - 0xD5",
+        ] {
+            let path = temp_path(&format!("c-radix.{extension}"));
+            fs::write(
+                &path,
+                format!("int value = {literal}; int main() {{ return value; }}"),
+            )
+            .unwrap();
+            let report = compile_owned(&default_request(
+                path.clone(),
+                CompileTarget::Jit,
+                Some("main"),
+                None,
+            ));
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{extension}: {literal}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{extension}: {literal}"
+            );
+        }
+    }
+    for literal in ["4'2", "0'52", "0x2'A", "0b10'1010"] {
+        let path = temp_path("cpp-separated-int.cpp");
+        fs::write(&path, format!("int main() {{ return {literal}; }}")).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(report.success, "{literal}: {report:?}");
+        assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{literal}");
+    }
+}

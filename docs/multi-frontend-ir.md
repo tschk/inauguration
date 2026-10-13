@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## C-like integer literals
+
+C-like integer literals retain hexadecimal digits and use their source radix: hexadecimal, binary, octal, or decimal. Traditional `U`/`L` suffix combinations are validated separately, and digit separators are accepted only between valid digits. The frontend still uses canonical signed 64-bit `Int`; suffixes do not yet preserve source width or unsigned arithmetic. Values outside that representation, unsupported suffixes, and malformed literal forms are refused instead of truncated or reinterpreted.
+
 ## Value-first variable updates
 
 The reserved statement operation `modify-value-first(target, value, operator)` lowers through the shared value-spill pass. It evaluates `value` once into a hygienic temporary, then reads and updates the original identifier target. C-like compound assignments use this operation, including loop updates, so a right operand that modifies the target cannot leave a stale value in the calculation. Invalid operation shapes remain explicit refusals.

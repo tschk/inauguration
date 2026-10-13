@@ -657,16 +657,50 @@ fn c_peel_statement_shell<'a>(n: Node<'a>) -> Option<Node<'a>> {
     }
 }
 
-fn parse_c_integer_literal(t: &str) -> Option<i64> {
-    let t = t.trim();
-    let t = t.trim_end_matches(|c: char| c.is_ascii_alphabetic());
-    if t.is_empty() {
+fn parse_c_integer_literal(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let number = text.trim_end_matches(['u', 'U', 'l', 'L']);
+    let suffix = &text[number.len()..];
+    if suffix.contains("lL")
+        || suffix.contains("Ll")
+        || !matches!(
+            suffix.to_ascii_lowercase().as_str(),
+            "" | "u" | "l" | "ul" | "lu" | "ll" | "ull" | "llu"
+        )
+    {
         return None;
     }
-    if let Some(rest) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        return i64::from_str_radix(rest, 16).ok();
+    let (digits, radix) = if let Some(digits) = number
+        .strip_prefix("0x")
+        .or_else(|| number.strip_prefix("0X"))
+    {
+        (digits, 16)
+    } else if let Some(digits) = number
+        .strip_prefix("0b")
+        .or_else(|| number.strip_prefix("0B"))
+    {
+        (digits, 2)
+    } else if number.starts_with('0') {
+        (number, 8)
+    } else {
+        (number, 10)
+    };
+    let bytes = digits.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\''
+            && (index == 0
+                || index + 1 == bytes.len()
+                || !(bytes[index - 1] as char).is_digit(radix)
+                || !(bytes[index + 1] as char).is_digit(radix))
+        {
+            return None;
+        }
     }
-    t.parse::<i64>().ok()
+    if digits.contains('\'') {
+        i64::from_str_radix(&digits.replace('\'', ""), radix).ok()
+    } else {
+        i64::from_str_radix(digits, radix).ok()
+    }
 }
 
 #[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]
@@ -683,4 +717,66 @@ pub(super) fn objc_like<'a>(src: &[u8], n: Node<'a>) -> Option<Decl> {
         return Some(decl_fn(normalize_entry(&name), vec![], Typ::Void));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integer_literal_radices_suffixes_and_separators_preserve_values() {
+        for text in [
+            "42",
+            "0x2A",
+            "0X2a",
+            "052",
+            "0b101010",
+            "0B101010",
+            "42u",
+            "42UL",
+            "42lu",
+            "42LL",
+            "42uLL",
+            "42LLU",
+            "0x2Aull",
+            "0'52",
+            "4'2",
+            "0x2'A",
+            "0b10'1010",
+        ] {
+            assert_eq!(parse_c_integer_literal(text), Some(42), "{text}");
+        }
+        assert_eq!(parse_c_integer_literal("0"), Some(0));
+        assert_eq!(parse_c_integer_literal("0xFF"), Some(255));
+        assert_eq!(
+            parse_c_integer_literal("0x7FFFFFFFFFFFFFFFULL"),
+            Some(i64::MAX)
+        );
+    }
+
+    #[test]
+    fn integer_literal_invalid_and_out_of_range_forms_are_refused() {
+        for text in [
+            "",
+            "0x",
+            "0b",
+            "08",
+            "0b102",
+            "42foo",
+            "42uu",
+            "42lL",
+            "42lll",
+            "42z",
+            "'42",
+            "42'",
+            "4''2",
+            "0x'2A",
+            "9223372036854775808",
+            "0xffffffffffffffffULL",
+            "1.5",
+            "1e2",
+        ] {
+            assert_eq!(parse_c_integer_literal(text), None, "{text}");
+        }
+    }
 }
