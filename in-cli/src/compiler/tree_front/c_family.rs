@@ -330,7 +330,6 @@ fn c_stmt(src: &[u8], stmt: Node<'_>) -> Option<Stmt> {
     let stmt = c_peel_statement_shell(stmt)?;
     match stmt.kind() {
         "return_statement" => c_return_expr(src, stmt).map(Stmt::Return),
-        "declaration" => c_declaration(src, stmt),
         "expression_statement" => c_expr_statement(src, stmt),
         "if_statement" => c_if_statement(src, stmt),
         "while_statement" => c_while_statement(src, stmt),
@@ -353,6 +352,9 @@ fn c_stmts(src: &[u8], stmt: Node<'_>) -> Vec<Stmt> {
         "for_statement" => {
             c_for_statement(src, stmt).unwrap_or_else(|| c_unsupported_statement("for"))
         }
+        "declaration" => {
+            c_declarations(src, stmt).unwrap_or_else(|| c_unsupported_statement("declaration"))
+        }
         _ => c_stmt(src, stmt)
             .map(|stmt| vec![stmt])
             .unwrap_or_else(|| c_unsupported_statement(stmt.kind())),
@@ -369,22 +371,11 @@ fn c_unsupported_statement(kind: &str) -> Vec<Stmt> {
 fn c_for_statement(src: &[u8], stmt: Node<'_>) -> Option<Vec<Stmt>> {
     let mut out = Vec::new();
     if let Some(init) = stmt.child_by_field_name("initializer") {
-        out.push(match init.kind() {
-            "declaration" => {
-                let mut cursor = init.walk();
-                if init
-                    .named_children(&mut cursor)
-                    .filter(|child| child.kind() == "init_declarator")
-                    .count()
-                    != 1
-                {
-                    return None;
-                }
-                c_declaration(src, init)?
-            }
-            "assignment_expression" => c_assignment(src, init)?,
-            _ => Stmt::Expr(c_expr(src, init)?),
-        });
+        match init.kind() {
+            "declaration" => out.extend(c_declarations(src, init)?),
+            "assignment_expression" => out.push(c_assignment(src, init)?),
+            _ => out.push(Stmt::Expr(c_expr(src, init)?)),
+        }
     }
     let cond = match stmt.child_by_field_name("condition") {
         Some(cond) => Some(c_expr(src, cond)?),
@@ -446,17 +437,27 @@ fn c_return_expr(src: &[u8], ret: Node<'_>) -> Option<Option<Expr>> {
     Some(None)
 }
 
-fn c_declaration(src: &[u8], decl: Node<'_>) -> Option<Stmt> {
-    let init = first_named(decl, "init_declarator")?;
-    let name_node = named_descendant(init, "identifier")?;
-    let name = node_txt(src, name_node).trim().to_string();
-    let ty_src = src.get(decl.start_byte()..name_node.start_byte())?;
-    let ty = c_typ_from_decl_specifier_text(std::str::from_utf8(ty_src).ok()?);
-    let value = init
-        .child_by_field_name("value")
-        .or_else(|| last_named(init))
-        .and_then(|n| c_expr(src, n))?;
-    Some(Stmt::Let(name, Some(ty), value))
+fn c_declarations(src: &[u8], declaration: Node<'_>) -> Option<Vec<Stmt>> {
+    let typ =
+        c_typ_from_decl_specifier_text(node_txt(src, declaration.child_by_field_name("type")?));
+    let mut out = Vec::new();
+    let mut cursor = declaration.walk();
+    for (index, child) in declaration.children(&mut cursor).enumerate() {
+        if declaration.field_name_for_child(index as u32) != Some("declarator") {
+            continue;
+        }
+        if child.kind() != "init_declarator" {
+            return None;
+        }
+        let declarator = child.child_by_field_name("declarator")?;
+        if declarator.kind() != "identifier" {
+            return None;
+        }
+        let name = node_txt(src, declarator).trim().to_string();
+        let value = c_expr(src, child.child_by_field_name("value")?)?;
+        out.push(Stmt::Let(name, Some(typ.clone()), value));
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn c_expr_statement(src: &[u8], stmt: Node<'_>) -> Option<Stmt> {

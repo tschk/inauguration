@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## C-like local declarations
+
+Every initialized identifier in a local C-like declaration lowers to an ordered `Stmt::Let`, using the declaration's common type. Later initializers can read earlier bindings, and unused bindings retain initializer side effects. The same extraction handles multiple bindings in `for` initializers while preserving their loop scope. Uninitialized, pointer, and aggregate declarators remain refused; they are not silently discarded when another declarator is supported.
+
 ## C-like integer literals
 
 C-like integer literals retain hexadecimal digits and use their source radix: hexadecimal, binary, octal, or decimal. Traditional `U`/`L` suffix combinations are validated separately, and digit separators are accepted only between valid digits. The frontend still uses canonical signed 64-bit `Int`; suffixes do not yet preserve source width or unsigned arithmetic. Values outside that representation, unsupported suffixes, and malformed literal forms are refused instead of truncated or reinterpreted.

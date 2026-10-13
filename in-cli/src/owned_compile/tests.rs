@@ -3144,7 +3144,6 @@ fn owned_c_unsupported_loop_parts_are_refused_instead_of_dropped() {
     }
     for extension in ["c", "cpp"] {
         for source in [
-            "int main() { for (int i = 0, j = 0; i < 1; i++) { return 42; } return 0; }",
             "int main() { for (int i = 0; i < 1; i++) { switch (i) { case 0: return 42; } } return 0; }",
             "int main() { int values[1]; for (int i = 0; i < 1; values[i]++) { return 42; } return 0; }",
         ] {
@@ -3348,5 +3347,72 @@ fn owned_c_integer_literal_radices_reach_native_unchanged() {
         fs::remove_file(path).unwrap();
         assert!(report.success, "{literal}: {report:?}");
         assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{literal}");
+    }
+}
+
+#[test]
+fn owned_c_local_declarators_preserve_order_dependencies_and_scope() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for source in [
+            "int value = 0; int helper() { value = 42; return 1; } int main() { int first = 0, ignored = helper(); return value; }",
+            "int calls = 0; int first() { calls = calls * 10 + 1; return 0; } int second() { calls = calls * 10 + 2; return 0; } int main() { int a = first(), b = second(); return calls + 30; }",
+            "int main() { int first = 20, second = first + 2; return first + second; }",
+            "int value = 99; int main() { int value = 20, second = value + 2; return value + second; }",
+            "int main() { for (int i = 0, j = 40; i < 2; i++) { if (i == 1) return j + i + 1; } return 0; }",
+            "int main() { int i = 42; for (int i = 0, j = 0; i < 1; i++) { j++; } return i; }",
+            "int calls = 0; int first() { calls = calls * 10 + 1; return 0; } int second() { calls = calls * 10 + 2; return 0; } int main() { for (int a = first(), b = second(); a < 1; a++) { return calls + 30; } return 0; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let path = temp_path(&format!("c-local-declarators.{extension}"));
+                fs::write(&path, source).unwrap();
+                let mut request =
+                    default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                fs::remove_file(path).unwrap();
+                assert!(
+                    report.success,
+                    "{extension}: {profile:?}: {source}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{extension}: {profile:?}: {source}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn owned_c_unsupported_later_declarators_are_not_discarded() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for source in [
+            "int main() { int first = 42, *pointer = 0; return first; }",
+            "int main() { int first = 42, second; return first; }",
+            "int main() { int first = 42, values[2] = {1, 2}; return first; }",
+        ] {
+            let path = temp_path(&format!("unsupported-c-local-declarators.{extension}"));
+            fs::write(&path, source).unwrap();
+            let report = compile_owned(&default_request(
+                path.clone(),
+                CompileTarget::Jit,
+                Some("main"),
+                None,
+            ));
+            fs::remove_file(path).unwrap();
+            assert!(!report.success, "{extension}: {source}: {report:?}");
+            assert_eq!(report.eval_result, None);
+        }
     }
 }
