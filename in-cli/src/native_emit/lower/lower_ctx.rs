@@ -759,6 +759,36 @@ impl<'a> LowerCtx<'a> {
         self.alloc_local(name, resolved.as_ref(), fn_name)
     }
 
+    pub(crate) fn validate_global_struct(&self, global: &str) -> Result<(), String> {
+        if let Some(Typ::Named(name)) = self.global_types.get(global)
+            && self.structs.get(name).is_some_and(|fields| {
+                fields
+                    .iter()
+                    .all(|(_, typ)| super::lower_util::is_native_scalar_type(typ))
+            })
+        {
+            return Ok(());
+        }
+        Err("native-lower: global struct values require a known scalar-field layout".into())
+    }
+
+    pub(crate) fn load_global_struct_field(
+        &mut self,
+        emitter: &mut CodeEmitter,
+        global: &str,
+        field: &str,
+        reg: u8,
+        fn_name: &str,
+    ) -> Result<(), String> {
+        let key = format!("{global}.{field}");
+        let offset = self.globals.get(&key).copied().ok_or_else(|| {
+            format!("native-lower: missing global struct field `{key}` in `{fn_name}`")
+        })?;
+        self.emit_global_address(emitter, reg, offset);
+        emitter.emit_u32(aarch64::ldr64(reg, reg, 0));
+        Ok(())
+    }
+
     pub(crate) fn emit_global_address(
         &mut self,
         emitter: &mut crate::native_emit::aarch64::CodeEmitter,

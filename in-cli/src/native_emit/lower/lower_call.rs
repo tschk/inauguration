@@ -803,6 +803,19 @@ pub(crate) fn lower_struct_call_arg(
     };
     match arg {
         Expr::Ident(local) => {
+            if !ctx.locals.contains_key(local)
+                && !ctx.params.contains_key(local)
+                && ctx.globals.contains_key(local)
+            {
+                ctx.validate_global_struct(local)?;
+                let fields = fields.clone();
+                for (field, _) in fields {
+                    ctx.load_global_struct_field(emitter, local, &field, reg, fn_name)?;
+                    reg += 1;
+                }
+                return Ok(reg);
+            }
+
             if let Some(offset) = ctx.params.get(local) {
                 // Param as struct pointer: emit address
                 emitter.emit_u32(aarch64::add_imm64(reg, aarch64::REG_SP, *offset as u16));

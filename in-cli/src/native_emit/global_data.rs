@@ -124,6 +124,27 @@ mod tests {
     }
 
     #[test]
+    fn nested_global_struct_values_are_refused_by_both_backends() {
+        for field in ["Inner inner", "[Int] items"] {
+            for body in ["return outer;", "var copied: Outer = outer; return copied;"] {
+                let source = format!(
+                    "struct Inner {{ Int value }}\nstruct Outer {{ {field} }}\nvar outer: Outer = 0;\nfn main() -> Outer {{ {body} }}"
+                );
+                let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                assert!(
+                    crate::native_emit::lower::lower_module(
+                        &module,
+                        "main",
+                        crate::native_emit::NativeLinkage::Executable
+                    )
+                    .is_err()
+                );
+                assert!(crate::native_emit::x86_64_lower::lower_module(&module, "main").is_err());
+            }
+        }
+    }
+
+    #[test]
     fn parsed_global_literals_initialize_shared_data() {
         let module = crate::in_lang_parse::parse_in_source("var count: Int = 3;\nvar value: Float = 1.5;\nconst enabled: Bool = true;\nfn main() -> Int { return count; }").expect("parse");
         let globals = collect_globals(&module, &HashMap::new());

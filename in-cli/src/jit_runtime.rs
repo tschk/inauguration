@@ -2791,6 +2791,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn global_struct_values_copy_return_and_pass_complete_fields() {
+        for source in [
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nfn main() -> Int { var point: Point = Point { x: 20, y: 22 }; var copied: Point = point; return copied.x + copied.y; }",
+            include_str!("../../conformance/types/global-struct-values.in"),
+            "struct State { Bool flag; Float value }\nvar state: State = 0;\nfn copy() -> State { return state; }\nfn main() -> Int { state.flag = true; state.value = 42.5; var saved: State = copy(); state.flag = false; state.value = 0.0; if saved.flag && saved.value == 42.5 { return 42; } return 0; }",
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nfn main() -> Int { point.x = 20; point.y = 22; var copied: Point = point; point.x = 0; return copied.x + copied.y; }",
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nfn make() -> Point { return point; }\nfn main() -> Int { point.x = 20; point.y = 22; var copied: Point = make(); point.x = 0; return copied.x + copied.y; }",
+            "struct Point { Int x; Int y }\nvar point: Point = 0;\nfn sum(value: Point) -> Int { return value.x + value.y; }\nfn main() -> Int { point.x = 20; point.y = 22; return sum(point); }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
     #[cfg(all(unix, target_arch = "x86_64"))]
     fn struct_parameter_sentinels_return_failure_without_reading_memory() {
         let module = crate::in_lang_parse::parse_in_source("struct Point { Int x; Int y }\nfn main(point: Point) -> Int { return point.x + point.y; }").unwrap();

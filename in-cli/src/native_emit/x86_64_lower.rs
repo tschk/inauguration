@@ -2035,6 +2035,19 @@ fn lower_ident_ref(
         emitter.emit_insns(&x86_64::sub_rmi32(target_reg, base as i32 + 8));
         return Ok(());
     }
+    if !ctx.locals.contains_key(name)
+        && matches!(ctx.scalar_types.get(name).map(Typ::canonical), Some(Typ::Named(ref typ)) if ctx.structs.contains_key(typ))
+        && let Some(&offset) = ctx.globals.get(name)
+    {
+        let site = emitter.len() + if x86_64::is_32bit() { 1 } else { 2 };
+        emitter.emit_insns(&x86_64::mov_ri64(target_reg, 0));
+        ctx.pending_globals.push(PendingGlobal {
+            site,
+            width: if x86_64::is_32bit() { 4 } else { 8 },
+            offset,
+        });
+        return Ok(());
+    }
     // Check if this is a global variable
     if let Some(&offset) = ctx.globals.get(name) {
         if target_reg == RAX {
@@ -3083,7 +3096,9 @@ fn store_struct_value(
         return Err("x86_64-lower: struct value needs a known scalar-field layout".into());
     }
     match expr {
-        Expr::Ident(name) if matches!(ctx.locals.get(name), Some(StackSlot::Struct { .. })) => {}
+        Expr::Ident(name)
+            if matches!(ctx.locals.get(name), Some(StackSlot::Struct { .. }))
+                || (!ctx.locals.contains_key(name) && ctx.globals.contains_key(name)) => {}
         Expr::StructInit { .. } | Expr::Call { .. } => {}
         _ => {
             return Err(

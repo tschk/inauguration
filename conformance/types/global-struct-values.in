@@ -1,0 +1,16 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+struct Point { Int x; Int y }
+var point: Point = 0;
+fn snapshot() -> Point { return point; }
+fn sum(value: Point) -> Int { return value.x + value.y; }
+fn main() -> Int {
+    point.x = 20;
+    point.y = 22;
+    var copied: Point = snapshot();
+    point.x = 0;
+    return sum(copied);
+}

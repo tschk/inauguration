@@ -860,6 +860,18 @@ pub(crate) fn lower_struct_expr_into_slots(
             Ok(())
         }
         Expr::Ident(local) => {
+            if !ctx.locals.contains_key(local)
+                && !ctx.params.contains_key(local)
+                && ctx.globals.contains_key(local)
+            {
+                ctx.validate_global_struct(local)?;
+                for (field, &offset) in fields {
+                    ctx.load_global_struct_field(emitter, local, field, 0, fn_name)?;
+                    emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, offset));
+                }
+                return Ok(());
+            }
+
             let Some(LocalSlot::Struct {
                 typ: local_typ,
                 fields: local_fields,
@@ -996,6 +1008,18 @@ pub(crate) fn lower_struct_expr_into_regs(
             Ok(())
         }
         Expr::Ident(local) => {
+            if !ctx.locals.contains_key(local)
+                && !ctx.params.contains_key(local)
+                && ctx.globals.contains_key(local)
+            {
+                let schema = native_struct_fields(ctx.structs, typ, fn_name)?;
+                ctx.validate_global_struct(local)?;
+                for (reg, (field, _)) in schema.iter().enumerate() {
+                    ctx.load_global_struct_field(emitter, local, field, reg as u8, fn_name)?;
+                }
+                return Ok(());
+            }
+
             let entry = ctx.locals.get(local).cloned();
             let (local_typ, fields) = match entry {
                 Some(LocalSlot::Struct { typ, fields, .. }) => (typ, fields),
