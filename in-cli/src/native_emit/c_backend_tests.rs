@@ -726,3 +726,52 @@ fn signed_right_shift_projection_preserves_boundary_signs() {
     std::fs::remove_dir_all(dir).unwrap();
     assert_eq!(status.code(), Some(42));
 }
+
+#[test]
+fn in_index_compound_projection_preserves_place_and_read_order() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let mut module = crate::in_lang_parse::parse_in_source(include_str!(
+        "../../../conformance/control-flow/in-index-compound-effects.in"
+    ))
+    .unwrap();
+    for decl in &mut module.decls {
+        if let Decl::Function { name, .. } = decl
+            && name == "main"
+        {
+            *name = "answer".into();
+        }
+    }
+    let source = format!(
+        "{}\nint main(void) {{ return (int)answer(); }}\n",
+        emit_c_module(&module).unwrap()
+    );
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-place-first-c-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let c = dir.join("place.c");
+    let binary = dir.join("place");
+    std::fs::write(&c, source).unwrap();
+    let build = Command::new("clang")
+        .arg(&c)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let status = Command::new(&binary).status().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(status.code(), Some(42));
+}

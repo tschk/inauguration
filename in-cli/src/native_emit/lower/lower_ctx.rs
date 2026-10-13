@@ -1,7 +1,7 @@
+use super::PendingInrtCall;
 use super::lower_util::{
     array_item_matches, base_struct_name, ensure_native_array_element, expr_type,
 };
-use super::{PendingInrtCall, PendingStaticArray};
 use crate::core_ir::{Expr, LoopKind, Stmt, Typ};
 use crate::native_emit::aarch64::{self, CodeEmitter};
 use std::collections::HashMap;
@@ -33,20 +33,6 @@ pub(crate) fn max_try_depth(body: &[Stmt]) -> usize {
         })
         .max()
         .unwrap_or(0)
-}
-
-pub(crate) fn append_static_arrays(emitter: &mut CodeEmitter, arrays: Vec<PendingStaticArray>) {
-    for array in arrays {
-        while !emitter.len().is_multiple_of(8) {
-            emitter.bytes.push(0);
-        }
-        let data_offset = emitter.len();
-        let adr_delta = data_offset as i32 - array.adr_site as i32;
-        emitter.patch_u32(array.adr_site, aarch64::adr(0, adr_delta));
-        for value in array.values {
-            emitter.bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
 }
 
 pub(crate) fn append_string_table(
@@ -263,7 +249,6 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) vec_for_slots: VecForPlan,
     pub(crate) structs: &'a HashMap<String, Vec<(String, Typ)>>,
     pub(crate) strings: &'a HashMap<String, i64>,
-    pub(crate) pending_static_arrays: &'a mut Vec<PendingStaticArray>,
     pub(crate) pending_inrt_calls: &'a mut Vec<PendingInrtCall>,
     pub(crate) pending_strings: &'a mut Vec<super::PendingString>,
     pub(crate) stack_size: u32,
@@ -446,7 +431,6 @@ impl<'a> LowerCtx<'a> {
         strings: &'a HashMap<String, i64>,
         globals: &'a HashMap<String, u64>,
         global_types: &'a HashMap<String, Typ>,
-        pending_static_arrays: &'a mut Vec<PendingStaticArray>,
         pending_inrt_calls: &'a mut Vec<PendingInrtCall>,
         pending_strings: &'a mut Vec<super::PendingString>,
         fn_name: &str,
@@ -464,7 +448,6 @@ impl<'a> LowerCtx<'a> {
             vec_for_slots: VecForPlan::default(),
             structs,
             strings,
-            pending_static_arrays,
             pending_inrt_calls,
             pending_strings,
             stack_size: 0,

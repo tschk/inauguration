@@ -105,17 +105,15 @@ pub(crate) fn parse_assign_stmt(s: &str) -> Option<Stmt> {
         let target = trim(&s[..op_idx]);
         let rhs = parse_expr(trim(&s[op_idx + op.len()..]));
         return match parse_expr(target) {
-            Expr::Index { base, index } => {
-                let read = Expr::Index {
-                    base: base.clone(),
-                    index: index.clone(),
-                };
-                Some(Stmt::IndexAssign {
-                    base: *base,
-                    index: *index,
-                    value: compound_binary(op, read, rhs),
-                })
-            }
+            Expr::Index { base, index } => Some(Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident("index-modify-place-first".into())),
+                args: vec![
+                    *base,
+                    *index,
+                    rhs,
+                    Expr::StringLit(op.strip_suffix('=').unwrap().into()),
+                ],
+            })),
             Expr::Field { base, name: field } => {
                 let read = Expr::Field {
                     base: base.clone(),

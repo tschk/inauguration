@@ -2397,6 +2397,24 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn in_index_compound_places_execute_once_before_value_effects() {
+        for source in [
+            include_str!("../../conformance/control-flow/in-index-compound-effects.in"),
+            include_str!("../../conformance/types/array-return-writable.in"),
+            "var calls: Int = 0;\nfn make() -> [Int] { calls += 1; return [40]; }\nfn index() -> Int { calls += 1; return 0; }\nfn main() -> Int { return make()[index()] + calls; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(invoke_source(source, profile, &[]), Some(42), "{profile:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

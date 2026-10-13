@@ -39,6 +39,14 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## Writable array literal results
+
+AArch64 materializes array literal results in writable storage instead of returning pointers into read-only code. Elements can be dynamic and retain their evaluation order; a saved cursor survives element calls. JIT storage belongs to the runtime arena, while native hosted artifacts use the existing process-lifetime heap policy. The internal AArch64 data-pointer/length array ABI remains unchanged.
+
+## Indexed compound update order
+
+`.in` indexed compound assignments share the indexed-store spill machinery. The array/base, index, and old element are saved once before RHS effects, then the update stores through the saved place. This retains `.in` read-before-RHS order while eliminating duplicate index evaluation and unsupported call operands. Rust's value-before-place order remains distinct in the same lowering path.
+
 ## Harden dispatcher scopes
 
 Control-flow dispatcher states keep a local declaration with its last read or write, preserving lexical scope without moving initialization effects. A single scan computes the use boundaries, and the synthetic program counter avoids existing names. Hardened programs retain valid bindings across assignments and returns.

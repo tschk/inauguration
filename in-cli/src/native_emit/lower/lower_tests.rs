@@ -292,7 +292,6 @@ fn lowers_string_len_to_aarch64_ldr_offset_8() {
     let mut emitter = CodeEmitter::new();
     let structs = HashMap::new();
     let strings = HashMap::new();
-    let mut pending_static_arrays = Vec::new();
     let mut pending_inrt_calls = Vec::new();
     let mut pending_strings = Vec::new();
     let globals = HashMap::new();
@@ -303,7 +302,6 @@ fn lowers_string_len_to_aarch64_ldr_offset_8() {
         &strings,
         &globals,
         &global_types,
-        &mut pending_static_arrays,
         &mut pending_inrt_calls,
         &mut pending_strings,
         "test",
@@ -330,7 +328,6 @@ fn lowers_string_contains_to_native_wrapper_call() {
     let mut emitter = CodeEmitter::new();
     let structs = HashMap::new();
     let strings = HashMap::new();
-    let mut pending_static_arrays = Vec::new();
     let mut pending_inrt_calls = Vec::new();
     let mut pending_strings = Vec::new();
     let globals = HashMap::new();
@@ -341,7 +338,6 @@ fn lowers_string_contains_to_native_wrapper_call() {
         &strings,
         &globals,
         &global_types,
-        &mut pending_static_arrays,
         &mut pending_inrt_calls,
         &mut pending_strings,
         "test",
@@ -719,7 +715,7 @@ fn main() -> Int {
 }
 
 #[test]
-fn lowers_array_literal_return_as_owned_static_data() {
+fn array_literal_return_uses_owned_writable_storage() {
     let module = crate::in_lang_parse::parse_in_source(
         r#"
 fn values() -> [Int] {
@@ -728,6 +724,7 @@ fn values() -> [Int] {
 
 fn main() -> Int {
   let ys: [Int] = values();
+  ys[1] = 42;
   return ys[1];
 }
 "#,
@@ -735,14 +732,26 @@ fn main() -> Int {
     .expect("parse");
 
     let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
-    let values: Vec<i64> = lowered
-        .code
-        .as_chunks::<8>()
-        .0
-        .iter()
-        .map(|chunk| i64::from_le_bytes(*chunk))
-        .collect();
-    assert!(values.windows(3).any(|window| window == [2, 5, 8]));
+    assert!(lowered.degradations.is_empty());
+    #[cfg(target_arch = "aarch64")]
+    {
+        let offsets = lowered
+            .function_offsets
+            .iter()
+            .map(|(name, offset)| (name.clone(), *offset, 0))
+            .collect::<Vec<_>>();
+        let mut runtime = crate::jit_runtime::JitRuntime::new();
+        runtime
+            .load_with_globals(
+                &lowered.code,
+                &offsets,
+                &lowered.relocations,
+                &lowered.data,
+                &lowered.global_relocs,
+            )
+            .unwrap();
+        assert_eq!(unsafe { runtime.invoke("main", &[]) }.unwrap(), 42);
+    }
 }
 
 #[test]

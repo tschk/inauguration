@@ -1100,9 +1100,9 @@ pub(crate) fn lower_array_expr_into_regs(
     fn_name: &str,
 ) -> Result<(), String> {
     if !is_native_scalar_type(elem) {
-        // Accept non-scalar elements: emit 0 and return
-        emitter.emit_insns(&crate::native_emit::aarch64::load_i64(0, 0));
-        return Ok(());
+        return Err(format!(
+            "native-lower: unsupported array element type `{elem:?}` in `{fn_name}`"
+        ));
     }
     match expr {
         Expr::Ident(local) => {
@@ -1161,52 +1161,100 @@ pub(crate) fn lower_array_expr_into_regs(
             Ok(())
         }
         Expr::ArrayLit(items) => {
-            let values = static_array_values(ctx, items, elem, fn_name)?;
-            if values.is_empty() {
+            for item in items {
+                if let Some(actual) = lower_expr::native_expr_type(item, ctx, functions)
+                    && !array_item_matches(elem, &actual)
+                {
+                    return Err(format!(
+                        "native-lower: array return type mismatch in `{fn_name}`"
+                    ));
+                }
+            }
+            if items.is_empty() {
                 emitter.emit_insns(&aarch64::load_i64(0, 0));
                 emitter.emit_insns(&aarch64::load_i64(1, 0));
                 return Ok(());
             }
-            let adr_site = emitter.emit_insn(aarch64::adr(0, 0));
-            emitter.emit_insns(&aarch64::load_i64(1, values.len() as i64));
-            ctx.pending_static_arrays
-                .push(super::PendingStaticArray { adr_site, values });
+            let data_bytes = items
+                .len()
+                .checked_mul(8)
+                .and_then(|bytes| i64::try_from(bytes).ok())
+                .ok_or("native-lower: array allocation overflow")?;
+            if super::TL_NATIVE_MODE.with(|mode| *mode.borrow()) {
+                // Runtime allocation must not bind to same-named user functions.
+                let runtime_functions = HashMap::new();
+                let bytes = items
+                    .len()
+                    .checked_add(2)
+                    .and_then(|words| words.checked_mul(8))
+                    .ok_or("native-lower: array allocation overflow")?;
+                super::lower_call::lower_call(
+                    emitter,
+                    ctx,
+                    &Expr::Ident("malloc".into()),
+                    &[Expr::IntLit(bytes as i64)],
+                    0,
+                    &runtime_functions,
+                    pending_calls,
+                    fn_name,
+                )?;
+                emitter.emit_u32(aarch64::cmp_reg64(0, aarch64::REG_XZR));
+                let allocated = emitter.emit_insn(aarch64::b_cond(1, 0));
+                super::lower_call::lower_call(
+                    emitter,
+                    ctx,
+                    &Expr::Ident("abort".into()),
+                    &[],
+                    0,
+                    &runtime_functions,
+                    pending_calls,
+                    fn_name,
+                )?;
+                emitter.patch_u32(
+                    allocated,
+                    aarch64::b_cond(1, emitter.len() as i32 - allocated as i32),
+                );
+            } else {
+                emitter.emit_u32(aarch64::mov_reg64(0, 27));
+                emitter.emit_insns(&aarch64::load_i64(1, items.len() as i64));
+                emitter.emit_insns(&aarch64::load_i64(
+                    15,
+                    crate::jit_runtime::allocate_array as *const () as i64,
+                ));
+                emitter.emit_u32(0xD63F_0000 | (15 << 5));
+            }
+            emitter.emit_insns(&aarch64::load_i64(1, items.len() as i64));
+            emitter.emit_u32(aarch64::str64(1, 0, 0));
+            emitter.emit_u32(aarch64::str64(1, 0, 8));
+            let cursor = ctx.acquire_binop_temp(fn_name)?;
+            emitter.emit_u32(aarch64::add_imm64(0, 0, 16));
+            emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, cursor));
+            for item in items {
+                lower_expr::lower_expr_into(
+                    emitter,
+                    ctx,
+                    item,
+                    0,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )?;
+                emitter.emit_u32(aarch64::ldr64(3, aarch64::REG_SP, cursor));
+                emitter.emit_u32(aarch64::str64(0, 3, 0));
+                emitter.emit_u32(aarch64::add_imm64(3, 3, 8));
+                emitter.emit_u32(aarch64::str64(3, aarch64::REG_SP, cursor));
+            }
+            emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, cursor));
+            emitter.emit_insns(&aarch64::load_i64(2, data_bytes));
+            emitter.emit_u32(aarch64::sub_reg64(0, 0, 2));
+            emitter.emit_insns(&aarch64::load_i64(1, items.len() as i64));
+            ctx.release_binop_temp();
             Ok(())
         }
         _ => Err(format!(
             "native-lower: unsupported array return in `{fn_name}`"
         )),
     }
-}
-
-pub(crate) fn static_array_values(
-    ctx: &LowerCtx<'_>,
-    items: &[Expr],
-    elem: &Typ,
-    fn_name: &str,
-) -> Result<Vec<i64>, String> {
-    let mut values = Vec::with_capacity(items.len());
-    for item in items {
-        if let Some(item_ty) = expr_type(item)
-            && !array_item_matches(elem, &item_ty)
-        {
-            return Err(format!(
-                "native-lower: array return type mismatch in `{fn_name}`"
-            ));
-        }
-        let value = match (elem, item) {
-            (Typ::Int, Expr::IntLit(value)) => *value,
-            (Typ::Bool, Expr::BoolLit(value)) => i64::from(*value),
-            (Typ::String, Expr::StringLit(value)) => ctx.string_id(value)?,
-            _ => {
-                return Err(format!(
-                    "native-lower: unsupported array return in `{fn_name}`"
-                ));
-            }
-        };
-        values.push(value);
-    }
-    Ok(values)
 }
 
 pub(crate) fn lower_if(

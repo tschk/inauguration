@@ -87,8 +87,7 @@ pub(crate) use lower_collect::{
     collect_functions, collect_strings, collect_structs, entry_return_kind,
 };
 pub(crate) use lower_ctx::{
-    IteratorMapSlots, LocalSlot, LowerCtx, alloc_declared_locals, append_static_arrays,
-    append_string_table,
+    IteratorMapSlots, LocalSlot, LowerCtx, alloc_declared_locals, append_string_table,
 };
 pub(crate) use lower_iterator::lower_vec_for;
 pub(crate) use lower_stmt::{lower_stmt, lower_struct_expr_into_regs};
@@ -442,11 +441,6 @@ pub(crate) struct PendingInrtCall {
     pub(crate) target: String,
 }
 
-pub(crate) struct PendingStaticArray {
-    pub(crate) adr_site: u32,
-    pub(crate) values: Vec<i64>,
-}
-
 pub(crate) struct PendingString {
     pub(crate) adr_site: u32,
     pub(crate) string_index: i64,
@@ -458,7 +452,6 @@ pub(crate) struct FunctionBuffer {
     pub(crate) bytes: Vec<u8>,
     pub(crate) pending_calls: Vec<PendingCall>,
     pub(crate) pending_inrt_calls: Vec<PendingInrtCall>,
-    pub(crate) pending_static_arrays: Vec<PendingStaticArray>,
     pub(crate) pending_strings: Vec<PendingString>,
     pub(crate) pending_globals: Vec<(u32, u64)>,
     pub(crate) external_refs: Vec<(u32, String)>,
@@ -484,7 +477,6 @@ fn lower_function_to_buffer(
     let mut emitter = CodeEmitter::new();
     let mut pending_calls = Vec::new();
     let mut pending_inrt_calls = Vec::new();
-    let mut pending_static_arrays = Vec::new();
     let mut pending_strings = Vec::new();
     let mut pending_globals = Vec::new();
     let lowered = lower_function(
@@ -495,7 +487,6 @@ fn lower_function_to_buffer(
         strings,
         &mut pending_calls,
         &mut pending_inrt_calls,
-        &mut pending_static_arrays,
         &mut pending_strings,
         globals,
         global_types,
@@ -509,7 +500,6 @@ fn lower_function_to_buffer(
         bytes: emitter.bytes,
         pending_calls,
         pending_inrt_calls,
-        pending_static_arrays,
         pending_strings,
         pending_globals,
         external_refs,
@@ -642,7 +632,6 @@ pub fn lower_module_with_jobs(
     let mut function_offsets = HashMap::new();
     let mut external_refs = Vec::new();
     let mut pending_inrt_calls = Vec::new();
-    let mut pending_static_arrays = Vec::new();
     let mut pending_strings = Vec::new();
     let mut names: Vec<String> = functions.keys().cloned().collect();
     names.retain(|name| !name.starts_with("__closure_"));
@@ -826,12 +815,6 @@ pub fn lower_module_with_jobs(
                 .into_iter()
                 .map(|(site, offset)| (base + site, offset)),
         );
-        pending_static_arrays.extend(buf.pending_static_arrays.into_iter().map(|a| {
-            PendingStaticArray {
-                adr_site: base + a.adr_site,
-                values: a.values,
-            }
-        }));
         pending_strings.extend(buf.pending_strings.into_iter().map(|p| PendingString {
             adr_site: base + p.adr_site,
             string_index: p.string_index,
@@ -843,7 +826,6 @@ pub fn lower_module_with_jobs(
         }));
     }
 
-    append_static_arrays(&mut emitter, pending_static_arrays);
     append_string_table(&mut emitter, &strings, pending_strings)?;
 
     // Trap bodies emitted for degraded code call into the runtime blob, so they
@@ -920,7 +902,6 @@ fn lower_function(
     strings: &HashMap<String, i64>,
     pending_calls: &mut Vec<PendingCall>,
     pending_inrt_calls: &mut Vec<PendingInrtCall>,
-    pending_static_arrays: &mut Vec<PendingStaticArray>,
     pending_strings: &mut Vec<PendingString>,
     globals: &HashMap<String, u64>,
     global_types: &HashMap<String, Typ>,
@@ -940,7 +921,6 @@ fn lower_function(
         strings,
         globals,
         global_types,
-        pending_static_arrays,
         pending_inrt_calls,
         pending_strings,
         &func.name,

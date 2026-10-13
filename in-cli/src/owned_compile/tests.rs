@@ -4078,3 +4078,40 @@ fn owned_signed_shift_sources_preserve_sign_and_compound_updates() {
         }
     }
 }
+
+#[test]
+fn owned_in_index_compound_updates_evaluate_place_once_before_rhs() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        include_str!("../../../conformance/types/array-return-writable.in"),
+        include_str!("../../../conformance/control-flow/in-index-compound-effects.in"),
+        "var trace: Int = 0;\nfn base() -> [Int] { trace = trace * 10 + 1; return [39]; }\nfn index() -> Int { trace = trace * 10 + 2; return 0; }\nfn rhs() -> Int { trace = trace * 10 + 3; return 2; }\nfn main() -> Int { base()[index()] += rhs(); return trace - 81; }",
+        "fn mutate(values: [Float]) -> Float { values[0] = 40.0; return 2.0; }\nfn main() -> Int { var values: [Float] = [20.0]; values[0] += mutate(values); if values[0] == 22.0 { return 42; } return 0; }",
+        "var calls: Int = 0;\nfn index() -> Int { calls += 1; return calls - 1; }\nfn main() -> Int { var values = [39, 0]; values[index()] += 2; return values[0] + calls; }",
+        "var trace: Int = 0;\nfn index() -> Int { trace = trace * 10 + 1; return 0; }\nfn rhs() -> Int { trace = trace * 10 + 2; return 2; }\nfn main() -> Int { var values = [28]; values[index()] += rhs(); return values[0] + trace; }",
+        "fn mutate(values: [Int]) -> Int { values[0] = 40; return 2; }\nfn main() -> Int { var values = [20]; values[0] += mutate(values); return values[0] + 20; }",
+        "fn main() -> Int { var values = [-84]; values[0] >>= 1; return -values[0]; }",
+        "fn main() -> Int { var values = [21]; values[0] <<= 1; return values[0]; }",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let path = temp_path("in-index-compound.in");
+            fs::write(&path, source).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{profile:?}: {source}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{profile:?}: {source}"
+            );
+        }
+    }
+}

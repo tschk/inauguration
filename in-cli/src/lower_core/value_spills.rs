@@ -1,4 +1,4 @@
-//! Spill effectful Core IR operands for array repetition and value-first stores.
+//! Spill effectful Core IR operands for array repetition and ordered stores.
 //!
 //! Save the value once, then reuse it in an ordinary array literal. Expression
 //! spills preserve left-to-right evaluation and remain inside conditional paths.
@@ -12,8 +12,8 @@ fn is_repeat(expr: &Expr) -> bool {
     matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "array-repeat"))
 }
 
-fn is_value_first_store(expr: &Expr) -> bool {
-    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "index-assign-value-first" || name == "index-modify-value-first"))
+fn is_index_store(expr: &Expr) -> bool {
+    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "index-assign-value-first" || name == "index-modify-value-first" || name == "index-modify-place-first"))
 }
 
 fn is_field_modify(expr: &Expr) -> bool {
@@ -25,10 +25,7 @@ fn is_variable_modify(expr: &Expr) -> bool {
 }
 
 fn expr_needs_spills(expr: &Expr) -> bool {
-    if is_repeat(expr)
-        || is_value_first_store(expr)
-        || is_field_modify(expr)
-        || is_variable_modify(expr)
+    if is_repeat(expr) || is_index_store(expr) || is_field_modify(expr) || is_variable_modify(expr)
     {
         return true;
     }
@@ -363,32 +360,40 @@ impl Lower {
         for mut stmt in std::mem::take(body) {
             let mut prefix = Vec::new();
             if let Stmt::Expr(expr) = &stmt
-                && is_value_first_store(expr)
+                && is_index_store(expr)
                 && let Expr::Call { callee, args } = expr
                 && ((matches!(callee.as_ref(), Expr::Ident(name) if name == "index-assign-value-first")
                     && args.len() == 3)
-                    || (matches!(callee.as_ref(), Expr::Ident(name) if name == "index-modify-value-first")
+                    || (matches!(callee.as_ref(), Expr::Ident(name) if name == "index-modify-value-first" || name == "index-modify-place-first")
                         && args.len() == 4
                         && matches!(&args[3], Expr::StringLit(op) if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"))))
             {
-                // Rust assignment evaluates the value before the place. Save
-                // all three operands so each effect occurs exactly once.
+                let place_first = matches!(callee.as_ref(), Expr::Ident(name) if name == "index-modify-place-first");
                 let mut value = args[2].clone();
-                self.expr(&mut value, &mut prefix);
-                let value = self.save(value, &mut prefix);
+                if !place_first {
+                    self.expr(&mut value, &mut prefix);
+                    value = self.save(value, &mut prefix);
+                }
                 let mut base = args[0].clone();
                 self.expr(&mut base, &mut prefix);
                 let base = self.save(base, &mut prefix);
                 let mut index = args[1].clone();
                 self.expr(&mut index, &mut prefix);
                 let index = self.save(index, &mut prefix);
+                let mut read = Expr::Index {
+                    base: Box::new(base.clone()),
+                    index: Box::new(index.clone()),
+                };
+                if place_first {
+                    // .in compound updates read the place before RHS effects.
+                    read = self.save(read, &mut prefix);
+                    self.expr(&mut value, &mut prefix);
+                    value = self.save(value, &mut prefix);
+                }
                 let value = if let Some(Expr::StringLit(op)) = args.get(3) {
                     Expr::Binary {
                         op: op.clone(),
-                        lhs: Box::new(Expr::Index {
-                            base: Box::new(base.clone()),
-                            index: Box::new(index.clone()),
-                        }),
+                        lhs: Box::new(read),
                         rhs: Box::new(value),
                     }
                 } else {

@@ -202,6 +202,8 @@ pub(crate) fn lower_index(
         return Ok(());
     }
     if let Expr::Call { callee, args } = base {
+        let ptr_slot = ctx.acquire_binop_temp(fn_name)?;
+        let len_slot = ctx.acquire_binop_temp(fn_name)?;
         lower_call::lower_call(
             emitter,
             ctx,
@@ -212,6 +214,8 @@ pub(crate) fn lower_index(
             pending_calls,
             fn_name,
         )?;
+        emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, ptr_slot));
+        emitter.emit_u32(aarch64::str64(1, aarch64::REG_SP, len_slot));
         let index_reg = if rd == 2 { 3 } else { 2 };
         lower_expr_into(
             emitter,
@@ -222,6 +226,8 @@ pub(crate) fn lower_index(
             pending_calls,
             fn_name,
         )?;
+        emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, ptr_slot));
+        emitter.emit_u32(aarch64::ldr64(1, aarch64::REG_SP, len_slot));
         emitter.emit_u32(aarch64::cmp_reg64(index_reg, aarch64::REG_XZR));
         let negative_branch = emitter.emit_insn(aarch64::b_cond(11, 0));
         emitter.emit_u32(aarch64::cmp_reg64(index_reg, 1));
@@ -240,6 +246,8 @@ pub(crate) fn lower_index(
         emit_failure_return(emitter, ctx.prologue_stack_reserve);
         let end_offset = emitter.len() as i32 - end_branch as i32;
         emitter.patch_u32(end_branch, aarch64::b(end_offset));
+        ctx.release_binop_temp();
+        ctx.release_binop_temp();
         return Ok(());
     }
     let (slot, field_ptr_off, field_len_off) = match base {

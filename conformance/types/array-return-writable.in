@@ -1,0 +1,14 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var calls: Int = 0;
+fn element() -> Int { calls += 1; return calls + 38; }
+fn make() -> [Int] { return [element(), element()]; }
+fn index() -> Int { calls += 1; return 0; }
+fn main() -> Int {
+    var values: [Int] = make();
+    values[index()] += 1;
+    return values[0] + calls - 1;
+}
