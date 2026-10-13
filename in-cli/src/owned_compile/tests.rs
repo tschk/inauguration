@@ -4115,3 +4115,39 @@ fn owned_in_index_compound_updates_evaluate_place_once_before_rhs() {
         }
     }
 }
+
+#[test]
+fn owned_global_field_projection_does_not_discard_constructor_effects() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for (source, expected) in [
+            (
+                "struct Point { Int x; Int y }\nvar calls: Int = 0;\nfn effect() -> Int { calls += 1; return 0; }\nvar seed: Int = Point { x: 42, y: effect() }.x;\nfn main() -> Int { return seed + calls; }",
+                None,
+            ),
+            (
+                "struct Point { Int x; Int y }\nvar seed: Int = Point { x: 42, y: 0 }.x;\nfn main() -> Int { return seed; }",
+                Some(EvalValue::Int(42)),
+            ),
+        ] {
+            let path = temp_path("global-field-projection.in");
+            fs::write(&path, source).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(path).unwrap();
+            assert_eq!(
+                report.success,
+                expected.is_some(),
+                "{profile:?}: {report:?}"
+            );
+            assert_eq!(report.eval_result, expected, "{profile:?}: {report:?}");
+        }
+    }
+}

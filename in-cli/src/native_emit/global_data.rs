@@ -97,6 +97,33 @@ mod tests {
     }
 
     #[test]
+    fn optimized_global_field_projection_keeps_runtime_initializer_refusal() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source("struct Point { Int x; Int y }\nvar calls: Int = 0;\nfn effect() -> Int { calls += 1; return 0; }\nvar seed: Int = Point { x: 42, y: effect() }.x;\nfn main() -> Int { return seed + calls; }").unwrap();
+            crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            let globals = collect_globals(&module, &HashMap::new());
+            assert!(
+                build_data_section(&module, &globals)
+                    .unwrap_err()
+                    .contains("unsupported native initializer for global `seed`")
+            );
+            assert!(
+                crate::native_emit::lower::lower_module(
+                    &module,
+                    "main",
+                    crate::native_emit::NativeLinkage::Executable
+                )
+                .is_err()
+            );
+            assert!(crate::native_emit::x86_64_lower::lower_module(&module, "main").is_err());
+        }
+    }
+
+    #[test]
     fn parsed_global_literals_initialize_shared_data() {
         let module = crate::in_lang_parse::parse_in_source("var count: Int = 3;\nvar value: Float = 1.5;\nconst enabled: Bool = true;\nfn main() -> Int { return count; }").expect("parse");
         let globals = collect_globals(&module, &HashMap::new());

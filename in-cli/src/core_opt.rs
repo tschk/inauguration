@@ -1244,7 +1244,14 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
             e
         }
         Expr::Field { base, name, .. } => {
-            if let Expr::StructInit { fields, .. } = base.as_ref() {
+            if let Expr::StructInit { fields, .. } = base.as_ref()
+                && fields.iter().all(|(_, value)| {
+                    matches!(
+                        value,
+                        Expr::IntLit(_) | Expr::BoolLit(_) | Expr::FloatLit(_) | Expr::StringLit(_)
+                    )
+                })
+            {
                 if let Some((_, value)) = fields.iter().find(|(n, _)| n == name) {
                     return value.clone();
                 }
@@ -2510,6 +2517,38 @@ mod tests {
     }
 
     // ─── Constant Folding ──────────────────────────────────────────────
+
+    #[test]
+    fn struct_field_fold_preserves_unselected_effects_and_failures() {
+        for discarded in [
+            call("effect", vec![]),
+            bin("div", Expr::IntLit(1), Expr::IntLit(0)),
+            Expr::Index {
+                base: Box::new(ident("values")),
+                index: Box::new(Expr::IntLit(-1)),
+            },
+        ] {
+            let expr = Expr::Field {
+                base: Box::new(Expr::StructInit {
+                    name: "Point".into(),
+                    fields: vec![("x".into(), Expr::IntLit(42)), ("y".into(), discarded)],
+                }),
+                name: "x".into(),
+            };
+            assert_eq!(fold_expr(expr.clone()), expr);
+        }
+        let expr = Expr::Field {
+            base: Box::new(Expr::StructInit {
+                name: "Point".into(),
+                fields: vec![
+                    ("x".into(), Expr::IntLit(42)),
+                    ("y".into(), Expr::IntLit(0)),
+                ],
+            }),
+            name: "x".into(),
+        };
+        assert_eq!(fold_expr(expr), Expr::IntLit(42));
+    }
 
     #[test]
     fn fold_add() {
