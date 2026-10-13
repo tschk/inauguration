@@ -64,9 +64,9 @@ pub(crate) fn parse_return_stmt(s: &str) -> Result<Stmt, String> {
     Ok(Stmt::Return(Some(parse_expr(rest))))
 }
 
-/// Compound assignment operators, desugared to plain assignments:
-/// `x += e` becomes `x = x + e`, `arr[i] *= e` becomes `arr[i] = arr[i] * e`.
-const COMPOUND_ASSIGN_OPS: [&str; 7] = ["<<=", ">>=", "+=", "-=", "*=", "/=", "%="];
+/// Compound operators reuse assignment lowering; indexed targets spill their place once.
+const COMPOUND_ASSIGN_OPS: [&str; 10] =
+    ["<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="];
 
 /// Find the first top-level compound assignment operator, skipping string
 /// literals so `"a += b"` inside an expression is not mistaken for one.

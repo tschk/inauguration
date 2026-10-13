@@ -2578,6 +2578,49 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn in_bitwise_compound_updates_preserve_types_and_read_order() {
+        for source in [
+            include_str!("../../conformance/control-flow/in-bit-compound-effects.in"),
+            "fn main() -> Int { var value: Int = -1; value &= 42; return value; }",
+            "var calls: Int = 0;\nfn rhs() -> Bool { calls += 1; return true; }\nfn main() -> Int { var value: Bool = false; value &= rhs(); if !value && calls == 1 { return 42; } return 0; }",
+            "fn main() -> Int { var value: Int = 63; value &= 47; value ^= 5; value |= 0; return value; }",
+            "fn main() -> Int { var value: Bool = true; value &= false; value |= true; value ^= false; if value { return 42; } return 0; }",
+            "struct Bits { Int value }\nfn main() -> Int { var bits: Bits = Bits { value: 63 }; bits.value &= 47; bits.value ^= 5; bits.value |= 0; return bits.value; }",
+            "var value: Int = 63;\nfn rhs() -> Int { value = 0; return 42; }\nfn main() -> Int { value &= rhs(); return value; }",
+            "fn main() -> Int { var values: [Bool] = [true]; values[0] &= false; values[0] |= true; values[0] ^= false; if values[0] { return 42; } return 0; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+        for (operator, before, rhs) in [("&=", 63, 42), ("|=", 40, 2), ("^=", 40, 2)] {
+            let source = format!(
+                "var trace: Int = 0;\nfn index() -> Int {{ trace = trace * 10 + 1; return 0; }}\nfn rhs(values: [Int]) -> Int {{ trace = trace * 10 + 2; values[0] = 0; return {rhs}; }}\nfn main() -> Int {{ var values: [Int] = [{before}]; values[index()] {operator} rhs(values); if trace == 12 {{ return values[0]; }} return 0; }}"
+            );
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(&source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,
