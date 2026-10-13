@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## C-like global storage
+
+Top-level C and C++ variable definitions use `Decl::Global` and the existing shared native data section. Integer literal definitions, zero initialization, multiple identifier declarators, and static storage preserve reads and writes across functions. `const` definitions retain immutable storage. External declarations do not fabricate module-owned storage; unresolved external variable reads are refused. Pointer, array, and reference declarators are currently refused, and runtime initializers retain the native backend's existing refusal.
+
 ## C-like counted loops
 
 C and C++ `for` statements lower to a scoped initializer and a Core IR loop. The condition is reevaluated before each iteration, and the update executes after the body or before a `continue` targeting that loop. Nested-loop continues retain their own target; `break` and `return` skip the update. Omitted conditions form an unbounded loop. Identifier increment, decrement, and compound assignment updates retain their stores. Unsupported initializer, condition, or update expressions produce an explicit unsupported operation instead of dropping the loop.

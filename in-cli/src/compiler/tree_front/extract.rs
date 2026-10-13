@@ -1,8 +1,10 @@
 //! Tree-sitter grammars → [`UnifiedModule`] with per-language declaration extraction and bounded
 //! scalar body lowering where wired.
 
+#[cfg(test)]
+use super::c_family::c_like_function_decl;
 #[cfg_attr(not(feature = "parse-extended"), allow(unused_imports))]
-use super::c_family::{c_like_function_decl, extract_cpp_with_classes, objc_like};
+use super::c_family::{extract_c, extract_cpp_with_classes, objc_like};
 use super::crystal::extract_crystal;
 #[cfg(feature = "parse-extended")]
 use super::csharp::extract_csharp;
@@ -205,7 +207,7 @@ fn dispatch(id: ParserId, _path: &Path, src: &str) -> Result<UnifiedModule, Stri
                 )
             })?,
             src,
-            |b, r| extract_fn_nodes(b, r, &["function_definition"], c_like_function_decl),
+            extract_c,
         ),
         ParserId::Cpp | ParserId::ObjCpp => parse_lang(
             try_lang_for(ParserId::Cpp).ok_or_else(|| {
@@ -1820,7 +1822,7 @@ mod tests {
         let c_module = parse_lang(
             try_lang_for(ParserId::C).unwrap(),
             &repo_sample("control_flow.c"),
-            |b, r| extract_fn_nodes(b, r, &["function_definition"], c_like_function_decl),
+            extract_c,
         )
         .expect("parse c control flow");
         assert_eq!(body_shape(main_body(&c_module)), expected);

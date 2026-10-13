@@ -4,8 +4,96 @@ use super::extract::{
 use crate::core_ir::{Decl, Expr, Stmt, Typ, Visibility};
 use tree_sitter::Node;
 
+pub(super) fn extract_c(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {
+    let mut decls = c_globals(src, root)?;
+    let mut functions = Vec::new();
+    collect_kinds(root, &["function_definition"], &mut functions);
+    decls.extend(
+        functions
+            .into_iter()
+            .filter_map(|node| c_like_function_decl(src, node)),
+    );
+    Ok(decls)
+}
+
+fn c_globals(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {
+    let mut out = Vec::new();
+    let mut cursor = root.walk();
+    for declaration in root.named_children(&mut cursor) {
+        if declaration.kind() != "declaration" {
+            continue;
+        }
+        let Some(type_node) = declaration.child_by_field_name("type") else {
+            continue;
+        };
+        let mut modifiers = declaration.walk();
+        let modifiers: Vec<_> = declaration
+            .named_children(&mut modifiers)
+            .map(|node| node_txt(src, node).trim())
+            .collect();
+        let external = modifiers.contains(&"extern");
+        let mutable = !modifiers
+            .iter()
+            .any(|modifier| matches!(*modifier, "const" | "constexpr"));
+        let typ = c_typ_from_decl_specifier_text(node_txt(src, type_node));
+        let mut children = declaration.walk();
+        for child in declaration.named_children(&mut children) {
+            let (declarator, value) = if child.kind() == "init_declarator" {
+                (
+                    child.child_by_field_name("declarator"),
+                    child.child_by_field_name("value"),
+                )
+            } else if matches!(
+                child.kind(),
+                "identifier"
+                    | "function_declarator"
+                    | "pointer_declarator"
+                    | "array_declarator"
+                    | "reference_declarator"
+            ) {
+                (Some(child), None)
+            } else {
+                continue;
+            };
+            let Some(declarator) = declarator else {
+                continue;
+            };
+            // A declaration without an initializer does not define external storage.
+            if external && value.is_none() {
+                continue;
+            }
+            if declarator.kind() == "function_declarator" {
+                continue;
+            }
+            if declarator.kind() != "identifier" {
+                return Err(format!(
+                    "unsupported C-like global declarator `{}`",
+                    node_txt(src, declarator)
+                ));
+            }
+            let name = node_txt(src, declarator).trim().to_string();
+            let init = match value {
+                Some(value) => {
+                    Some(Box::new(c_expr(src, value).ok_or_else(|| {
+                        format!("unsupported initializer for global `{name}`")
+                    })?))
+                }
+                None => None,
+            };
+            out.push(Decl::Global {
+                name,
+                typ: typ.clone(),
+                init,
+                mutable,
+                constant_value: false,
+            });
+        }
+    }
+    Ok(out)
+}
+
 pub(super) fn extract_cpp_with_classes(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {
-    let mut decls = Vec::new();
+    let mut decls = c_globals(src, root)?;
 
     let mut class_nodes = Vec::new();
     collect_kinds(

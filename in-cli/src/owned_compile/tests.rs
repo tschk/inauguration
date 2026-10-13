@@ -3162,3 +3162,65 @@ fn owned_c_unsupported_loop_parts_are_refused_instead_of_dropped() {
         }
     }
 }
+
+#[test]
+fn owned_c_global_storage_is_shared_and_zero_initialized() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for source in [
+            "int value = 20; int helper() { value = 40; return 2; } int main() { helper(); return value + 2; }",
+            "extern int value = 42; int main() { return value; }",
+            "int /* const */ value = 41; int main() { value++; return value; }",
+            "int value; int main() { return value + 42; }",
+            "int first = 20, second = 22; int main() { return first + second; }",
+            "static int value = 21; int helper() { value = value * 2; return value; } int main() { helper(); return value; }",
+            "const int value = 42; int main() { return value; }",
+            "int value = 42; int main() { { int value = 0; value++; } return value; }",
+        ] {
+            let path = temp_path(&format!("c-global.{extension}"));
+            fs::write(&path, source).unwrap();
+            let report = compile_owned(&default_request(
+                path.clone(),
+                CompileTarget::Jit,
+                Some("main"),
+                None,
+            ));
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{extension}: {source}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{extension}: {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn owned_c_global_definitions_preserve_refusal_boundaries() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for source in [
+            "const int value = 42; int main() { value = 0; return value; }",
+            "extern int value; int main() { return value; }",
+            "int helper() { return 42; } int value = helper(); int main() { return value; }",
+            "int values[2]; int main() { return 42; }",
+        ] {
+            let path = temp_path(&format!("unsupported-c-global.{extension}"));
+            fs::write(&path, source).unwrap();
+            let report = compile_owned(&default_request(
+                path.clone(),
+                CompileTarget::Jit,
+                Some("main"),
+                None,
+            ));
+            fs::remove_file(path).unwrap();
+            assert!(!report.success, "{extension}: {source}: {report:?}");
+            assert_eq!(report.eval_result, None);
+        }
+    }
+}
