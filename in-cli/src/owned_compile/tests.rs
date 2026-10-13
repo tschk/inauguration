@@ -3073,3 +3073,92 @@ fn owned_bitwise_operands_do_not_mix_boolean_float_and_integer_types() {
         );
     }
 }
+
+#[test]
+fn owned_c_for_loops_preserve_updates_and_control_flow() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for (source, expected) in [
+            (
+                "int main() { for (int i = 0; i < 1; i++) { return 42; } return 0; }",
+                42,
+            ),
+            (
+                "int main() { int sum = 0; for (int i = 0; i < 5; ++i) { if (i == 2) continue; sum = sum + i; } return sum; }",
+                8,
+            ),
+            (
+                "int main() { int sum = 0; for (int i = 0; i < 7; i += 2) { sum += i; } return sum; }",
+                12,
+            ),
+            (
+                "int main() { int i = 42; for (int i = 0; i < 3; i++) {} return i; }",
+                42,
+            ),
+            (
+                "int main() { int sum = 0; for (int i = 4; i > 0; i--) { if (i == 2) break; sum = sum + i; } return sum; }",
+                7,
+            ),
+            (
+                "int main() { int i = 0; for (;;) { i = i + 1; if (i == 42) return i; } }",
+                42,
+            ),
+            (
+                "int main() { int sum = 0; for (int i = 0; i < 3; i = i + 1) { int j = 0; while (j < 2) { j = j + 1; continue; } sum = sum + i; } return sum; }",
+                3,
+            ),
+            (
+                "int main() { int i = 0; for (i = 2; i < 4; i++) i = i + 1; return i; }",
+                4,
+            ),
+            (
+                "int combine(bool left, bool right) { for (int i = 0; i < 1; i++) { return left | right; } return 0; } int main() { return combine(true, false); }",
+                1,
+            ),
+        ] {
+            let path = temp_path(&format!("c-for.{extension}"));
+            fs::write(&path, source).unwrap();
+            let report = compile_owned(&default_request(
+                path.clone(),
+                CompileTarget::Jit,
+                Some("main"),
+                None,
+            ));
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{extension}: {source}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(expected)),
+                "{extension}: {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn owned_c_unsupported_loop_parts_are_refused_instead_of_dropped() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for source in [
+            "int main() { for (int i = 0, j = 0; i < 1; i++) { return 42; } return 0; }",
+            "int main() { for (int i = 0; i < 1; i++) { switch (i) { case 0: return 42; } } return 0; }",
+            "int main() { int values[1]; for (int i = 0; i < 1; values[i]++) { return 42; } return 0; }",
+        ] {
+            let path = temp_path(&format!("unsupported-c-for.{extension}"));
+            fs::write(&path, source).unwrap();
+            let report = compile_owned(&default_request(
+                path.clone(),
+                CompileTarget::Jit,
+                Some("main"),
+                None,
+            ));
+            fs::remove_file(path).unwrap();
+            assert!(!report.success, "{extension}: {source}: {report:?}");
+            assert_eq!(report.eval_result, None);
+        }
+    }
+}

@@ -233,9 +233,7 @@ fn c_body(src: &[u8], body: Node<'_>) -> Vec<Stmt> {
     let mut out = Vec::new();
     let mut w = block.walk();
     for ch in block.named_children(&mut w) {
-        if let Some(stmt) = c_stmt(src, ch) {
-            out.push(stmt);
-        }
+        out.extend(c_stmts(src, ch));
     }
     out
 }
@@ -248,8 +246,106 @@ fn c_stmt(src: &[u8], stmt: Node<'_>) -> Option<Stmt> {
         "expression_statement" => c_expr_statement(src, stmt),
         "if_statement" => c_if_statement(src, stmt),
         "while_statement" => c_while_statement(src, stmt),
+        "break_statement" => Some(Stmt::Break),
+        "continue_statement" => Some(Stmt::Continue),
         _ => None,
     }
+}
+
+fn c_stmts(src: &[u8], stmt: Node<'_>) -> Vec<Stmt> {
+    let stmt = c_peel_statement_shell(stmt).unwrap_or(stmt);
+    match stmt.kind() {
+        "comment" => vec![],
+        "expression_statement" if stmt.named_child_count() == 0 => vec![],
+        "compound_statement" => vec![Stmt::If {
+            cond: Expr::BoolLit(true),
+            then_body: c_body(src, stmt),
+            else_body: vec![],
+        }],
+        "for_statement" => {
+            c_for_statement(src, stmt).unwrap_or_else(|| c_unsupported_statement("for"))
+        }
+        _ => c_stmt(src, stmt)
+            .map(|stmt| vec![stmt])
+            .unwrap_or_else(|| c_unsupported_statement(stmt.kind())),
+    }
+}
+
+fn c_unsupported_statement(kind: &str) -> Vec<Stmt> {
+    vec![Stmt::Expr(Expr::Call {
+        callee: Box::new(Expr::Ident(format!("__unsupported_c_{kind}"))),
+        args: vec![],
+    })]
+}
+
+fn c_for_statement(src: &[u8], stmt: Node<'_>) -> Option<Vec<Stmt>> {
+    let mut out = Vec::new();
+    if let Some(init) = stmt.child_by_field_name("initializer") {
+        out.push(match init.kind() {
+            "declaration" => {
+                let mut cursor = init.walk();
+                if init
+                    .named_children(&mut cursor)
+                    .filter(|child| child.kind() == "init_declarator")
+                    .count()
+                    != 1
+                {
+                    return None;
+                }
+                c_declaration(src, init)?
+            }
+            "assignment_expression" => c_assignment(src, init)?,
+            _ => Stmt::Expr(c_expr(src, init)?),
+        });
+    }
+    let cond = match stmt.child_by_field_name("condition") {
+        Some(cond) => Some(c_expr(src, cond)?),
+        None => None,
+    };
+    let mut body = c_stmt_or_body(src, stmt.child_by_field_name("body")?);
+    if let Some(update) = stmt.child_by_field_name("update") {
+        let advance = match update.kind() {
+            "update_expression" => c_update(src, update)?,
+            "assignment_expression" => c_assignment(src, update)?,
+            _ => Stmt::Expr(c_expr(src, update)?),
+        };
+        crate::lower_core::advance_for_continues(&mut body, &advance);
+        body.push(advance);
+    }
+    out.push(Stmt::Loop {
+        kind: crate::core_ir::LoopKind::While,
+        cond,
+        body,
+    });
+    // The initializer binding belongs to the loop, not the enclosing block.
+    Some(vec![Stmt::If {
+        cond: Expr::BoolLit(true),
+        then_body: out,
+        else_body: vec![],
+    }])
+}
+
+fn c_update(src: &[u8], expr: Node<'_>) -> Option<Stmt> {
+    let argument = expr
+        .child_by_field_name("argument")
+        .or_else(|| expr.named_child(0))?;
+    let name = c_assignee_name(src, argument)?;
+    let text = node_txt(src, expr).trim();
+    let op = if text.starts_with("++") || text.ends_with("++") {
+        "+"
+    } else if text.starts_with("--") || text.ends_with("--") {
+        "-"
+    } else {
+        return None;
+    };
+    Some(Stmt::Assign(
+        name.clone(),
+        Expr::Binary {
+            op: op.into(),
+            lhs: Box::new(Expr::Ident(name)),
+            rhs: Box::new(Expr::IntLit(1)),
+        },
+    ))
 }
 
 fn c_return_expr(src: &[u8], ret: Node<'_>) -> Option<Option<Expr>> {
@@ -280,6 +376,7 @@ fn c_expr_statement(src: &[u8], stmt: Node<'_>) -> Option<Stmt> {
     let expr = stmt.named_children(&mut w).next()?;
     match expr.kind() {
         "assignment_expression" => c_assignment(src, expr),
+        "update_expression" => c_update(src, expr),
         _ => c_expr(src, expr).map(Stmt::Expr),
     }
 }
@@ -292,7 +389,27 @@ fn c_assignment(src: &[u8], expr: Node<'_>) -> Option<Stmt> {
         .child_by_field_name("right")
         .or_else(|| expr.named_child(expr.named_child_count().saturating_sub(1) as u32))?;
     let name = c_assignee_name(src, left)?;
-    Some(Stmt::Assign(name, c_expr(src, right)?))
+    let operator = std::str::from_utf8(src.get(left.end_byte()..right.start_byte())?)
+        .ok()?
+        .trim();
+    let value = c_expr(src, right)?;
+    let value = if operator == "=" {
+        value
+    } else {
+        let op = operator.strip_suffix('=')?;
+        if !matches!(
+            op,
+            "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"
+        ) {
+            return None;
+        }
+        Expr::Binary {
+            op: op.into(),
+            lhs: Box::new(Expr::Ident(name.clone())),
+            rhs: Box::new(value),
+        }
+    };
+    Some(Stmt::Assign(name, value))
 }
 
 fn c_assignee_name(src: &[u8], n: Node<'_>) -> Option<String> {
@@ -344,7 +461,7 @@ fn c_stmt_or_body(src: &[u8], n: Node<'_>) -> Vec<Stmt> {
     if n.kind() == "compound_statement" {
         c_body(src, n)
     } else {
-        c_stmt(src, n).into_iter().collect()
+        c_stmts(src, n)
     }
 }
 
@@ -356,7 +473,7 @@ fn c_else_body(src: &[u8], n: Node<'_>) -> Vec<Stmt> {
         n
     };
     if n.kind() == "if_statement" {
-        c_stmt(src, n).into_iter().collect()
+        c_stmts(src, n)
     } else {
         c_stmt_or_body(src, n)
     }
@@ -374,6 +491,10 @@ fn c_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
         "parenthesized_expression" | "expression" => {
             expr.named_child(0).and_then(|n| c_expr(src, n))
         }
+        "condition_clause" => expr
+            .child_by_field_name("value")
+            .or_else(|| expr.named_child(0))
+            .and_then(|value| c_expr(src, value)),
         "binary_expression" => c_binary_expr(src, expr),
         "unary_expression" => c_unary_expr(src, expr),
         "call_expression" => c_call_expr(src, expr),

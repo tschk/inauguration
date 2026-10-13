@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## C-like counted loops
+
+C and C++ `for` statements lower to a scoped initializer and a Core IR loop. The condition is reevaluated before each iteration, and the update executes after the body or before a `continue` targeting that loop. Nested-loop continues retain their own target; `break` and `return` skip the update. Omitted conditions form an unbounded loop. Identifier increment, decrement, and compound assignment updates retain their stores. Unsupported initializer, condition, or update expressions produce an explicit unsupported operation instead of dropping the loop.
+
 ## Boolean bitwise operations
 
 Core IR `&`, `|`, and `^` preserve the operand type: two `Bool` operands produce `Bool`, and two `Int` operands produce `Int`. Mixed types and floating operands are refused. Boolean bitwise operations evaluate both operands in order; `&&` and `||` retain conditional evaluation. Verification, native type inference, and constant folding share this distinction. C-like frontends insert explicit `bool-to-int` promotions where bitwise operands or integer call parameters require integer values.

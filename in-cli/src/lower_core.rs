@@ -311,7 +311,7 @@ pub(crate) fn expand_for_loop(
 }
 
 // Nested-loop continues must not advance the enclosing for loop.
-fn advance_for_continues(body: &mut Vec<Stmt>, advance: &Stmt) {
+pub(crate) fn advance_for_continues(body: &mut Vec<Stmt>, advance: &Stmt) {
     let mut rewritten = Vec::with_capacity(body.len());
     for mut stmt in std::mem::take(body) {
         match &mut stmt {
