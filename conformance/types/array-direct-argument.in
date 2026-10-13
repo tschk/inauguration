@@ -1,0 +1,12 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var calls: Int = 0;
+fn element() -> Int { calls += 1; return 18 + calls; }
+fn sum(values: [Int], after: Int) -> Int {
+    values[0] += 1;
+    return values[0] + values[1] + after;
+}
+fn main() -> Int { return sum([element(), element()], calls); }

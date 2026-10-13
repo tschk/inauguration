@@ -41,7 +41,7 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 ## Writable array literal results
 
-AArch64 materializes array literal results in writable storage instead of returning pointers into read-only code. Elements can be dynamic and retain their evaluation order; a saved cursor survives element calls. JIT storage belongs to the runtime arena, while native hosted artifacts use the existing process-lifetime heap policy. The internal AArch64 data-pointer/length array ABI remains unchanged.
+AArch64 materializes array literal results in writable storage instead of returning pointers into read-only code. Elements can be dynamic and retain their evaluation order; a saved cursor survives element calls. JIT storage belongs to the runtime arena, while native hosted artifacts use the existing process-lifetime heap policy. The internal AArch64 data-pointer/length array ABI remains unchanged. Direct literal and call-result array arguments use this same materializer; argument staging preserves earlier values across later calls.
 
 ## Indexed compound update order
 

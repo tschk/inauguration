@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "inauguration"
-version = "0.9.103"
+version = "0.9.104"
 dependencies = [
  "clap",
  "criterion",

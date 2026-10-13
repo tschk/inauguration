@@ -2415,6 +2415,31 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn direct_array_arguments_preserve_values_and_effect_order() {
+        for source in [
+            include_str!("../../conformance/types/array-direct-argument.in"),
+            "fn empty(values: [Int]) -> Int { return 42; }\nfn main() -> Int { return empty([]); }",
+            "fn first(values: [Float]) -> Int { if values[0] == 42.5 { return 42; } return 0; }\nfn main() -> Int { return first([42.5]); }",
+            "fn first(values: [Bool]) -> Int { if values[0] { return 42; } return 0; }\nfn main() -> Int { return first([true]); }",
+            "fn sum(values: [Int]) -> Int { return values[0] + values[1]; }\nfn main() -> Int { return sum([20, 22]); }",
+            "fn make() -> [Int] { return [42]; }\nfn first(values: [Int]) -> Int { return values[0]; }\nfn main() -> Int { return first(make()); }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

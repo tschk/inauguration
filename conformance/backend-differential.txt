@@ -65,3 +65,4 @@ agree conformance/types/bool-bitwise-effects.in
 agree conformance/types/signed-shift-effects.in
 agree conformance/control-flow/in-index-compound-effects.in
 agree conformance/types/array-return-writable.in
+agree conformance/types/array-direct-argument.in

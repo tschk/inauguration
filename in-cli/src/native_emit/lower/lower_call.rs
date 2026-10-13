@@ -333,7 +333,16 @@ pub(crate) fn lower_call_arg(
                 )
             }
         }
-        Typ::Array(elem) => lower_array_call_arg(emitter, ctx, arg, elem, reg, fn_name),
+        Typ::Array(elem) => lower_array_call_arg(
+            emitter,
+            ctx,
+            arg,
+            elem,
+            reg,
+            functions,
+            pending_calls,
+            fn_name,
+        ),
         Typ::Vector(elem) => lower_vector_call_arg(
             emitter,
             ctx,
@@ -666,6 +675,8 @@ pub(crate) fn lower_array_call_arg(
     arg: &Expr,
     elem: &Typ,
     reg: u8,
+    functions: &HashMap<String, FunctionInfo>,
+    pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
     if !is_native_scalar_type(elem) {
@@ -707,9 +718,19 @@ pub(crate) fn lower_array_call_arg(
         }
     }
     let Expr::Ident(local) = arg else {
-        // Emit 0 for complex self arg expressions (field access, range, closure)
-        emitter.emit_insns(&aarch64::load_i64(reg, 0));
-        emitter.emit_insns(&aarch64::load_i64(reg + 1, 0));
+        super::lower_stmt::lower_array_expr_into_regs(
+            emitter,
+            ctx,
+            arg,
+            elem,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        if reg != 0 {
+            emitter.emit_u32(aarch64::mov_reg64(reg + 1, 1));
+            emitter.emit_u32(aarch64::mov_reg64(reg, 0));
+        }
         return Ok(reg + 2);
     };
     let Some(slot) = ctx.locals.get(local) else {
