@@ -702,11 +702,39 @@ fn c_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
             .child_by_field_name("value")
             .or_else(|| expr.named_child(0))
             .and_then(|value| c_expr(src, value)),
+        "cast_expression" => c_cast_expr(src, expr),
         "binary_expression" => c_binary_expr(src, expr),
         "unary_expression" => c_unary_expr(src, expr),
         "call_expression" => c_call_expr(src, expr),
         _ => None,
     }
+}
+
+fn c_cast_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
+    let descriptor = expr.child_by_field_name("type")?;
+    if descriptor.child_by_field_name("declarator").is_some() {
+        return None;
+    }
+    let specifier = descriptor.child_by_field_name("type")?;
+    // The C grammar exposes the reserved _Bool keyword as a type_identifier.
+    if !matches!(specifier.kind(), "primitive_type" | "sized_type_specifier")
+        && !(specifier.kind() == "type_identifier" && node_txt(src, specifier) == "_Bool")
+    {
+        return None;
+    }
+    let target = match c_typ_from_decl_specifier_text(node_txt(src, specifier)) {
+        Typ::Int => "Int",
+        Typ::Float => "Float",
+        Typ::Bool => "Bool",
+        _ => return None,
+    };
+    Some(Expr::Call {
+        callee: Box::new(Expr::Ident("c-numeric-cast".into())),
+        args: vec![
+            c_expr(src, expr.child_by_field_name("value")?)?,
+            Expr::StringLit(target.into()),
+        ],
+    })
 }
 
 fn c_binary_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {

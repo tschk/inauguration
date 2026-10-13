@@ -127,7 +127,7 @@ impl TypeChecker {
         self.resolve_typed_operators(module, false);
     }
 
-    fn resolve_c_boolean_promotions(&self, module: &mut UnifiedModule) {
+    fn resolve_c_value_promotions(&self, module: &mut UnifiedModule) {
         self.resolve_typed_operators(module, true);
     }
 
@@ -239,6 +239,30 @@ impl TypeChecker {
             crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
                 self.resolve_typed_expr(child, facts, env, promote_c_bool)
             });
+        }
+        if promote_c_bool
+            && let Expr::Call { callee, args } = expr
+            && matches!(callee.as_ref(), Expr::Ident(name) if name == "c-numeric-cast")
+        {
+            if let [value, Expr::StringLit(target)] = args.as_slice() {
+                let expected = match target.as_str() {
+                    "Int" => Some(Typ::Int),
+                    "Float" => Some(Typ::Float),
+                    "Bool" => Some(Typ::Bool),
+                    _ => None,
+                };
+                if let Some(expected) = expected
+                    && matches!(
+                        self.expr_type(value, facts, env).map(|typ| typ.canonical()),
+                        Some(Typ::Int | Typ::Float | Typ::Bool)
+                    )
+                {
+                    let mut value = value.clone();
+                    self.resolve_c_value(&mut value, &expected, facts, env);
+                    *expr = value;
+                }
+            }
+            return;
         }
         if promote_c_bool {
             match expr {
@@ -1599,7 +1623,7 @@ pub fn normalize_module(parser_id: ParserId, module: &UnifiedModule) -> UnifiedM
         parser_id,
         ParserId::C | ParserId::Cpp | ParserId::ObjC | ParserId::ObjCpp
     ) {
-        TypeChecker::new().resolve_c_boolean_promotions(&mut normalized);
+        TypeChecker::new().resolve_c_value_promotions(&mut normalized);
     }
     normalized
 }
@@ -3396,6 +3420,23 @@ mod tests {
             let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
             let errors = TypeChecker::new().check_module(&module).unwrap_err();
             assert!(errors.iter().any(|error| matches!(error, TypeError::TypeMismatch { context, .. } if context.contains("complement operand"))), "{errors:?}");
+        }
+    }
+    #[test]
+    fn malformed_numeric_cast_markers_remain_refused() {
+        for expression in [
+            "c-numeric-cast()",
+            "c-numeric-cast(42, \"Unknown\")",
+            "c-numeric-cast(42, 0)",
+            "c-numeric-cast(42, \"Int\", 0)",
+            "c-numeric-cast(\"text\", \"Int\")",
+        ] {
+            let source = format!("fn main() -> Int {{ return {expression}; }}");
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let module = super::normalize_module(ParserId::C, &module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(!report.ok, "{expression}: {report:?}");
+            assert_eq!(report.reason_code.as_deref(), Some("unresolved-symbol"));
         }
     }
 }

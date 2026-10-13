@@ -3897,3 +3897,66 @@ fn owned_c_numeric_conversions_preserve_effects_and_truncate() {
         }
     }
 }
+
+#[test]
+fn owned_c_numeric_casts_preserve_value_and_effects() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for source in [
+            "int main() { double value = 42.9; return (int)value; }",
+            "int main() { int value = 21; return (int)((double)value * 2.0); }",
+            "int main() { double value = -0.5; return (int)((double)(int)value + 42.0); }",
+            "int main() { double value = -42.9; return (int)value + 84; }",
+            "int calls = 0; double next() { calls++; return 41.9; } int main() { return (int)next() + calls; }",
+            "int main() { double value = 2.5; return (int)((_Bool)value) + 41; }",
+            "int main() { int value = 42; return (const int)value; }",
+            "int calls = 0; double next() { calls++; return 2.5; } int main() { return (int)(_Bool)next() + calls + 40; }",
+            "int main() { double value = -0.0; return (int)(_Bool)value + 42; }",
+        ] {
+            let source = source.replace("_Bool", if extension == "cpp" { "bool" } else { "_Bool" });
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let path = temp_path(&format!("c-numeric-cast.{extension}"));
+                fs::write(&path, &source).unwrap();
+                let mut request =
+                    default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                fs::remove_file(path).unwrap();
+                assert!(
+                    report.success,
+                    "{extension}: {profile:?}: {source}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{extension}: {profile:?}: {source}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn owned_c_numeric_casts_refuse_pointer_object_and_extended_types() {
+    for extension in ["c", "cpp"] {
+        for source in [
+            "int main() { int value = 42; return (int*)value; }",
+            "int main() { int value = 42; return (long double)value; }",
+            "int main() { int value = 42; return (Unknown)value; }",
+        ] {
+            let path = temp_path(&format!("c-unsupported-cast.{extension}"));
+            fs::write(&path, source).unwrap();
+            let request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            let report = compile_owned(&request);
+            fs::remove_file(path).unwrap();
+            assert!(!report.success, "{extension}: {source}: {report:?}");
+            assert_eq!(report.eval_result, None);
+        }
+    }
+}

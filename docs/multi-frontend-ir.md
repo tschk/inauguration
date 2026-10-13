@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## C-style numeric casts
+
+C/C++ `(type)value` casts to primitive numeric types lower through the same typed conversions as implicit value contexts. Nested casts, boolean truth conversion, and qualifiers preserve operand evaluation once. Pointer, reference, object, typedef, void, and extended-precision casts remain refused. Numeric casts use canonical Int64/Float64, with the source-width and unsigned limitations described below.
+
 ## C-like numeric conversions
 
 Typed C/C++ initializers, assignments, returns, and call arguments convert between canonical signed Int64 and Float64 through shared unary IR operations. Mixed floating arithmetic and comparisons promote integer and boolean operands to Float64. Floating-to-integer conversion truncates toward zero; only finite values whose truncated result fits Int64 have defined cross-backend behavior. Source integer widths, unsigned conversion, and Float32 arithmetic remain outside this canonical subset.
