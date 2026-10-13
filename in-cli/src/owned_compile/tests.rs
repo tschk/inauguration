@@ -3224,3 +3224,78 @@ fn owned_c_global_definitions_preserve_refusal_boundaries() {
         }
     }
 }
+
+#[test]
+fn owned_cpp_compound_assignment_reads_target_after_rhs_once() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (op, expected) in [
+        ("+", 43),
+        ("-", 37),
+        ("*", 120),
+        ("/", 13),
+        ("%", 1),
+        ("&", 0),
+        ("|", 43),
+        ("^", 43),
+        ("<<", 320),
+        (">>", 5),
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = format!(
+                "int value = 21; int calls = 0; int helper() {{ calls++; value = 40; return 3; }} int main() {{ value {op}= helper(); return value + calls * 1000; }}"
+            );
+            let path = temp_path("cpp-compound-order.cpp");
+            fs::write(&path, &source).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{source}: {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(expected + 1000)),
+                "{source}: {profile:?}"
+            );
+        }
+    }
+    for (source, expected) in [
+        (
+            "int value = 20; int helper() { value = 40; return 2; } int main() { value += helper(); return value; }",
+            42,
+        ),
+        (
+            "int value = 40; int main() { int result = 0; { int value = 20; value += 2; result = value; } return result + value; }",
+            62,
+        ),
+        (
+            "int __array_repeat_0 = 40; int main() { int value = 20; value += 2; return value + __array_repeat_0; }",
+            62,
+        ),
+        (
+            "int step = 0; int calls = 0; int helper() { calls++; step = 2; return 2; } int main() { for (; step < 4; step += helper()) {} return step + calls * 1000; }",
+            1004,
+        ),
+    ] {
+        let path = temp_path("cpp-compound-place.cpp");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(expected)),
+            "{source}"
+        );
+    }
+}

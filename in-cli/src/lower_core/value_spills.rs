@@ -20,8 +20,16 @@ fn is_field_modify(expr: &Expr) -> bool {
     matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "field-modify-value-first"))
 }
 
+fn is_variable_modify(expr: &Expr) -> bool {
+    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "modify-value-first"))
+}
+
 fn expr_needs_spills(expr: &Expr) -> bool {
-    if is_repeat(expr) || is_value_first_store(expr) || is_field_modify(expr) {
+    if is_repeat(expr)
+        || is_value_first_store(expr)
+        || is_field_modify(expr)
+        || is_variable_modify(expr)
+    {
         return true;
     }
     if let Expr::Closure { body, .. } = expr {
@@ -274,7 +282,7 @@ impl Lower {
             self.types = types;
             return;
         }
-        if !expr_needs_spills(expr) {
+        if !expr_needs_spills(expr) || is_variable_modify(expr) {
             return;
         }
         if is_repeat(expr) {
@@ -417,6 +425,28 @@ impl Lower {
                     },
                 };
             }
+            if let Stmt::Expr(expr) = &stmt
+                && is_variable_modify(expr)
+                && let Expr::Call { args, .. } = expr
+                && args.len() == 3
+                && let (Expr::Ident(name), Expr::StringLit(op)) = (&args[0], &args[2])
+                && matches!(
+                    op.as_str(),
+                    "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"
+                )
+            {
+                let mut value = args[1].clone();
+                self.expr(&mut value, &mut prefix);
+                let value = self.save(value, &mut prefix);
+                stmt = Stmt::Assign(
+                    name.clone(),
+                    Expr::Binary {
+                        op: op.clone(),
+                        lhs: Box::new(Expr::Ident(name.clone())),
+                        rhs: Box::new(value),
+                    },
+                );
+            }
             match &mut stmt {
                 Stmt::Let(_, _, expr)
                 | Stmt::Assign(_, expr)
@@ -513,5 +543,53 @@ impl Lower {
         *body = out;
         self.constants = constants;
         self.types = types;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_variable_updates_remain_unresolved() {
+        for args in [
+            vec![Expr::Ident("value".into()), Expr::IntLit(2)],
+            vec![
+                Expr::IntLit(1),
+                Expr::IntLit(2),
+                Expr::StringLit("+".into()),
+            ],
+            vec![
+                Expr::Ident("value".into()),
+                Expr::IntLit(2),
+                Expr::StringLit("&&".into()),
+            ],
+            vec![
+                Expr::Ident("value".into()),
+                Expr::IntLit(2),
+                Expr::IntLit(3),
+            ],
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(
+                "var value: Int = 20;\nfn main() -> Int { return 42; }",
+            )
+            .unwrap();
+            let Decl::Function { body, .. } = module.decls.last_mut().unwrap() else {
+                panic!("missing main");
+            };
+            body.insert(
+                0,
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("modify-value-first".into())),
+                    args,
+                }),
+            );
+            let original = module.decls.clone();
+            lower_value_spills(&mut module.decls);
+            assert_eq!(module.decls, original);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(!report.ok, "{report:?}");
+            assert_eq!(report.reason_code.as_deref(), Some("unresolved-symbol"));
+        }
     }
 }

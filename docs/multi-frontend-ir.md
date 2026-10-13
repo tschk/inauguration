@@ -39,6 +39,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## Value-first variable updates
+
+The reserved statement operation `modify-value-first(target, value, operator)` lowers through the shared value-spill pass. It evaluates `value` once into a hygienic temporary, then reads and updates the original identifier target. C-like compound assignments use this operation, including loop updates, so a right operand that modifies the target cannot leave a stale value in the calculation. Invalid operation shapes remain explicit refusals.
+
 ## C-like global storage
 
 Top-level C and C++ variable definitions use `Decl::Global` and the existing shared native data section. Integer literal definitions, zero initialization, multiple identifier declarators, and static storage preserve reads and writes across functions. `const` definitions retain immutable storage. External declarations do not fabricate module-owned storage; unresolved external variable reads are refused. Pointer, array, and reference declarators are currently refused, and runtime initializers retain the native backend's existing refusal.

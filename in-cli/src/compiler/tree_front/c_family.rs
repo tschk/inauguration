@@ -491,11 +491,10 @@ fn c_assignment(src: &[u8], expr: Node<'_>) -> Option<Stmt> {
         ) {
             return None;
         }
-        Expr::Binary {
-            op: op.into(),
-            lhs: Box::new(Expr::Ident(name.clone())),
-            rhs: Box::new(value),
-        }
+        return Some(Stmt::Expr(Expr::Call {
+            callee: Box::new(Expr::Ident("modify-value-first".into())),
+            args: vec![Expr::Ident(name), value, Expr::StringLit(op.into())],
+        }));
     };
     Some(Stmt::Assign(name, value))
 }
