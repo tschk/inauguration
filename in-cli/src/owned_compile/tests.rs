@@ -1944,3 +1944,49 @@ fn owned_rust_jit_inclusive_ranges_include_the_endpoint() {
         );
     }
 }
+
+#[test]
+fn owned_rust_jit_loop_temporaries_preserve_user_names() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (source, expected) in [
+        (
+            "fn main() -> i64 { let __for_items_0 = 100; let mut sum = 0; for item in [1, 2, 3] { sum = sum + item; } return __for_items_0 + sum; }",
+            106,
+        ),
+        (
+            "fn main() -> i64 { let __for_0 = 100; let __for_end_0 = 200; let mut sum = 0; for item in 1..3 { sum = sum + item; } return __for_0 + __for_end_0 + sum; }",
+            303,
+        ),
+        (
+            "fn sum(__for_0: i64) -> i64 { let mut result = 0; for item in 1..=3 { result = result + item; } return __for_0 + result; } fn main() -> i64 { return sum(100); }",
+            106,
+        ),
+        (
+            "fn main() -> i64 { let mut sum = 0; for mut __for_0 in 1..=3 { sum = sum + __for_0; __for_0 = 99; } return sum; }",
+            6,
+        ),
+        (
+            "fn __for_0() -> i64 { return 100; } fn main() -> i64 { let mut sum = 0; for item in 1..3 { sum = sum + item; } return __for_0() + sum; }",
+            103,
+        ),
+    ] {
+        let path = temp_path("rust-loop-names.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(expected)),
+            "{source}"
+        );
+    }
+}

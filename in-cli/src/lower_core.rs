@@ -61,9 +61,16 @@ pub fn desugar_module(module: &mut UnifiedModule) {
     let mut closure_counter = 0usize;
     let mut extra_decls: Vec<Decl> = Vec::new();
     let mut for_counter = 0usize;
+    let mut for_names = crate::core_bindings::module_names(&new_decls);
+    for decl in &new_decls {
+        if let Decl::Function { params, body, .. } = decl {
+            for_names.extend(params.iter().map(|(name, _)| name.clone()));
+            crate::core_bindings::reserve_body(body, &mut for_names);
+        }
+    }
     for decl in &mut new_decls {
         if let Decl::Function { body, .. } = decl {
-            desugar_for_loops(body, &mut for_counter);
+            desugar_for_loops(body, &mut for_counter, &for_names);
             desugar_closures_in_body(body, &mut closure_counter, &mut extra_decls);
             if !method_map.is_empty() {
                 rewrite_method_calls_in_body(body, &method_map);
@@ -75,7 +82,7 @@ pub fn desugar_module(module: &mut UnifiedModule) {
     module.decls = new_decls;
 }
 
-fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize) {
+fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize, names: &HashSet<String>) {
     let mut out = Vec::with_capacity(body.len());
     for stmt in std::mem::take(body) {
         match stmt {
@@ -84,7 +91,13 @@ fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize) {
                 cond: Some(iter),
                 body: mut loop_body,
             } => {
-                desugar_for_loops(&mut loop_body, counter);
+                desugar_for_loops(&mut loop_body, counter, names);
+                while ["__for_", "__for_end_", "__for_items_"]
+                    .iter()
+                    .any(|prefix| names.contains(&format!("{prefix}{counter}")))
+                {
+                    *counter += 1;
+                }
                 out.extend(expand_for_loop(binding, iter, loop_body, counter));
             }
             Stmt::If {
@@ -92,8 +105,8 @@ fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize) {
                 mut then_body,
                 mut else_body,
             } => {
-                desugar_for_loops(&mut then_body, counter);
-                desugar_for_loops(&mut else_body, counter);
+                desugar_for_loops(&mut then_body, counter, names);
+                desugar_for_loops(&mut else_body, counter, names);
                 out.push(Stmt::If {
                     cond,
                     then_body,
@@ -105,7 +118,7 @@ fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize) {
                 cond,
                 mut body,
             } => {
-                desugar_for_loops(&mut body, counter);
+                desugar_for_loops(&mut body, counter, names);
                 out.push(Stmt::Loop { kind, cond, body });
             }
             Stmt::Match {
@@ -113,7 +126,7 @@ fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize) {
                 mut arms,
             } => {
                 for arm in &mut arms {
-                    desugar_for_loops(&mut arm.body, counter);
+                    desugar_for_loops(&mut arm.body, counter, names);
                 }
                 out.push(Stmt::Match { scrutinee, arms });
             }
@@ -121,9 +134,9 @@ fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize) {
                 mut body,
                 mut catches,
             } => {
-                desugar_for_loops(&mut body, counter);
+                desugar_for_loops(&mut body, counter, names);
                 for c in &mut catches {
-                    desugar_for_loops(&mut c.body, counter);
+                    desugar_for_loops(&mut c.body, counter, names);
                 }
                 out.push(Stmt::Try { body, catches });
             }

@@ -67,7 +67,7 @@ fn reserve_expr(expr: &Expr, names: &mut HashSet<String>) {
     }
 }
 
-fn reserve_body(body: &[Stmt], names: &mut HashSet<String>) {
+pub(crate) fn reserve_body(body: &[Stmt], names: &mut HashSet<String>) {
     for stmt in body {
         match stmt {
             Stmt::Let(name, _, expr) | Stmt::Assign(name, expr) => {
