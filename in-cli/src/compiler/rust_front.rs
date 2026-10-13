@@ -1733,7 +1733,7 @@ fn lower_expr_with_types_inner(
             callee: Box::new(Expr::Ident(
                 match r.limits {
                     syn::RangeLimits::Closed(_) => "range-inclusive",
-                    syn::RangeLimits::HalfOpen(_) => "range",
+                    syn::RangeLimits::HalfOpen(_) => "range-exclusive",
                 }
                 .into(),
             )),

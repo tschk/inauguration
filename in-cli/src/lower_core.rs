@@ -66,7 +66,8 @@ pub fn desugar_module(module: &mut UnifiedModule) {
     let mut closure_counter = 0usize;
     let mut extra_decls: Vec<Decl> = Vec::new();
     let mut for_counter = 0usize;
-    let mut for_names = crate::core_bindings::module_names(&new_decls);
+    let declared_names = crate::core_bindings::module_names(&new_decls);
+    let mut for_names = declared_names.clone();
     for decl in &new_decls {
         if let Decl::Function { params, body, .. } = decl {
             for_names.extend(params.iter().map(|(name, _)| name.clone()));
@@ -74,8 +75,11 @@ pub fn desugar_module(module: &mut UnifiedModule) {
         }
     }
     for decl in &mut new_decls {
-        if let Decl::Function { body, .. } = decl {
-            desugar_for_loops(body, &mut for_counter, &for_names);
+        if let Decl::Function { params, body, .. } = decl {
+            let mut bound = declared_names.clone();
+            bound.extend(params.iter().map(|(name, _)| name.clone()));
+            collect_bound_names_in_body(body, &mut bound);
+            desugar_for_loops(body, &mut for_counter, &for_names, &bound);
             desugar_closures_in_body(body, &mut closure_counter, &mut extra_decls);
             if !method_map.is_empty() {
                 rewrite_method_calls_in_body(body, &method_map);
@@ -88,22 +92,28 @@ pub fn desugar_module(module: &mut UnifiedModule) {
     crate::typecheck::TypeChecker::new().resolve_complements(module);
 }
 
-fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize, names: &HashSet<String>) {
+fn desugar_for_loops(
+    body: &mut Vec<Stmt>,
+    counter: &mut usize,
+    names: &HashSet<String>,
+    declared: &HashSet<String>,
+) {
     let mut out = Vec::with_capacity(body.len());
     for stmt in std::mem::take(body) {
         match stmt {
             Stmt::Loop {
                 kind: LoopKind::For { binding },
-                cond: Some(iter),
+                cond: Some(mut iter),
                 body: mut loop_body,
             } => {
-                desugar_for_loops(&mut loop_body, counter, names);
+                desugar_for_loops(&mut loop_body, counter, names, declared);
                 while ["__for_", "__for_end_", "__for_items_"]
                     .iter()
                     .any(|prefix| names.contains(&format!("{prefix}{counter}")))
                 {
                     *counter += 1;
                 }
+                normalize_range_iterator(&mut iter, |name| declared.contains(name));
                 out.extend(expand_for_loop(binding, iter, loop_body, counter));
             }
             Stmt::If {
@@ -111,8 +121,8 @@ fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize, names: &HashSet<
                 mut then_body,
                 mut else_body,
             } => {
-                desugar_for_loops(&mut then_body, counter, names);
-                desugar_for_loops(&mut else_body, counter, names);
+                desugar_for_loops(&mut then_body, counter, names, declared);
+                desugar_for_loops(&mut else_body, counter, names, declared);
                 out.push(Stmt::If {
                     cond,
                     then_body,
@@ -124,7 +134,7 @@ fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize, names: &HashSet<
                 cond,
                 mut body,
             } => {
-                desugar_for_loops(&mut body, counter, names);
+                desugar_for_loops(&mut body, counter, names, declared);
                 out.push(Stmt::Loop { kind, cond, body });
             }
             Stmt::Match {
@@ -132,7 +142,7 @@ fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize, names: &HashSet<
                 mut arms,
             } => {
                 for arm in &mut arms {
-                    desugar_for_loops(&mut arm.body, counter, names);
+                    desugar_for_loops(&mut arm.body, counter, names, declared);
                 }
                 out.push(Stmt::Match { scrutinee, arms });
             }
@@ -140,9 +150,9 @@ fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize, names: &HashSet<
                 mut body,
                 mut catches,
             } => {
-                desugar_for_loops(&mut body, counter, names);
+                desugar_for_loops(&mut body, counter, names, declared);
                 for c in &mut catches {
-                    desugar_for_loops(&mut c.body, counter, names);
+                    desugar_for_loops(&mut c.body, counter, names, declared);
                 }
                 out.push(Stmt::Try { body, catches });
             }
@@ -150,6 +160,18 @@ fn desugar_for_loops(body: &mut Vec<Stmt>, counter: &mut usize, names: &HashSet<
         }
     }
     *body = out;
+}
+
+/// Legacy Core IR's `range` call denotes a builtin only when the name is unbound.
+pub(crate) fn normalize_range_iterator(iter: &mut Expr, is_bound: impl Fn(&str) -> bool) {
+    if let Expr::Call { callee, args } = iter
+        && args.len() == 2
+        && let Expr::Ident(name) = callee.as_mut()
+        && name == "range"
+        && !is_bound(name)
+    {
+        *name = "range-exclusive".into();
+    }
 }
 
 pub(crate) fn expand_for_loop(
@@ -160,7 +182,7 @@ pub(crate) fn expand_for_loop(
 ) -> Vec<Stmt> {
     let binding = binding.trim().to_string();
     if let Expr::Call { callee, args } = &iter {
-        if matches!(callee.as_ref(), Expr::Ident(name) if name == "range" || name == "range-inclusive")
+        if matches!(callee.as_ref(), Expr::Ident(name) if name == "range-exclusive" || name == "range-inclusive")
             && args.len() == 2
         {
             let inclusive =

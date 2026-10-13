@@ -2322,3 +2322,78 @@ fn raw_native_guard_lowering_preserves_effect_order() {
     let result = super::jit::compile_jit(&module, "GuardEffects", &request).unwrap();
     assert_eq!(result.eval_result, Some(EvalValue::Int(42)));
 }
+
+#[test]
+fn owned_rust_user_range_is_not_replaced_by_numeric_iteration() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = temp_path("rust-user-range.rs");
+    fs::write(&path, "fn range(start: i64, end: i64) -> [i64; 2] { return [10, 20]; } fn main() -> i64 { let mut sum = 0; for item in range(1, 2) { sum = sum + item; } return sum; }").unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    fs::remove_file(path).unwrap();
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+    assert_eq!(report.eval_result, Some(EvalValue::Int(30)));
+}
+
+#[test]
+fn owned_rust_range_syntax_does_not_call_a_user_range_function() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = temp_path("rust-range-syntax.rs");
+    fs::write(&path, "fn range(start: i64, end: i64) -> i64 { return 99; } fn main() -> i64 { let mut sum = 0; for item in 1..4 { sum = sum + item; } return sum; }").unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    fs::remove_file(path).unwrap();
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.eval_result, Some(EvalValue::Int(6)));
+}
+
+#[test]
+fn owned_rust_noninlined_range_call_retains_its_array_abi() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = temp_path("rust-range-array-abi.rs");
+    fs::write(&path, "fn range(start: i64, end: i64) -> [i64; 2] { if start == 1 { return [10, 20]; } else { return [30, 40]; } } fn main() -> i64 { let mut sum = 0; for item in range(1, 2) { sum = sum + item; } return sum; }").unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    fs::remove_file(path).unwrap();
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.reason_code.as_deref(), Some("jit-compiled-only"));
+    assert_eq!(report.eval_result, None);
+    assert_eq!(report.eval_exit_code, None);
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn raw_x86_user_range_iterator_executes_the_function_result() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let source = "fn range(start: i64, end: i64) -> [i64; 2] { if start == 1 { return [10, 20]; } else { return [30, 40]; } } fn main() -> i64 { let mut sum = 0; for item in range(1, 2) { sum = sum + item; } return sum; }";
+    let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+    let request = default_request(
+        PathBuf::from("direct-range.in"),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    );
+    let result = super::jit::compile_jit(&module, "RangeCall", &request).unwrap();
+    assert_eq!(result.eval_result, Some(EvalValue::Int(30)));
+}

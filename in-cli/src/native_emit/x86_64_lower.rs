@@ -1438,9 +1438,15 @@ fn lower_stmt(
             }) {
                 counter += 1;
             }
+            let mut iterator = cond.clone().unwrap_or(Expr::ArrayLit(Vec::new()));
+            crate::lower_core::normalize_range_iterator(&mut iterator, |name| {
+                ctx.functions.contains_key(name)
+                    || ctx.locals.contains_key(name)
+                    || ctx.globals.contains_key(name)
+            });
             let expanded = crate::lower_core::expand_for_loop(
                 binding.clone(),
-                cond.clone().unwrap_or(Expr::ArrayLit(Vec::new())),
+                iterator,
                 body.clone(),
                 &mut counter,
             );

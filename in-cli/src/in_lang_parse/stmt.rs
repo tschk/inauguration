@@ -463,7 +463,7 @@ fn parse_for_expanded(s: &str, context: &mut LoopParseContext<'_>) -> Result<Vec
     let end = trim(range_segs[1]);
     let (range_name, end) = match end.strip_prefix('=') {
         Some(end) => ("range-inclusive", trim(end)),
-        None => ("range", end),
+        None => ("range-exclusive", end),
     };
     let end_expr = parse_expr(end);
     let (inner, _) = brace_content_bounds_after_open(rest, open)
