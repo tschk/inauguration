@@ -143,7 +143,7 @@ fn pattern_names(pattern: &mut MatchPattern, visit: &mut impl FnMut(&mut String)
     }
 }
 
-fn reserve_pattern(source: &str, names: &mut HashSet<String>) {
+pub(crate) fn reserve_pattern(source: &str, names: &mut HashSet<String>) {
     if let Ok(mut pattern) = MatchPattern::parse(source) {
         pattern_names(&mut pattern, &mut |name| {
             names.insert(name.clone());

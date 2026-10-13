@@ -1,0 +1,468 @@
+//! Spill effectful Core IR operands for array repetition and value-first stores.
+//!
+//! Save the value once, then reuse it in an ordinary array literal. Expression
+//! spills preserve left-to-right evaluation and remain inside conditional paths.
+
+use crate::core_ir::{Decl, Expr, LoopKind, Stmt, Typ};
+use std::collections::{HashMap, HashSet};
+
+const MAX_EXPANDED_ITEMS: usize = 4096;
+
+fn is_repeat(expr: &Expr) -> bool {
+    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "array-repeat"))
+}
+
+fn is_value_first_store(expr: &Expr) -> bool {
+    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "index-assign-value-first"))
+}
+
+fn expr_needs_spills(expr: &Expr) -> bool {
+    if is_repeat(expr) || is_value_first_store(expr) {
+        return true;
+    }
+    if let Expr::Closure { body, .. } = expr {
+        return body.iter().any(stmt_needs_spills);
+    }
+    let mut found = false;
+    crate::core_ir::for_each_expr_child(expr, &mut |child| found |= expr_needs_spills(child));
+    found
+}
+
+fn stmt_needs_spills(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let(_, _, expr)
+        | Stmt::Assign(_, expr)
+        | Stmt::Expr(expr)
+        | Stmt::Throw(expr)
+        | Stmt::Return(Some(expr)) => expr_needs_spills(expr),
+        Stmt::IndexAssign { base, index, value } => {
+            [base, index, value].into_iter().any(expr_needs_spills)
+        }
+        Stmt::FieldAssign { base, value, .. } => [base, value].into_iter().any(expr_needs_spills),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => expr_needs_spills(cond) || then_body.iter().chain(else_body).any(stmt_needs_spills),
+        Stmt::Loop { cond, body, .. } => {
+            cond.as_ref().is_some_and(expr_needs_spills) || body.iter().any(stmt_needs_spills)
+        }
+        Stmt::Match { scrutinee, arms } => {
+            expr_needs_spills(scrutinee)
+                || arms.iter().any(|arm| {
+                    arm.guard.as_ref().is_some_and(expr_needs_spills)
+                        || arm.body.iter().any(stmt_needs_spills)
+                })
+        }
+        Stmt::Try { body, catches } => {
+            body.iter().any(stmt_needs_spills)
+                || catches
+                    .iter()
+                    .any(|catch| catch.body.iter().any(stmt_needs_spills))
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn has_value_spills(decls: &[Decl]) -> bool {
+    decls.iter().any(|decl| match decl {
+        Decl::Function { body, .. } => body.iter().any(stmt_needs_spills),
+        Decl::Class { methods, .. } => has_value_spills(methods),
+        Decl::Global {
+            init: Some(expr), ..
+        } => expr_needs_spills(expr),
+        _ => false,
+    })
+}
+
+pub(crate) fn lower_value_spills(decls: &mut [Decl]) {
+    if !has_value_spills(decls) {
+        return;
+    }
+    let mut names = crate::core_bindings::module_names(decls);
+    fn reserve(decls: &[Decl], names: &mut HashSet<String>) {
+        for decl in decls {
+            match decl {
+                Decl::Function { params, body, .. } => {
+                    names.extend(params.iter().map(|(name, _)| name.clone()));
+                    crate::core_bindings::reserve_body(body, names);
+                }
+                Decl::Class { methods, .. } => reserve(methods, names),
+                Decl::Global {
+                    init: Some(expr), ..
+                } => crate::core_bindings::reserve_expr(expr, names),
+                _ => {}
+            }
+        }
+    }
+    reserve(decls, &mut names);
+    let mut constants = HashMap::new();
+    // Resolve immutable integer globals to a fixed point, including forward refs.
+    for _ in 0..decls.len() {
+        let old_len = constants.len();
+        for decl in decls.iter() {
+            if let Decl::Global {
+                name,
+                init: Some(expr),
+                mutable: false,
+                ..
+            } = decl
+                && let Some(value) = constant_int(expr, &constants)
+            {
+                constants.insert(name.clone(), value);
+            }
+        }
+        if constants.len() == old_len {
+            break;
+        }
+    }
+    let facts = crate::typecheck::TypeChecker::new().collect_decl_facts(decls);
+    let types = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global { name, typ, .. } => Some((name.clone(), typ.clone())),
+            _ => None,
+        })
+        .collect();
+    let mut lower = Lower {
+        names,
+        constants,
+        facts,
+        types,
+        counter: 0,
+    };
+    lower.members(decls);
+}
+
+fn constant_int(expr: &Expr, constants: &HashMap<String, i64>) -> Option<i64> {
+    match expr {
+        Expr::Ident(name) => constants.get(name).copied(),
+        Expr::Unary { op, expr } => {
+            let value = constant_int(expr, constants)?;
+            match op.as_str() {
+                "-" => value.checked_neg(),
+                "~" => Some(!value),
+                _ => None,
+            }
+        }
+        Expr::Binary { op, lhs, rhs } => {
+            let (lhs, rhs) = (constant_int(lhs, constants)?, constant_int(rhs, constants)?);
+            match op.as_str() {
+                "+" => lhs.checked_add(rhs),
+                "-" => lhs.checked_sub(rhs),
+                "*" => lhs.checked_mul(rhs),
+                "/" => lhs.checked_div(rhs),
+                "%" => lhs.checked_rem(rhs),
+                "&" => Some(lhs & rhs),
+                "|" => Some(lhs | rhs),
+                "^" => Some(lhs ^ rhs),
+                "<<" => lhs.checked_shl(u32::try_from(rhs).ok()?),
+                ">>" => lhs.checked_shr(u32::try_from(rhs).ok()?),
+                _ => None,
+            }
+        }
+        _ => super::const_int(expr),
+    }
+}
+
+struct Lower {
+    names: HashSet<String>,
+    constants: HashMap<String, i64>,
+    counter: usize,
+    facts: crate::typecheck::Facts,
+    types: HashMap<String, Typ>,
+}
+
+impl Lower {
+    fn fresh(&mut self) -> String {
+        loop {
+            let name = format!("__array_repeat_{}", self.counter);
+            self.counter += 1;
+            if self.names.insert(name.clone()) {
+                return name;
+            }
+        }
+    }
+
+    fn save(&mut self, expr: Expr, out: &mut Vec<Stmt>) -> Expr {
+        let name = self.fresh();
+        let typ = self.expr_type(&expr);
+        if let Some(typ) = &typ {
+            self.types.insert(name.clone(), typ.clone());
+        }
+        out.push(Stmt::Let(name.clone(), typ, expr));
+        Expr::Ident(name)
+    }
+
+    fn expr_type(&self, expr: &Expr) -> Option<Typ> {
+        crate::typecheck::TypeChecker::new().expr_type(expr, &self.facts, &self.types)
+    }
+
+    fn pattern_body(&mut self, body: &mut Vec<Stmt>, pattern: &str, typ: Option<Typ>) {
+        let constants = self.constants.clone();
+        let types = self.types.clone();
+        let mut names = HashSet::new();
+        crate::core_bindings::reserve_pattern(pattern, &mut names);
+        for name in names {
+            self.constants.remove(&name);
+            self.types
+                .insert(name, typ.clone().unwrap_or(Typ::Generic("_".into())));
+        }
+        self.body(body);
+        self.constants = constants;
+        self.types = types;
+    }
+
+    fn members(&mut self, decls: &mut [Decl]) {
+        for decl in decls {
+            match decl {
+                Decl::Function { params, body, .. } => {
+                    let constants = self.constants.clone();
+                    let types = self.types.clone();
+                    for (name, typ) in params {
+                        self.constants.remove(name);
+                        self.types.insert(name.clone(), typ.clone());
+                    }
+                    self.body(body);
+                    self.constants = constants;
+                    self.types = types;
+                }
+                Decl::Class { methods, .. } => self.members(methods),
+                // A global initializer has no statement context. Only expand
+                // literal values; preserve other operations for honest refusal.
+                Decl::Global {
+                    init: Some(expr), ..
+                } if is_repeat(expr) => {
+                    if let Expr::Call { args, .. } = expr.as_mut()
+                        && args.len() == 2
+                        && matches!(
+                            args[0],
+                            Expr::IntLit(_)
+                                | Expr::FloatLit(_)
+                                | Expr::BoolLit(_)
+                                | Expr::StringLit(_)
+                        )
+                        && let Some(count) = self.count(&args[1])
+                    {
+                        **expr = Expr::ArrayLit(vec![args[0].clone(); count]);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn count(&self, expr: &Expr) -> Option<usize> {
+        let count = usize::try_from(constant_int(expr, &self.constants)?).ok()?;
+        (count <= MAX_EXPANDED_ITEMS).then_some(count)
+    }
+
+    fn expr(&mut self, expr: &mut Expr, out: &mut Vec<Stmt>) {
+        if let Expr::Closure { params, body, .. } = expr {
+            let constants = self.constants.clone();
+            let types = self.types.clone();
+            for (name, typ) in params {
+                self.constants.remove(name);
+                self.types.insert(name.clone(), typ.clone());
+            }
+            self.body(body);
+            self.constants = constants;
+            self.types = types;
+            return;
+        }
+        if !expr_needs_spills(expr) {
+            return;
+        }
+        if is_repeat(expr) {
+            let Expr::Call { args, .. } = expr else {
+                unreachable!()
+            };
+            if args.len() != 2 {
+                return;
+            }
+            let Some(count) = self.count(&args[1]) else {
+                return;
+            };
+            let mut value = args[0].clone();
+            self.expr(&mut value, out);
+            let typ = self.expr_type(&value);
+            let saved = self.save(value, out);
+            if count == 0 {
+                let name = self.fresh();
+                let typ = Typ::Array(Box::new(typ.unwrap_or(Typ::Generic("_".into()))));
+                self.types.insert(name.clone(), typ.clone());
+                out.push(Stmt::Let(name.clone(), Some(typ), Expr::ArrayLit(vec![])));
+                *expr = Expr::Ident(name);
+            } else {
+                *expr = Expr::ArrayLit(vec![saved; count]);
+            }
+            return;
+        }
+        if let Expr::Binary { op, lhs, rhs } = expr
+            && matches!(op.as_str(), "&&" | "||")
+        {
+            self.expr(lhs, out);
+            let saved = self.save((**lhs).clone(), out);
+            let mut branch = Vec::new();
+            self.expr(rhs, &mut branch);
+            let Expr::Ident(name) = &saved else {
+                unreachable!()
+            };
+            branch.push(Stmt::Assign(name.clone(), (**rhs).clone()));
+            let cond = if op == "&&" {
+                saved.clone()
+            } else {
+                Expr::Unary {
+                    op: "!".into(),
+                    expr: Box::new(saved.clone()),
+                }
+            };
+            out.push(Stmt::If {
+                cond,
+                then_body: branch,
+                else_body: vec![],
+            });
+            *expr = saved;
+            return;
+        }
+        // Save each child in order so a later child's spills cannot run before
+        // earlier calls, reads, or array allocations. A direct callee is a
+        // symbol, not a first-class value to materialize.
+        if let Expr::Call { callee, args } = expr {
+            if !matches!(callee.as_ref(), Expr::Ident(_)) {
+                self.expr(callee, out);
+            }
+            for arg in args {
+                self.expr(arg, out);
+                *arg = self.save(arg.clone(), out);
+            }
+        } else {
+            crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
+                self.expr(child, out);
+                *child = self.save(child.clone(), out);
+            });
+        }
+    }
+
+    fn body(&mut self, body: &mut Vec<Stmt>) {
+        let constants = self.constants.clone();
+        let types = self.types.clone();
+        let mut out = Vec::with_capacity(body.len());
+        for mut stmt in std::mem::take(body) {
+            let mut prefix = Vec::new();
+            if let Stmt::Expr(expr) = &stmt
+                && is_value_first_store(expr)
+                && let Expr::Call { args, .. } = expr
+                && args.len() == 3
+            {
+                // Rust assignment evaluates the value before the place. Save
+                // all three operands so each effect occurs exactly once.
+                let mut value = args[2].clone();
+                self.expr(&mut value, &mut prefix);
+                let value = self.save(value, &mut prefix);
+                let mut base = args[0].clone();
+                self.expr(&mut base, &mut prefix);
+                let base = self.save(base, &mut prefix);
+                let mut index = args[1].clone();
+                self.expr(&mut index, &mut prefix);
+                let index = self.save(index, &mut prefix);
+                stmt = Stmt::IndexAssign { base, index, value };
+            }
+            match &mut stmt {
+                Stmt::Let(_, _, expr)
+                | Stmt::Assign(_, expr)
+                | Stmt::Expr(expr)
+                | Stmt::Return(Some(expr))
+                | Stmt::Throw(expr) => self.expr(expr, &mut prefix),
+                Stmt::IndexAssign { base, index, value } => {
+                    if [&*base, &*index, &*value]
+                        .into_iter()
+                        .any(expr_needs_spills)
+                    {
+                        for expr in [base, index, value] {
+                            self.expr(expr, &mut prefix);
+                            *expr = self.save(expr.clone(), &mut prefix);
+                        }
+                    }
+                }
+                Stmt::FieldAssign { base, value, .. } => {
+                    if expr_needs_spills(base) || expr_needs_spills(value) {
+                        for expr in [base, value] {
+                            self.expr(expr, &mut prefix);
+                            *expr = self.save(expr.clone(), &mut prefix);
+                        }
+                    }
+                }
+                Stmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                } => {
+                    self.expr(cond, &mut prefix);
+                    self.body(then_body);
+                    self.body(else_body);
+                }
+                Stmt::Loop { kind, cond, body } => {
+                    if let Some(cond) = cond {
+                        self.expr(cond, &mut prefix);
+                        if let LoopKind::For { binding } = kind {
+                            let typ = match self.expr_type(cond) {
+                                Some(Typ::Array(item) | Typ::Vector(item)) => Some(*item),
+                                _ => None,
+                            };
+                            self.pattern_body(body, binding, typ);
+                        } else {
+                            self.body(body);
+                        }
+                        if !prefix.is_empty() && matches!(kind, LoopKind::While) {
+                            prefix.push(Stmt::If {
+                                cond: Expr::Unary {
+                                    op: "!".into(),
+                                    expr: Box::new(cond.clone()),
+                                },
+                                then_body: vec![Stmt::Break],
+                                else_body: vec![],
+                            });
+                            prefix.append(body);
+                            *body = std::mem::take(&mut prefix);
+                            *kind = LoopKind::Infinite;
+                            // Infinite loops ignore this condition in native lowering.
+                            *cond = Expr::BoolLit(true);
+                        }
+                    } else {
+                        self.body(body);
+                    }
+                }
+                Stmt::Match { scrutinee, arms } => {
+                    self.expr(scrutinee, &mut prefix);
+                    let typ = self.expr_type(scrutinee);
+                    for arm in arms {
+                        self.pattern_body(&mut arm.body, &arm.pattern, typ.clone());
+                    }
+                }
+                Stmt::Try { body, catches } => {
+                    self.body(body);
+                    for catch in catches {
+                        self.pattern_body(&mut catch.body, &catch.pattern, None);
+                    }
+                }
+                _ => {}
+            }
+            if let Stmt::Let(name, typ, expr) = &stmt {
+                // Initializers still see the previous binding; the new local
+                // shadows a compile-time global only after its initialization.
+                self.constants.remove(name);
+                if let Some(typ) = typ.clone().or_else(|| self.expr_type(expr)) {
+                    self.types.insert(name.clone(), typ);
+                } else {
+                    self.types.remove(name);
+                }
+            }
+            out.extend(prefix);
+            out.push(stmt);
+        }
+        *body = out;
+        self.constants = constants;
+        self.types = types;
+    }
+}

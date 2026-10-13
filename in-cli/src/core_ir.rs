@@ -538,6 +538,8 @@ pub enum Decl {
         typ: Typ,
         init: Option<Box<Expr>>,
         mutable: bool,
+        /// A compile-time value copied at each use, rather than stored globally.
+        constant_value: bool,
     },
 }
 

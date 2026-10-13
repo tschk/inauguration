@@ -1,0 +1,18 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+class Counter {
+ value: Int
+ fn check() -> Int {
+  var sum: Int = 0;
+  for item in array-repeat(value, 0) { sum += item; }
+  for item in array-repeat(value, 3) { sum += item; }
+  return sum;
+ }
+}
+fn main() -> Int {
+ let counter = Counter { value: 7 };
+ return counter.check() + 21;
+}

@@ -65,7 +65,7 @@ fn sanitize_comment(s: &str) -> String {
 
 /// Emit a complete C translation unit from Core IR.
 pub fn emit_c_module(module: &UnifiedModule) -> Result<String, String> {
-    let prepared = crate::lower_core::prepared_guard_module(module);
+    let prepared = crate::lower_core::prepared_native_module(module);
     let module = prepared.as_ref();
     check_module_limits(module)?;
 
@@ -209,7 +209,11 @@ pub fn emit_c_module(module: &UnifiedModule) -> Result<String, String> {
     if has_globals {
         for decl in &module.decls {
             if let Decl::Global {
-                name, typ, init, ..
+                name,
+                typ,
+                init,
+                constant_value: false,
+                ..
             } = decl
             {
                 let init_s = match init {

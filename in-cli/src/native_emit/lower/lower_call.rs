@@ -54,11 +54,6 @@ pub(crate) fn lower_call(
         return Ok(());
     }
     if !functions.contains_key(target) {
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "[TRACE] EXTERNAL path for target={target}, all fns: {:?}",
-            functions.keys().collect::<Vec<_>>()
-        );
         // Load args into registers
         for (i, arg) in args.iter().enumerate() {
             if i > 7 {
@@ -604,9 +599,9 @@ pub(crate) fn lower_struct_ptr_arg(
         }
     }
     let Expr::Ident(local) = arg else {
-        // Aggressive fallback: emit null pointer for any non-Ident self arg
-        emitter.emit_insns(&aarch64::load_i64(reg, 0));
-        return Ok(reg + 1);
+        return Err(format!(
+            "native-lower: self argument needs addressable struct storage in `{fn_name}`"
+        ));
     };
     match ctx.locals.get(local) {
         Some(LocalSlot::Struct { fields: slots, .. }) => {

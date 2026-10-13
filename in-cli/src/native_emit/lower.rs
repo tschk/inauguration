@@ -583,7 +583,7 @@ pub fn lower_module_with_jobs(
     linkage: NativeLinkage,
     jobs: usize,
 ) -> Result<LoweredModule, String> {
-    let prepared = crate::lower_core::prepared_guard_module(module);
+    let prepared = crate::lower_core::prepared_native_module(module);
     let module = prepared.as_ref();
     // Clear any stale external refs from previous invocations
     TL_EXTERNAL_REFS.with(|refs| refs.borrow_mut().clear());
@@ -994,6 +994,12 @@ fn lower_function(
             ctx.alloc_slot();
         }
         ctx.aggregate_vector_scratch = Some((offset, words));
+    }
+    if ctx.stack_reserve() > 4095 {
+        return Err(format!(
+            "native-lower: stack frame exceeds the AArch64 immediate-offset subset in `{}`",
+            func.name
+        ));
     }
     if ctx.stack_size > 0 {
         emitter.emit_u32(aarch64::sub_imm64(

@@ -119,6 +119,7 @@ pub(crate) fn parse_module_from_blocks(
                     typ: typ.unwrap_or(crate::core_ir::Typ::Int),
                     init: Some(Box::new(init)),
                     mutable: true,
+                    constant_value: false,
                 });
             } else {
                 return Err(format!(
@@ -144,6 +145,7 @@ pub(crate) fn parse_module_from_blocks(
                     typ: typ.unwrap_or(crate::core_ir::Typ::Int),
                     init: Some(Box::new(init)),
                     mutable: false,
+                    constant_value: false,
                 });
             } else {
                 return Err(".in: `const` needs `=` initializer".into());

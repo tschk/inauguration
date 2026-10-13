@@ -2,12 +2,17 @@ use crate::core_ir::{Decl, Expr, MatchArm, Stmt, Typ, UnifiedModule};
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-pub(crate) fn prepared_guard_module(module: &UnifiedModule) -> Cow<'_, UnifiedModule> {
-    if !module.decls.iter().any(decl_has_guard) {
+pub(crate) fn prepared_native_module(module: &UnifiedModule) -> Cow<'_, UnifiedModule> {
+    if !module.decls.iter().any(decl_has_guard)
+        && !super::value_spills::has_value_spills(&module.decls)
+        && !super::constant_values::has_named_constants(&module.decls)
+    {
         return Cow::Borrowed(module);
     }
     let mut lowered = module.clone();
     lower_guarded_decls(&mut lowered.decls);
+    super::lower_named_constants(&mut lowered.decls);
+    super::lower_value_spills(&mut lowered.decls);
     crate::core_bindings::normalize_decls(&mut lowered.decls);
     crate::typecheck::TypeChecker::new().resolve_complements(&mut lowered);
     Cow::Owned(lowered)

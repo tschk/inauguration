@@ -437,7 +437,7 @@ fn parse_function_body_with_context(
     Ok(stmts)
 }
 
-/// Parse a range loop using the shared Core IR expansion.
+/// Parse a range or collection loop using the shared Core IR expansion.
 fn parse_for_expanded(s: &str, context: &mut LoopParseContext<'_>) -> Result<Vec<Stmt>, String> {
     let rest = trim(s)
         .strip_prefix("for ")
@@ -448,45 +448,49 @@ fn parse_for_expanded(s: &str, context: &mut LoopParseContext<'_>) -> Result<Vec
     let header = trim(&rest[..open]);
     let parts: Vec<&str> = header.splitn(2, " in ").collect();
     if parts.len() != 2 {
-        return Err(".in: `for` needs `<var> in <range>`".into());
+        return Err(".in: `for` needs `<var> in <iterator>`".into());
     }
     let var_name = trim(parts[0]).to_string();
     if var_name.is_empty() {
         return Err(".in: `for` loop variable name missing".into());
     }
-    let range_part = trim(parts[1]);
-    let range_segs: Vec<&str> = range_part.splitn(2, "..").collect();
-    if range_segs.len() != 2 {
-        return Err(".in: `for` range needs `start..end`".into());
+    let iterator = trim(parts[1]);
+    if iterator.is_empty() {
+        return Err(".in: `for` iterator missing".into());
     }
-    if trim(range_segs[0]).is_empty() {
-        return Err(".in: a range iterator needs a start value".into());
-    }
-    let start_expr = parse_expr(trim(range_segs[0]));
-    let end = trim(range_segs[1]);
-    let (mut range_name, end) = match end.strip_prefix('=') {
-        Some(end) => ("range-inclusive", trim(end)),
-        None => ("range-exclusive", end),
-    };
-    let mut args = vec![start_expr];
-    if end.is_empty() {
-        if range_name == "range-inclusive" {
-            return Err(".in: an inclusive range needs an end value".into());
+    let iter = if let Some((_, pos)) = find_top_level_binary_op(iterator, &[".."]) {
+        let start = trim(&iterator[..pos]);
+        if start.is_empty() {
+            return Err(".in: a range iterator needs a start value".into());
         }
-        range_name = "range-from";
+        let end = trim(&iterator[pos + 2..]);
+        let (mut range_name, end) = match end.strip_prefix('=') {
+            Some(end) => ("range-inclusive", trim(end)),
+            None => ("range-exclusive", end),
+        };
+        let mut args = vec![parse_expr(start)];
+        if end.is_empty() {
+            if range_name == "range-inclusive" {
+                return Err(".in: an inclusive range needs an end value".into());
+            }
+            range_name = "range-from";
+        } else {
+            args.push(parse_expr(end));
+        }
+        Expr::Call {
+            callee: Box::new(Expr::Ident(range_name.into())),
+            args,
+        }
     } else {
-        args.push(parse_expr(end));
-    }
+        parse_expr(iterator)
+    };
     let (inner, _) = brace_content_bounds_after_open(rest, open)
         .ok_or_else(|| ".in: unclosed `for` body".to_string())?;
     let body = parse_function_body_with_context(inner, context)?;
     let mut counter = context.fresh_counter();
     Ok(crate::lower_core::expand_for_loop(
         var_name,
-        Expr::Call {
-            callee: Box::new(Expr::Ident(range_name.into())),
-            args,
-        },
+        iter,
         body,
         &mut counter,
     ))

@@ -4,9 +4,15 @@ use crate::core_ir::{Decl, LoopKind, MatchPattern, Typ, UnifiedModule};
 use crate::core_ir::{Expr, Stmt, for_each_expr_child};
 use std::collections::{HashMap, HashSet};
 
+#[path = "lower_core/constant_values.rs"]
+mod constant_values;
+#[path = "lower_core/value_spills.rs"]
+mod value_spills;
+pub(crate) use constant_values::lower_named_constants;
 #[path = "lower_core/match_guards.rs"]
 mod match_guards;
-pub(crate) use match_guards::{lower_guarded_decls, prepared_guard_module};
+pub(crate) use match_guards::{lower_guarded_decls, prepared_native_module};
+pub(crate) use value_spills::lower_value_spills;
 
 pub fn desugar_module(module: &mut UnifiedModule) {
     lower_guarded_decls(&mut module.decls);
@@ -63,6 +69,17 @@ pub fn desugar_module(module: &mut UnifiedModule) {
         }
     }
 
+    // Expose method receivers and field types before spilling repeat operands.
+    if !method_map.is_empty() {
+        for decl in &mut new_decls {
+            if let Decl::Function { body, .. } = decl {
+                rewrite_method_calls_in_body(body, &method_map);
+            }
+        }
+    }
+    lower_named_constants(&mut new_decls);
+    lower_value_spills(&mut new_decls);
+
     let mut closure_counter = 0usize;
     let mut extra_decls: Vec<Decl> = Vec::new();
     let mut for_counter = 0usize;
@@ -81,9 +98,6 @@ pub fn desugar_module(module: &mut UnifiedModule) {
             collect_bound_names_in_body(body, &mut bound);
             desugar_for_loops(body, &mut for_counter, &for_names, &bound);
             desugar_closures_in_body(body, &mut closure_counter, &mut extra_decls);
-            if !method_map.is_empty() {
-                rewrite_method_calls_in_body(body, &method_map);
-            }
         }
     }
     new_decls.extend(extra_decls);

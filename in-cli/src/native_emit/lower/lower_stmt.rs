@@ -492,6 +492,16 @@ pub(crate) fn lower_store_local(
             Ok(())
         }
         LocalSlot::Array { elem, offsets } => {
+            if let Expr::Ident(source) = expr
+                && let Some(LocalSlot::Array {
+                    elem: actual,
+                    offsets: source_offsets,
+                }) = ctx.locals.get(source)
+                && actual == &elem
+                && source_offsets == &offsets
+            {
+                return Ok(());
+            }
             let Expr::ArrayLit(items) = expr else {
                 return Err(format!(
                     "native-lower: unsupported array assignment in `{fn_name}`"

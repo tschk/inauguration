@@ -313,13 +313,9 @@ pub(crate) fn lower_index(
     } else {
         match slot {
             LocalSlot::Array { offsets, .. } => {
-                if offsets.is_empty() {
-                    return Err(format!(
-                        "native-lower: unsupported empty array index in `{fn_name}`"
-                    ));
-                }
                 emitter.emit_insns(&aarch64::load_i64(len_reg, offsets.len() as i64));
-                let base_offset = offsets[0];
+                // With length zero, every index takes the bounds-failure branch.
+                let base_offset = offsets.first().copied().unwrap_or(0);
                 if base_offset == 0 {
                     aarch64::REG_SP
                 } else {

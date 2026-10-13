@@ -291,7 +291,9 @@ impl<'a> LowerCtx<'a> {
                     return Ok(());
                 };
                 let mut slots = HashMap::new();
-                for (field, _field_ty) in fields {
+                // Frame offsets grow downward; reverse allocation keeps declared
+                // fields in increasing memory order from the struct address.
+                for (field, _field_ty) in fields.into_iter().rev() {
                     // ponytail: all struct fields map to scalar slots
                     slots.insert(field.clone(), self.alloc_slot());
                 }
@@ -396,7 +398,7 @@ fn lower_module_impl(
     layout: X86StringLayout,
     runtime_error_slot: bool,
 ) -> Result<X86_64CompileResult, String> {
-    let prepared = crate::lower_core::prepared_guard_module(module);
+    let prepared = crate::lower_core::prepared_native_module(module);
     let module = prepared.as_ref();
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
@@ -1011,9 +1013,32 @@ fn lower_function(
     emitter.emit_insns(&frame_instruction);
 
     let param_regs = [RDI, RSI, RDX, RCX, 8, 9];
+    let mut struct_params = Vec::new();
     if !is_interrupt {
-        for (i, (name, _)) in func.params.iter().enumerate() {
-            if i < 6 {
+        for (i, (name, typ)) in func.params.iter().enumerate() {
+            if let Some(StackSlot::Struct { fields }) = ctx.locals.get(name).cloned() {
+                let Typ::Named(struct_name) = typ.canonical() else {
+                    unreachable!()
+                };
+                if x86_64::is_32bit()
+                    || ctx.structs[&struct_name].iter().any(|(_, typ)| {
+                        !matches!(
+                            typ.canonical(),
+                            Typ::Int | Typ::Bool | Typ::Float | Typ::String
+                        )
+                    })
+                {
+                    return Err("x86_64-lower: struct parameter needs a supported scalar-field 64-bit layout".into());
+                }
+                let pointer_slot = ctx.alloc_slot();
+                if i < 6 {
+                    emitter.emit_insns(&x86_64::str64(param_regs[i], pointer_slot as u16));
+                } else {
+                    emitter.emit_insns(&x86_64::mov_r_m(RAX, RBP, 16 + ((i - 6) * 8) as i32));
+                    emitter.emit_insns(&x86_64::str64(RAX, pointer_slot as u16));
+                }
+                struct_params.push((pointer_slot, fields));
+            } else if i < 6 {
                 if let Some(StackSlot::Scalar(offset)) = ctx.locals.get(name) {
                     emitter.emit_insns(&x86_64::str64(param_regs[i], *offset as u16));
                 }
@@ -1038,6 +1063,17 @@ fn lower_function(
                     emitter.emit_insns(&x86_64::str64(param_regs[i], *offset as u16));
                 }
             }
+        }
+    }
+
+    // All incoming registers have been saved before copying aggregate fields.
+    for (pointer_slot, fields) in struct_params {
+        emitter.emit_insns(&x86_64::ldr64(RAX, pointer_slot as u16));
+        let mut offsets: Vec<_> = fields.values().copied().collect();
+        offsets.sort_unstable_by(|lhs, rhs| rhs.cmp(lhs));
+        for (index, offset) in offsets.into_iter().enumerate() {
+            emitter.emit_insns(&x86_64::mov_r_m(RCX, RAX, (index * 8) as i32));
+            emitter.emit_insns(&x86_64::str64(RCX, offset as u16));
         }
     }
 
@@ -1954,6 +1990,16 @@ fn lower_ident_ref(
     if matches!(ctx.locals.get(name), Some(StackSlot::InlineArray { .. })) {
         return Err("x86_64-lower: escaping 32-bit arrays require an aggregate ABI".into());
     }
+    if let Some(StackSlot::Struct { fields }) = ctx.locals.get(name) {
+        let base = fields
+            .values()
+            .max()
+            .copied()
+            .ok_or("x86_64-lower: empty struct has no addressable fields")?;
+        emitter.emit_insns(&x86_64::mov_rr(target_reg, RBP));
+        emitter.emit_insns(&x86_64::sub_rmi32(target_reg, base as i32));
+        return Ok(());
+    }
     // Check if this is a global variable
     if let Some(&offset) = ctx.globals.get(name) {
         if target_reg == RAX {
@@ -2746,6 +2792,42 @@ fn emit_stack_cleanup(emitter: &mut CodeEmitter, args_len: usize) {
     }
 }
 
+fn lower_call_argument(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    arg: &Expr,
+    target_reg: u8,
+    pending_calls: &mut Vec<PendingCall>,
+) -> Result<(), String> {
+    if let Expr::StructInit { name, fields } = arg {
+        if !ctx.structs.contains_key(name)
+            || ctx.structs[name].iter().any(|(_, typ)| {
+                !matches!(
+                    typ.canonical(),
+                    Typ::Int | Typ::Bool | Typ::Float | Typ::String
+                )
+            })
+        {
+            return Err("x86_64-lower: struct argument needs a known scalar-field layout".into());
+        }
+        let mut number = ctx.frame_size;
+        let temporary = loop {
+            let candidate = format!("__struct_arg_{number}");
+            if !ctx.locals.contains_key(&candidate)
+                && !ctx.functions.contains_key(&candidate)
+                && !ctx.globals.contains_key(&candidate)
+            {
+                break candidate;
+            }
+            number += 1;
+        };
+        ctx.alloc_local(&temporary, &Typ::Named(name.clone()))?;
+        lower_struct_init(emitter, ctx, &temporary, fields, pending_calls)?;
+        return lower_ident_ref(emitter, ctx, target_reg, &temporary, pending_calls);
+    }
+    lower_expr_into(emitter, ctx, arg, target_reg, pending_calls)
+}
+
 fn lower_call_args(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -2768,7 +2850,7 @@ fn lower_call_args(
     }
     if args.len() > nreg {
         for arg in args[nreg..].iter().rev() {
-            lower_expr_into(emitter, ctx, arg, RAX, pending_calls)?;
+            lower_call_argument(emitter, ctx, arg, RAX, pending_calls)?;
             emitter.emit_insns(&x86_64::push_r(RAX));
         }
     }
@@ -2778,7 +2860,7 @@ fn lower_call_args(
                 emitter.emit_insns(&x86_64::push_r(arg_regs[j]));
             }
         }
-        lower_expr_into(emitter, ctx, arg, arg_regs[i], pending_calls)?;
+        lower_call_argument(emitter, ctx, arg, arg_regs[i], pending_calls)?;
         if i > 0 {
             for j in (0..i).rev() {
                 emitter.emit_insns(&x86_64::pop_r(arg_regs[j]));

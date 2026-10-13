@@ -297,11 +297,34 @@ fn prefix_module_decls(mut decls: Vec<Decl>, module: &str) -> Vec<Decl> {
     if module.is_empty() {
         return decls;
     }
-    for d in &mut decls {
-        match d {
+    let constants: HashMap<_, _> = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global {
+                name,
+                constant_value: true,
+                ..
+            } => Some((name.clone(), format!("{module}::{name}"))),
+            _ => None,
+        })
+        .collect();
+    if !constants.is_empty() {
+        // Distinguish local shadows before qualifying the constant references.
+        crate::core_bindings::normalize_decls(&mut decls);
+        crate::core_opt::rewrite_constant_references(&mut decls, &constants);
+    }
+    for decl in &mut decls {
+        match decl {
             Decl::Function { name, .. } | Decl::Struct { name, .. }
                 if !name.contains("::") || !name.starts_with(module) =>
             {
+                *name = format!("{module}::{name}");
+            }
+            Decl::Global {
+                name,
+                constant_value: true,
+                ..
+            } => {
                 *name = format!("{module}::{name}");
             }
             _ => {}
@@ -312,15 +335,12 @@ fn prefix_module_decls(mut decls: Vec<Decl>, module: &str) -> Vec<Decl> {
 
 fn lower_const_item(c: &syn::ItemConst) -> Option<Decl> {
     let mut locals = HashMap::new();
-    Some(Decl::Function {
+    Some(Decl::Global {
         name: c.ident.to_string(),
-        params: vec![],
-        ret: map_type(&c.ty),
-        body: vec![Stmt::Return(Some(lower_expr_with_types(
-            &c.expr,
-            &mut locals,
-        )))],
-        type_params: vec![],
+        typ: map_type(&c.ty),
+        init: Some(Box::new(lower_expr_with_types(&c.expr, &mut locals))),
+        mutable: false,
+        constant_value: true,
     })
 }
 
@@ -1282,7 +1302,16 @@ fn lower_expr_stmt(
             &mut local_types.clone(),
         )),
         syn::Expr::Assign(a) => {
-            if let Some(name) = assign_lhs_name(&a.left) {
+            if let syn::Expr::Index(index) = a.left.as_ref() {
+                out.push(Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("index-assign-value-first".into())),
+                    args: vec![
+                        lower_expr_with_types(&index.expr, local_types),
+                        lower_expr_with_types(&index.index, local_types),
+                        lower_expr_with_types(&a.right, local_types),
+                    ],
+                }));
+            } else if let Some(name) = assign_lhs_name(&a.left) {
                 out.push(Stmt::Assign(
                     name,
                     lower_expr_with_types(&a.right, local_types),
@@ -1728,7 +1757,13 @@ fn lower_expr_with_types_inner(
                 captures: vec![],
             }
         }
-        syn::Expr::Repeat(r) => Expr::ArrayLit(vec![lower_expr_with_types(&r.expr, local_types)]),
+        syn::Expr::Repeat(repeat) => Expr::Call {
+            callee: Box::new(Expr::Ident("array-repeat".into())),
+            args: vec![
+                lower_expr_with_types(&repeat.expr, local_types),
+                lower_expr_with_types(&repeat.len, local_types),
+            ],
+        },
         syn::Expr::Range(range) => {
             let inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));
             let name = match (range.start.is_some(), range.end.is_some(), inclusive) {
@@ -2214,7 +2249,7 @@ fn main() -> i64 { N }
             module
                 .decls
                 .iter()
-                .any(|d| matches!(d, Decl::Function { name, .. } if name == "N"))
+                .any(|d| matches!(d, Decl::Global { name, typ: Typ::Int, mutable: false, constant_value: true, init: Some(value) } if name == "N" && value.as_ref() == &Expr::IntLit(4)))
         );
         assert!(
             module

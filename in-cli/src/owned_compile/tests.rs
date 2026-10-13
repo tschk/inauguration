@@ -2496,3 +2496,255 @@ fn owned_range_iterators_do_not_invent_missing_bounds() {
         assert_eq!(report.eval_result, None);
     }
 }
+
+#[test]
+fn owned_rust_array_repeats_preserve_count() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (source, expected) in [
+        (
+            "fn main() -> i64 { let mut sum = 0; for value in [7; 3] { sum = sum + value; } return sum; }",
+            21,
+        ),
+        (
+            "fn main() -> i64 { let values = [7; 3]; let mut sum = 0; for value in values { sum = sum + value; } return sum; }",
+            21,
+        ),
+        (
+            "fn main() -> i64 { let mut sum = 0; for value in [7; 0] { sum = sum + value; } return sum; }",
+            0,
+        ),
+        (
+            "const COUNT: usize = 1 + 2; fn main() -> i64 { let mut sum = 0; for value in [7; COUNT] { sum = sum + value; } return sum; }",
+            21,
+        ),
+        (
+            "fn main() -> i64 { let mut sum = 0; for value in [true; 3] { if value { sum = sum + 1; } } return sum; }",
+            3,
+        ),
+        ("const N: i64 = 42; fn main() -> i64 { N }", 42),
+        (
+            "fn main() -> i64 { let __array_repeat_0 = 100; let mut sum = 0; for value in [7; 3] { sum = sum + value; } return sum + __array_repeat_0; }",
+            121,
+        ),
+        (
+            "fn main() -> i64 { let mut sum = 0; for value in [\"x\"; 3] { if value == \"x\" { sum = sum + 1; } } return sum; }",
+            3,
+        ),
+        (
+            "const COUNT: usize = 3; fn main() -> i64 { let mut sum = 0; for value in [7; COUNT] { sum = sum + value; } let COUNT = 0; return sum + COUNT; }",
+            21,
+        ),
+    ] {
+        let path = temp_path("rust-array-repeat.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(expected)),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn owned_array_repeats_preserve_effect_order() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (source, expected) in [
+        (
+            "var calls: Int = 0; fn step() -> Int { calls += 1; return calls; } fn main() -> Int { var sum: Int = 0; for value in array-repeat(step(), 3) { sum += value; } return sum + calls * 10; }",
+            13,
+        ),
+        (
+            "var calls: Int = 0; fn step() -> Int { calls += 1; return calls; } fn main() -> Int { var sum: Int = 0; for value in array-repeat(step(), 0) { sum += value; } return calls; }",
+            1,
+        ),
+        (
+            "var calls: Int = 0; fn step() -> Int { calls += 1; return calls; } fn main() -> Int { if false && array-len(array-repeat(step(), 3)) > 0 { return 99; } return calls; }",
+            0,
+        ),
+        (
+            "var calls: Int = 0; fn step() -> Int { calls += 1; return calls; } fn main() -> Int { while array-repeat(step(), 1)[0] < 3 { continue; } return calls; }",
+            3,
+        ),
+        (
+            "var calls: Int = 0; fn step() -> Int { calls += 1; return calls; } fn combine(a: Int, b: Int, c: Int) -> Int { return a + b * 10 + c * 100; } fn main() -> Int { return combine(step(), array-len(array-repeat(step(), 3)), step()) + calls * 1000; }",
+            3331,
+        ),
+        (
+            "var calls: Int = 0; fn step() -> Int { calls += 1; throw 5; } fn main() -> Int { try { let values: [Int] = array-repeat(step(), 0); return 9; } catch e { return calls + 41; } }",
+            42,
+        ),
+        (
+            "fn main() -> Int { var count: Int = 0; for item in [\"..\", \"x\"] { count += 1; } return count; }",
+            2,
+        ),
+        (
+            "var calls: Int = 0; fn index() -> Int { calls += 1; return 0; } fn value() -> Int { calls += 1; return calls; } fn main() -> Int { let values: [Int] = [0]; index-assign-value-first(values, index(), value()); return values[0] * 10 + calls; }",
+            12,
+        ),
+        (
+            "var calls: Int = 0; fn index() -> Int { calls += 1; return 0; } fn value() -> Int { throw 5; } fn main() -> Int { let values: [Int] = [0]; try { index-assign-value-first(values, index(), value()); return 9; } catch e { return calls + 42; } }",
+            42,
+        ),
+    ] {
+        let path = temp_path("array-repeat-effects.in");
+        fs::write(
+            &path,
+            source.replace("; fn", ";\nfn").replace("} fn", "}\nfn"),
+        )
+        .unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(expected)),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn owned_array_repeat_counts_require_supported_constants() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main() -> i64 { let count = 3; let mut sum = 0; for value in [7; count] { sum = sum + value; } return sum; }",
+        "const COUNT: usize = 3; fn main() -> i64 { let COUNT = 1; let mut sum = 0; for value in [7; COUNT] { sum = sum + value; } return sum; }",
+        "fn main() -> i64 { let mut sum = 0; for value in [7; -1] { sum = sum + value; } return sum; }",
+        "fn main() -> i64 { let mut sum = 0; for value in [7; 4097] { sum = sum + value; } return sum; }",
+    ] {
+        let path = temp_path("unsupported-repeat-count.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(!report.success, "{source}: {report:?}");
+        assert_eq!(report.eval_result, None);
+    }
+}
+
+#[test]
+fn owned_class_array_repeats_use_field_types() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../conformance/classes/class-array-repeat.in");
+    let report = compile_owned(&default_request(
+        path,
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
+}
+
+#[test]
+fn owned_scalar_struct_parameters_preserve_layout_and_stack_arguments() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "struct Pair {\n Int a\n Int b\n}\nfn score(pair: Pair, z: Int) -> Int { var sum: Int = 0; for i in 0..2 { sum += pair.a + pair.b; } return sum + z; }\nfn main() -> Int { let pair = Pair { a: 3, b: 4 }; return score(pair, 28); }",
+        "struct Pair {\n Int a\n Int b\n}\nfn score(pair: Pair, z: Int) -> Int { var sum: Int = 0; for i in 0..2 { sum += pair.a + pair.b; } return sum + z; }\nfn main() -> Int { return score(Pair { a: 3, b: 4 }, 28); }",
+        "struct Pair {\n Int a\n Int b\n}\nfn score(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, pair: Pair) -> Int { var sum: Int = 0; for i in 0..1 { sum += a + b + c + d + e + f + pair.a + pair.b; } return sum; }\nfn main() -> Int { let pair = Pair { a: 10, b: 11 }; return score(1, 2, 3, 4, 5, 6, pair); }",
+    ] {
+        let path = temp_path("scalar-struct-arguments.in");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{source}");
+    }
+}
+
+#[test]
+fn owned_rust_compile_time_constants_copy_values_at_use() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (source, expected) in [
+        (
+            "const TEXT: &str = \"constant\"; fn main() -> &str { TEXT }",
+            EvalValue::Str("constant".into()),
+        ),
+        (
+            "const VALUES: [i64; 2] = [7, 14]; fn main() -> i64 { let mut first = VALUES; first[0] = 100; let second = VALUES; first[1] + second[0] + second[1] + 7 }",
+            EvalValue::Int(42),
+        ),
+        (
+            "mod first { pub const COUNT: usize = 3; pub fn calc() -> i64 { let mut sum = 0; for value in [7; COUNT] { sum = sum + value; } return sum; } } mod second { pub const COUNT: usize = 2; pub fn calc() -> i64 { let mut sum = 0; for value in [7; COUNT] { sum = sum + value; } return sum; } } fn main() -> i64 { first::calc() + second::calc() + 7 }",
+            EvalValue::Int(42),
+        ),
+    ] {
+        let path = temp_path("compile-time-constants.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(report.success, "{source}: {report:?}");
+        assert_eq!(report.eval_result, Some(expected), "{source}");
+    }
+}
+
+#[test]
+fn owned_large_repeat_respects_native_frame_limits() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = temp_path("large-repeat.rs");
+    fs::write(&path, "fn main() -> i64 { let mut sum = 0; for value in [7; 600] { sum = sum + value; } return sum; }").unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    fs::remove_file(path).unwrap();
+    if cfg!(target_arch = "aarch64") {
+        assert!(!report.success, "{report:?}");
+        assert!(
+            report
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("stack frame")),
+            "{report:?}"
+        );
+        assert_eq!(report.eval_result, None);
+    } else {
+        assert!(report.success, "{report:?}");
+        assert_eq!(report.eval_result, Some(EvalValue::Int(4200)));
+    }
+}

@@ -25,6 +25,20 @@ Rust type: `in_cli::core_ir::UnifiedModule`.
 
 **`Typ`**: `Int`, `String`, `Bool`, `Void`, `Named(String)`.
 
+## Compile-time values and stored globals
+
+`Decl::Global.constant_value` distinguishes a value copied at use from runtime storage. Rust `const` items use this flag; `.in` globals keep their existing storage semantics. Shared lowering resolves pure constant expressions, including literal strings, arrays, and struct fields, with lexical shadowing and qualified module names. Unresolved constant uses are refused rather than initialized with fabricated data. Native and C emission omit compile-time declarations from runtime global storage.
+
+Rust indexed assignment uses `index-assign-value-first(base, index, value)` in statement position. Shared operand spilling evaluates the assigned value before the place, evaluates each operand once, and skips place evaluation when the value throws.
+
+## Array repetition and collection loops
+
+Rust `[value; count]` lowers to the reserved Core IR operation `array-repeat(value, count)`. The shared pass evaluates an ordinary value expression once, including when the count is zero, and copies that value into an array. It preserves surrounding argument order, short-circuit branches, and repeated while-condition evaluation. Generated bindings avoid source names. Empty arrays retain the element type for checking unreachable loop bodies.
+
+Counts currently support checked integer constant arithmetic and immutable integer globals. Expansion is bounded to 4096 items; backend frame and element-layout limits still apply. Unresolved, negative, and larger counts are refused. Inferred counts, const blocks, general const-function evaluation, and Rust `Copy` trait checking remain outside this subset.
+
+`.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
+
 ## Guarded matches
 
 `Stmt::Match` arms contain a pattern, an optional `guard: Expr`, and a body. The subject is evaluated once. A guard runs only when its pattern matches; a false guard continues to the next arm. The first successful arm runs its body, and later guards and bodies are skipped. Guard conditions must be boolean.

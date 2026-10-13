@@ -429,6 +429,8 @@ fn check_stmt(
             let expr_typ = expr_type(expr, facts, env);
             if let (Some(expected), Some(actual)) = (typ, expr_typ.as_ref())
                 && !expected.compatible_with(actual)
+                && !(matches!(expected.canonical(), Typ::Array(_))
+                    && matches!(expr, Expr::ArrayLit(items) if items.is_empty()))
             {
                 return Err((
                     "type-mismatch".to_string(),
@@ -1253,6 +1255,7 @@ mod tests {
                             typ: Typ::Int,
                             init: Some(Box::new(Expr::IntLit(0))),
                             mutable: false,
+                            constant_value: false,
                         },
                         function_with_params(
                             "main",
@@ -1396,6 +1399,7 @@ mod tests {
                             typ: Typ::Int,
                             init: Some(Box::new(Expr::IntLit(1))),
                             mutable,
+                            constant_value: false,
                         },
                         function_with_params("main", params, Typ::Int, body),
                     ]),
@@ -1420,6 +1424,7 @@ mod tests {
                         typ: Typ::Named("Point".into()),
                         init: Some(Box::new(Expr::IntLit(value))),
                         mutable: true,
+                        constant_value: false,
                     },
                 ]),
                 &default_options(),
@@ -1440,6 +1445,7 @@ mod tests {
                     typ: Typ::Float,
                     init: Some(Box::new(value)),
                     mutable: true,
+                    constant_value: false,
                 }]),
                 &default_options(),
             );
@@ -1460,6 +1466,7 @@ mod tests {
                 typ: typ.clone(),
                 init: Some(Box::new(value.clone())),
                 mutable: true,
+                constant_value: false,
             };
             let valid = module(vec![
                 global.clone(),

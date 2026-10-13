@@ -70,7 +70,7 @@ pub enum ModuleKind {
 #[derive(Default)]
 pub struct TypeChecker;
 
-struct Facts {
+pub(crate) struct Facts {
     functions: HashMap<String, (Vec<(String, Typ)>, Typ)>,
     structs: HashMap<String, Vec<(String, Typ)>>,
 }
@@ -255,10 +255,14 @@ impl TypeChecker {
     }
 
     fn collect_facts(&self, module: &UnifiedModule) -> Facts {
+        self.collect_decl_facts(&module.decls)
+    }
+
+    pub(crate) fn collect_decl_facts(&self, decls: &[Decl]) -> Facts {
         let mut functions: HashMap<String, (Vec<(String, Typ)>, Typ)> = HashMap::new();
         let mut structs: HashMap<String, Vec<(String, Typ)>> = HashMap::new();
 
-        for decl in &module.decls {
+        for decl in decls {
             match decl {
                 Decl::Struct { name, fields, .. } => {
                     structs
@@ -442,6 +446,8 @@ impl TypeChecker {
                 let expr_typ = self.expr_type(expr, facts, env);
                 if let (Some(expected), Some(actual)) = (annot, &expr_typ)
                     && !is_compatible(expected, actual)
+                    && !(matches!(expected.canonical(), Typ::Array(_))
+                        && matches!(expr, Expr::ArrayLit(items) if items.is_empty()))
                 {
                     errors.push(TypeError::TypeMismatch {
                         context: format!("let binding `{name}` in `{fn_name}`"),
@@ -903,7 +909,12 @@ impl TypeChecker {
         }
     }
 
-    fn expr_type(&self, expr: &Expr, facts: &Facts, env: &HashMap<String, Typ>) -> Option<Typ> {
+    pub(crate) fn expr_type(
+        &self,
+        expr: &Expr,
+        facts: &Facts,
+        env: &HashMap<String, Typ>,
+    ) -> Option<Typ> {
         match expr {
             Expr::IntLit(_) => Some(Typ::Int),
             Expr::FloatLit(_) => Some(Typ::Float),

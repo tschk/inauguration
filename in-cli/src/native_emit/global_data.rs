@@ -9,7 +9,13 @@ pub(crate) fn collect_globals(
     let mut globals = HashMap::new();
     let mut offset = 0u64;
     for decl in &module.decls {
-        if let Decl::Global { name, typ, .. } = decl {
+        if let Decl::Global {
+            name,
+            typ,
+            constant_value: false,
+            ..
+        } = decl
+        {
             globals.insert(name.clone(), offset);
             // Struct-typed globals reserve one word per known field so that
             // `{name}.{field}` sites lower to direct data-section slots.
@@ -37,7 +43,13 @@ pub(crate) fn build_data_section(
     }
     let mut data = Vec::new();
     for decl in &module.decls {
-        if let Decl::Global { name, init, .. } = decl {
+        if let Decl::Global {
+            name,
+            init,
+            constant_value: false,
+            ..
+        } = decl
+        {
             let offset = *globals.get(name).unwrap_or(&0);
             let val: i64 = match init.as_deref() {
                 Some(Expr::IntLit(v)) => *v,

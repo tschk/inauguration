@@ -101,7 +101,7 @@ pub(crate) fn serialize_program(prog: &Program) -> Vec<u8> {
 }
 
 fn compile(module: &UnifiedModule, entry: &str) -> Result<Program, String> {
-    let prepared = crate::lower_core::prepared_guard_module(module);
+    let prepared = crate::lower_core::prepared_native_module(module);
     let module = prepared.as_ref();
     let mut fn_index = std::collections::HashMap::new();
     let mut decls: Vec<&Decl> = Vec::new();

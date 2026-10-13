@@ -488,6 +488,7 @@ pub(crate) fn split_function_statements(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut start = 0usize;
     let mut depth = 0i32;
+    let mut expression_depth = 0i32;
     let mut in_string = false;
     let mut escape = false;
     for (i, c) in body.char_indices() {
@@ -505,10 +506,12 @@ pub(crate) fn split_function_statements(body: &str) -> Vec<String> {
         }
         match c {
             '"' => in_string = true,
+            '(' | '[' => expression_depth += 1,
+            ')' | ']' => expression_depth -= 1,
             '{' => depth += 1,
             '}' => {
                 depth -= 1;
-                if depth == 0 {
+                if depth == 0 && expression_depth == 0 {
                     if body[i + 1..].trim_start().starts_with("else") {
                         continue;
                     }
@@ -525,7 +528,7 @@ pub(crate) fn split_function_statements(body: &str) -> Vec<String> {
                     start = i + 1;
                 }
             }
-            ';' | '\n' if depth == 0 => {
+            ';' | '\n' if depth == 0 && expression_depth == 0 => {
                 if c == '\n' && body[start..i].trim_end().ends_with('}') {
                     let tail = body[i + 1..].trim_start();
                     if tail.starts_with("else")

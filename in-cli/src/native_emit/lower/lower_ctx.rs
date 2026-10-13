@@ -723,6 +723,15 @@ impl<'a> LowerCtx<'a> {
             .or_else(|| super::lower_expr::native_expr_type(expr, self, functions));
         if let Some(Typ::Array(elem)) = resolved.as_ref() {
             ensure_native_array_element(elem, fn_name, "local")?;
+            // Local aliases share inline array metadata rather than pretending
+            // an inline array is a returned pointer/length pair.
+            if let Expr::Ident(source) = expr
+                && let Some(slot @ LocalSlot::Array { elem: actual, .. }) = self.locals.get(source)
+                && actual == elem.as_ref()
+            {
+                self.locals.insert(name.to_string(), slot.clone());
+                return Ok(());
+            }
             let Expr::ArrayLit(items) = expr else {
                 let ptr_offset = self.alloc_slot();
                 let len_offset = self.alloc_slot();

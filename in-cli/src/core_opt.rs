@@ -33,6 +33,8 @@ pub fn optimize_with_linkage(
     keep_all_functions: bool,
 ) {
     crate::lower_core::lower_guarded_decls(decls);
+    crate::lower_core::lower_named_constants(decls);
+    crate::lower_core::lower_value_spills(decls);
     crate::core_bindings::normalize_decls(decls);
     match profile {
         EmitProfile::Default => {
@@ -82,6 +84,31 @@ pub fn optimize_with_linkage(
             harden_cfg_dispatch_lite(decls);
             harden_junk_stmts(decls);
             harden_hash_symbols(decls, entry);
+        }
+    }
+}
+
+/// Qualify frontend constant references after lexical binding normalization.
+pub(crate) fn rewrite_constant_references(decls: &mut [Decl], names: &HashMap<String, String>) {
+    let mut rewrite = |expr: &mut Expr| {
+        if let Expr::Ident(name) = expr
+            && let Some(qualified) = names.get(name)
+        {
+            *name = qualified.clone();
+        }
+    };
+    for decl in decls {
+        match decl {
+            Decl::Function { body, .. } => {
+                for stmt in body {
+                    map_stmt_mut(stmt, &mut rewrite);
+                }
+            }
+            Decl::Global {
+                init: Some(expr), ..
+            } => map_expr_mut(expr, &mut rewrite),
+            Decl::Class { methods, .. } => rewrite_constant_references(methods, names),
+            _ => {}
         }
     }
 }
@@ -154,7 +181,11 @@ fn map_expr_mut<F: FnMut(&mut Expr)>(e: &mut Expr, f: &mut F) {
 fn map_stmt_mut<F: FnMut(&mut Expr)>(s: &mut Stmt, f: &mut F) {
     match s {
         Stmt::Let(_, _, e) => map_expr_mut(e, f),
-        Stmt::Assign(_, e) | Stmt::FieldAssign { value: e, .. } => map_expr_mut(e, f),
+        Stmt::Assign(_, e) => map_expr_mut(e, f),
+        Stmt::FieldAssign { base, value, .. } => {
+            map_expr_mut(base, f);
+            map_expr_mut(value, f);
+        }
         Stmt::IndexAssign {
             base, index, value, ..
         } => {
@@ -203,6 +234,9 @@ fn map_stmt_mut<F: FnMut(&mut Expr)>(s: &mut Stmt, f: &mut F) {
         } => {
             map_expr_mut(scrutinee, f);
             for arm in arms.iter_mut() {
+                if let Some(guard) = &mut arm.guard {
+                    map_expr_mut(guard, f);
+                }
                 for s in arm.body.iter_mut() {
                     map_stmt_mut(s, f);
                 }
@@ -1038,7 +1072,7 @@ fn fold_stmt_matches(s: Stmt) -> Vec<Stmt> {
     }
 }
 
-fn fold_expr(e: Expr) -> Expr {
+pub(crate) fn fold_expr(e: Expr) -> Expr {
     match &e {
         Expr::Binary { op, lhs, rhs, .. } => {
             if let (Expr::FloatLit(a), Expr::FloatLit(b)) = (lhs.as_ref(), rhs.as_ref()) {
@@ -1161,10 +1195,8 @@ fn fold_expr(e: Expr) -> Expr {
 // ─── Constant Propagation ──────────────────────────────────────────────────
 
 /// Replace `let x = C; ... x ...` with `... C ...` when `x` is never assigned.
-/// Scalars and structs substitute on every use; array literals are excluded
-/// because backends materialize arrays as stack slots — inlining the literal
-/// into `arr[i]` would leave `arr` unbound and turn variable-index reads into
-/// a form no owned backend can execute.
+/// Scalars substitute on every use. Aggregates retain storage: array indexing
+/// and struct receiver calls can observe an address, even without assignments.
 fn propagate_constants(decls: &mut [Decl]) {
     for body in fn_bodies_mut(decls) {
         propagate_in_body(body);
@@ -1174,7 +1206,6 @@ fn propagate_constants(decls: &mut [Decl]) {
 fn is_propagatable_const(e: &Expr) -> bool {
     match e {
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) => true,
-        Expr::StructInit { fields, .. } => fields.iter().all(|(_, v)| is_propagatable_const(v)),
         _ => false,
     }
 }
@@ -2451,6 +2482,7 @@ mod tests {
             typ: Typ::Int,
             init: init.map(Box::new),
             mutable: true,
+            constant_value: false,
         })
         .collect();
         let original = decls.clone();
