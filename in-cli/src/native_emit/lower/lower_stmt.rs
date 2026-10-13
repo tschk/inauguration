@@ -1106,28 +1106,53 @@ pub(crate) fn lower_array_expr_into_regs(
     }
     match expr {
         Expr::Ident(local) => {
-            let Some(slot) = ctx.locals.get(local) else {
-                emitter.emit_insns(&crate::native_emit::aarch64::load_i64(0, 0));
-                return Ok(());
-            };
+            let slot = ctx.locals.get(local).cloned().ok_or_else(|| {
+                format!("native-lower: array references unknown local `{local}` in `{fn_name}`")
+            })?;
             match slot {
                 LocalSlot::ArrayParam {
                     elem: actual,
                     ptr_offset,
                     len_offset,
                 } => {
-                    if actual != elem {
-                        emitter.emit_insns(&crate::native_emit::aarch64::load_i64(0, 0));
-                        return Ok(());
+                    if &actual != elem {
+                        return Err(format!(
+                            "native-lower: array return type mismatch in `{fn_name}`"
+                        ));
                     }
-                    emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, *ptr_offset));
-                    emitter.emit_u32(aarch64::ldr64(1, aarch64::REG_SP, *len_offset));
+                    emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, ptr_offset));
+                    emitter.emit_u32(aarch64::ldr64(1, aarch64::REG_SP, len_offset));
                     Ok(())
                 }
-                _ => {
-                    emitter.emit_insns(&crate::native_emit::aarch64::load_i64(0, 0));
-                    Ok(())
+                LocalSlot::Array {
+                    elem: actual,
+                    offsets,
+                } => {
+                    if &actual != elem {
+                        return Err(format!(
+                            "native-lower: array return type mismatch in `{fn_name}`"
+                        ));
+                    }
+                    // Copy inline storage before the callee's frame is released.
+                    let items = (0..offsets.len())
+                        .map(|index| Expr::Index {
+                            base: Box::new(expr.clone()),
+                            index: Box::new(Expr::IntLit(index as i64)),
+                        })
+                        .collect();
+                    lower_array_expr_into_regs(
+                        emitter,
+                        ctx,
+                        &Expr::ArrayLit(items),
+                        elem,
+                        functions,
+                        pending_calls,
+                        fn_name,
+                    )
                 }
+                _ => Err(format!(
+                    "native-lower: `{local}` is not an array in `{fn_name}`"
+                )),
             }
         }
         Expr::Call { callee, args, .. } => {

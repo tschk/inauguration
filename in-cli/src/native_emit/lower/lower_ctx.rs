@@ -717,7 +717,13 @@ impl<'a> LowerCtx<'a> {
                 self.locals.insert(name.to_string(), slot.clone());
                 return Ok(());
             }
-            let Expr::ArrayLit(items) = expr else {
+            // Array-returning functions can forward locals through other calls.
+            // Own their literals from initialization so aliases cannot escape the frame.
+            let inline_items = match expr {
+                Expr::ArrayLit(items) if !matches!(self.ret_typ, Typ::Array(_)) => Some(items),
+                _ => None,
+            };
+            let Some(items) = inline_items else {
                 let ptr_offset = self.alloc_slot();
                 let len_offset = self.alloc_slot();
                 self.locals.insert(

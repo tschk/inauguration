@@ -1,0 +1,17 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+fn id(values: [Int]) -> [Int] { return values; }
+fn make(value: Int) -> [Int] {
+    var values: [Int] = [value];
+    values[0] += 1;
+    return id(values);
+}
+fn main() -> Int {
+    var first: [Int] = make(19);
+    var second: [Int] = make(21);
+    first[0] += 1;
+    return first[0] + second[0] - 1;
+}

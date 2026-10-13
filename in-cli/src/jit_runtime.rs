@@ -2440,6 +2440,30 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn local_array_results_survive_frame_reuse() {
+        for source in [
+            "fn id(values: [Int]) -> [Int] { return values; }\nfn make(value: Int) -> [Int] { var values: [Int] = [value]; return id(values); }\nfn main() -> Int { var first: [Int] = make(20); var second: [Int] = make(22); return first[0] + second[0]; }",
+            include_str!("../../conformance/types/array-local-return.in"),
+            "fn make() -> [Int] { var values: [Int] = [20, 21]; values[1] += 1; return values; }\nfn main() -> Int { var result: [Int] = make(); return result[0] + result[1]; }",
+            "fn make(value: Int) -> [Int] { var values: [Int] = [value]; return values; }\nfn main() -> Int { var first: [Int] = make(20); var second: [Int] = make(22); first[0] += 1; return first[0] + second[0] - 1; }",
+            "fn make() -> [Float] { var values: [Float] = [42.5]; return values; }\nfn main() -> Int { var values: [Float] = make(); if values[0] == 42.5 { return 42; } return 0; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,
