@@ -901,6 +901,16 @@ impl TypeChecker {
                         got: actual,
                     });
                 }
+                if matches!(op.as_str(), "float-cast-f32" | "float-cast-f64")
+                    && let Some(actual) = self.expr_type(inner, facts, env)
+                    && actual != Typ::Float
+                {
+                    errors.push(TypeError::TypeMismatch {
+                        context: format!("floating width cast in `{fn_name}`"),
+                        expected: Typ::Float,
+                        got: actual,
+                    });
+                }
                 if matches!(op.as_str(), "int-to-float" | "float-to-int")
                     && let Some(actual) = self.expr_type(inner, facts, env)
                 {
@@ -1253,7 +1263,7 @@ impl TypeChecker {
             Expr::Unary { op, expr, .. } => match op.as_str() {
                 "!" => Some(Typ::Bool),
                 "bool-to-int" | "float-to-int" => Some(Typ::Int),
-                "int-to-float" => Some(Typ::Float),
+                "int-to-float" | "float-cast-f32" | "float-cast-f64" => Some(Typ::Float),
                 op if crate::core_ir::integer_cast_spec(op).is_some() => Some(Typ::Int),
                 "-" => self.expr_type(expr, facts, env),
                 _ => self.expr_type(expr, facts, env),

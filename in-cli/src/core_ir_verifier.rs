@@ -715,6 +715,20 @@ fn check_expr(
             {
                 require_type(fn_name, "integer cast", &Typ::Int, expr, facts, env)?;
             }
+            if op.starts_with("float-cast-") {
+                if !matches!(op.as_str(), "float-cast-f32" | "float-cast-f64") {
+                    return Err((
+                        "unsupported-floating-cast".into(),
+                        format!("unsupported floating cast `{op}` in `{fn_name}`"),
+                    ));
+                }
+                if expr_type(expr, facts, env) != Some(Typ::Float) {
+                    return Err((
+                        "type-mismatch".into(),
+                        format!("floating width cast in `{fn_name}` needs canonical Float"),
+                    ));
+                }
+            }
             if matches!(op.as_str(), "int-to-float" | "float-to-int") {
                 let expected = if op == "int-to-float" {
                     Typ::Int
@@ -1071,7 +1085,7 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
         Expr::Unary { op, expr, .. } => match op.as_str() {
             "!" => Some(Typ::Bool),
             "bool-to-int" | "float-to-int" => Some(Typ::Int),
-            "int-to-float" => Some(Typ::Float),
+            "int-to-float" | "float-cast-f32" | "float-cast-f64" => Some(Typ::Float),
             op if crate::core_ir::integer_cast_spec(op).is_some() => Some(Typ::Int),
             "-" => {
                 if expr_type(expr, facts, env) == Some(Typ::Float) {
@@ -2137,6 +2151,39 @@ mod tests {
             );
             assert!(!report.ok, "{report:?}");
             assert_eq!(report.reason_code.as_deref(), Some(reason));
+        }
+    }
+    #[test]
+    fn floating_width_casts_accept_canonical_floats_only() {
+        for (op, operand, accepted) in [
+            (
+                "float-cast-f32",
+                Expr::FloatLit(crate::core_ir::FloatVal(42.0)),
+                true,
+            ),
+            (
+                "float-cast-f64",
+                Expr::FloatLit(crate::core_ir::FloatVal(42.0)),
+                true,
+            ),
+            ("float-cast-f32", Expr::IntLit(42), false),
+            ("float-cast-f32", Expr::BoolLit(true), false),
+            (
+                "float-cast-f128",
+                Expr::FloatLit(crate::core_ir::FloatVal(42.0)),
+                false,
+            ),
+        ] {
+            let module = module(vec![function_with_ret(
+                "main",
+                Typ::Float,
+                vec![Stmt::Return(Some(Expr::Unary {
+                    op: op.into(),
+                    expr: Box::new(operand),
+                }))],
+            )]);
+            let report = verify_for_entry(&module, "main");
+            assert_eq!(report.ok, accepted, "{report:?}");
         }
     }
 }

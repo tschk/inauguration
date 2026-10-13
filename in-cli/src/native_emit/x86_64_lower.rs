@@ -2167,7 +2167,14 @@ fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
         {
             Some(Typ::Int)
         }
-        Expr::Unary { op, .. } if op == "int-to-float" => Some(Typ::Float),
+        Expr::Unary { op, .. }
+            if matches!(
+                op.as_str(),
+                "int-to-float" | "float-cast-f32" | "float-cast-f64"
+            ) =>
+        {
+            Some(Typ::Float)
+        }
         Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&" | "|" | "^") => {
             crate::core_ir::bitwise_result_type(
                 scalar_expr_type(lhs, ctx),
@@ -3115,6 +3122,17 @@ fn lower_unary_expr(
     }
     lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
     match op {
+        "float-cast-f32" | "float-cast-f64" => {
+            if scalar_expr_type(expr, ctx) != Some(Typ::Float) {
+                return Err("x86_64-lower: floating width cast needs Float".into());
+            }
+            if op == "float-cast-f32" {
+                emitter.emit_insns(&x86_64::movq_xmm_gpr(0, RAX, true));
+                emitter.emit_insns(&x86_64::convert_scalar_float(0, 0, true));
+                emitter.emit_insns(&x86_64::convert_scalar_float(0, 0, false));
+                emitter.emit_insns(&x86_64::movq_xmm_gpr(0, RAX, false));
+            }
+        }
         "int-to-float" => {
             if scalar_expr_type(expr, ctx) != Some(Typ::Int) {
                 return Err("x86_64-lower: integer conversion needs Int".into());

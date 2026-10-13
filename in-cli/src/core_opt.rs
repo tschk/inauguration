@@ -1181,6 +1181,15 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
                     );
                 }
             }
+            if matches!(op.as_str(), "float-cast-f32" | "float-cast-f64")
+                && let Expr::FloatLit(value) = expr.as_ref()
+            {
+                return Expr::FloatLit(crate::core_ir::FloatVal(if op == "float-cast-f32" {
+                    f64::from(value.0 as f32)
+                } else {
+                    value.0
+                }));
+            }
             if op == "int-to-float"
                 && let Expr::IntLit(value) = expr.as_ref()
             {
@@ -3901,5 +3910,27 @@ mod tests {
             fold_expr(unary("int-cast-u8", Expr::BoolLit(true))),
             Expr::IntLit(1)
         );
+    }
+    #[test]
+    fn floating_width_folding_matches_ieee_single_rounding() {
+        for value in [
+            0.0f64,
+            -0.0,
+            0.1,
+            16777217.0,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+            f64::INFINITY,
+        ] {
+            let expected = f64::from(value as f32);
+            let folded = fold_expr(unary(
+                "float-cast-f32",
+                Expr::FloatLit(crate::core_ir::FloatVal(value)),
+            ));
+            let Expr::FloatLit(value) = folded else {
+                panic!("literal");
+            };
+            assert_eq!(value.0.to_bits(), expected.to_bits());
+        }
     }
 }

@@ -916,6 +916,7 @@ fn map_type(ty: &syn::Type) -> Typ {
                 Some("u8" | "u16" | "u32" | "u64" | "u128" | "usize") => Typ::Int,
                 Some("String" | "str") => Typ::String,
                 Some("bool") => Typ::Bool,
+                Some("f64") => Typ::Float,
                 Some("Result") => last_segment
                     .and_then(|segment| match &segment.arguments {
                         syn::PathArguments::AngleBracketed(arguments) => {
@@ -1506,14 +1507,41 @@ fn lower_expr_with_types_inner(
 ) -> Expr {
     match expr {
         syn::Expr::Lit(l) => match &l.lit {
+            syn::Lit::Int(i) if matches!(i.suffix(), "f32" | "f64") => {
+                let token = i.to_token_stream().to_string();
+                if ["0x", "0o", "0b"]
+                    .iter()
+                    .any(|prefix| token.starts_with(prefix))
+                {
+                    return Expr::Ident(token);
+                }
+                let value = if i.suffix() == "f32" {
+                    i.base10_parse::<f32>().map(f64::from)
+                } else {
+                    i.base10_parse::<f64>()
+                };
+                value
+                    .ok()
+                    .filter(|value| value.is_finite())
+                    .map(|value| Expr::FloatLit(FloatVal(value)))
+                    .unwrap_or(Expr::Ident(token))
+            }
             syn::Lit::Int(i) => i
                 .base10_parse::<i64>()
                 .map(Expr::IntLit)
                 .unwrap_or_else(|_| Expr::Ident(i.to_token_stream().to_string())),
-            syn::Lit::Float(value) => value
-                .base10_parse::<f64>()
-                .map(|value| Expr::FloatLit(FloatVal(value)))
-                .unwrap_or_else(|_| Expr::Ident(value.to_token_stream().to_string())),
+            syn::Lit::Float(value) => {
+                let parsed = match value.suffix() {
+                    "f32" => value.base10_parse::<f32>().map(f64::from),
+                    "" | "f64" => value.base10_parse::<f64>(),
+                    _ => return Expr::Ident(value.to_token_stream().to_string()),
+                };
+                parsed
+                    .ok()
+                    .filter(|value| value.is_finite())
+                    .map(|value| Expr::FloatLit(FloatVal(value)))
+                    .unwrap_or_else(|| Expr::Ident(value.to_token_stream().to_string()))
+            }
             syn::Lit::Bool(b) => Expr::BoolLit(b.value),
             syn::Lit::Str(s) => Expr::StringLit(s.value()),
             _ => Expr::Ident(l.lit.to_token_stream().to_string()),
@@ -1756,8 +1784,10 @@ fn lower_expr_with_types_inner(
                     expr: Box::new(value),
                 }
             } else if matches!(target, "f32" | "f64") {
-                // shortcut: floating casts still erase their target, replace with typed rounding and conversion.
-                value
+                Expr::Unary {
+                    op: format!("float-cast-{target}"),
+                    expr: Box::new(value),
+                }
             } else {
                 Expr::Call {
                     callee: Box::new(Expr::Ident("unsupported-rust-cast".into())),
@@ -2504,6 +2534,43 @@ fn main() {
                     "{source}: {body:?}"
                 );
             }
+        }
+    }
+    #[test]
+    fn floating_width_source_and_literal_suffixes_are_host_independent() {
+        for (literal, expected) in [
+            ("16777217.0", 16777216.0),
+            ("0.1f32", f64::from(0.1f32)),
+            ("42f32", 42.0),
+            ("42f64", 42.0),
+        ] {
+            let source = format!("fn main() -> f64 {{ return ({literal} as f32) as f64; }}");
+            let mut module = parse_rust_source(&source).unwrap();
+            crate::typecheck::TypeChecker::new()
+                .check_module(&module)
+                .unwrap();
+            assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+            crate::core_opt::optimize_with_profile(
+                &mut module.decls,
+                Some("main"),
+                crate::emit_profile::EmitProfile::Default,
+            );
+            let Decl::Function { body, .. } = &module.decls[0] else {
+                panic!("function");
+            };
+            assert_eq!(
+                body.last(),
+                Some(&Stmt::Return(Some(Expr::FloatLit(FloatVal(expected))))),
+                "{source}: {body:?}"
+            );
+        }
+        for literal in ["1e39f32", "1e400f64", "0b1f32"] {
+            let source = format!("fn main() -> f64 {{ return {literal}; }}");
+            let module = parse_rust_source(&source).unwrap();
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}"
+            );
         }
     }
 }

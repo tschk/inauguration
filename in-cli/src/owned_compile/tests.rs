@@ -4000,3 +4000,37 @@ fn owned_rust_integer_casts_truncate_and_extend() {
         }
     }
 }
+
+#[test]
+fn owned_rust_floating_width_casts_round_and_keep_values() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main() -> i64 { let value = 16777217.0; if (value as f32) as f64 == 16777216.0 { return 42; } return 0; }",
+        "fn main() -> i64 { let value: f64 = 16777217.0; if (value as f32) as f64 == 16777216.0 { return 42; } return 0; }",
+        "fn value() -> f64 { return 16777217.0; } fn main() -> i64 { if (value() as f32) as f64 == 16777216.0 { return 42; } return 0; }",
+        "fn main() -> i64 { let value = 0.1f32; if (value as f64) > 0.1f64 { return 42; } return 0; }",
+        "fn main() -> i64 { let value = 42f32; if value as f64 == 42f64 { return 42; } return 0; }",
+        "fn main() -> i64 { let value: f64 = 42.5; if value as ::core::primitive::f64 == 42.5 { return 42; } return 0; }",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let path = temp_path("rust-float-width.rs");
+            fs::write(&path, source).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{profile:?}: {source}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{profile:?}: {source}"
+            );
+        }
+    }
+}

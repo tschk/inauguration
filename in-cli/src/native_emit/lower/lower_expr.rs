@@ -500,6 +500,18 @@ pub(crate) fn lower_unary(
     }
     lower_expr_into(emitter, ctx, expr, rd, functions, pending_calls, fn_name)?;
     match op {
+        "float-cast-f32" | "float-cast-f64" => {
+            if native_expr_type(expr, ctx, functions) != Some(Typ::Float) {
+                return Err("native-lower: floating width cast needs Float".into());
+            }
+            if op == "float-cast-f32" {
+                emitter.emit_u32(aarch64::fmov_from_gp(rd, rd));
+                emitter.emit_u32(aarch64::fcvt_s_d(rd, rd));
+                emitter.emit_u32(aarch64::fcvt_d_s(rd, rd));
+                emitter.emit_u32(aarch64::fmov_to_gp(rd, rd));
+            }
+            Ok(())
+        }
         "int-to-float" => {
             if native_expr_type(expr, ctx, functions) != Some(Typ::Int) {
                 return Err("native-lower: integer conversion needs Int".into());
@@ -843,7 +855,14 @@ pub(crate) fn native_expr_type(
         {
             Some(Typ::Int)
         }
-        Expr::Unary { op, .. } if op == "int-to-float" => Some(Typ::Float),
+        Expr::Unary { op, .. }
+            if matches!(
+                op.as_str(),
+                "int-to-float" | "float-cast-f32" | "float-cast-f64"
+            ) =>
+        {
+            Some(Typ::Float)
+        }
         Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&" | "|" | "^") => {
             crate::core_ir::bitwise_result_type(
                 native_expr_type(lhs, ctx, functions),

@@ -630,3 +630,53 @@ fn integer_cast_projection_executes_operand_once() {
     std::fs::remove_dir_all(dir).unwrap();
     assert_eq!(status.code(), Some(42));
 }
+
+#[test]
+fn floating_width_projection_rounds_and_evaluates_once() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let mut module = crate::in_lang_parse::parse_in_source("var calls: Int = 0;\nfn next() -> Float { calls += 1; return 16777217.0; }\nfn main() -> Int { let value: Float = next(); if value == 16777216.0 && calls == 1 { return 42; } return 0; }").unwrap();
+    let Decl::Function { name, body, .. } = &mut module.decls[2] else {
+        panic!("function");
+    };
+    *name = "answer".into();
+    let Stmt::Let(_, _, value) = &mut body[0] else {
+        panic!("let");
+    };
+    *value = Expr::Unary {
+        op: "float-cast-f32".into(),
+        expr: Box::new(value.clone()),
+    };
+    let source = format!(
+        "{}\nint main(void) {{ return (int)answer(); }}\n",
+        emit_c_module(&module).unwrap()
+    );
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-float-width-c-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let c = dir.join("cast.c");
+    let binary = dir.join("cast");
+    std::fs::write(&c, source).unwrap();
+    let build = Command::new("clang")
+        .arg(&c)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let status = Command::new(&binary).status().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(status.code(), Some(42));
+}

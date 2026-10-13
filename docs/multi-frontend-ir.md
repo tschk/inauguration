@@ -39,6 +39,12 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 
+## Floating width casts
+
+Rust `as f32` and `as f64` preserve explicit precision conversion for canonical floating values. `f32` conversion rounds to IEEE single precision, then widens into the internal Float64 word; `f64` conversion preserves that word. Both native CPUs and C projection use this representation. Rust `f64` annotations normalize to the canonical floating type, and explicit `f32`/`f64` literal suffixes retain their precision, including decimal literals without a point. Overflowing source literals remain refused; floating-width conversion itself can produce infinity or subnormal values.
+
+Integer-to-floating casts, unsigned source semantics, and full typed `f32` binding/arithmetic semantics remain pending. The shared width operations require canonical Float operands rather than guessing the representation of named types.
+
 ## Rust integer casts
 
 Explicit Rust casts to signed and unsigned 8-, 16-, 32-, and 64-bit integers truncate low bits and then sign- or zero-extend into the canonical Int64 word. Boolean operands become zero or one. `isize`/`usize` use the supported 64-bit target word. Shared bit operations implement these conversions for both native backends and C projection, with one evaluation of the operand. General source-width arithmetic and floating-point cast semantics remain separate coverage gaps.

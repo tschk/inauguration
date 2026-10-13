@@ -151,6 +151,15 @@ pub fn cvttsd2si(gpr: u8, xmm: u8) -> Vec<u8> {
     code
 }
 
+pub fn convert_scalar_float(dst: u8, src: u8, to_single: bool) -> Vec<u8> {
+    let mut code = vec![if to_single { 0xf2 } else { 0xf3 }];
+    if dst >= 8 || src >= 8 {
+        code.push(0x40 | ((dst >> 3) << 2) | (src >> 3));
+    }
+    code.extend_from_slice(&[0x0f, 0x5a, modrm(3, dst, src)]);
+    code
+}
+
 /// Scalar double arithmetic: ADD/SUB/MUL/DIV opcode, destination XMM, source XMM.
 pub fn scalar_double(opcode: u8, dst: u8, src: u8) -> Vec<u8> {
     let mut code = vec![0xf2];
@@ -776,6 +785,14 @@ pub fn epilogue() -> Vec<u8> {
 mod tests {
     #[test]
     fn encodes_scalar_double_register_operations() {
+        assert_eq!(
+            super::convert_scalar_float(0, 1, true),
+            [0xf2, 0x0f, 0x5a, 0xc1]
+        );
+        assert_eq!(
+            super::convert_scalar_float(8, 9, false),
+            [0xf3, 0x45, 0x0f, 0x5a, 0xc1]
+        );
         assert_eq!(
             super::movq_xmm_gpr(0, super::RDX, true),
             [0x66, 0x48, 0x0f, 0x6e, 0xc2]

@@ -405,7 +405,8 @@ impl Ctx {
                 let e = self.expr_str(expr);
                 match op.as_str() {
                     "bool-to-int" | "float-to-int" => format!("((int64_t)({e}))"),
-                    "int-to-float" => format!("((double)({e}))"),
+                    "int-to-float" | "float-cast-f64" => format!("((double)({e}))"),
+                    "float-cast-f32" => format!("((double)((float)({e})))"),
                     "neg" | "-" => format!("(-{})", e),
                     "not" | "!" => format!("(!{})", e),
                     "bnot" | "~" => format!("(~{})", e),

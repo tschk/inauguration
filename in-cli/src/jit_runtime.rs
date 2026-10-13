@@ -2264,6 +2264,84 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn floating_width_casts_execute_rounding_without_folding() {
+        use crate::core_ir::{Decl, Expr, Stmt};
+        for target in ["f32", "f64"] {
+            let mut module = crate::in_lang_parse::parse_in_source(
+                "fn main(value: Float) -> Float { return value; }",
+            )
+            .unwrap();
+            let Decl::Function { body, .. } = &mut module.decls[0] else {
+                panic!("function");
+            };
+            body[0] = Stmt::Return(Some(Expr::Unary {
+                op: format!("float-cast-{target}"),
+                expr: Box::new(Expr::Ident("value".into())),
+            }));
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                for value in [
+                    0.0f64,
+                    -0.0,
+                    0.1,
+                    -0.1,
+                    16777217.0,
+                    f64::MAX,
+                    f64::MIN_POSITIVE,
+                    f64::from(f32::from_bits(1)),
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NAN,
+                ] {
+                    let expected = if target == "f32" {
+                        f64::from(value as f32)
+                    } else {
+                        value
+                    };
+                    let actual = f64::from_bits(
+                        invoke_module(&module, profile, &[value.to_bits() as i64]).unwrap() as u64,
+                    );
+                    if expected.is_nan() {
+                        assert!(actual.is_nan());
+                    } else {
+                        assert_eq!(
+                            actual.to_bits(),
+                            expected.to_bits(),
+                            "{profile:?}: {target}: {value}"
+                        );
+                    }
+                }
+            }
+        }
+        let mut module = crate::in_lang_parse::parse_in_source("var calls: Int = 0;\nfn next() -> Float { calls += 1; return 16777217.0; }\nfn main() -> Int { let value: Float = next(); if value == 16777216.0 && calls == 1 { return 42; } return 0; }").unwrap();
+        let Decl::Function { body, .. } = &mut module.decls[2] else {
+            panic!("function");
+        };
+        let Stmt::Let(_, _, value) = &mut body[0] else {
+            panic!("let");
+        };
+        *value = Expr::Unary {
+            op: "float-cast-f32".into(),
+            expr: Box::new(value.clone()),
+        };
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(
+                invoke_module(&module, profile, &[]),
+                Some(42),
+                "{profile:?}: evaluation count"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn logical_operators_short_circuit_calls() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,
