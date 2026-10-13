@@ -43,6 +43,10 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 AArch64 materializes array literal results in writable storage instead of returning pointers into read-only code. Elements can be dynamic and retain their evaluation order; a saved cursor survives element calls. JIT storage belongs to the runtime arena, while native hosted artifacts use the existing process-lifetime heap policy. The internal AArch64 data-pointer/length array ABI remains unchanged. Array-returning functions initialize local literal arrays in owned storage, so returns through aliases and other calls survive frame release. Inline arrays materialized elsewhere copy their current elements into owned storage. Direct indexing of literals evaluates elements before the index and uses the same pointer/length bounds checks as call results. Direct literal and call-result array arguments use this same materializer; argument staging preserves earlier values across later calls.
 
+## Array bounds failures
+
+AArch64 and x86 native array reads and writes return 1 from the current function on a negative or out-of-range index. They preserve effects evaluated before the bounds check and skip later statements. Raw integer-pointer indexing remains unchecked. This is the existing native failure-return convention; callers receive the result and can continue.
+
 ## Indexed compound update order
 
 `.in` indexed compound assignments share the indexed-store spill machinery. The array/base, index, and old element are saved once before RHS effects, then the update stores through the saved place. This retains `.in` read-before-RHS order while eliminating duplicate index evaluation and unsupported call operands. Rust's value-before-place order remains distinct in the same lowering path.

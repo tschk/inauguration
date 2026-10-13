@@ -1,0 +1,18 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var trace: Int = 0;
+fn index() -> Int { trace += 1; return 2; }
+fn invalid(values: [Int]) -> Int {
+    var read: Int = values[index()];
+    trace = 99;
+    return read + 7;
+}
+fn main() -> Int {
+    var values: [Int] = [42];
+    var result: Int = invalid(values);
+    if result == 1 && trace == 1 { return 42; }
+    return 0;
+}

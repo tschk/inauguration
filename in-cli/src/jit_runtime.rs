@@ -773,7 +773,7 @@ mod tests {
             crate::emit_profile::EmitProfile::Lean,
             crate::emit_profile::EmitProfile::Harden,
         ] {
-            for (index, expected) in [(0, 13), (1, 24), (9, 12), (-1, 12)] {
+            for (index, expected) in [(0, 13), (1, 24), (9, 1), (-1, 1)] {
                 let source = format!(
                     "var calls: Int = 0;\nfn next(digit: Int) -> Int {{ calls = calls * 10 + digit; return calls; }}\nfn main() -> Int {{ let item = [next(1), next(2)][{index}]; return item + calls; }}"
                 );
@@ -781,6 +781,13 @@ mod tests {
                 assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
                 crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
                 assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
+                if index < 0 || index >= 2 {
+                    let source = source.replace("fn main()", "fn invalid()");
+                    let source = format!(
+                        "{source}\nfn main() -> Int {{ let result = invalid(); if result == 1 && calls == 12 {{ return 42; }} return 0; }}"
+                    );
+                    assert_eq!(invoke_source(&source, profile, &[]), Some(42));
+                }
             }
             let items = (0..400)
                 .map(|i| i.to_string())
@@ -808,7 +815,7 @@ mod tests {
             crate::emit_profile::EmitProfile::Lean,
             crate::emit_profile::EmitProfile::Harden,
         ] {
-            for (index, expected) in [(1, 29), (9, 42), (-1, 42)] {
+            for (index, expected) in [(1, 29), (9, 1), (-1, 1)] {
                 let source = format!(
                     "var calls: Int = 0;\nfn index() -> Int {{ calls = calls * 10 + 1; return {index}; }}\nfn value() -> Int {{ calls = calls * 10 + 2; return 7; }}\nfn main() -> Int {{ let xs: [Int] = [10, 20]; xs[index()] = value(); return xs[0] + xs[1] + calls; }}"
                 );
@@ -816,6 +823,13 @@ mod tests {
                 assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
                 crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
                 assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
+                if index < 0 || index >= 2 {
+                    let source = source.replace("fn main()", "fn invalid()");
+                    let source = format!(
+                        "{source}\nfn main() -> Int {{ let result = invalid(); if result == 1 && calls == 12 {{ return 42; }} return 0; }}"
+                    );
+                    assert_eq!(invoke_source(&source, profile, &[]), Some(42));
+                }
             }
         }
     }
@@ -1145,7 +1159,7 @@ mod tests {
                 ),
                 (
                     "fn values() -> [Int] { return []; }\nfn main() -> Int { return array_len(values()) + values()[0]; }",
-                    0,
+                    1,
                 ),
                 (
                     "fn values() -> [String] { return [\"a\", \"bc\"]; }\nfn main() -> Int { return str_len(values()[1]); }",
@@ -2500,9 +2514,64 @@ mod tests {
             ] {
                 assert_eq!(
                     invoke_source(&source, profile, &[]),
-                    Some(if cfg!(target_arch = "aarch64") { 1 } else { 0 }),
+                    Some(1),
                     "{profile:?}: {index}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn invalid_array_indices_stop_the_current_function() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(
+                invoke_source(
+                    include_str!("../../conformance/control-flow/array-bounds-effects.in"),
+                    profile,
+                    &[]
+                ),
+                Some(42)
+            );
+            assert_eq!(
+                invoke_source(
+                    "fn invalid() -> Int { var values: [Int] = []; return values[0] + 7; }\nfn main() -> Int { return invalid() + 41; }",
+                    profile,
+                    &[]
+                ),
+                Some(42)
+            );
+        }
+        for index in [-1, 2, i64::MAX] {
+            for body in [
+                format!(
+                    "var values: [Int] = [20, 42]; var read: Int = values[{index}]; trace = 99; return read + 7;"
+                ),
+                format!("var read: Int = [20, 42][{index}]; trace = 99; return read + 7;"),
+                format!("var read: Int = make()[{index}]; trace = 99; return read + 7;"),
+                format!(
+                    "var values: [Int] = [20, 42]; values[{index}] = 99; trace = 99; return 7;"
+                ),
+                format!("var values: [Int] = make(); values[{index}] = 99; trace = 99; return 7;"),
+            ] {
+                let source = format!(
+                    "var trace: Int = 0;\nfn make() -> [Int] {{ return [20, 42]; }}\nfn invalid() -> Int {{ {body} }}\nfn main() -> Int {{ var result: Int = invalid(); if result == 1 && trace == 0 {{ return 42; }} return 0; }}"
+                );
+                for profile in [
+                    crate::emit_profile::EmitProfile::Default,
+                    crate::emit_profile::EmitProfile::Lean,
+                    crate::emit_profile::EmitProfile::Harden,
+                ] {
+                    assert_eq!(
+                        invoke_source(&source, profile, &[]),
+                        Some(42),
+                        "{profile:?}: {source}"
+                    );
+                }
             }
         }
     }

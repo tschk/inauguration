@@ -95,6 +95,11 @@ fn emit_function_epilogue(emitter: &mut CodeEmitter, is_interrupt: bool) {
     }
 }
 
+fn emit_array_bounds_failure(emitter: &mut CodeEmitter, is_interrupt: bool) {
+    emitter.emit_insns(&x86_64::load_i64(RAX, 1));
+    emit_function_epilogue(emitter, is_interrupt);
+}
+
 pub struct X86_64CompileResult {
     pub code: Vec<u8>,
     pub entry_offset: u32,
@@ -1405,7 +1410,11 @@ fn lower_stmt(
                     emitter.emit_insns(&x86_64::sub_rr(RDI, RAX));
                     emitter.emit_insns(&x86_64::mov_ptr_reg(RDI, RSI));
                 }
+                let end = emitter.len();
+                emitter.emit_insns(&x86_64::jmp_rel32(0));
                 emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
+                emit_array_bounds_failure(emitter, ctx.is_interrupt);
+                emitter.patch_u32(end + 1, emitter.len() - end - 5);
                 return Ok(());
             }
             let base_slot = ctx.alloc_slot();
@@ -1433,8 +1442,12 @@ fn lower_stmt(
             emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
             emitter.emit_insns(&x86_64::add_rr(RDI, RAX));
             emitter.emit_insns(&x86_64::mov_m_r(RDI, 16, RSI));
+            let end = emitter.len();
+            emitter.emit_insns(&x86_64::jmp_rel32(0));
             emitter.patch_u32(null + 2, emitter.len() - null - 6);
             emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
+            emit_array_bounds_failure(emitter, ctx.is_interrupt);
+            emitter.patch_u32(end + 1, emitter.len() - end - 5);
             Ok(())
         }
         Stmt::Break => {
@@ -3204,11 +3217,13 @@ fn lower_array_elem_read(
                 return Ok(());
             }
         }
-        return lower_int_lit(emitter, target_reg, 0);
+        emit_array_bounds_failure(emitter, ctx.is_interrupt);
+        return Ok(());
     }
     let Some(&first) = offsets.first() else {
         lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
-        return lower_int_lit(emitter, target_reg, 0);
+        emit_array_bounds_failure(emitter, ctx.is_interrupt);
+        return Ok(());
     };
     lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
     emitter.emit_insns(&x86_64::load_i64(RDX, offsets.len() as i64));
@@ -3224,7 +3239,7 @@ fn lower_array_elem_read(
     let end = emitter.len();
     emitter.emit_insns(&x86_64::jmp_rel32(0));
     emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
-    emitter.emit_insns(&x86_64::zero_reg(RAX));
+    emit_array_bounds_failure(emitter, ctx.is_interrupt);
     emitter.patch_u32(end + 1, emitter.len() - end - 5);
     if target_reg != RAX {
         emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
@@ -3358,7 +3373,7 @@ fn lower_index_expr(
     emitter.emit_insns(&x86_64::jmp_rel32(0));
     emitter.patch_u32(null + 2, emitter.len() - null - 6);
     emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
-    emitter.emit_insns(&x86_64::zero_reg(RAX));
+    emit_array_bounds_failure(emitter, ctx.is_interrupt);
     emitter.patch_u32(end + 1, emitter.len() - end - 5);
     if target_reg != RAX {
         emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
