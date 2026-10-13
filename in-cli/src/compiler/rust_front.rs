@@ -1197,7 +1197,10 @@ fn lower_expr_stmt(
             let body = lower_block_no_implicit_return_with_types(&f.body, local_types);
             out.push(Stmt::Loop {
                 kind: LoopKind::For {
-                    binding: f.pat.to_token_stream().to_string(),
+                    binding: match f.pat.as_ref() {
+                        syn::Pat::Ident(pattern) => pattern.ident.to_string(),
+                        pattern => pattern.to_token_stream().to_string(),
+                    },
                 },
                 cond: Some(lower_expr_with_types(&f.expr, local_types)),
                 body,
@@ -1738,7 +1741,10 @@ fn lower_expr_with_types_inner(
             ret: Typ::Void,
             body: vec![Stmt::Loop {
                 kind: LoopKind::For {
-                    binding: f.pat.to_token_stream().to_string(),
+                    binding: match f.pat.as_ref() {
+                        syn::Pat::Ident(pattern) => pattern.ident.to_string(),
+                        pattern => pattern.to_token_stream().to_string(),
+                    },
                 },
                 cond: Some(lower_expr_with_types(&f.expr, local_types)),
                 body: lower_block_no_implicit_return_with_types(&f.body, local_types),

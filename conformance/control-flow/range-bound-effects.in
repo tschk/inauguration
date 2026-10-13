@@ -1,0 +1,13 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 15
+
+var calls: Int = 0;
+fn start() -> Int { calls = calls * 10 + 1; return 0; }
+fn limit() -> Int { calls = calls * 10 + 2; return 3; }
+fn main() -> Int {
+    var sum: Int = 0;
+    for item in start()..limit() { sum += item; }
+    return sum + calls;
+}

@@ -141,27 +141,33 @@ pub(crate) fn expand_for_loop(
 ) -> Vec<Stmt> {
     let binding = binding.trim().to_string();
     if let Expr::Call { callee, args } = &iter {
-        if matches!(callee.as_ref(), Expr::Ident(name) if name == "range") && args.len() >= 2 {
-            let start = args[0].clone();
-            let end = args[1].clone();
+        if matches!(callee.as_ref(), Expr::Ident(name) if name == "range") && args.len() == 2 {
+            let index = format!("__for_{counter}");
+            let end = format!("__for_end_{counter}");
+            *counter += 1;
             let advance = Stmt::Assign(
-                binding.clone(),
+                index.clone(),
                 Expr::Binary {
                     op: "+".into(),
-                    lhs: Box::new(Expr::Ident(binding.clone())),
+                    lhs: Box::new(Expr::Ident(index.clone())),
                     rhs: Box::new(Expr::IntLit(1)),
                 },
+            );
+            loop_body.insert(
+                0,
+                Stmt::Let(binding, Some(Typ::Int), Expr::Ident(index.clone())),
             );
             advance_for_continues(&mut loop_body, &advance);
             loop_body.push(advance);
             return vec![
-                Stmt::Let(binding.clone(), Some(Typ::Int), start),
+                Stmt::Let(index.clone(), Some(Typ::Int), args[0].clone()),
+                Stmt::Let(end.clone(), Some(Typ::Int), args[1].clone()),
                 Stmt::Loop {
                     kind: LoopKind::While,
                     cond: Some(Expr::Binary {
                         op: "<".into(),
-                        lhs: Box::new(Expr::Ident(binding)),
-                        rhs: Box::new(end),
+                        lhs: Box::new(Expr::Ident(index)),
+                        rhs: Box::new(Expr::Ident(end)),
                     }),
                     body: loop_body,
                 },
@@ -2612,6 +2618,23 @@ mod tests {
             !sil.contains("apply @Circle_draw"),
             "interface method on unknown concrete type should not be rewritten to class method"
         );
+    }
+
+    #[test]
+    fn extra_range_arguments_are_not_discarded() {
+        let iterator = Expr::Call {
+            callee: Box::new(Expr::Ident("range".into())),
+            args: vec![
+                Expr::IntLit(0),
+                Expr::IntLit(6),
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("step".into())),
+                    args: Vec::new(),
+                },
+            ],
+        };
+        let expanded = expand_for_loop("item".into(), iterator.clone(), Vec::new(), &mut 0);
+        assert!(matches!(&expanded[0], Stmt::Let(_, _, expr) if expr == &iterator));
     }
 
     #[test]

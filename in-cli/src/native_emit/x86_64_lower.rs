@@ -1423,14 +1423,17 @@ fn lower_stmt(
             body,
         } => {
             let mut counter = ctx.frame_size as usize;
-            while [format!("__for_{counter}"), format!("__for_items_{counter}")]
-                .iter()
-                .any(|name| {
-                    ctx.locals.contains_key(name)
-                        || ctx.globals.contains_key(name)
-                        || ctx.functions.contains_key(name)
-                })
-            {
+            while [
+                format!("__for_{counter}"),
+                format!("__for_items_{counter}"),
+                format!("__for_end_{counter}"),
+            ]
+            .iter()
+            .any(|name| {
+                ctx.locals.contains_key(name)
+                    || ctx.globals.contains_key(name)
+                    || ctx.functions.contains_key(name)
+            }) {
                 counter += 1;
             }
             let expanded = crate::lower_core::expand_for_loop(

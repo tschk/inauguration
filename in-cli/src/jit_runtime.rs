@@ -999,6 +999,68 @@ mod tests {
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
+    fn ranges_snapshot_bounds_and_keep_iteration_separate_from_bindings() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (source, expected) in [
+                (
+                    "var calls: Int = 0;\nfn start() -> Int { calls = calls * 10 + 1; return 0; }\nfn limit() -> Int { calls = calls * 10 + 2; return 3; }\nfn main() -> Int { var sum: Int = 0; for item in start()..limit() { sum += item; } return sum + calls; }",
+                    15,
+                ),
+                (
+                    "fn main() -> Int { var sum: Int = 0; for item in 1..4 { sum += item; item = 99; } return sum; }",
+                    6,
+                ),
+                (
+                    "fn main() -> Int { var visits: Int = 0; var count: Int = 0; for item in 0..2 { visits += 1; if visits > 3 { return 999; } for item in 0..2 { count += 1; } } return count; }",
+                    4,
+                ),
+                (
+                    "fn main() -> Int { var __for_0: Int = 100; var __for_end_0: Int = 200; var sum: Int = 0; for item in 0..3 { sum += item; } return sum + __for_0 + __for_end_0; }",
+                    303,
+                ),
+                (
+                    "var calls: Int = 0;\nfn start() -> Int { calls += 1; throw 7; }\nfn limit() -> Int { calls += 10; return 3; }\nfn main() -> Int { try { for item in start()..limit() { } } catch 7 { return calls; } return 999; }",
+                    1,
+                ),
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "{source}"
+                );
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn rust_range_bindings_do_not_control_iteration() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut module = crate::compiler::rust_front::parse_rust_source("fn main() -> i64 { let mut sum = 0; for mut item in 1..4 { sum = sum + item; item = 99; } return sum; }").unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            assert_eq!(invoke_module(&module, profile, &[]), Some(6));
+            crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            assert_eq!(invoke_module(&module, profile, &[]), Some(6));
+        }
+    }
+
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
     fn integer_address_indexing_keeps_headerless_word_layout() {
         for profile in [
             crate::emit_profile::EmitProfile::Default,

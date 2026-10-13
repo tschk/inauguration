@@ -1,7 +1,29 @@
 use super::expr::parse_expr;
 use super::types::parse_in_type;
 use super::util::*;
-use crate::core_ir::{Expr, LoopKind, Stmt, Typ};
+use crate::core_ir::{Expr, LoopKind, Stmt};
+
+struct LoopParseContext<'a> {
+    source: &'a str,
+    counter: usize,
+}
+
+impl LoopParseContext<'_> {
+    fn fresh_counter(&mut self) -> usize {
+        while [
+            format!("__for_{}", self.counter),
+            format!("__for_end_{}", self.counter),
+        ]
+        .iter()
+        .any(|name| self.source.contains(name))
+        {
+            self.counter += 1;
+        }
+        let counter = self.counter;
+        self.counter += 1;
+        counter
+    }
+}
 
 pub(crate) fn parse_let_stmt(s: &str) -> Result<Stmt, String> {
     let declaration = trim(s);
@@ -141,7 +163,7 @@ pub(crate) fn parse_assign_stmt(s: &str) -> Option<Stmt> {
     }
 }
 
-pub(crate) fn parse_if_stmt(s: &str) -> Result<Stmt, String> {
+fn parse_if_stmt(s: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt, String> {
     let rest = trim(s)
         .strip_prefix("if ")
         .ok_or_else(|| ".in: internal if parse".to_string())?;
@@ -155,26 +177,26 @@ pub(crate) fn parse_if_stmt(s: &str) -> Result<Stmt, String> {
     let else_body = if let Some(else_rest) = tail.strip_prefix("else") {
         let else_rest = trim(else_rest);
         if else_rest.starts_with("if ") {
-            vec![parse_if_stmt(else_rest)?]
+            vec![parse_if_stmt(else_rest, context)?]
         } else {
             let open = else_rest
                 .find('{')
                 .ok_or_else(|| ".in: `else` needs `{` body".to_string())?;
             let (else_inner, _) = brace_content_bounds_after_open(else_rest, open)
                 .ok_or_else(|| ".in: unclosed `else` body".to_string())?;
-            parse_function_body(else_inner)?
+            parse_function_body_with_context(else_inner, context)?
         }
     } else {
         Vec::new()
     };
     Ok(Stmt::If {
         cond,
-        then_body: parse_function_body(then_inner)?,
+        then_body: parse_function_body_with_context(then_inner, context)?,
         else_body,
     })
 }
 
-pub(crate) fn parse_while_stmt(s: &str) -> Result<Stmt, String> {
+fn parse_while_stmt(s: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt, String> {
     let rest = trim(s)
         .strip_prefix("while ")
         .ok_or_else(|| ".in: internal while parse".to_string())?;
@@ -187,11 +209,11 @@ pub(crate) fn parse_while_stmt(s: &str) -> Result<Stmt, String> {
     Ok(Stmt::Loop {
         kind: LoopKind::While,
         cond: Some(cond),
-        body: parse_function_body(inner)?,
+        body: parse_function_body_with_context(inner, context)?,
     })
 }
 
-pub(crate) fn parse_match_stmt(s: &str) -> Result<Stmt, String> {
+fn parse_match_stmt(s: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt, String> {
     let rest = trim(s)
         .strip_prefix("match ")
         .ok_or_else(|| ".in: internal match parse".to_string())?;
@@ -201,11 +223,14 @@ pub(crate) fn parse_match_stmt(s: &str) -> Result<Stmt, String> {
     let scrutinee = parse_expr(trim(&rest[..open]));
     let (inner, _) = brace_content_bounds_after_open(rest, open)
         .ok_or_else(|| ".in: unclosed `match` body".to_string())?;
-    let arms = parse_match_arms(inner)?;
+    let arms = parse_match_arms(inner, context)?;
     Ok(Stmt::Match { scrutinee, arms })
 }
 
-pub(crate) fn parse_match_arms(inner: &str) -> Result<Vec<crate::core_ir::MatchArm>, String> {
+fn parse_match_arms(
+    inner: &str,
+    context: &mut LoopParseContext<'_>,
+) -> Result<Vec<crate::core_ir::MatchArm>, String> {
     let mut arms = Vec::new();
     let mut pos = 0usize;
     while pos < inner.len() {
@@ -235,7 +260,7 @@ pub(crate) fn parse_match_arms(inner: &str) -> Result<Vec<crate::core_ir::MatchA
             .ok_or_else(|| ".in: unclosed match arm body".to_string())?;
         arms.push(crate::core_ir::MatchArm {
             pattern: pattern.to_string(),
-            body: parse_function_body(body_inner)?,
+            body: parse_function_body_with_context(body_inner, context)?,
         });
         pos = close + 1;
         while pos < inner.len() {
@@ -263,7 +288,7 @@ pub(crate) fn parse_throw_stmt(s: &str) -> Result<Stmt, String> {
     Ok(Stmt::Throw(parse_expr(rest)))
 }
 
-pub(crate) fn parse_try_stmt(s: &str) -> Result<Stmt, String> {
+fn parse_try_stmt(s: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt, String> {
     let rest = trim(s)
         .strip_prefix("try ")
         .or_else(|| trim(s).strip_prefix("try{"))
@@ -272,16 +297,16 @@ pub(crate) fn parse_try_stmt(s: &str) -> Result<Stmt, String> {
     if trim(s).starts_with("try{") {
         let rest = format!("{{{rest}");
         let rest_str = rest.as_str();
-        return parse_try_stmt_inner(rest_str);
+        return parse_try_stmt_inner(rest_str, context);
     }
     let rest = trim(rest);
     if !rest.starts_with('{') {
         return Err(".in: `try` needs `{` body".into());
     }
-    parse_try_stmt_inner(rest)
+    parse_try_stmt_inner(rest, context)
 }
 
-pub(crate) fn parse_try_stmt_inner(rest: &str) -> Result<Stmt, String> {
+fn parse_try_stmt_inner(rest: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt, String> {
     let (body_inner, close) = brace_content_bounds_after_open(rest, 0)
         .ok_or_else(|| ".in: unclosed `try` body".to_string())?;
     let mut catches = Vec::new();
@@ -312,17 +337,17 @@ pub(crate) fn parse_try_stmt_inner(rest: &str) -> Result<Stmt, String> {
             .ok_or_else(|| ".in: unclosed `catch` body".to_string())?;
         catches.push(crate::core_ir::CatchArm {
             pattern: pattern.to_string(),
-            body: parse_function_body(catch_inner)?,
+            body: parse_function_body_with_context(catch_inner, context)?,
         });
         pos = catch_close + 1;
     }
     Ok(Stmt::Try {
-        body: parse_function_body(body_inner)?,
+        body: parse_function_body_with_context(body_inner, context)?,
         catches,
     })
 }
 
-pub(crate) fn parse_stmt_line(line: &str) -> Result<Stmt, String> {
+fn parse_stmt_line(line: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt, String> {
     let s = trim(line);
     if s.is_empty() {
         return Err(".in: empty statement".into());
@@ -331,10 +356,10 @@ pub(crate) fn parse_stmt_line(line: &str) -> Result<Stmt, String> {
         return parse_let_stmt(s);
     }
     if s.starts_with("if ") {
-        return parse_if_stmt(s);
+        return parse_if_stmt(s, context);
     }
     if s.starts_with("while ") {
-        return parse_while_stmt(s);
+        return parse_while_stmt(s, context);
     }
     if s.starts_with("break")
         && (s.len() == 5
@@ -359,10 +384,10 @@ pub(crate) fn parse_stmt_line(line: &str) -> Result<Stmt, String> {
         );
     }
     if s.starts_with("match ") {
-        return parse_match_stmt(s);
+        return parse_match_stmt(s, context);
     }
     if s.starts_with("try ") || s.starts_with("try{") || s == "try" {
-        return parse_try_stmt(s);
+        return parse_try_stmt(s, context);
     }
     if s.starts_with("throw")
         && (s.len() == 5 || s.chars().nth(5).is_some_and(|c| c.is_whitespace()))
@@ -381,23 +406,30 @@ pub(crate) fn parse_stmt_line(line: &str) -> Result<Stmt, String> {
 }
 
 pub(crate) fn parse_function_body(inner: &str) -> Result<Vec<Stmt>, String> {
+    let mut context = LoopParseContext {
+        source: inner,
+        counter: 0,
+    };
+    parse_function_body_with_context(inner, &mut context)
+}
+
+fn parse_function_body_with_context(
+    inner: &str,
+    context: &mut LoopParseContext<'_>,
+) -> Result<Vec<Stmt>, String> {
     let mut stmts = Vec::new();
     for part in split_function_statements(inner) {
-        let trimmed = trim(&part);
-        if trimmed.starts_with("for ") {
-            // Expand for loop into multiple statements (let + while)
-            stmts.extend(parse_for_expanded(&part)?);
+        if trim(&part).starts_with("for ") {
+            stmts.extend(parse_for_expanded(&part, context)?);
         } else {
-            stmts.push(parse_stmt_line(&part)?);
+            stmts.push(parse_stmt_line(&part, context)?);
         }
     }
     Ok(stmts)
 }
 
-/// Parse a `for i in start..end { body }` and expand to:
-///   let i = start
-///   while i < end { body; i = i + 1 }
-pub(crate) fn parse_for_expanded(s: &str) -> Result<Vec<Stmt>, String> {
+/// Parse a range loop using the shared Core IR expansion.
+fn parse_for_expanded(s: &str, context: &mut LoopParseContext<'_>) -> Result<Vec<Stmt>, String> {
     let rest = trim(s)
         .strip_prefix("for ")
         .ok_or_else(|| ".in: internal for parse".to_string())?;
@@ -422,62 +454,15 @@ pub(crate) fn parse_for_expanded(s: &str) -> Result<Vec<Stmt>, String> {
     let end_expr = parse_expr(trim(range_segs[1]));
     let (inner, _) = brace_content_bounds_after_open(rest, open)
         .ok_or_else(|| ".in: unclosed `for` body".to_string())?;
-    let mut body = parse_function_body(inner)?;
-    let increment = Stmt::Assign(
-        var_name.to_string(),
-        Expr::Binary {
-            op: "+".to_string(),
-            lhs: Box::new(Expr::Ident(var_name.to_string())),
-            rhs: Box::new(Expr::IntLit(1)),
+    let body = parse_function_body_with_context(inner, context)?;
+    let mut counter = context.fresh_counter();
+    Ok(crate::lower_core::expand_for_loop(
+        var_name,
+        Expr::Call {
+            callee: Box::new(Expr::Ident("range".into())),
+            args: vec![start_expr, end_expr],
         },
-    );
-    insert_continue_updates(&mut body, &increment);
-    body.push(increment);
-    let while_loop = Stmt::Loop {
-        kind: LoopKind::While,
-        cond: Some(Expr::Binary {
-            op: "<".to_string(),
-            lhs: Box::new(Expr::Ident(var_name.clone())),
-            rhs: Box::new(end_expr),
-        }),
         body,
-    };
-    Ok(vec![
-        Stmt::Let(var_name, Some(Typ::Int), start_expr),
-        while_loop,
-    ])
-}
-
-// A desugared range must advance before a continue, but nested loops own theirs.
-fn insert_continue_updates(body: &mut Vec<Stmt>, increment: &Stmt) {
-    let mut index = 0;
-    while index < body.len() {
-        match &mut body[index] {
-            Stmt::Continue => {
-                body.insert(index, increment.clone());
-                index += 1;
-            }
-            Stmt::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                insert_continue_updates(then_body, increment);
-                insert_continue_updates(else_body, increment);
-            }
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    insert_continue_updates(&mut arm.body, increment);
-                }
-            }
-            Stmt::Try { body, catches } => {
-                insert_continue_updates(body, increment);
-                for catch in catches {
-                    insert_continue_updates(&mut catch.body, increment);
-                }
-            }
-            _ => {}
-        }
-        index += 1;
-    }
+        &mut counter,
+    ))
 }
