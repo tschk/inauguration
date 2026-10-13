@@ -3148,11 +3148,18 @@ fn lower_field_access(
     target_reg: u8,
     base: &Expr,
     name: &str,
+    pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
     let Expr::Ident(base_name) = base else {
         emitter.emit_insns(&x86_64::load_i64(target_reg, 0));
         return Ok(());
     };
+    if !ctx.locals.contains_key(base_name) {
+        let field_key = format!("{base_name}.{name}");
+        if ctx.globals.contains_key(&field_key) {
+            return lower_ident_ref(emitter, ctx, target_reg, &field_key, pending_calls);
+        }
+    }
     match ctx.locals.get(base_name) {
         Some(StackSlot::Struct { fields }) => {
             let field_key = if fields.contains_key(name) {
@@ -3502,7 +3509,7 @@ fn lower_expr_into(
             lower_struct_init(emitter, ctx, name.as_str(), fields, pending_calls)
         }
         Expr::Field { base, name, .. } => {
-            lower_field_access(emitter, ctx, target_reg, base, name.as_str())
+            lower_field_access(emitter, ctx, target_reg, base, name.as_str(), pending_calls)
         }
         Expr::Unary { op, expr, .. } => {
             lower_unary_expr(emitter, ctx, target_reg, op.as_str(), expr, pending_calls)

@@ -41,6 +41,8 @@ Counts currently support checked integer constant arithmetic and immutable integ
 
 ## Fields of produced struct values
 
+x86 global scalar struct fields use the same writable data-section slots for reads and writes. Local bindings shadow global field paths.
+
 Constant folding projects a constructor field only when every initializer is a scalar literal. Calls, reads, and possible failures in unselected fields remain in the IR; unsupported runtime global initializers stay refused.
 
 Field reads from calls and struct constructors materialize their base once through shared operand spills. This evaluates every constructor field, preserves surrounding operand order, and keeps producers inside short-circuit branches. Native backends read the resulting local struct through their existing field paths. x86 hosted 64-bit results with scalar fields use owned heap storage and an internal data-pointer ABI; bindings and assignments copy all fields into their local layout. JIT storage lives in the runtime arena, and native storage uses the existing process-lifetime allocation policy.

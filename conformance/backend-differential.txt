@@ -74,3 +74,4 @@ agree conformance/control-flow/in-assignment-scan.in
 agree conformance/control-flow/in-shift-precedence.in
 agree conformance/types/in-scientific-literals.in
 agree conformance/control-flow/struct-field-call-effects.in
+agree conformance/types/global-struct-scalars.in

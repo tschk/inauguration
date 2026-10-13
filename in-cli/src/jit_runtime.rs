@@ -2768,6 +2768,29 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn global_struct_fields_preserve_reads_writes_and_local_shadowing() {
+        for source in [
+            include_str!("../../conformance/types/global-struct-scalars.in"),
+            "struct Counter { Int value }\nvar counter: Counter = 0;\nfn bump() -> Int { counter.value += 2; return counter.value; }\nfn main() -> Int { counter.value = 40; return bump(); }",
+            "struct Counter { Int value }\nvar counter: Counter = 0;\nfn read() -> Int { return counter.value; }\nfn main() -> Int { counter.value = 20; var counter: Counter = Counter { value: 22 }; return counter.value + read(); }",
+            "struct State { Bool flag; Float value }\nvar state: State = 0;\nfn main() -> Int { state.flag = true; state.value = 42.5; if state.flag && state.value == 42.5 { return 42; } return 0; }",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_source(source, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
     #[cfg(all(unix, target_arch = "x86_64"))]
     fn struct_parameter_sentinels_return_failure_without_reading_memory() {
         let module = crate::in_lang_parse::parse_in_source("struct Point { Int x; Int y }\nfn main(point: Point) -> Int { return point.x + point.y; }").unwrap();

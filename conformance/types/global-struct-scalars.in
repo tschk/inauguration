@@ -1,0 +1,13 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+struct State { Bool flag; Float value }
+var state: State = 0;
+fn main() -> Int {
+    state.flag = true;
+    state.value = 42.5;
+    if state.flag && state.value == 42.5 { return 42; }
+    return 0;
+}
