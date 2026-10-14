@@ -1720,10 +1720,6 @@ pub(crate) fn lower_stdlib_call(
             return Ok(true);
         }
         "vector-push" if args.len() == 2 => {
-            // shortcut: projected vector headers need an address path before wrapper calls.
-            if !matches!(&args[0], Expr::Ident(_)) {
-                return Err("native-lower: vector push requires a local vector header".into());
-            }
             let Some(Typ::Vector(item)) =
                 super::lower_expr::native_expr_type(&args[0], ctx, functions)
             else {
@@ -1736,7 +1732,27 @@ pub(crate) fn lower_stdlib_call(
             {
                 return Err("native-lower: vector push requires matching scalar elements".into());
             }
-            lower_expr_into(emitter, ctx, &args[0], 0, functions, pending_calls, fn_name)?;
+            let (root, path) = super::lower_util::field_path(&args[0])
+                .ok_or("native-lower: vector push requires addressable storage")?;
+            let pointer_field = if path.is_empty() {
+                "ptr".into()
+            } else {
+                format!("{path}.ptr")
+            };
+            let Some(LocalSlot::Struct { fields, .. }) = ctx.locals.get(root) else {
+                return Err("native-lower: vector push requires a known header layout".into());
+            };
+            let (base, offset) =
+                if let Some((pointer, offset)) = ctx.receiver_field(root, &pointer_field) {
+                    emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, pointer));
+                    (0, offset)
+                } else {
+                    let offset = *fields
+                        .get(&pointer_field)
+                        .ok_or("native-lower: vector header pointer is missing")?;
+                    (aarch64::REG_SP, offset)
+                };
+            emitter.emit_u32(aarch64::add_imm64(0, base, offset as u16));
             let saved = ctx.acquire_binop_temp(fn_name)?;
             emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, saved));
             lower_expr_into(emitter, ctx, &args[1], 1, functions, pending_calls, fn_name)?;

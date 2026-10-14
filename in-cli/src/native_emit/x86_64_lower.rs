@@ -318,7 +318,7 @@ impl<'a> LowerCtx<'a> {
                 // Frame offsets grow downward; reverse allocation keeps declared
                 // fields in increasing memory order from the struct address.
                 let fields =
-                    crate::native_emit::struct_layout::scalar_fields(self.structs, &struct_name)
+                    crate::native_emit::struct_layout::x86_fields(self.structs, &struct_name)
                         .unwrap_or(fields);
                 for (field, _field_ty) in fields.into_iter().rev() {
                     // ponytail: all struct fields map to scalar slots
@@ -1071,7 +1071,7 @@ fn lower_function(
                     unreachable!()
                 };
                 if x86_64::is_32bit()
-                    || crate::native_emit::struct_layout::scalar_fields(ctx.structs, &struct_name)
+                    || crate::native_emit::struct_layout::x86_fields(ctx.structs, &struct_name)
                         .is_err()
                 {
                     return Err("x86_64-lower: struct parameter needs a supported scalar-field 64-bit layout".into());
@@ -1273,15 +1273,13 @@ fn lower_stmt(
                 if let Typ::Named(name) = &ret_typ
                     && ctx.structs.contains_key(name)
                 {
-                    if crate::native_emit::struct_layout::scalar_fields(ctx.structs, name).is_err()
-                    {
+                    if crate::native_emit::struct_layout::x86_fields(ctx.structs, name).is_err() {
                         return Err(
                             "x86_64-lower: struct return needs a supported scalar-field layout"
                                 .into(),
                         );
                     }
-                    let schema =
-                        crate::native_emit::struct_layout::scalar_fields(ctx.structs, name)?;
+                    let schema = crate::native_emit::struct_layout::x86_fields(ctx.structs, name)?;
                     let fields: HashMap<_, _> = schema
                         .iter()
                         .rev()
@@ -3092,7 +3090,7 @@ fn lower_call_argument(
 ) -> Result<(), String> {
     if let Expr::StructInit { name, fields } = arg {
         if !ctx.structs.contains_key(name)
-            || crate::native_emit::struct_layout::scalar_fields(ctx.structs, name).is_err()
+            || crate::native_emit::struct_layout::x86_fields(ctx.structs, name).is_err()
         {
             return Err("x86_64-lower: struct argument needs a known scalar-field layout".into());
         }
@@ -3148,13 +3146,13 @@ fn lower_call_args(
             && ctx.structs.contains_key(&name)
         {
             if x86_64::is_32bit()
-                || crate::native_emit::struct_layout::scalar_fields(ctx.structs, &name).is_err()
+                || crate::native_emit::struct_layout::x86_fields(ctx.structs, &name).is_err()
             {
                 return Err(
                     "x86_64-lower: struct argument needs a scalar-field 64-bit layout".into(),
                 );
             }
-            let schema = crate::native_emit::struct_layout::scalar_fields(ctx.structs, &name)?;
+            let schema = crate::native_emit::struct_layout::x86_fields(ctx.structs, &name)?;
             let fields: HashMap<_, _> = schema
                 .iter()
                 .rev()
@@ -3243,10 +3241,6 @@ fn lower_call_expr(
         let [vector, value] = args else {
             return Err("x86_64-lower: vector push requires two arguments".into());
         };
-        // shortcut: projected vector headers need an address path before wrapper calls.
-        if !matches!(vector, Expr::Ident(_)) {
-            return Err("x86_64-lower: vector push requires a local vector header".into());
-        }
         let Some(Typ::Vector(item)) = scalar_expr_type(vector, ctx) else {
             return Err("x86_64-lower: vector push requires vector storage".into());
         };
@@ -3258,15 +3252,30 @@ fn lower_call_expr(
         if !ctx.runtime_error_slot || x86_64::is_32bit() || ctx.is_interrupt {
             return Err("x86_64-lower: vector push requires the 64-bit JIT runtime".into());
         }
-        let Expr::Ident(local) = vector else {
-            unreachable!()
-        };
-        let destination = ctx.slot_offset(local)?;
+        let (root, path) = crate::native_emit::lower::field_path(vector)
+            .ok_or("x86_64-lower: vector push requires addressable storage")?;
+        if path.is_empty() {
+            let offset = ctx.slot_offset(root)?;
+            emitter.emit_insns(&x86_64::mov_rr(RAX, RBP));
+            emitter.emit_insns(&x86_64::sub_rmi32(RAX, offset as i32 + 8));
+        } else if let Some((pointer, offset)) = ctx.receiver_field(root, &path) {
+            emitter.emit_insns(&x86_64::ldr64(RAX, pointer as u16));
+            emitter.emit_insns(&x86_64::sub_rmi32(RAX, -offset));
+        } else {
+            let Some(StackSlot::Struct { fields }) = ctx.locals.get(root) else {
+                return Err("x86_64-lower: vector push requires a known field layout".into());
+            };
+            let offset = *fields
+                .get(&path)
+                .ok_or("x86_64-lower: vector field storage is missing")?;
+            emitter.emit_insns(&x86_64::mov_rr(RAX, RBP));
+            emitter.emit_insns(&x86_64::sub_rmi32(RAX, offset as i32 + 8));
+        }
         let saved = ctx.alloc_slot();
-        lower_expr_into(emitter, ctx, vector, RAX, pending_calls)?;
         emitter.emit_insns(&x86_64::str64(RAX, saved as u16));
         lower_expr_into(emitter, ctx, value, RDX, pending_calls)?;
         emitter.emit_insns(&x86_64::ldr64(RSI, saved as u16));
+        emitter.emit_insns(&x86_64::mov_r_m(RSI, RSI, 0));
         emitter.emit_insns(&x86_64::mov_rr(RDI, 15));
         emitter.emit_insns(&x86_64::load_i64(
             RAX,
@@ -3284,7 +3293,8 @@ fn lower_call_expr(
         emitter.emit_insns(&x86_64::jcc_near(0x05, 0));
         emit_failure_return(emitter, ctx)?;
         emitter.patch_u32(valid + 2, emitter.len() - valid - 6);
-        emitter.emit_insns(&x86_64::str64(RAX, destination as u16));
+        emitter.emit_insns(&x86_64::ldr64(RCX, saved as u16));
+        emitter.emit_insns(&x86_64::mov_m_r(RCX, 0, RAX));
         emitter.emit_insns(&x86_64::zero_reg(target_reg));
         return Ok(());
     }
@@ -3438,7 +3448,7 @@ fn store_struct_value(
     let Some(Typ::Named(name)) = scalar_expr_type(expr, ctx) else {
         return Err("x86_64-lower: struct value needs a known scalar-field layout".into());
     };
-    if crate::native_emit::struct_layout::scalar_fields(ctx.structs, &name).is_err() {
+    if crate::native_emit::struct_layout::x86_fields(ctx.structs, &name).is_err() {
         return Err("x86_64-lower: struct value needs a known scalar-field layout".into());
     }
     if let Expr::Field { .. } = expr {

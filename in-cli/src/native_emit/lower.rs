@@ -75,6 +75,7 @@ mod lower_iterator;
 mod lower_stdlib;
 mod lower_stmt;
 mod lower_util;
+pub(crate) use lower_util::field_path;
 
 pub use lower_compile::{
     NativeArtifactOutcome, compile_native_artifact, compile_native_artifact_for_host,
