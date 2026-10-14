@@ -105,17 +105,28 @@ pub fn in_buf_from_host_arena(arena: InArenaHandle, len: u64, align: u64) -> InB
     if state.generation != arena.generation {
         return failed;
     }
-    let Some(reserved_end) = state
-        .cursor
-        .checked_add(align - 1)
-        .and_then(|start| start.checked_add(len))
+    let base = state.storage.as_ptr() as usize;
+    let Some(address) = base
+        .checked_add(state.cursor)
+        .and_then(|address| align_up(address, align))
     else {
         return failed;
     };
-    if reserved_end > isize::MAX as usize {
+    let mut aligned = address - base;
+    let Some(mut end) = aligned.checked_add(len) else {
         return failed;
-    }
-    if reserved_end > state.storage.capacity() {
+    };
+    if end > state.storage.capacity() {
+        let Some(reserved_end) = state
+            .cursor
+            .checked_add(align - 1)
+            .and_then(|start| start.checked_add(len))
+        else {
+            return failed;
+        };
+        if reserved_end > isize::MAX as usize {
+            return failed;
+        }
         let Some(epoch) = state.borrow_epoch.checked_add(1) else {
             return failed;
         };
@@ -127,17 +138,17 @@ pub fn in_buf_from_host_arena(arena: InArenaHandle, len: u64, align: u64) -> InB
             return failed;
         }
         state.borrow_epoch = epoch;
+        // Relocation can change alignment; reserved padding bounds the new end.
+        let base = state.storage.as_ptr() as usize;
+        let Some(address) = base
+            .checked_add(state.cursor)
+            .and_then(|address| align_up(address, align))
+        else {
+            return failed;
+        };
+        aligned = address - base;
+        end = aligned + len;
     }
-    // Reserve worst-case padding first: relocation can change the base alignment.
-    let base = state.storage.as_ptr() as usize;
-    let Some(address) = base
-        .checked_add(state.cursor)
-        .and_then(|address| align_up(address, align))
-    else {
-        return failed;
-    };
-    let aligned = address - base;
-    let end = aligned + len; // Bounded above by reserved_end.
     if end > state.storage.len() {
         state.storage.resize(end, 0);
     }
@@ -210,6 +221,37 @@ fn align_up(value: usize, align: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aligned_allocations_that_fit_preserve_existing_borrows() {
+        let arena = in_arena_create(64, 0);
+        let (base, capacity) = {
+            let map = arenas().lock().unwrap();
+            let state = map.get(&arena.id).unwrap();
+            (state.storage.as_ptr() as usize, state.storage.capacity())
+        };
+        let cursor = ((base + capacity - 8) & !7) - base;
+        let mut first = in_buf_from_host_arena(arena, cursor as u64, 1);
+        let mut token = InBorrowToken {
+            arena_id: 0,
+            generation: 0,
+            start: 0,
+            len: 0,
+            flags: 0,
+        };
+        in_borrow_bytes(&mut first, &mut token);
+        let second = in_buf_from_host_arena(arena, (capacity - cursor) as u64, 8);
+        assert!(!second.ptr.is_null());
+        assert_eq!(in_borrow_validate(token), 0);
+        let map = arenas().lock().unwrap();
+        let state = map.get(&arena.id).unwrap();
+        assert_eq!(state.storage.as_ptr() as usize, base);
+        assert_eq!(state.storage.capacity(), capacity);
+        assert_eq!(state.cursor, capacity);
+        assert_eq!(second.ptr as usize, base + cursor);
+        drop(map);
+        in_arena_destroy(arena);
+    }
 
     #[test]
     fn allocation_alignment_uses_actual_addresses_after_growth() {
