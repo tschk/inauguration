@@ -42,6 +42,40 @@ fn default_request(
 
 #[test]
 #[cfg(all(unix, target_arch = "aarch64"))]
+fn rust_jit_executes_known_aggregate_parameters() {
+    for source in [
+        "struct Bag { items: Vec<i64> } impl Bag { fn replace(&mut self) -> i64 { self.items = vec![20, 22]; return self.items[0] + self.items[1]; } } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; return Bag::replace(&mut bag); }",
+        "struct Bag { items: Vec<i64> } struct Wrapper { bag: Bag } impl Wrapper { fn replace(&mut self) -> i64 { self.bag.items = vec![20, 22]; return self.bag.items[0] + self.bag.items[1]; } } fn main() -> i64 { let mut wrapper: Wrapper = Wrapper { bag: Bag { items: vec![0] } }; return Wrapper::replace(&mut wrapper); }",
+        "struct Bag { items: Vec<i64> } impl Bag { fn replace(&mut self, other: Bag) -> i64 { self.items = other.items; return self.items[0] + self.items[1]; } } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; let other: Bag = Bag { items: vec![20, 22] }; return Bag::replace(&mut bag, other); }",
+        "struct Inner { value: i64 } struct Wrapper { left: Inner, right: Inner } impl Wrapper { fn answer(&mut self) -> i64 { self.left.value = 20; return self.left.value + self.right.value; } } fn main() -> i64 { let mut wrapper: Wrapper = Wrapper { left: Inner { value: 0 }, right: Inner { value: 22 } }; return Wrapper::answer(&mut wrapper); }",
+        "struct Empty {} impl Empty { fn answer(&self, value: i64) -> i64 { return value; } } fn main() -> i64 { let empty: Empty = Empty {}; return Empty::answer(&empty, 42); }",
+        "struct Pair { x: i64, y: f64 } fn answer(value: Pair) -> i64 { return value.x + value.y as i64; } fn main() -> i64 { return answer(Pair { x: 20, y: 22.0 }); }",
+        "struct Pair { x: i64, y: i64 } fn answer(value: Pair, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 { return value.x + value.y + a + b + c + d + e + f + g; } fn main() -> i64 { return answer(Pair { x: 20, y: 15 }, 1, 1, 1, 1, 1, 1, 1); }",
+        "struct Bag { items: Vec<i64> } impl Bag { fn answer(&mut self, other: Bag, a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 { self.items = other.items; return self.items[0] + self.items[1] + a + b + c + d + e; } } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; let other: Bag = Bag { items: vec![20, 17] }; return Bag::answer(&mut bag, other, 1, 1, 1, 1, 1); }",
+    ] {
+        let path = temp_path("aggregate-parameters.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?}: {report:?}: {source}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{profile:?}: {report:?}: {source}"
+            );
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+#[cfg(all(unix, target_arch = "aarch64"))]
 fn jit_executes_typed_saturating_float_casts() {
     for source in [
         "fn main() -> i64 { let items: Vec<f64> = vec![20.0, 22.0]; return (items[0] + items[1]) as i64; }",

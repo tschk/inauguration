@@ -325,9 +325,67 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
             return false;
         }
     }
+    let structs: std::collections::HashMap<&str, &[(String, Typ)]> = reachable
+        .decls
+        .iter()
+        .filter_map(|decl| {
+            if let Decl::Struct { name, fields, .. } = decl {
+                Some((name.as_str(), fields.as_slice()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    fn layout_words(
+        typ: &Typ,
+        structs: &std::collections::HashMap<&str, &[(String, Typ)]>,
+        active: &mut std::collections::HashSet<String>,
+    ) -> Option<usize> {
+        match typ.canonical() {
+            Typ::Int | Typ::Bool | Typ::Float | Typ::String => Some(1),
+            Typ::Vector(item)
+                if matches!(
+                    item.canonical(),
+                    Typ::Int | Typ::Bool | Typ::Float | Typ::String
+                ) =>
+            {
+                Some(3)
+            }
+            Typ::Named(name) => {
+                let fields = structs.get(name.as_str())?;
+                if active.len() >= 40 || !active.insert(name.clone()) {
+                    return None;
+                }
+                let words = fields.iter().try_fold(0usize, |total, (_, field)| {
+                    total.checked_add(layout_words(field, structs, active)?)
+                });
+                active.remove(&name);
+                words
+            }
+            _ => None,
+        }
+    }
     reachable.decls.iter().all(|decl| match decl {
         Decl::Function { params, ret, .. } => {
-            internal_type(ret) && params.iter().all(|(_, typ)| internal_type(typ))
+            if !internal_type(ret) {
+                return false;
+            }
+            if params.iter().all(|(_, typ)| internal_type(typ)) {
+                return true;
+            }
+            if !cfg!(target_arch = "aarch64") {
+                return false;
+            }
+            let words = params.iter().try_fold(0usize, |total, (name, typ)| {
+                let layout = layout_words(typ, &structs, &mut std::collections::HashSet::new())?;
+                let words = if name == "self" && matches!(typ.canonical(), Typ::Named(_)) {
+                    1
+                } else {
+                    layout
+                };
+                total.checked_add(words)
+            });
+            words.is_some_and(|words| words <= 32)
         }
         _ => true,
     })
@@ -355,6 +413,67 @@ fn decode_jit_string(raw: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aggregate_parameter_execution_requires_known_bounded_layouts() {
+        use crate::core_ir::Typ;
+        let source = "struct Bag { items: Vec<i64> } impl Bag { fn read(&self) -> i64 { return self.items[0]; } } fn main() -> i64 { let bag: Bag = Bag { items: vec![42] }; return Bag::read(&bag); }";
+        let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        assert_eq!(
+            rust_entry_can_execute(&module, "main", "main"),
+            cfg!(target_arch = "aarch64")
+        );
+        for field in [
+            Typ::Array(Box::new(Typ::Int)),
+            Typ::Named("Opaque".into()),
+            Typ::Named("Bag".into()),
+            Typ::Generic("T".into()),
+            Typ::Vector(Box::new(Typ::Named("Opaque".into()))),
+            Typ::Void,
+        ] {
+            let mut changed = module.clone();
+            for decl in &mut changed.decls {
+                if let Decl::Struct { name, fields, .. } = decl
+                    && name == "Bag"
+                {
+                    fields[0].1 = field.clone();
+                }
+            }
+            assert!(
+                !rust_entry_can_execute(&changed, "main", "main"),
+                "{field:?}"
+            );
+        }
+        let mut entry = module.clone();
+        for decl in &mut entry.decls {
+            if let Decl::Function { name, params, .. } = decl
+                && name == "main"
+            {
+                params.push(("argument".into(), Typ::Int));
+            }
+        }
+        assert!(!rust_entry_can_execute(&entry, "main", "main"));
+        let mut wide = module.clone();
+        for decl in &mut wide.decls {
+            if let Decl::Function { name, params, .. } = decl
+                && name == "Bag::read"
+            {
+                params.extend((0..32).map(|i| (format!("arg{i}"), Typ::Int)));
+            }
+        }
+        assert!(!rust_entry_can_execute(&wide, "main", "main"));
+        for decl in &mut wide.decls {
+            if let Decl::Function { name, params, .. } = decl
+                && name == "Bag::read"
+            {
+                params.pop();
+            }
+        }
+        assert_eq!(
+            rust_entry_can_execute(&wide, "main", "main"),
+            cfg!(target_arch = "aarch64")
+        );
+    }
 
     #[test]
     fn rust_execution_keeps_entry_scalar_and_vector_elements_supported() {
