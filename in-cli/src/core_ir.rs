@@ -528,6 +528,17 @@ impl MatchPattern {
                     bindings.extend(pattern.typed_bindings(item_type, schema)?);
                 }
             }
+            Self::IntPat(_) | Self::StringPat(_) | Self::BoolPat(_) => {
+                let expected = match self {
+                    Self::IntPat(_) => Typ::Int,
+                    Self::StringPat(_) => Typ::String,
+                    Self::BoolPat(_) => Typ::Bool,
+                    _ => unreachable!(),
+                };
+                if !expected.compatible_with(typ) {
+                    return Err(format!("literal pattern {self:?} does not match {typ:?}"));
+                }
+            }
             _ => {}
         }
         Ok(bindings)
@@ -823,6 +834,26 @@ mod tests {
         );
         assert!(!array.irrefutable(&Typ::Array(Box::new(Typ::Bool)), &schema));
         assert!(array.typed_bindings(&Typ::Int, &schema).is_err());
+        for (pattern, typ) in [("1", Typ::String), ("true", Typ::Int), ("\"x\"", Typ::Bool)] {
+            assert!(
+                MatchPattern::parse(pattern)
+                    .unwrap()
+                    .typed_bindings(&typ, &schema)
+                    .is_err()
+            );
+        }
+        assert!(
+            MatchPattern::parse("Point { value: true }")
+                .unwrap()
+                .typed_bindings(&Typ::Named("Point".into()), &schema)
+                .is_err()
+        );
+        assert!(
+            MatchPattern::parse("1")
+                .unwrap()
+                .typed_bindings(&Typ::Int, &schema)
+                .is_ok()
+        );
     }
 
     use super::*;

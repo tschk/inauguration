@@ -1196,10 +1196,19 @@ impl TypeChecker {
                     if let Ok(pattern) = MatchPattern::parse(&arm.pattern) {
                         self.check_match_pattern(fn_name, &pattern, facts, &mut env_arm, errors);
                     }
-                    if let Ok(MatchPattern::IdentPat(name)) = MatchPattern::parse(&arm.pattern)
+                    if let Ok(pattern) = MatchPattern::parse(&arm.pattern)
                         && let Some(typ) = self.expr_type(scrutinee, facts, env)
                     {
-                        env_arm.insert(name, typ);
+                        match pattern.typed_bindings(&typ, &|name| {
+                            facts.structs.get(name).map(Vec::as_slice)
+                        }) {
+                            Ok(bindings) => env_arm.extend(bindings),
+                            Err(reason) => errors.push(TypeError::TypeMismatch {
+                                context: format!("match pattern in `{fn_name}`: {reason}"),
+                                expected: typ,
+                                got: Typ::Named(arm.pattern.clone()),
+                            }),
+                        }
                     }
                     if let Some(guard) = &arm.guard {
                         self.check_expr(fn_name, guard, facts, &env_arm, errors);
@@ -2527,6 +2536,38 @@ mod tests {
         TypeChecker::new()
             .check_module(&m)
             .expect("valid field access should pass");
+    }
+
+    #[test]
+    fn match_bindings_keep_field_types() {
+        let m = module(vec![
+            Decl::Struct {
+                name: "Text".into(),
+                fields: vec![("value".into(), Typ::String)],
+                type_params: vec![],
+            },
+            function(
+                "main",
+                Typ::Int,
+                vec![("text".into(), Typ::Named("Text".into()))],
+                vec![Stmt::Match {
+                    scrutinee: Expr::Ident("text".into()),
+                    arms: vec![crate::core_ir::MatchArm {
+                        pattern: "Text { value: item }".into(),
+                        guard: None,
+                        body: vec![Stmt::Return(Some(Expr::Ident("item".into())))],
+                    }],
+                }],
+            ),
+        ]);
+        let errors = TypeChecker::new().check_module(&m).unwrap_err();
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            TypeError::ReturnTypeMismatch {
+                got: Typ::String,
+                ..
+            }
+        )));
     }
 
     #[test]
