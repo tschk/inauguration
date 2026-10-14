@@ -3,14 +3,14 @@ use crate::core_ir::{Expr, Typ};
 use crate::native_emit::aarch64::{self, CodeEmitter};
 use std::collections::HashMap;
 
-/// Strip generic parameters and path prefix from a struct type name.
-/// `Pin<P>` → `Pin`, `io::Cursor<T>` → `Cursor`, `Vec<u8>` → `Vec`.
-/// Returns the original string if no generic params or path prefix found.
+/// Strip generic arguments while retaining the declaration's module path.
 pub(crate) fn base_struct_name(name: &str) -> &str {
-    // Strip generic params FIRST (before path splitting) to handle
-    // names like `CachePadded :: < T >` where spaces surround :: and <>
-    let name = name.split('<').next().unwrap_or(name);
-    name.rsplit("::").next().unwrap_or(name).trim()
+    name.split('<')
+        .next()
+        .unwrap_or(name)
+        .trim()
+        .trim_end_matches("::")
+        .trim()
 }
 
 pub(crate) fn canonical_type(typ: &Typ) -> Typ {

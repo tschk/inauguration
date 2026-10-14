@@ -1197,8 +1197,39 @@ fn err_pattern_binding(pat: &syn::Pat) -> Option<String> {
         .and_then(pattern_name)
 }
 
+fn nominal_path_name(path: &syn::Path) -> String {
+    path.segments
+        .iter()
+        .map(|segment| {
+            let arguments = match &segment.arguments {
+                syn::PathArguments::None => String::new(),
+                syn::PathArguments::AngleBracketed(arguments) => {
+                    let args = arguments
+                        .args
+                        .iter()
+                        .map(|arg| match arg {
+                            syn::GenericArgument::Type(syn::Type::Path(ty))
+                                if ty.qself.is_none() =>
+                            {
+                                nominal_path_name(&ty.path)
+                            }
+                            _ => arg.to_token_stream().to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("<{args}>")
+                }
+                other => other.to_token_stream().to_string(),
+            };
+            format!("{}{arguments}", segment.ident)
+        })
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
 fn map_type(ty: &syn::Type) -> Typ {
     match ty {
+        syn::Type::Path(tp) if tp.qself.is_some() => Typ::Named(ty.to_token_stream().to_string()),
         syn::Type::Path(tp) => {
             let last_segment = tp.path.segments.last();
             let last = last_segment.map(|s| s.ident.to_string());
@@ -1239,7 +1270,7 @@ fn map_type(ty: &syn::Type) -> Typ {
                     })
                     .map(|elem| Typ::Vector(Box::new(elem)))
                     .unwrap_or_else(|| Typ::Vector(Box::new(Typ::Generic("_".to_string())))),
-                Some(other) => Typ::Named(other.to_string()),
+                Some(_) => Typ::Named(nominal_path_name(&tp.path)),
                 None => Typ::Named(tp.path.to_token_stream().to_string()),
             }
         }
@@ -2262,7 +2293,7 @@ fn lower_expr_with_types_inner(
             captures: vec![],
         },
         syn::Expr::Struct(s) => Expr::StructInit {
-            name: s.path.to_token_stream().to_string(),
+            name: nominal_path_name(&s.path),
             fields: s
                 .fields
                 .iter()
@@ -2300,6 +2331,66 @@ fn lower_expr_with_types_inner(
 mod tests {
     use super::*;
     use crate::boundary_ir::{BoundaryRepr, BoundaryTransfer};
+
+    #[test]
+    fn nominal_types_preserve_paths_and_generic_arguments() {
+        let int: syn::Type = syn::parse_str("OnceLock<i64>").unwrap();
+        let boolean: syn::Type = syn::parse_str("OnceLock<bool>").unwrap();
+        assert_ne!(map_type(&int), map_type(&boolean));
+        let left: syn::Type = syn::parse_str("left::State").unwrap();
+        let right: syn::Type = syn::parse_str("right::State").unwrap();
+        assert_ne!(map_type(&left), map_type(&right));
+        let nested: syn::Type = syn::parse_str(
+            "std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, State>>>",
+        )
+        .unwrap();
+        assert_eq!(
+            map_type(&nested),
+            Typ::Named(
+                "std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, State>>>"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_erased_generic_argument_mismatches() {
+        let parsed = parse_rust_source("fn take(value:OnceLock<i64>)->i64 { 42 } fn wrong(value:OnceLock<bool>)->i64 { take(value) }").unwrap();
+        let module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        let report = crate::core_ir_verifier::verify_for_entry(&module, "wrong");
+        assert!(
+            !report.ok,
+            "distinct generic arguments must not share a call ABI"
+        );
+        assert_eq!(report.reason_code.as_deref(), Some("type-mismatch"));
+    }
+
+    #[test]
+    fn qualified_struct_initializers_match_parameter_types() {
+        let module = parse_rust_source("mod alpha { pub struct Point { pub value:i64 } } fn answer(point:alpha::Point)->i64 { point.value } fn main()->i64 { answer(alpha::Point { value:42 }) }").unwrap();
+        let Decl::Function { params, .. } = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function{name,..} if name=="answer"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(params[0].1, Typ::Named("alpha::Point".into()));
+        let Decl::Function { body, .. } = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function{name,..} if name=="main"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let Stmt::Return(Some(Expr::Call { args, .. })) = body.last().unwrap() else {
+            panic!("expected constructor argument");
+        };
+        assert!(matches!(&args[0], Expr::StructInit{name,..} if name=="alpha::Point"));
+    }
 
     #[test]
     fn parses_struct_and_function_with_body() {

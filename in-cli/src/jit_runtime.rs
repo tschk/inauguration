@@ -4272,6 +4272,23 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn qualified_struct_paths_execute_through_native_parameters() {
+        let parsed = crate::compiler::rust_front::parse_rust_source("mod alpha { pub struct Point { pub value:i64 } } fn answer(point:alpha::Point)->i64 { point.value } fn main()->i64 { answer(alpha::Point { value:42 }) }").unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        crate::lower_core::desugar_module(&mut module);
+        assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(invoke_module(&module, profile, &[]), Some(42));
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn known_struct_field_reads_execute_actual_values() {
         let parsed = crate::compiler::rust_front::parse_rust_source("struct Point { first:i64, answer:i64 } fn main()->i64 { let point:Point=Point { first:7, answer:42 }; return point.answer; }").unwrap();
         let mut module =
