@@ -3610,6 +3610,78 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn typed_string_length_and_empty_preserve_bytes() {
+        let mut sources = vec![
+            "fn len(text: String) -> i64 { return 42; } fn main() -> i64 { let text: String = \"\"; return text.len(); }",
+            "fn accept(text: String) -> i64 { return text.len()+40; } fn main() -> i64 { return accept(\"hi\"); }",
+            "struct Bag { text: String } fn main() -> i64 { let bag: Bag = Bag { text: \"hi\" }; return bag.text.len()+40; }",
+            "fn main() -> i64 { let text: String = \"hi\"; return text.len()+40; }",
+            "fn main() -> i64 { let text: String = \"é\"; return text.len()+40; }",
+            "fn main() -> i64 { let text: String = \"a\\0b\"; return text.len()+39; }",
+            "fn values() -> String { return \"hi\"; } fn main() -> i64 { return values().len()+40; }",
+            "fn main() -> i64 { let text: String = \"\"; if text.is_empty() { return 42; } return 0; }",
+            "fn main() -> i64 { let text: String = \"hi\"; if text.is_empty() { return 0; } return 42; }",
+            "fn values() -> String { return \"\"; } fn main() -> i64 { if values().is_empty() { return 42; } return 0; }",
+            "fn is_empty(text: String) -> bool { return false; } fn main() -> i64 { let text: String = \"\"; if text.is_empty() { return 0; } return 42; }",
+        ];
+        if cfg!(target_arch = "aarch64") {
+            sources.push("struct Bag { text: String } impl Bag { fn answer(&mut self) -> i64 { self.text=\"hi\"; return self.text.len()+40; } } fn main() -> i64 { let mut bag: Bag = Bag { text: \"\" }; return Bag::answer(&mut bag); }");
+        }
+        for source in sources {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            crate::typecheck::TypeChecker::new()
+                .check_module(&module)
+                .unwrap();
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{verified:?}: {source}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn typed_string_methods_evaluate_producer_once() {
+        for body in [
+            "return len(values()) + calls;",
+            "return values().len() + calls;",
+            "if is_empty(values()) { return calls; } return 0;",
+            "if values().is_empty() { return calls; } return 0;",
+        ] {
+            let source = format!(
+                "var calls: Int = 0;\nfn values() -> String {{ calls += 1; return \"\"; }}\nfn main() -> Int {{ {body} }}"
+            );
+            let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            crate::typecheck::TypeChecker::new()
+                .check_module(&module)
+                .unwrap();
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{verified:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(invoke_module(&module, profile, &[]), Some(1));
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn scalar_vector_literals_preserve_call_and_return_values() {
         for source in [
             "fn values() -> Vec<i64> { return vec![20, 22]; } fn main() -> i64 { let items: Vec<i64> = values(); let mut sum = 0; for value in items { sum += value; } return sum; }",

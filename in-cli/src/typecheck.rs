@@ -254,44 +254,61 @@ impl TypeChecker {
         }
         if let Expr::Call { callee, args } = expr
             && let Expr::Ident(name) = callee.as_mut()
-            && let Some((_, short)) = name.rsplit_once("::")
-            && matches!(short, "clone" | "is_empty")
+            && let Some(short) = name
+                .rsplit_once("::")
+                .map(|(_, short)| short)
+                .or_else(|| name.strip_prefix("__method__"))
+            && matches!(short, "clone" | "is_empty" | "len")
             && !facts.functions.contains_key(name)
             && facts.functions.contains_key(short)
             && let [source] = args.as_slice()
             && matches!(
                 self.expr_type(source, facts, env),
-                Some(Typ::Vector(_) | Typ::Array(_))
+                Some(Typ::Vector(_) | Typ::Array(_) | Typ::String)
             )
         {
             *name = short.to_owned();
         }
         if let Expr::Call { callee, args } = expr
-            && matches!(callee.as_ref(), Expr::Ident(name) if name.rsplit("::").next() == Some("is_empty") && !facts.functions.contains_key(name) && !facts.functions.contains_key("is_empty"))
+            && matches!(callee.as_ref(), Expr::Ident(name) if (name.rsplit("::").next() == Some("is_empty") || name == "__method__is_empty") && !facts.functions.contains_key(name) && !facts.functions.contains_key("is_empty"))
             && let [source] = args.as_slice()
             && matches!(
                 self.expr_type(source, facts, env),
-                Some(Typ::Vector(_) | Typ::Array(_))
+                Some(Typ::Vector(_) | Typ::Array(_) | Typ::String)
             )
         {
             *expr = Expr::Binary {
                 op: "==".into(),
                 lhs: Box::new(Expr::Call {
-                    callee: Box::new(Expr::Ident("array-len".into())),
+                    callee: Box::new(Expr::Ident(
+                        if self.expr_type(source, facts, env) == Some(Typ::String) {
+                            "str-len"
+                        } else {
+                            "array-len"
+                        }
+                        .into(),
+                    )),
                     args: vec![source.clone()],
                 }),
                 rhs: Box::new(Expr::IntLit(0)),
             };
         }
         if let Expr::Call { callee, args } = expr
-            && matches!(callee.as_ref(), Expr::Ident(name) if name == "len" && !facts.functions.contains_key(name))
+            && matches!(callee.as_ref(), Expr::Ident(name) if (name == "len" || name == "__method__len") && !facts.functions.contains_key(name) && !facts.functions.contains_key("len"))
             && let [source] = args.as_slice()
             && matches!(
                 self.expr_type(source, facts, env),
-                Some(Typ::Vector(_) | Typ::Array(_))
+                Some(Typ::Vector(_) | Typ::Array(_) | Typ::String)
             )
         {
-            *callee = Box::new(Expr::Ident("array-len".into()));
+            *callee = Box::new(Expr::Ident(
+                if self.expr_type(source, facts, env) == Some(Typ::String) {
+                    "str-len"
+                } else {
+                    "array-len"
+                }
+                .into(),
+            ));
         }
         if let Expr::Call { callee, args } = expr
             && matches!(callee.as_ref(), Expr::Ident(name) if (name == "clone" || name == "Vec::clone") && !facts.functions.contains_key(name) && !facts.functions.contains_key("clone"))
@@ -1524,6 +1541,7 @@ fn is_builtin_fn(name: &str) -> bool {
             | "to-string"
             | "len"
             | "throw-error"
+            | "str-len"
             | "str-concat"
             | "str-eq"
             | "str-contains"
@@ -1552,9 +1570,9 @@ fn is_builtin_fn(name: &str) -> bool {
 
 fn builtin_return_type(name: &str) -> Typ {
     match name {
-        "len" | "array-len" | "bool-to-int" | "to-int" | "str-to-int" | "str-index-of"
-        | "str-table-get-int" | "inb" | "inl" | "load8" | "load16" | "load32" | "load64"
-        | "read-cr2" | "read-cr3" | "invoke" | "invoke1" | "invoke2" => Typ::Int,
+        "len" | "str-len" | "array-len" | "bool-to-int" | "to-int" | "str-to-int"
+        | "str-index-of" | "str-table-get-int" | "inb" | "inl" | "load8" | "load16" | "load32"
+        | "load64" | "read-cr2" | "read-cr3" | "invoke" | "invoke1" | "invoke2" => Typ::Int,
         "str-eq" | "str-contains" | "str-starts-with" | "str-is-int" | "str-table-has"
         | "int-to-bool" => Typ::Bool,
         "str-concat" | "str-trim" | "str-slice" | "to-string" => Typ::String,
