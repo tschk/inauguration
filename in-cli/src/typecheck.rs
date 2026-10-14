@@ -504,11 +504,39 @@ impl TypeChecker {
             };
         }
         if let Expr::Call { callee, args } = expr {
-            let captures = match callee.as_ref() {
-                Expr::Ident(local) => match env.get(local) {
-                    Some(Typ::Named(name)) => Some(name.as_str()),
+            if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::tuples::LET_CHECK)
+                && let [base, Expr::IntLit(fixed), Expr::BoolLit(rest)] = args.as_slice()
+                && let Some(typ) = self.expr_type(base, facts, env)
+                && let Some(len) = match typ {
+                    Typ::Void => Some(0),
+                    Typ::Named(name) => {
+                        crate::core_ir::tuples::fields(&name).map(|fields| fields.len())
+                    }
                     _ => None,
-                },
+                }
+                && let Ok(fixed) = usize::try_from(*fixed)
+                && ((!rest && len == fixed) || (*rest && len >= fixed))
+            {
+                *expr = Expr::IntLit(0);
+            } else if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::tuples::LET_FIELD)
+                && let [base, Expr::IntLit(index), Expr::BoolLit(from_end)] = args.as_slice()
+                && let Some(typ) = self.expr_type(base, facts, env)
+                && let Some((name, _)) = crate::core_ir::tuples::let_field(&typ, *index, *from_end)
+            {
+                *expr = Expr::Field {
+                    base: Box::new(base.clone()),
+                    name,
+                };
+            }
+        }
+        if let Expr::Call { callee, args } = expr {
+            let captures = match callee.as_ref() {
+                Expr::Ident(local) if !crate::core_ir::tuples::is_marker(local) => {
+                    match env.get(local) {
+                        Some(Typ::Named(name)) => Some(name.as_str()),
+                        _ => None,
+                    }
+                }
                 Expr::StructInit { name, fields } if fields.is_empty() => Some(name.as_str()),
                 _ => None,
             };
@@ -737,7 +765,11 @@ impl TypeChecker {
                         self.resolve_c_value(expr, typ, facts, env);
                     }
                     if let Some(typ) = typ.clone().or_else(|| self.expr_type(expr, facts, env)) {
+                        let discard = name.starts_with("#tuple-let-") && typ == Typ::Void;
                         env.insert(name.clone(), typ);
+                        if discard {
+                            *stmt = Stmt::Expr(expr.clone());
+                        }
                     }
                 }
                 Stmt::Assign(name, expr) => {
@@ -1766,6 +1798,15 @@ impl TypeChecker {
             },
             Expr::Call { callee, args } => {
                 if let Expr::Ident(name) = callee.as_ref() {
+                    if name == crate::core_ir::tuples::LET_FIELD {
+                        let [base, Expr::IntLit(index), Expr::BoolLit(from_end)] = args.as_slice()
+                        else {
+                            return None;
+                        };
+                        let typ = self.expr_type(base, facts, env)?;
+                        return crate::core_ir::tuples::let_field(&typ, *index, *from_end)
+                            .map(|(_, typ)| typ);
+                    }
                     if name == crate::core_ir::tuples::VALUE && !args.is_empty() {
                         let types = args
                             .iter()

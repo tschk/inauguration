@@ -335,6 +335,12 @@ fn check_and_insert_top_level<'a>(
     top_level: &mut HashSet<&'a str>,
     name: &'a str,
 ) -> Result<(), (String, String)> {
+    if crate::core_ir::tuples::is_marker(name) {
+        return Err((
+            "reserved-intrinsic-name".into(),
+            format!("private compiler intrinsic `{name}` cannot be declared"),
+        ));
+    }
     if !top_level.insert(name) {
         return Err((
             "duplicate-top-level-name".to_string(),

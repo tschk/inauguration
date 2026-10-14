@@ -3,6 +3,27 @@ use super::{Decl, Expr, Stmt, Typ, UnifiedModule};
 use std::collections::BTreeMap;
 
 pub(crate) const VALUE: &str = "#tuple-value";
+pub(crate) const LET_CHECK: &str = "#tuple-let-check";
+pub(crate) const LET_FIELD: &str = "#tuple-let-field";
+
+pub(crate) fn is_marker(name: &str) -> bool {
+    matches!(name, VALUE | LET_CHECK | LET_FIELD)
+}
+
+pub(crate) fn let_field(typ: &Typ, index: i64, from_end: bool) -> Option<(String, Typ)> {
+    let Typ::Named(name) = typ else {
+        return None;
+    };
+    let fields = fields(name)?;
+    let index = usize::try_from(index).ok()?;
+    let index = if from_end {
+        fields.len().checked_sub(index.checked_add(1)?)?
+    } else {
+        index
+    };
+    fields.get(index).cloned()
+}
+
 const PREFIX: &str = "in-tuple-";
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -263,6 +284,24 @@ mod tests {
             report.reason_code.as_deref(),
             Some("duplicate-top-level-name")
         );
+    }
+
+    #[test]
+    fn private_intrinsic_declarations_are_rejected() {
+        for name in [VALUE, LET_CHECK, LET_FIELD] {
+            let module = UnifiedModule::new(vec![Decl::Function {
+                name: name.into(),
+                params: vec![],
+                ret: Typ::Int,
+                body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                type_params: vec![],
+            }]);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, name);
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("reserved-intrinsic-name")
+            );
+        }
     }
 
     #[test]

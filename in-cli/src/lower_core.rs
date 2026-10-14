@@ -1292,7 +1292,7 @@ fn collect_expr_reads(e: &Expr, reads: &mut HashSet<String>) {
             collect_expr_reads(index, reads);
         }
         Expr::Call { callee, args, .. } => {
-            if !matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::tuples::VALUE)
+            if !matches!(callee.as_ref(), Expr::Ident(name) if crate::core_ir::tuples::is_marker(name))
             {
                 collect_expr_reads(callee, reads);
             }

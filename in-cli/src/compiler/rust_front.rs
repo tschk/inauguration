@@ -1337,6 +1337,104 @@ fn lower_block_inner_with_types(
     out
 }
 
+fn tuple_let_pattern(pattern: &syn::Pat) -> bool {
+    match pattern {
+        syn::Pat::Tuple(_) => true,
+        syn::Pat::Type(pattern) => tuple_let_pattern(&pattern.pat),
+        syn::Pat::Paren(pattern) => tuple_let_pattern(&pattern.pat),
+        syn::Pat::Reference(pattern) => tuple_let_pattern(&pattern.pat),
+        _ => false,
+    }
+}
+
+fn tuple_let_names(pattern: &syn::Pat, names: &mut HashSet<String>) -> bool {
+    match pattern {
+        syn::Pat::Ident(pattern) => names.insert(pattern.ident.to_string()),
+        syn::Pat::Tuple(pattern) => pattern
+            .elems
+            .iter()
+            .all(|pattern| tuple_let_names(pattern, names)),
+        syn::Pat::Type(pattern) => tuple_let_names(&pattern.pat, names),
+        syn::Pat::Paren(pattern) => tuple_let_names(&pattern.pat, names),
+        _ => true,
+    }
+}
+
+fn borrowed_tuple_initializer(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Reference(_) => true,
+        syn::Expr::Paren(expr) => borrowed_tuple_initializer(&expr.expr),
+        syn::Expr::Group(expr) => borrowed_tuple_initializer(&expr.expr),
+        _ => false,
+    }
+}
+
+fn unit_tuple_pattern(pattern: &syn::Pat) -> bool {
+    match pattern {
+        syn::Pat::Tuple(pattern) => pattern.elems.is_empty(),
+        syn::Pat::Type(pattern) => unit_tuple_pattern(&pattern.pat),
+        syn::Pat::Paren(pattern) => unit_tuple_pattern(&pattern.pat),
+        _ => false,
+    }
+}
+
+fn lower_tuple_let_bindings(pattern: &syn::Pat, value: Expr, out: &mut Vec<Stmt>) {
+    match pattern {
+        syn::Pat::Type(pattern) => lower_tuple_let_bindings(&pattern.pat, value, out),
+        syn::Pat::Paren(pattern) => lower_tuple_let_bindings(&pattern.pat, value, out),
+        syn::Pat::Wild(_) => {}
+        syn::Pat::Ident(pattern) if pattern.by_ref.is_none() && pattern.subpat.is_none() => {
+            out.push(Stmt::Let(pattern.ident.to_string(), None, value));
+        }
+        syn::Pat::Tuple(pattern) => {
+            let rest = pattern
+                .elems
+                .iter()
+                .position(|pattern| matches!(pattern, syn::Pat::Rest(_)));
+            if pattern
+                .elems
+                .iter()
+                .filter(|pattern| matches!(pattern, syn::Pat::Rest(_)))
+                .count()
+                > 1
+            {
+                out.push(Stmt::Expr(Expr::Ident(
+                    "#unsupported-tuple-let-rest".into(),
+                )));
+                return;
+            }
+            out.push(Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident(crate::core_ir::tuples::LET_CHECK.into())),
+                args: vec![
+                    value.clone(),
+                    Expr::IntLit((pattern.elems.len() - usize::from(rest.is_some())) as i64),
+                    Expr::BoolLit(rest.is_some()),
+                ],
+            }));
+            let len = pattern.elems.len();
+            for (index, pattern) in pattern.elems.iter().enumerate() {
+                if matches!(pattern, syn::Pat::Rest(_)) {
+                    continue;
+                }
+                let from_end = rest.is_some_and(|rest| index > rest);
+                let index = if from_end { len - index - 1 } else { index };
+                let field = Expr::Call {
+                    callee: Box::new(Expr::Ident(crate::core_ir::tuples::LET_FIELD.into())),
+                    args: vec![
+                        value.clone(),
+                        Expr::IntLit(index as i64),
+                        Expr::BoolLit(from_end),
+                    ],
+                };
+                lower_tuple_let_bindings(pattern, field, out);
+            }
+        }
+        _ => out.push(Stmt::Expr(Expr::Ident(
+            "#unsupported-tuple-let-pattern".into(),
+        ))),
+    }
+}
+
 fn lower_block_inner_with_types_go(
     block: &syn::Block,
     wrap_implicit_return: bool,
@@ -1347,6 +1445,38 @@ fn lower_block_inner_with_types_go(
         match stmt {
             syn::Stmt::Local(local) => {
                 if let Some(init) = &local.init {
+                    if tuple_let_pattern(&local.pat) {
+                        let mut names = HashSet::new();
+                        if !tuple_let_names(&local.pat, &mut names)
+                            || borrowed_tuple_initializer(&init.expr)
+                        {
+                            out.push(Stmt::Expr(Expr::Ident(
+                                "#unsupported-tuple-let-pattern".into(),
+                            )));
+                            continue;
+                        }
+                        if unit_tuple_pattern(&local.pat)
+                            && matches!(init.expr.as_ref(), syn::Expr::Tuple(tuple) if tuple.elems.is_empty())
+                        {
+                            continue;
+                        }
+                        let name = format!("#tuple-let-{}", out.len());
+                        let value = if let syn::Expr::Try(value) = init.expr.as_ref() {
+                            lower_expr_with_types(&value.expr, local_types)
+                        } else {
+                            lower_expr_with_types(&init.expr, local_types)
+                        };
+                        out.push(Stmt::Let(name.clone(), local_decl_type(&local.pat), value));
+                        if matches!(init.expr.as_ref(), syn::Expr::Try(_)) {
+                            out.push(Stmt::Propagate);
+                        }
+                        // A new binding must not inherit an earlier receiver type hint.
+                        for name in names {
+                            local_types.remove(&name);
+                        }
+                        lower_tuple_let_bindings(&local.pat, Expr::Ident(name), &mut out);
+                        continue;
+                    }
                     // For destructuring patterns (Err(e), Some(x), etc.), use a temp name
                     let is_simple = pattern_name(&local.pat).is_some();
                     let name = if is_simple {
@@ -2778,6 +2908,29 @@ fn main() {
             !src.contains("Ident(\"collect\")"),
             "collect should not remain a call: {src}"
         );
+    }
+
+    #[test]
+    fn tuple_let_patterns_reject_wrong_shapes_and_reference_bindings() {
+        for source in [
+            "fn main()->i64 {let(a,b)=(42,);a+b}",
+            "fn main()->i64 {let(a,b)=[20,22];a+b}",
+            "fn main()->i64 {let(ref a,b)=(20,22);*a+b}",
+            "fn main()->i64 {let(a,a)=(20,22);a}",
+            "fn main()->i64 {let(a,b)=&(20,22);a+b}",
+            "fn main()->i64 {let &(a,b)=&(20,22);42}",
+            "fn main()->i64 {let ()=0;42}",
+            "fn main()->i64 {let(a,b):(i64,bool)=(20,22);a}",
+        ] {
+            let parsed = parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}: {module:?}"
+            );
+        }
     }
 
     #[test]

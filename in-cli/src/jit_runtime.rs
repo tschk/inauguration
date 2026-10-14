@@ -4464,6 +4464,47 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn tuple_let_bindings_preserve_types_shapes_scope_and_order() {
+        for source in [
+            "fn main()->i64 {let (a,b)=(20,22);a+b}",
+            "fn main()->i64 {let (a,b):(i64,f64)=(20,22.0);a+b as i64}",
+            "fn main()->i64 {let (a,(b,c))=(1,(20,21));a+b+c}",
+            "fn main()->i64 {let (a,..,b)=(20,3,true,22);a+b}",
+            "fn main()->i64 {let (..,a,b)=(true,20.0,22);a as i64+b}",
+            "static mut CALLS:i64=0; fn make()->(i64,i64) {unsafe{CALLS+=1;} (20,21)} fn main()->i64 {let (a,b)=make();unsafe{a+b+CALLS}}",
+            "fn main()->i64 {let a=20;let (a,b)=(a,22);a+b}",
+            "fn main()->i64 {let (mut a,b)=(20,21);a+=1;a+b}",
+            "fn main()->i64 {let (pair,_)=((20,22),true);pair.0+pair.1}",
+            "fn main()->i64 {let f=|pair| {let(a,b)=pair;a+b};f((20,22))}",
+            "fn main()->i64 {let (a,)=(42,);a}",
+            "fn main()->i64 {let ()=();42}",
+            "static mut CALLS:i64=0; fn unit() {unsafe{CALLS=42;}} fn main()->i64 {let ()=unit();unsafe{CALLS}}",
+            "struct Bucket {value:i64} impl Bucket {fn load(&self)->i64 {self.value}} fn main()->i64 {let bucket:i64=0;let(bucket,extra)=(Bucket{value:40},2);bucket.load()+extra}",
+            "fn make()->Result<(i64,i64),i64> {Ok((20,22))} fn main()->Result<i64,i64> {let(a,b)=make()?;Ok(a+b)}",
+            "static mut CALLS:i64=0; fn make()->Result<(i64,i64),i64> {Err(42)} fn answer()->Result<i64,i64> {let(a,b)=make()?;unsafe{CALLS=99;} Ok(a+b)} fn main()->i64 {if let Err(error)=answer() {unsafe{return error+CALLS;}} 0}",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{source}: {report:?}; {module:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn closure_parameters_infer_monomorphic_call_types() {
         for source in [
             "fn main()->i64 { let f=|x|x+2; f(40) }",

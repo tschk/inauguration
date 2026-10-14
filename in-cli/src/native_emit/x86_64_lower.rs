@@ -3354,6 +3354,23 @@ fn store_struct_value(
     if crate::native_emit::struct_layout::scalar_fields(ctx.structs, &name).is_err() {
         return Err("x86_64-lower: struct value needs a known scalar-field layout".into());
     }
+    if let Expr::Field { .. } = expr {
+        let mut ordered: Vec<_> = fields
+            .iter()
+            .map(|(name, &slot)| (name.clone(), slot))
+            .collect();
+        ordered.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        let staged: Vec<_> = ordered.iter().map(|(_, _)| ctx.alloc_slot()).collect();
+        for ((field, _), &slot) in ordered.iter().zip(&staged) {
+            lower_field_access(emitter, ctx, RAX, expr, field, pending_calls)?;
+            emitter.emit_insns(&x86_64::str64(RAX, slot as u16));
+        }
+        for ((_, destination), slot) in ordered.iter().zip(staged) {
+            emitter.emit_insns(&x86_64::ldr64(RAX, slot as u16));
+            emitter.emit_insns(&x86_64::str64(RAX, *destination as u16));
+        }
+        return Ok(());
+    }
     match expr {
         Expr::Ident(name)
             if matches!(ctx.locals.get(name), Some(StackSlot::Struct { .. }))
