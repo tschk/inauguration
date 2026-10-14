@@ -640,6 +640,11 @@ impl TypeChecker {
                     && self.expr_type(&args[1], facts, env).is_some_and(|actual| receiver.accepts_vector_source(&args[1], &actual)))
             {
                 *callee = Box::new(Expr::Ident("vector-extend".into()));
+            } else if method == "clear"
+                && args.len() == 1
+                && matches!(&receiver, Typ::Vector(item) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
+            {
+                *callee = Box::new(Expr::Ident("vector-clear".into()));
             } else if method == "capacity" && args.len() == 1 && matches!(receiver, Typ::Vector(_))
             {
                 *callee = Box::new(Expr::Ident("vector-capacity".into()));
@@ -2129,6 +2134,7 @@ fn is_builtin_fn(name: &str) -> bool {
             | "array-push"
             | "vector-push"
             | "vector-extend"
+            | "vector-clear"
             | "vector-capacity"
             | "vector-with-capacity-int" | "vector-with-capacity-float" | "vector-with-capacity-bool"
             | "array-pop"

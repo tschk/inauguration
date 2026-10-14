@@ -238,6 +238,7 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("array-push", IntrinsicRet::Void),
     ("vector-push", IntrinsicRet::Void),
     ("vector-extend", IntrinsicRet::Void),
+    ("vector-clear", IntrinsicRet::Void),
     ("vector-capacity", IntrinsicRet::Int),
     ("vector-with-capacity-int", IntrinsicRet::IntVector),
     ("vector-with-capacity-float", IntrinsicRet::FloatVector),
@@ -1142,6 +1143,22 @@ fn check_expr_with_array_borrow(
                             return Err((
                                 "type-mismatch".into(),
                                 "vector push requires matching scalar elements".into(),
+                            ));
+                        }
+                    }
+                    if name == "vector-clear" {
+                        if args.len() != 1 {
+                            return Err((
+                                "call-arity-mismatch".into(),
+                                "vector clear expects one argument".into(),
+                            ));
+                        }
+                        if !matches!(expr_type(&args[0], facts, env), Some(Typ::Vector(item))
+                            if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
+                        {
+                            return Err((
+                                "type-mismatch".into(),
+                                "vector clear requires scalar vector storage".into(),
                             ));
                         }
                     }
@@ -2515,6 +2532,10 @@ mod tests {
             ("str-eq(42, 0)", Some("type-mismatch")),
             ("vector-push()", Some("call-arity-mismatch")),
             ("vector-extend()", Some("call-arity-mismatch")),
+            ("vector-clear()", Some("call-arity-mismatch")),
+            ("vector-clear([], [])", Some("call-arity-mismatch")),
+            ("vector-clear(42)", Some("type-mismatch")),
+            ("vector-clear([1])", Some("type-mismatch")),
             ("vector-capacity()", Some("call-arity-mismatch")),
             ("vector-with-capacity-int()", Some("call-arity-mismatch")),
             ("__inrt_vector_alloc()", Some("call-arity-mismatch")),

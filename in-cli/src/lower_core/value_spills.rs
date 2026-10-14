@@ -36,6 +36,14 @@ fn is_addressable(expr: &Expr) -> bool {
     }
 }
 
+fn value_receiver_index(name: &str, facts: &crate::typecheck::Facts) -> Option<usize> {
+    if matches!(name, "vector-push" | "vector-extend" | "vector-clear") {
+        Some(0)
+    } else {
+        facts.value_receiver_index(name)
+    }
+}
+
 fn expr_needs_spills(expr: &Expr, facts: &crate::typecheck::Facts) -> bool {
     if is_repeat(expr) || is_index_store(expr) || is_field_modify(expr) || is_variable_modify(expr)
     {
@@ -47,10 +55,8 @@ fn expr_needs_spills(expr: &Expr, facts: &crate::typecheck::Facts) -> bool {
     }
     if let Expr::Call { callee, args } = expr
         && let Expr::Ident(name) = callee.as_ref()
-        && let Some(index) = facts.value_receiver_index(name)
-        && args
-            .get(index)
-            .is_some_and(|arg| matches!(arg, Expr::Call { .. } | Expr::StructInit { .. }))
+        && let Some(index) = value_receiver_index(name, facts)
+        && args.get(index).is_some_and(|arg| !is_addressable(arg))
     {
         return true;
     }
@@ -397,11 +403,7 @@ impl Lower {
                 self.expr(callee, out);
             }
             let receiver = if let Expr::Ident(name) = callee.as_ref() {
-                if matches!(name.as_str(), "vector-push" | "vector-extend") {
-                    Some(0)
-                } else {
-                    self.facts.value_receiver_index(name)
-                }
+                value_receiver_index(name, &self.facts)
             } else {
                 None
             };

@@ -3642,6 +3642,38 @@ mod tests {
     }
 
     #[test]
+    fn scalar_vector_clear_refuses_unsupported_storage_and_c_projection() {
+        for source in [
+            "fn main()->i64{let mut v=[1,2];v.clear();42}",
+            "fn main()->i64{let mut v=vec![\"hello\"];v.clear();42}",
+            "struct Item{value:i64} fn main()->i64{let mut v=vec![Item{value:42}];v.clear();42}",
+            "fn main()->i64{let mut v=vec![vec![42]];v.clear();42}",
+            "fn main()->i64{let mut v=Vec::new();v.clear();42}",
+            "fn main()->i64{let mut v=vec![42];v.clear(1);42}",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}: {module:?}"
+            );
+        }
+        let parsed = crate::compiler::rust_front::parse_rust_source(
+            "fn main()->i64{let mut v=vec![42];v.clear();42}",
+        )
+        .unwrap();
+        let module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        assert!(
+            crate::native_emit::c_backend::emit_c_module(&module)
+                .unwrap_err()
+                .contains("vector clear requires owned native lowering")
+        );
+    }
+
+    #[test]
     fn scalar_vector_clone_rejects_unsupported_operands_and_c_projection() {
         use crate::core_ir::{Decl, Expr, Stmt};
         let parsed = crate::compiler::rust_front::parse_rust_source("fn main() -> i64 { let items: Vec<i64> = vec![20,22]; let copied: Vec<i64> = items.clone(); return copied[0]+copied[1]; }").unwrap();
@@ -4665,6 +4697,18 @@ mod tests {
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn typed_tuples_preserve_fields_calls_returns_and_order() {
         for source in [
+            "fn main()->i64{let v=vec![42];v.clone().clear();v[0]}",
+            "struct Bag{items:Vec<i64>} impl Bag{fn reset(&mut self){self.items.clear();self.items.push(42);}} fn main()->i64{let mut bag=Bag{items:vec![1,2]};bag.reset();bag.items[0]}",
+            "static mut CALLS:i64=0;fn source()->Vec<i64>{unsafe{CALLS+=1;}vec![1]} fn main()->i64{source().clear();unsafe{CALLS+41}}",
+            "fn main()->i64{let mut v=Vec::<i64>::with_capacity(10);v.push(1);let cap=v.capacity();v.clear();if v.len()!=0 || v.capacity()!=cap{return 0;}v.push(42);v[0]}",
+            "fn main()->i64{let mut v=Vec::<i64>::new();v.clear();v.clear();v.push(42);v[0]}",
+            "struct Bag{items:Vec<i64>} struct Outer{bag:Bag} fn main()->i64{let mut o=Outer{bag:Bag{items:vec![1,2]}};o.bag.items.clear();o.bag.items.push(42);o.bag.items[0]}",
+            "fn main()->i64{let mut v=vec![1.0];v.clear();v.push(42.0);v[0] as i64}",
+            "fn main()->i64{let mut v=vec![false];v.clear();v.push(true);if v.len()==1 && v[0]{42}else{0}}",
+            "fn main()->i64{let mut v=Vec::<i64>::new();let mut i=0;while i<10{v.push(i);i+=1;}v.clear();v.extend([20,22]);v[0]+v[1]}",
+            "fn clear(v:Vec<i64>)->i64{42} fn main()->i64{let v=vec![1];v.clear()}",
+            "fn clear(flag:bool)->i64{0} fn main()->i64{let mut v=vec![1];v.clear();v.push(42);v[0]}",
+            "struct Bag{answer:i64} impl Bag{fn clear(&self)->i64{self.answer}} fn clear(flag:bool)->i64{0} fn main()->i64{let bag=Bag{answer:42};bag.clear()}",
             "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
             "mod Vec{pub fn with_capacity(value:i64)->i64{value}} fn main()->i64{Vec::with_capacity(42)}",
             "struct Reader{value:i64} impl Reader{fn take(&self,items:Vec<i64>)->i64{if items.capacity()>=10{self.value}else{0}}} fn main()->i64{let reader=Reader{value:42};reader.take(Vec::with_capacity(10))}",

@@ -3283,29 +3283,37 @@ fn lower_call_expr(
         ));
     }
 
-    if matches!(target_name.as_str(), "vector-push" | "vector-extend") {
-        let [vector, value] = args else {
-            return Err("x86_64-lower: vector push requires two arguments".into());
-        };
+    if matches!(
+        target_name.as_str(),
+        "vector-push" | "vector-extend" | "vector-clear"
+    ) {
+        let expected_args = if target_name == "vector-clear" { 1 } else { 2 };
+        if args.len() != expected_args {
+            return Err(format!(
+                "x86_64-lower: {target_name} requires {expected_args} arguments"
+            ));
+        }
+        let vector = &args[0];
         let Some(Typ::Vector(item)) = scalar_expr_type(vector, ctx) else {
-            return Err("x86_64-lower: vector push requires vector storage".into());
+            return Err("x86_64-lower: vector mutation requires vector storage".into());
         };
         if !matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
-            || !scalar_expr_type(value, ctx).is_some_and(|actual| {
-                if target_name == "vector-extend" {
-                    Typ::Vector(item.clone()).accepts_vector_source(value, &actual)
-                } else {
-                    actual.canonical() == item.canonical()
-                }
-            })
+            || (target_name != "vector-clear"
+                && !scalar_expr_type(&args[1], ctx).is_some_and(|actual| {
+                    if target_name == "vector-extend" {
+                        Typ::Vector(item.clone()).accepts_vector_source(&args[1], &actual)
+                    } else {
+                        actual.canonical() == item.canonical()
+                    }
+                }))
         {
-            return Err("x86_64-lower: vector push requires matching scalar elements".into());
+            return Err("x86_64-lower: vector mutation requires matching scalar elements".into());
         }
         if !ctx.runtime_error_slot || x86_64::is_32bit() || ctx.is_interrupt {
-            return Err("x86_64-lower: vector push requires the 64-bit JIT runtime".into());
+            return Err("x86_64-lower: vector mutation requires the 64-bit JIT runtime".into());
         }
         let (root, path) = crate::native_emit::lower::field_path(vector)
-            .ok_or("x86_64-lower: vector push requires addressable storage")?;
+            .ok_or("x86_64-lower: vector mutation requires addressable storage")?;
         if path.is_empty() {
             let offset = ctx.slot_offset(root)?;
             emitter.emit_insns(&x86_64::mov_rr(RAX, RBP));
@@ -3315,7 +3323,7 @@ fn lower_call_expr(
             emitter.emit_insns(&x86_64::sub_rmi32(RAX, -offset));
         } else {
             let Some(StackSlot::Struct { fields }) = ctx.locals.get(root) else {
-                return Err("x86_64-lower: vector push requires a known field layout".into());
+                return Err("x86_64-lower: vector mutation requires a known field layout".into());
             };
             let offset = *fields
                 .get(&path)
@@ -3323,9 +3331,20 @@ fn lower_call_expr(
             emitter.emit_insns(&x86_64::mov_rr(RAX, RBP));
             emitter.emit_insns(&x86_64::sub_rmi32(RAX, offset as i32 + 8));
         }
+        if target_name == "vector-clear" {
+            emitter.emit_insns(&x86_64::mov_r_m(RAX, RAX, 0));
+            emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+            let empty = emitter.len();
+            emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
+            emitter.emit_insns(&x86_64::zero_reg(RCX));
+            emitter.emit_insns(&x86_64::mov_m_r(RAX, 0, RCX));
+            emitter.patch_u32(empty + 2, emitter.len() - empty - 6);
+            emitter.emit_insns(&x86_64::zero_reg(target_reg));
+            return Ok(());
+        }
         let saved = ctx.alloc_slot();
         emitter.emit_insns(&x86_64::str64(RAX, saved as u16));
-        lower_expr_into(emitter, ctx, value, RDX, pending_calls)?;
+        lower_expr_into(emitter, ctx, &args[1], RDX, pending_calls)?;
         emitter.emit_insns(&x86_64::ldr64(RSI, saved as u16));
         emitter.emit_insns(&x86_64::mov_r_m(RSI, RSI, 0));
         emitter.emit_insns(&x86_64::mov_rr(RDI, 15));

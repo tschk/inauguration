@@ -251,6 +251,9 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
             count_expr(index, depth + 1, nodes)
         }
         Expr::Call { callee, args } => {
+            if matches!(callee.as_ref(), Expr::Ident(name) if name == "vector-clear") {
+                return Err("c-backend: vector clear requires owned native lowering".into());
+            }
             count_expr(callee, depth + 1, nodes)?;
             for a in args {
                 count_expr(a, depth + 1, nodes)?;

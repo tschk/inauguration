@@ -33,6 +33,9 @@ pub(crate) fn lower_call(
             "native-lower: unresolved private compiler operation `{target}`"
         ));
     }
+    if target == "vector-clear" && args.len() != 1 {
+        return Err("native-lower: vector clear requires one argument".into());
+    }
     if target == "vector-push" && args.len() != 2 {
         return Err("native-lower: vector push requires two arguments".into());
     }

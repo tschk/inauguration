@@ -1753,34 +1753,39 @@ pub(crate) fn lower_stdlib_call(
             )?;
             return Ok(true);
         }
-        "vector-push" | "vector-extend" if args.len() == 2 => {
+        "vector-push" | "vector-extend" | "vector-clear"
+            if args.len() == if target == "vector-clear" { 1 } else { 2 } =>
+        {
             let Some(Typ::Vector(item)) =
                 super::lower_expr::native_expr_type(&args[0], ctx, functions)
             else {
-                return Err("native-lower: vector push requires vector storage".into());
+                return Err("native-lower: vector mutation requires vector storage".into());
             };
             if !matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
-                || !super::lower_expr::native_expr_type(&args[1], ctx, functions).is_some_and(
-                    |actual| {
-                        if target == "vector-extend" {
-                            Typ::Vector(item.clone()).accepts_vector_source(&args[1], &actual)
-                        } else {
-                            actual.canonical() == item.canonical()
-                        }
-                    },
-                )
+                || (target != "vector-clear"
+                    && !super::lower_expr::native_expr_type(&args[1], ctx, functions).is_some_and(
+                        |actual| {
+                            if target == "vector-extend" {
+                                Typ::Vector(item.clone()).accepts_vector_source(&args[1], &actual)
+                            } else {
+                                actual.canonical() == item.canonical()
+                            }
+                        },
+                    ))
             {
-                return Err("native-lower: vector push requires matching scalar elements".into());
+                return Err(
+                    "native-lower: vector mutation requires matching scalar elements".into(),
+                );
             }
             let (root, path) = super::lower_util::field_path(&args[0])
-                .ok_or("native-lower: vector push requires addressable storage")?;
+                .ok_or("native-lower: vector mutation requires addressable storage")?;
             let pointer_field = if path.is_empty() {
                 "ptr".into()
             } else {
                 format!("{path}.ptr")
             };
             let Some(LocalSlot::Struct { fields, .. }) = ctx.locals.get(root) else {
-                return Err("native-lower: vector push requires a known header layout".into());
+                return Err("native-lower: vector mutation requires a known header layout".into());
             };
             let (base, offset) =
                 if let Some((pointer, offset)) = ctx.receiver_field(root, &pointer_field) {
@@ -1793,6 +1798,11 @@ pub(crate) fn lower_stdlib_call(
                     (aarch64::REG_SP, offset)
                 };
             emitter.emit_u32(aarch64::add_imm64(0, base, offset as u16));
+            if target == "vector-clear" {
+                emitter.emit_u32(aarch64::str64(aarch64::REG_XZR, 0, 8));
+                emitter.emit_u32(aarch64::movz64(rd, 0, 0));
+                return Ok(true);
+            }
             let saved = ctx.acquire_binop_temp(fn_name)?;
             emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, saved));
             if target == "vector-extend"
