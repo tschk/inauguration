@@ -491,12 +491,12 @@ fn check_stmt(
             Ok(())
         }
         Stmt::FieldAssign { base, name, value } => {
-            check_expr(fn_name, base, facts, env, call_edges)?;
-            check_expr(fn_name, value, facts, env, call_edges)?;
             let destination = Expr::Field {
                 base: Box::new(base.clone()),
                 name: name.clone(),
             };
+            check_expr(fn_name, &destination, facts, env, call_edges)?;
+            check_expr(fn_name, value, facts, env, call_edges)?;
             if let (Some(expected), Some(actual)) = (
                 expr_type(&destination, facts, env),
                 expr_type(value, facts, env),
@@ -1287,6 +1287,33 @@ mod tests {
         VerifyOptions {
             entry: None,
             require_entry: false,
+        }
+    }
+
+    #[test]
+    fn field_assignments_validate_destination_names() {
+        for source in [
+            "struct Point { x: i64 } fn main() -> i64 { let mut point: Point = Point { x: 0 }; point.missing = 42; return 0; }",
+            "struct Point { x: i64 } struct Wrapper { point: Point } fn main() -> i64 { let mut wrapper: Wrapper = Wrapper { point: Point { x: 0 } }; wrapper.point.missing = 42; return 0; }",
+            "struct Bag { items: Vec<i64> } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; bag.missing = vec![42]; return 0; }",
+            "struct Point { x: i64 } fn make() -> Point { return Point { x: 0 }; } fn main() -> i64 { make().missing = 42; return 0; }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            let report = verify_for_entry(&module, "main");
+            assert!(!report.ok, "{source}");
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("unknown-struct-field"),
+                "{report:?}: {source}"
+            );
+            assert!(
+                crate::typecheck::TypeChecker::new()
+                    .check_module(&module)
+                    .is_err(),
+                "{source}"
+            );
         }
     }
 

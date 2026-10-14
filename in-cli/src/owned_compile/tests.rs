@@ -41,6 +41,25 @@ fn default_request(
 }
 
 #[test]
+fn owned_compile_rejects_unknown_field_write_before_execution() {
+    let path = temp_path("unknown-field.rs");
+    fs::write(&path, "struct Point { x: i64 } fn main() -> i64 { let mut point: Point = Point { x: 0 }; point.missing = 42; return 42; }").unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    fs::remove_file(path).unwrap();
+    assert!(!report.success, "{report:?}");
+    assert_eq!(
+        report.reason_code.as_deref(),
+        Some("verify-unknown-struct-field")
+    );
+    assert!(report.eval_result.is_none());
+}
+
+#[test]
 #[cfg(all(unix, target_arch = "aarch64"))]
 fn rust_jit_executes_known_aggregate_parameters() {
     for source in [

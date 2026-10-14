@@ -701,7 +701,9 @@ pub(crate) fn lower_field_assign(
         ));
     };
     let Some(&field_offset) = find_field_offset(fields, name) else {
-        return Ok(());
+        return Err(format!(
+            "native-lower: field `{name}` not found in `{base_name}` in `{fn_name}`"
+        ));
     };
     lower_expr::lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
     emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, field_offset));

@@ -896,12 +896,12 @@ impl TypeChecker {
                 }
             }
             Stmt::FieldAssign { base, name, value } => {
-                self.check_expr(fn_name, base, facts, env, errors);
-                self.check_expr(fn_name, value, facts, env, errors);
                 let destination = Expr::Field {
                     base: Box::new(base.clone()),
                     name: name.clone(),
                 };
+                self.check_expr(fn_name, &destination, facts, env, errors);
+                self.check_expr(fn_name, value, facts, env, errors);
                 if let (Some(expected), Some(actual)) = (
                     self.expr_type(&destination, facts, env),
                     self.expr_type(value, facts, env),

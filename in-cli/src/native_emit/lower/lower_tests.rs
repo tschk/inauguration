@@ -121,6 +121,16 @@ fn assert_contains_divide_failure_path(code: &[u8], branch_distance: i32) {
 }
 
 #[test]
+#[cfg(target_arch = "aarch64")]
+fn raw_native_lowering_refuses_unknown_field_write() {
+    let module = crate::compiler::rust_front::parse_rust_source("struct Point { x: i64 } fn main() -> i64 { let mut point: Point = Point { x: 0 }; point.missing = 42; return 42; }").unwrap();
+    let error = lower_module(&module, "main", NativeLinkage::Executable)
+        .err()
+        .expect("unknown field must fail lowering");
+    assert!(error.contains("field `missing` not found"), "{error}");
+}
+
+#[test]
 fn lowers_answer_literal_module_to_bytes() {
     let module = answer_module();
     let lowered = lower_module(&module, "answer", NativeLinkage::Executable).expect("lower");
