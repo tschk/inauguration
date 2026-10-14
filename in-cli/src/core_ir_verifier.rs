@@ -442,6 +442,13 @@ fn check_stmt(
 ) -> Result<(), (String, String)> {
     match stmt {
         Stmt::Let(name, typ, expr) => {
+            if matches!(typ, Some(Typ::Vector(item)) if matches!(item.as_ref(), Typ::Generic(name) if name == "_"))
+            {
+                return Err((
+                    "unresolved-type".into(),
+                    format!("vector element type for `{name}` in `{fn_name}` remains unresolved"),
+                ));
+            }
             // Check the initializer before the new binding shadows the previous one.
             check_expr(fn_name, expr, facts, env, call_edges)?;
             let expr_typ = expr_type(expr, facts, env);

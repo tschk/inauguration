@@ -1,3 +1,5 @@
+#[path = "typecheck/vector_inference.rs"]
+mod vector_inference;
 use crate::core_ir::{Decl, Expr, MatchPattern, MethodSig, Stmt, Typ, UnifiedModule};
 use crate::parser_registry::{ParserId, ResolvedBuildParser};
 use std::collections::{HashMap, HashSet};
@@ -209,6 +211,7 @@ impl TypeChecker {
         promote_c_bool: bool,
         closures: Option<&HashMap<String, String>>,
     ) {
+        crate::core_bindings::normalize_decls(&mut module.decls);
         crate::core_ir::tuples::register(module);
         let mut facts = self.collect_facts(module);
         if let Some(closures) = closures {
@@ -473,7 +476,7 @@ impl TypeChecker {
             let mut inner = env.clone();
             inner.extend(params.iter().cloned());
             let initial = inner.clone();
-            self.resolve_typed_body(body, facts, &mut inner, None, promote_c_bool);
+            self.resolve_typed_body(body, facts, &mut inner, Some(ret), promote_c_bool);
             if matches!(ret, Typ::Generic(name) if name == "_")
                 && params.iter().all(|(_, typ)| resolved_closure_type(typ))
                 && let Some(inferred) = self.infer_closure_return(body, facts, &initial)
@@ -858,6 +861,7 @@ impl TypeChecker {
         return_type: Option<&Typ>,
         promote_c_bool: bool,
     ) {
+        vector_inference::infer(self, body, facts, env, return_type);
         for stmt in body {
             match stmt {
                 Stmt::Let(name, typ, expr) => {
