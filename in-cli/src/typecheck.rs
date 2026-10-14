@@ -552,7 +552,15 @@ impl TypeChecker {
             if let Some(target) = target {
                 *callee = Box::new(Expr::Ident(target));
             } else if matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
-                && facts.functions.contains_key(method)
+                && facts.functions.get(method).is_some_and(|(params, _)| {
+                    params.len() == args.len()
+                        && params.iter().zip(args.iter()).all(|((_, expected), arg)| {
+                            self.expr_type(arg, facts, env).is_some_and(|actual| {
+                                is_compatible(expected, &actual)
+                                    || expected.accepts_sequence_literal(arg, &actual)
+                            })
+                        })
+                })
             {
                 *callee = Box::new(Expr::Ident(method.into()));
             } else if method == "len"
