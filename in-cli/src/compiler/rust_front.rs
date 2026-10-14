@@ -1106,6 +1106,11 @@ fn stmt_ensures_return(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Return(_) => true,
         Stmt::If {
+            cond: Expr::BoolLit(true),
+            then_body,
+            else_body,
+        } if else_body.is_empty() => all_paths_return(then_body),
+        Stmt::If {
             then_body,
             else_body,
             ..
@@ -1139,6 +1144,10 @@ fn lower_tail_expr_with_types(
         syn::Expr::If(value) => lower_if_with_types(value, true, out, local_types),
         syn::Expr::Match(value) => lower_match_with_types(value, true, out, local_types),
         syn::Expr::Block(value) => out.extend(lower_block_with_types(
+            &value.block,
+            &mut local_types.clone(),
+        )),
+        syn::Expr::Unsafe(value) => out.extend(lower_block_with_types(
             &value.block,
             &mut local_types.clone(),
         )),
@@ -1259,6 +1268,8 @@ fn lower_expr_stmt(
     local_types: &mut HashMap<String, String>,
 ) {
     match expr {
+        syn::Expr::Paren(value) => lower_expr_stmt(&value.expr, out, local_types),
+        syn::Expr::Group(value) => lower_expr_stmt(&value.expr, out, local_types),
         syn::Expr::Return(ret) => lower_return_expr(ret.expr.as_deref(), out, local_types),
         syn::Expr::Break(_) => out.push(Stmt::Break),
         syn::Expr::Continue(_) => out.push(Stmt::Continue),
@@ -1302,6 +1313,14 @@ fn lower_expr_stmt(
             &value.block,
             &mut local_types.clone(),
         )),
+        syn::Expr::Unsafe(value) => out.push(Stmt::If {
+            cond: Expr::BoolLit(true),
+            then_body: lower_block_no_implicit_return_with_types(
+                &value.block,
+                &mut local_types.clone(),
+            ),
+            else_body: vec![],
+        }),
         syn::Expr::Assign(a) => {
             if let syn::Expr::Index(index) = a.left.as_ref() {
                 out.push(Stmt::Expr(Expr::Call {
@@ -1388,6 +1407,7 @@ fn lower_return_expr(
         syn::Expr::If(_)
             | syn::Expr::Match(_)
             | syn::Expr::Block(_)
+            | syn::Expr::Unsafe(_)
             | syn::Expr::Paren(_)
             | syn::Expr::Group(_)
     ) || matches!(expr, syn::Expr::Tuple(value) if value.elems.is_empty())
@@ -1821,15 +1841,11 @@ fn lower_expr_with_types_inner(
                 captures: vec![],
             }
         }
-        syn::Expr::Block(b) => {
-            let body = lower_block_with_types(&b.block, local_types);
-            Expr::Closure {
-                params: vec![],
-                ret: Typ::Generic("_".into()),
-                body,
-                captures: vec![],
-            }
-        }
+        // shortcut: refuse block values until their statements can be spilled into the caller.
+        syn::Expr::Block(_) => Expr::Call {
+            callee: Box::new(Expr::Ident("__unsupported_rust_block_value".into())),
+            args: vec![],
+        },
         syn::Expr::Repeat(repeat) => Expr::Call {
             callee: Box::new(Expr::Ident("array-repeat".into())),
             args: vec![
@@ -1864,15 +1880,11 @@ fn lower_expr_with_types_inner(
                 .map(|e| lower_expr_with_types(e, local_types))
                 .collect(),
         ),
-        syn::Expr::Unsafe(u) => {
-            let body = lower_block_with_types(&u.block, local_types);
-            Expr::Closure {
-                params: vec![],
-                ret: Typ::Generic("_".into()),
-                body,
-                captures: vec![],
-            }
-        }
+        // shortcut: refuse value-position unsafe blocks until their statements can be spilled.
+        syn::Expr::Unsafe(_) => Expr::Call {
+            callee: Box::new(Expr::Ident("__unsupported_rust_unsafe_value".into())),
+            args: vec![],
+        },
         syn::Expr::Match(value) => {
             let mut body = Vec::new();
             lower_match_with_types(value, true, &mut body, local_types);
