@@ -401,6 +401,17 @@ pub(crate) fn decode_string_literal(quoted: &str) -> Option<String> {
 }
 
 impl MatchPattern {
+    /// The verifier must still prove the struct name and field types match.
+    pub(crate) fn irrefutable_after_shape_check(&self) -> bool {
+        match self {
+            Self::WildPat | Self::IdentPat(_) => true,
+            Self::StructPat { fields, .. } => fields
+                .iter()
+                .all(|(_, pattern)| pattern.irrefutable_after_shape_check()),
+            _ => false,
+        }
+    }
+
     pub fn parse(s: &str) -> Result<Self, String> {
         let s = trim_match_pat(s).trim_end_matches(':').trim();
         let s = s.strip_prefix("case ").unwrap_or(s).trim();

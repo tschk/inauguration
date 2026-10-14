@@ -1463,19 +1463,16 @@ fn stmt_ensures_return(stmt: &Stmt) -> bool {
             ..
         } => !else_body.is_empty() && all_paths_return(then_body) && all_paths_return(else_body),
         Stmt::Match { arms, .. } => {
-            let wildcard = arms.iter().filter(|arm| arm.guard.is_none()).any(|arm| {
-                matches!(
-                    crate::core_ir::MatchPattern::parse(&arm.pattern),
-                    Ok(crate::core_ir::MatchPattern::WildPat
-                        | crate::core_ir::MatchPattern::IdentPat(_))
-                )
+            let irrefutable = arms.iter().filter(|arm| arm.guard.is_none()).any(|arm| {
+                crate::core_ir::MatchPattern::parse(&arm.pattern)
+                    .is_ok_and(|pattern| pattern.irrefutable_after_shape_check())
             });
             let bool_complete = ["true", "false"].iter().all(|value| {
                 arms.iter()
                     .any(|arm| arm.guard.is_none() && arm.pattern.trim() == *value)
             });
             !arms.is_empty()
-                && (wildcard || bool_complete)
+                && (irrefutable || bool_complete)
                 && arms.iter().all(|arm| all_paths_return(&arm.body))
         }
         _ => false,
@@ -2777,6 +2774,31 @@ fn main() {
             !src.contains("Ident(\"collect\")"),
             "collect should not remain a call: {src}"
         );
+    }
+
+    #[test]
+    fn struct_match_return_proof_preserves_refutable_paths() {
+        for pattern in ["Point { x: 1 }", "Point { x: value } if value > 0"] {
+            let source = format!(
+                "struct Point {{ x:i64 }} fn main()->i64 {{ let p=Point{{x:42}}; match p {{ {pattern}=>42 }} }}"
+            );
+            let module = parse_rust_source(&source).unwrap();
+            let body = module
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Function { name, body, .. } if name == "main" => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(
+                matches!(body.last(), Some(Stmt::Return(None))),
+                "{pattern}: {body:?}"
+            );
+        }
+        let mut module = parse_rust_source("struct Point { x:i64 } struct Other { x:i64 } fn main()->i64 { let p=Point{x:42}; match p { Other{x:value}=>value } }").unwrap();
+        crate::lower_core::desugar_module(&mut module);
+        assert!(!crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
     }
 
     #[test]

@@ -4370,6 +4370,8 @@ mod tests {
             "fn main()->i64 { let values=[1,42]; match values { [2,a]=>0, [1,a]=>a, _=>0 } }",
             "fn main()->i64 { let values=[20,22]; match values { [a,b] if a==0=>0, [a,b]=>a+b, _=>0 } }",
             "struct Point { x:i64,y:i64 } fn main()->i64 { let p=Point{x:20,y:22}; match p { Point{x:a,y:b}=>{return a+b;} } return 0; }",
+            "struct Point { x:i64,y:i64 } fn main()->i64 { let p=Point{x:20,y:22}; match p { Point{x:a,y:b}=>a+b } }",
+            "struct Point { x:i64,y:i64 } fn main()->i64 { let f=|| { let p=Point{x:20,y:22}; match p { Point{x:a,y:b}=>a+b } }; f() }",
             "struct Point { x:i64,y:i64 } fn main()->i64 { let p=Point{x:1,y:42}; match p { Point{x:2,y:a}=>0, Point{x:1,y:a}=>a, _=>0 } }",
         ] {
             let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
