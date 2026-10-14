@@ -589,16 +589,27 @@ pub(crate) fn lower_store_local(
             emitter.emit_u32(aarch64::str64(1, aarch64::REG_SP, len_offset));
             Ok(())
         }
-        LocalSlot::Struct { typ, fields } => lower_struct_expr_into_slots(
-            emitter,
-            ctx,
-            expr,
-            &typ,
-            &fields,
-            functions,
-            pending_calls,
-            fn_name,
-        ),
+        LocalSlot::Struct { typ, fields } => {
+            lower_struct_expr_into_slots(
+                emitter,
+                ctx,
+                expr,
+                &typ,
+                &fields,
+                functions,
+                pending_calls,
+                fn_name,
+            )?;
+            // Receiver replacement commits only after every source field is staged.
+            for (field, &slot) in &fields {
+                if let Some((pointer, offset)) = ctx.receiver_field(name, field) {
+                    emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, slot));
+                    emitter.emit_u32(aarch64::ldr64(1, aarch64::REG_SP, pointer));
+                    emitter.emit_u32(aarch64::str64(0, 1, offset));
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -612,11 +623,68 @@ pub(crate) fn lower_field_assign(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
-    let Expr::Ident(base_name) = base else {
+    let field_type = lower_expr::native_expr_type(
+        &Expr::Field {
+            base: Box::new(base.clone()),
+            name: name.to_string(),
+        },
+        ctx,
+        functions,
+    )
+    .map(|typ| typ.canonical());
+    let Some((base_name, prefix)) = super::lower_util::field_path(base) else {
         return Err(format!(
-            "native-lower: field assignment base must be a local identifier, got `{base:?}` in `{fn_name}`"
+            "native-lower: field assignment base is not addressable in `{fn_name}`"
         ));
     };
+    let qualified = (!prefix.is_empty()).then(|| format!("{prefix}.{name}"));
+    let name = qualified.as_deref().unwrap_or(name);
+    if let Some(Typ::Named(typ)) = &field_type
+        && ctx
+            .structs
+            .contains_key(super::lower_util::base_struct_name(typ))
+    {
+        let words = super::lower_util::native_param_abi_slots(
+            &[("value".to_string(), Typ::Named(typ.clone()))],
+            ctx.structs,
+            fn_name,
+        )?;
+        let temp = ctx.acquire_call_arg_slots(fn_name, words.max(8))?;
+        let staged = super::lower_call::aggregate_scratch_fields(
+            ctx,
+            typ,
+            ctx.call_arg_temps[temp],
+            fn_name,
+        )?;
+        lower_struct_expr_into_slots(
+            emitter,
+            ctx,
+            value,
+            typ,
+            &staged,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        for (field, slot) in staged {
+            let full = format!("{name}.{field}");
+            emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, slot));
+            if let Some((pointer, offset)) = ctx.receiver_field(base_name, &full) {
+                emitter.emit_u32(aarch64::ldr64(1, aarch64::REG_SP, pointer));
+                emitter.emit_u32(aarch64::str64(0, 1, offset));
+            } else if let Some(LocalSlot::Struct { fields, .. }) = ctx.locals.get(base_name)
+                && let Some(&offset) = fields.get(&full)
+            {
+                emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, offset));
+            } else {
+                return Err(format!(
+                    "native-lower: missing aggregate destination `{base_name}.{full}` in `{fn_name}`"
+                ));
+            }
+        }
+        ctx.release_call_arg_temps();
+        return Ok(());
+    }
     if !ctx.locals.contains_key(base_name) && !ctx.params.contains_key(base_name) {
         if let Some(offset) = ctx.globals.get(&format!("{base_name}.{name}")).copied() {
             lower_expr::lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
@@ -624,6 +692,14 @@ pub(crate) fn lower_field_assign(
             emitter.emit_u32(aarch64::str64(0, 1, 0));
             return Ok(());
         }
+    }
+    if field_type.as_ref().is_some_and(is_native_scalar_type)
+        && let Some((pointer, offset)) = ctx.receiver_field(base_name, name)
+    {
+        lower_expr::lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
+        emitter.emit_u32(aarch64::ldr64(1, aarch64::REG_SP, pointer));
+        emitter.emit_u32(aarch64::str64(0, 1, offset));
+        return Ok(());
     }
     let scalar_offset = ctx.locals.get(base_name).and_then(|s| match s {
         LocalSlot::Scalar(off) => Some(*off),
@@ -939,8 +1015,19 @@ pub(crate) fn lower_struct_expr_into_slots(
                         "native-lower: field `{field}` missing on source struct `{typ}` in `{fn_name}`"
                     ));
                 };
-                emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, src));
+                if ctx.receiver_pointers.contains_key(local) {
+                    lower_expr::lower_struct_field_into(emitter, ctx, expr, field, 0, fn_name)?;
+                } else {
+                    emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, src));
+                }
                 emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, dst));
+            }
+            Ok(())
+        }
+        Expr::Field { .. } => {
+            for (field, &slot) in fields {
+                lower_expr::lower_struct_field_into(emitter, ctx, expr, field, 0, fn_name)?;
+                emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, slot));
             }
             Ok(())
         }
@@ -1091,7 +1178,12 @@ pub(crate) fn lower_struct_expr_into_regs(
                     emitter.emit_insns(&crate::native_emit::aarch64::load_i64(reg as u8, 0));
                     continue;
                 };
-                emitter.emit_u32(aarch64::ldr64(reg as u8, aarch64::REG_SP, offset));
+                if let Some((pointer, relative)) = ctx.receiver_field(local, field) {
+                    emitter.emit_u32(aarch64::ldr64(reg as u8, aarch64::REG_SP, pointer));
+                    emitter.emit_u32(aarch64::ldr64(reg as u8, reg as u8, relative));
+                } else {
+                    emitter.emit_u32(aarch64::ldr64(reg as u8, aarch64::REG_SP, offset));
+                }
             }
             Ok(())
         }
@@ -1106,6 +1198,18 @@ pub(crate) fn lower_struct_expr_into_regs(
             fn_name,
         ),
         Expr::Field { base, name, .. } => {
+            if let Some((root, _)) = super::lower_util::field_path(expr)
+                && matches!(ctx.locals.get(root), Some(LocalSlot::Struct { .. }))
+            {
+                let schema = native_struct_fields(ctx.structs, typ, fn_name)?;
+                for (reg, (field, _)) in schema.iter().enumerate() {
+                    lower_expr::lower_struct_field_into(
+                        emitter, ctx, expr, field, reg as u8, fn_name,
+                    )?;
+                }
+                return Ok(());
+            }
+
             if let Expr::Ident(local) = base.as_ref() {
                 let offset = ctx.params.get(local).copied().or_else(|| {
                     ctx.locals.get(local).and_then(|s| match s {

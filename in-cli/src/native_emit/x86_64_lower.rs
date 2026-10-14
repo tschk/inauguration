@@ -155,6 +155,7 @@ struct LowerCtx<'a> {
     locals: HashMap<String, StackSlot>,
     scalar_types: HashMap<String, Typ>,
     empty_struct_bases: HashMap<String, u32>,
+    receiver_pointers: HashMap<String, u32>,
     /// Current stack frame size (negative, grows down)
     frame_size: u32,
     /// Set when a return statement has been emitted
@@ -221,6 +222,7 @@ impl<'a> LowerCtx<'a> {
             locals: HashMap::new(),
             scalar_types: HashMap::new(),
             empty_struct_bases: HashMap::new(),
+            receiver_pointers: HashMap::new(),
             frame_size: 0,
             emitted_return: false,
             error_branches: Vec::new(),
@@ -319,6 +321,16 @@ impl<'a> LowerCtx<'a> {
                 Ok(())
             }
         }
+    }
+
+    fn receiver_field(&self, name: &str, field: &str) -> Option<(u32, i32)> {
+        let pointer = *self.receiver_pointers.get(name)?;
+        let StackSlot::Struct { fields } = self.locals.get(name)? else {
+            return None;
+        };
+        let offset = *fields.get(field)?;
+        let base = *fields.values().max()?;
+        Some((pointer, (base - offset) as i32))
     }
 
     fn frame_reserve(&self) -> u32 {
@@ -1049,6 +1061,9 @@ fn lower_function(
                     return Err("x86_64-lower: struct parameter needs a supported scalar-field 64-bit layout".into());
                 }
                 let pointer_slot = ctx.alloc_slot();
+                if name == "self" {
+                    ctx.receiver_pointers.insert(name.clone(), pointer_slot);
+                }
                 if i < param_regs.len() {
                     emitter.emit_insns(&x86_64::str64(param_regs[i], pointer_slot as u16));
                 } else {
@@ -1390,7 +1405,16 @@ fn lower_stmt(
                 return Ok(());
             }
             if let Some(StackSlot::Struct { fields }) = ctx.locals.get(name).cloned() {
-                return store_struct_value(emitter, ctx, expr, &fields, pending_calls);
+                store_struct_value(emitter, ctx, expr, &fields, pending_calls)?;
+                // Receiver replacement commits only after the source copy completes.
+                for (field, &slot) in &fields {
+                    if let Some((pointer, offset)) = ctx.receiver_field(name, field) {
+                        emitter.emit_insns(&x86_64::ldr64(RAX, slot as u16));
+                        emitter.emit_insns(&x86_64::ldr64(RCX, pointer as u16));
+                        emitter.emit_insns(&x86_64::mov_m_r(RCX, offset, RAX));
+                    }
+                }
+                return Ok(());
             }
             let offset = match ctx.locals.get(name) {
                 Some(StackSlot::Scalar(off)) => Some(*off),
@@ -1415,6 +1439,12 @@ fn lower_stmt(
                 lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
                 return Ok(());
             };
+            if let Some((pointer, offset)) = ctx.receiver_field(base_name, name) {
+                lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::ldr64(RCX, pointer as u16));
+                emitter.emit_insns(&x86_64::mov_m_r(RCX, offset, RAX));
+                return Ok(());
+            }
             if !ctx.locals.contains_key(base_name) {
                 // Global struct: collect_globals maps `{base}.{field}` to a
                 // data-section slot, so store through the pending-global path
@@ -2073,6 +2103,10 @@ fn lower_ident_ref(
     name: &str,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if let Some(&pointer) = ctx.receiver_pointers.get(name) {
+        emitter.emit_insns(&x86_64::ldr64(target_reg, pointer as u16));
+        return Ok(());
+    }
     if matches!(ctx.locals.get(name), Some(StackSlot::InlineArray { .. })) {
         return Err("x86_64-lower: escaping 32-bit arrays require an aggregate ABI".into());
     }
@@ -3268,6 +3302,11 @@ fn lower_field_access(
         emitter.emit_insns(&x86_64::load_i64(target_reg, 0));
         return Ok(());
     };
+    if let Some((pointer, offset)) = ctx.receiver_field(base_name, name) {
+        emitter.emit_insns(&x86_64::ldr64(target_reg, pointer as u16));
+        emitter.emit_insns(&x86_64::mov_r_m(target_reg, target_reg, offset));
+        return Ok(());
+    }
     if !ctx.locals.contains_key(base_name) {
         let field_key = format!("{base_name}.{name}");
         if ctx.globals.contains_key(&field_key) {

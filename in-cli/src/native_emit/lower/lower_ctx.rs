@@ -792,6 +792,39 @@ impl<'a> LowerCtx<'a> {
         self.alloc_local(name, resolved.as_ref(), fn_name)
     }
 
+    pub(crate) fn receiver_field_type(&self, name: &str, field: &str) -> Option<Typ> {
+        let LocalSlot::Struct { typ, .. } = self.locals.get(name)? else {
+            return None;
+        };
+        let mut typ = Typ::Named(typ.clone());
+        for part in field.split('.') {
+            let schema = match typ.canonical() {
+                Typ::Named(name) => self.structs.get(base_struct_name(&name))?,
+                Typ::Vector(_) => self.structs.get("Vec")?,
+                _ => return None,
+            };
+            typ = schema.iter().find(|(name, _)| name == part)?.1.clone();
+        }
+        Some(typ.canonical())
+    }
+
+    pub(crate) fn receiver_field(&self, name: &str, field: &str) -> Option<(u32, u32)> {
+        let pointer = *self.receiver_pointers.get(name)?;
+        let LocalSlot::Struct { typ, fields } = self.locals.get(name)? else {
+            return None;
+        };
+        if self
+            .structs
+            .get(base_struct_name(typ))
+            .is_some_and(|fields| fields.is_empty())
+        {
+            return None;
+        }
+        let offset = *super::lower_util::find_field_offset(fields, field)?;
+        let base = *fields.values().min()?;
+        Some((pointer, offset - base))
+    }
+
     pub(crate) fn validate_global_struct(&self, global: &str) -> Result<(), String> {
         if let Some(Typ::Named(name)) = self.global_types.get(global)
             && self.structs.get(name).is_some_and(|fields| {

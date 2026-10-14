@@ -3012,6 +3012,127 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn class_method_mutation_updates_the_callers_object() {
+        let sources = [
+            "class Counter { value: Int; fn add(delta: Int) -> Int { value += delta; return value; } }\nfn main() -> Int { var counter: Counter = Counter { value: 0 }; counter.add(42); return counter.value; }",
+            "class Counter { value: Int; fn add(delta: Int) -> Int { value += delta; return value; } fn run(delta: Int) -> Int { self.add(delta); return value; } }\nfn main() -> Int { var counter: Counter = Counter { value: 0 }; var result: Int = counter.run(21); return result + counter.value; }",
+            "class Counter { value: Int; fn add(delta: Int) -> Int { value += delta; return value; } }\nvar counter: Counter = 0;\nfn main() -> Int { counter.add(42); return counter.value; }",
+            "class Point { x: Int; y: Int; fn set(value: Int) -> Int { x = value; return x; } fn snapshot(value: Int) -> Point { self.set(value); return self; } }\nfn main() -> Int { var point: Point = Point { x: 0, y: 22 }; var copied: Point = point.snapshot(20); point.set(0); return copied.x + copied.y; }",
+            "class Point { x: Int; y: Int; fn replace() -> Int { self = Point { x: 20, y: 22 }; return x + y; } }\nfn main() -> Int { var point: Point = Point { x: 0, y: 0 }; point.replace(); return point.x + point.y; }",
+            "fn fail() -> Int { throw 9; }\nclass Point { x: Int; y: Int; fn replace() -> Int { self = Point { x: 0, y: fail() }; return 0; } }\nfn main() -> Int { var point: Point = Point { x: 20, y: 22 }; try { point.replace(); } catch 9 { return point.x + point.y; } return 0; }",
+            "class Counter { value: Int; fn fail() -> Int { value = 42; throw 9; } }\nfn main() -> Int { var counter: Counter = Counter { value: 0 }; try { counter.fail(); } catch 9 { return counter.value; } return 0; }",
+            "class State { flag: Bool; value: Float; fn set() -> Int { flag = true; value = 42.5; return 0; } }\nfn main() -> Int { var state: State = State { flag: false, value: 0.0 }; state.set(); if state.flag && state.value == 42.5 { return 42; } return 0; }",
+            "class Counter { value: Int; fn add(delta: Int) -> Int { value += delta; return value; } }\nfn mutate(value: Counter) -> Int { value.add(42); return value.value; }\nfn main() -> Int { var counter: Counter = Counter { value: 0 }; return mutate(counter) + counter.value; }",
+            "fn sum_point(value: Point) -> Int { return value.x + value.y; }\nclass Point { x: Int; y: Int; fn set(value: Int) -> Int { x = value; return x; } fn answer() -> Int { self.set(20); return sum_point(self); } }\nfn main() -> Int { var point: Point = Point { x: 0, y: 22 }; return point.answer(); }",
+        ];
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let actual = sources.map(|source| {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                crate::lower_core::desugar_module(&mut module);
+                invoke_module(&module, profile, &[])
+            });
+            assert!(
+                actual.iter().all(|value| *value == Some(42)),
+                "{profile:?}: {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn receiver_replacement_constructor_fields_evaluate_in_source_order() {
+        let source = "var trace: Int = 0;\nfn first() -> Int { trace = trace * 10 + 1; return 20; }\nfn second() -> Int { trace = trace * 10 + 2; return 22; }\nclass Point { x: Int; y: Int; fn replace() -> Int { self = Point { x: first(), y: second() }; return trace; } }\nfn main() -> Int { var point: Point = Point { x: 0, y: 0 }; var order: Int = point.replace(); if order == 12 && point.x + point.y == 42 { return 42; } return order; }";
+        for _ in 0..8 {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                crate::lower_core::desugar_module(&mut module);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, target_arch = "aarch64"))]
+    fn nested_receiver_mutation_preserves_addresses_and_value_copies() {
+        for source in [
+            "class Inner { x: Int; y: Int; }\nclass Wrapper { inner: Inner; fn replace() -> Int { inner = Inner { x: 20, y: 22 }; return inner.x + inner.y; } }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { inner: Inner { x: 0, y: 0 } }; wrapper.replace(); return wrapper.inner.x + wrapper.inner.y; }",
+            "fn fail() -> Int { throw 9; }\nclass Inner { x: Int; y: Int; }\nclass Wrapper { inner: Inner; fn replace() -> Int { inner = Inner { x: 0, y: fail() }; return 0; } }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { inner: Inner { x: 20, y: 22 } }; try { wrapper.replace(); } catch 9 { return wrapper.inner.x + wrapper.inner.y; } return 0; }",
+            "class Inner { x: Int; y: Int; fn set(value: Int) -> Int { x = value; return x; } }\nclass Middle { tag: Int; inner: Inner; }\nclass Wrapper { tag: Int; middle: Middle; fn answer() -> Int { middle.inner.set(20); return middle.inner.x + middle.inner.y; } }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { tag: 0, middle: Middle { tag: 0, inner: Inner { x: 0, y: 22 } } }; wrapper.answer(); return wrapper.middle.inner.x + wrapper.middle.inner.y; }",
+            "class Inner { x: Int; y: Int; fn set(value: Int) -> Int { x = value; return x; } }\nclass Middle { tag: Int; inner: Inner; }\nclass Wrapper { tag: Int; middle: Middle; }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { tag: 0, middle: Middle { tag: 0, inner: Inner { x: 0, y: 22 } } }; wrapper.middle.inner.set(20); return wrapper.middle.inner.x + wrapper.middle.inner.y; }",
+            "class Inner { x: Int; y: Int; }\nclass Wrapper { inner: Inner; }\nfn copy_inner(value: Wrapper) -> Inner { return value.inner; }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { inner: Inner { x: 20, y: 22 } }; var copied: Inner = copy_inner(wrapper); wrapper.inner.x = 0; return copied.x + copied.y; }",
+            "class Inner { x: Int; y: Int; fn set(value: Int) -> Int { x = value; return x; } }\nclass Wrapper { inner: Inner; fn answer() -> Int { inner.set(20); return inner.x + inner.y; } }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { inner: Inner { x: 0, y: 22 } }; wrapper.answer(); return wrapper.inner.x + wrapper.inner.y; }",
+            "class Inner { x: Int; y: Int; }\nclass Wrapper { inner: Inner; fn answer() -> Int { inner.x = 20; return inner.x + inner.y; } }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { inner: Inner { x: 0, y: 22 } }; wrapper.answer(); return wrapper.inner.x + wrapper.inner.y; }",
+            "fn sum_inner(value: Inner) -> Int { return value.x + value.y; }\nclass Inner { x: Int; y: Int; fn set(value: Int) -> Int { x = value; return x; } }\nclass Wrapper { inner: Inner; fn answer() -> Int { inner.set(20); return sum_inner(inner); } }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { inner: Inner { x: 0, y: 22 } }; return wrapper.answer(); }",
+            "class Inner { x: Int; y: Int; fn set(value: Int) -> Int { x = value; return x; } }\nclass Wrapper { inner: Inner; fn snapshot() -> Inner { inner.set(20); return inner; } }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { inner: Inner { x: 0, y: 22 } }; var copied: Inner = wrapper.snapshot(); wrapper.inner.x = 0; return copied.x + copied.y; }",
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn empty_receiver_copies_and_replacements_do_not_access_value_storage() {
+        for source in [
+            "struct Empty {}\nfn main(self: Empty) -> Int { var copied: Empty = self; return 42; }",
+            "struct Empty {}\nfn main(self: Empty) -> Int { self = Empty {}; return 42; }",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[8]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recursive_aggregate_field_replacement_is_refused_without_recursing_forever() {
+        let module = crate::in_lang_parse::parse_in_source("struct Node { Node next }\nfn unsupported(self: Node, value: Node) -> Int { self.next = value; return 0; }\nfn main() -> Int { return 42; }").unwrap();
+        let error = crate::native_emit::lower::lower_module(
+            &module,
+            "unsupported",
+            crate::native_emit::NativeLinkage::Executable,
+        )
+        .err()
+        .expect("recursive values are unsupported");
+        assert!(
+            error.contains("recursive aggregate value layout"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn receiver_sentinels_return_failure_before_reading_fields() {
         for source in [
             "struct Empty {}\nfn main(self: Empty) -> Int { return 42; }",

@@ -1,0 +1,15 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+class Counter {
+    value: Int;
+    fn add(delta: Int) -> Int { value += delta; return value; }
+    fn run(delta: Int) -> Int { self.add(delta); return value; }
+}
+fn main() -> Int {
+    var counter: Counter = Counter { value: 0 };
+    var result: Int = counter.run(21);
+    return result + counter.value;
+}

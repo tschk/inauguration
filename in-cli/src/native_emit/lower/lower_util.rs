@@ -26,6 +26,20 @@ pub(crate) fn emit_failure_return(emitter: &mut CodeEmitter, stack_reserve: u32)
     emit_epilogue(emitter, stack_reserve);
 }
 
+pub(crate) fn field_path(expr: &Expr) -> Option<(&str, String)> {
+    let mut names = Vec::new();
+    let mut base = expr;
+    while let Expr::Field { base: parent, name } = base {
+        names.push(name.as_str());
+        base = parent;
+    }
+    let Expr::Ident(root) = base else {
+        return None;
+    };
+    names.reverse();
+    Some((root, names.join(".")))
+}
+
 /// Find a field offset in a flattened struct field map, supporting nested struct access.
 /// When `field_map` has `"inner.val"` and we look up `"inner"`, returns the offset of `"inner.val"`.
 pub(crate) fn find_field_offset<'a>(

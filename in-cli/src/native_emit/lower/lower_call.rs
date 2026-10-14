@@ -480,6 +480,7 @@ pub(crate) fn aggregate_scratch_fields(
         prefix: &str,
         next_offset: &mut u32,
         fn_name: &str,
+        visited: &mut Vec<String>,
     ) -> Result<(), String> {
         match typ {
             Typ::Int | Typ::Bool | Typ::String | Typ::Float => {
@@ -493,6 +494,13 @@ pub(crate) fn aggregate_scratch_fields(
                 }
             }
             Typ::Named(name) => {
+                let base = base_struct_name(name).to_string();
+                if visited.contains(&base) || visited.len() >= 40 {
+                    return Err(format!(
+                        "native-lower: recursive aggregate value layout `{name}` in `{fn_name}`"
+                    ));
+                }
+                visited.push(base);
                 let nested = native_struct_fields(structs, name, fn_name)?;
                 for (field, field_typ) in nested {
                     append_fields(
@@ -502,8 +510,10 @@ pub(crate) fn aggregate_scratch_fields(
                         &format!("{prefix}.{field}"),
                         next_offset,
                         fn_name,
+                        visited,
                     )?;
                 }
+                visited.pop();
             }
             _ => {
                 return Err(format!(
@@ -524,6 +534,7 @@ pub(crate) fn aggregate_scratch_fields(
             &field,
             &mut next_offset,
             fn_name,
+            &mut Vec::new(),
         )?;
     }
     Ok(fields)
@@ -538,10 +549,22 @@ pub(crate) fn lower_struct_ptr_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
-    // Handle Field access: self.field → pointer to that field
-    // Supports nested fields like self.de.read (Field { base: Field { base: Ident("self"), name: "de" }, name: "read" })
-    // Handle Field access: self.field → pointer to that field
-    // Supports nested fields like self.de.read and ser.formatter where ser is a param
+    if let Some((root, field)) = super::lower_util::field_path(arg)
+        && !field.is_empty()
+    {
+        if let Some((pointer, offset)) = ctx.receiver_field(root, &field) {
+            emitter.emit_u32(aarch64::ldr64(reg, aarch64::REG_SP, pointer));
+            emitter.emit_u32(aarch64::add_imm64(reg, reg, offset as u16));
+            return Ok(reg + 1);
+        }
+        if let Some(LocalSlot::Struct { fields, .. }) = ctx.locals.get(root)
+            && let Some(&offset) = find_field_offset(fields, &field)
+        {
+            emitter.emit_u32(aarch64::add_imm64(reg, aarch64::REG_SP, offset as u16));
+            return Ok(reg + 1);
+        }
+    }
+    // Keep legacy pointer fallbacks for opaque or partially materialized field bases.
     if let Expr::Field { base, name } = arg {
         match base.as_ref() {
             Expr::Ident(local) => {
@@ -658,6 +681,10 @@ pub(crate) fn lower_struct_ptr_arg(
     {
         ctx.validate_global_struct(local)?;
         ctx.emit_global_address(emitter, reg, offset);
+        return Ok(reg + 1);
+    }
+    if let Some(&pointer) = ctx.receiver_pointers.get(local) {
+        emitter.emit_u32(aarch64::ldr64(reg, aarch64::REG_SP, pointer));
         return Ok(reg + 1);
     }
     match ctx.locals.get(local) {
@@ -868,7 +895,11 @@ pub(crate) fn lower_struct_call_arg(
                     }
                     for (field, field_ty) in fields {
                         if matches!(field_ty, Typ::Int | Typ::Bool | Typ::String | Typ::Float) {
-                            if let Some(offset) = find_field_offset(slots, field) {
+                            if ctx.receiver_pointers.contains_key(local) {
+                                super::lower_expr::lower_struct_field_into(
+                                    emitter, ctx, arg, field, reg, fn_name,
+                                )?;
+                            } else if let Some(offset) = find_field_offset(slots, field) {
                                 emitter.emit_u32(aarch64::ldr64(reg, aarch64::REG_SP, *offset));
                             }
                             // ponytail: field missing in slot — skip load, reg still advances
@@ -925,6 +956,19 @@ pub(crate) fn lower_struct_call_arg(
             Ok(reg + slot_count as u8)
         }
         Expr::Field { base, name } => {
+            if let Some((root, _)) = super::lower_util::field_path(arg)
+                && ctx.receiver_pointers.contains_key(root)
+            {
+                let schema = fields.clone();
+                for (field, _) in &schema {
+                    super::lower_expr::lower_struct_field_into(
+                        emitter, ctx, arg, field, reg, fn_name,
+                    )?;
+                    reg += 1;
+                }
+                return Ok(reg);
+            }
+
             // Field access on a local: load field value into register
             if let Expr::Ident(local) = base.as_ref() {
                 let offset = ctx.params.get(local).copied().or_else(|| {

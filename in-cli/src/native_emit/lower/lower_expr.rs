@@ -47,7 +47,9 @@ pub(crate) fn lower_expr_into(
                 emitter.emit_insns(&aarch64::load_i64(rd, 0));
                 return Ok(());
             }
-            if let Some(offset) = ctx.params.get(name) {
+            if let Some(&pointer) = ctx.receiver_pointers.get(name) {
+                emitter.emit_u32(aarch64::ldr64(rd, aarch64::REG_SP, pointer));
+            } else if let Some(offset) = ctx.params.get(name) {
                 emitter.emit_u32(aarch64::ldr64(rd, aarch64::REG_SP, *offset));
             } else if let Some(slot) = ctx.locals.get(name) {
                 match slot {
@@ -422,6 +424,48 @@ pub(crate) fn lower_index(
     Ok(())
 }
 
+pub(crate) fn lower_struct_field_into(
+    emitter: &mut CodeEmitter,
+    ctx: &LowerCtx<'_>,
+    base: &Expr,
+    field: &str,
+    rd: u8,
+    fn_name: &str,
+) -> Result<(), String> {
+    let (root, prefix) = super::lower_util::field_path(base).ok_or_else(|| {
+        format!("native-lower: struct field source is not addressable in `{fn_name}`")
+    })?;
+    let Some(LocalSlot::Struct { typ, fields }) = ctx.locals.get(root) else {
+        return Err(format!(
+            "native-lower: missing struct source `{root}` in `{fn_name}`"
+        ));
+    };
+    if prefix.is_empty()
+        && ctx
+            .structs
+            .get(super::lower_util::base_struct_name(typ))
+            .is_some_and(|fields| fields.is_empty())
+    {
+        emitter.emit_insns(&aarch64::load_i64(rd, 0));
+        return Ok(());
+    }
+    let name = if prefix.is_empty() {
+        field.to_string()
+    } else {
+        format!("{prefix}.{field}")
+    };
+    if let Some((pointer, offset)) = ctx.receiver_field(root, &name) {
+        emitter.emit_u32(aarch64::ldr64(rd, aarch64::REG_SP, pointer));
+        emitter.emit_u32(aarch64::ldr64(rd, rd, offset));
+    } else {
+        let offset = fields.get(&name).copied().ok_or_else(|| {
+            format!("native-lower: field `{name}` missing on source `{root}` in `{fn_name}`")
+        })?;
+        emitter.emit_u32(aarch64::ldr64(rd, aarch64::REG_SP, offset));
+    }
+    Ok(())
+}
+
 pub(crate) fn lower_field(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -434,6 +478,16 @@ pub(crate) fn lower_field(
 ) -> Result<(), String> {
     match base {
         Expr::Ident(local) => {
+            if ctx
+                .receiver_field_type(local, name)
+                .is_some_and(|typ| super::lower_util::is_native_scalar_type(&typ))
+                && let Some((pointer, offset)) = ctx.receiver_field(local, name)
+            {
+                emitter.emit_u32(aarch64::ldr64(rd, aarch64::REG_SP, pointer));
+                emitter.emit_u32(aarch64::ldr64(rd, rd, offset));
+                return Ok(());
+            }
+
             match ctx.locals.get(local) {
                 Some(LocalSlot::Struct { fields, .. }) => {
                     if let Some(offset) = find_field_offset(fields, name) {

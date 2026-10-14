@@ -1,0 +1,17 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+class Point {
+    x: Int;
+    y: Int;
+    fn set(value: Int) -> Int { x = value; return x; }
+    fn snapshot(value: Int) -> Point { self.set(value); return self; }
+}
+fn main() -> Int {
+    var point: Point = Point { x: 0, y: 22 };
+    var copied: Point = point.snapshot(20);
+    point.set(0);
+    return copied.x + copied.y;
+}

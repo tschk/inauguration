@@ -1,0 +1,19 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var trace: Int = 0;
+fn first() -> Int { trace = trace * 10 + 1; return 20; }
+fn second() -> Int { trace = trace * 10 + 2; return 22; }
+class Point {
+    x: Int;
+    y: Int;
+    fn replace() -> Int { self = Point { x: first(), y: second() }; return trace; }
+}
+fn main() -> Int {
+    var point: Point = Point { x: 0, y: 0 };
+    var order: Int = point.replace();
+    if order == 12 && point.x + point.y == 42 { return 42; }
+    return order;
+}
