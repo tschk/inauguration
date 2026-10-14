@@ -1588,6 +1588,74 @@ fn substring_builtin_copies_bytes_and_checks_ranges() {
 }
 
 #[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_vectors_construct_grow_and_preserve_fields() {
+    for text in [
+        "fn main()->i64 {let mut items=Vec::new();items.push(20);items.push(22);items[0]+items[1]}",
+        "fn main()->i64 {let items=vec![20,22];items[0]+items[1]}",
+        "fn main()->i64 {let mut items=Vec::new();let mut index=0;while index<10 {items.push(index);index+=1;}items.len()+items[8]+items[9]+15}",
+        "struct Bag {items:Vec<i64>} struct Outer {id:i64,bag:Bag} impl Outer {fn fill(&mut self) {let mut index=0;while index<10 {self.bag.items.push(index);index+=1;}}} fn main()->i64 {let mut outer=Outer{id:15,bag:Bag{items:Vec::new()}};outer.fill();outer.bag.items.len()+outer.bag.items[8]+outer.bag.items[9]+outer.id}",
+        "fn main()->i64 {let mut items=Vec::new();items.push(20.0);items.push(22.0);(items[0]+items[1]) as i64}",
+        "fn main()->i64 {let mut items=Vec::new();items.push(true);items.push(false);if items[0] && !items[1] {42} else {0}}",
+    ] {
+        let source = temp_path("vector-native.rs");
+        let binary = temp_path("vector-native");
+        fs::write(&source, text).unwrap();
+        let report = compile_owned(&default_request(
+            source.clone(),
+            CompileTarget::Native,
+            Some("main"),
+            Some(binary.clone()),
+        ));
+        assert!(report.success, "{text}: {report:?}");
+        assert_eq!(
+            std::process::Command::new(&binary).status().unwrap().code(),
+            Some(42),
+            "{text}"
+        );
+        fs::remove_file(source).unwrap();
+        fs::remove_file(binary).unwrap();
+    }
+}
+
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_vector_runtime_refuses_invalid_headers_and_failed_allocations() {
+    for text in [
+        "fn main()->i64 {__inrt_vector_push(0,42);0}",
+        "fn main()->i64 {__inrt_vector_push(1,42);0}",
+        "fn main()->i64 {let mut items:Vec<i64>=Vec::new();items.len=1;items.push(42);0}",
+        "fn main()->i64 {let mut items:Vec<i64>=Vec::new();items.cap=4;items.push(42);0}",
+        "fn main()->i64 {let mut items:Vec<i64>=Vec::new();items.ptr=8;items.cap=576460752303423488;items.push(42);0}",
+        "fn main()->i64 {let mut items:Vec<i64>=Vec::new();items.ptr=8;items.len=288230376151711744;items.cap=288230376151711744;items.push(42);0}",
+    ] {
+        let source = temp_path("vector-invalid-native.rs");
+        let binary = temp_path("vector-invalid-native");
+        fs::write(&source, text).unwrap();
+        let report = compile_owned(&default_request(
+            source.clone(),
+            CompileTarget::Native,
+            Some("main"),
+            Some(binary.clone()),
+        ));
+        assert!(report.success, "{text}: {report:?}");
+        let output = std::process::Command::new(&binary).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(crate::inrt::INRT_TRAP_EXIT_CODE as i32),
+            "{text}: {output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("invalid vector header or allocation failure"),
+            "{output:?}"
+        );
+        fs::remove_file(source).unwrap();
+        fs::remove_file(binary).unwrap();
+    }
+}
+
+#[test]
 fn owned_jit_uses_runtime_builtin_result_types() {
     if !native_backend::native_subset_host_available() {
         return;

@@ -57,6 +57,7 @@ fn emit_stdlib_wrapper_call(
 /// linker cannot resolve.
 fn native_inrt_builtin(wrapper: &str) -> Option<&'static str> {
     match wrapper {
+        "in_vec_push" => Some(crate::inrt::INRT_VECTOR_PUSH),
         "in_str_concat" => Some(crate::inrt::INRT_STR_CONCAT),
         "in_str_eq" => Some(crate::inrt::INRT_STR_EQ),
         "in_str_contains" => Some(crate::inrt::INRT_STR_CONTAINS),

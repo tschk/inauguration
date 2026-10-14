@@ -9,6 +9,7 @@ pub const INRT_ENTRY_SYMBOL: &str = "_inrt_start";
 /// String concatenation, embedded in the artifact so a native executable does not
 /// need the Rust-side `in_str_concat` helper the JIT resolves by dlsym.
 pub const INRT_STR_CONCAT: &str = "__inrt_str_concat";
+pub const INRT_VECTOR_PUSH: &str = "__inrt_vector_push";
 
 /// String equality and substring search, embedded for the same reason as
 /// [`INRT_STR_CONCAT`]: `str-eq` and `str-contains` are Rust-side helpers that a
@@ -34,6 +35,7 @@ pub const INRT_TRAP_EXIT_CODE: u16 = 70;
 pub const INRT_BUILTINS: &[&str] = &[
     "__inrt_str_len",
     INRT_STR_CONCAT,
+    INRT_VECTOR_PUSH,
     INRT_STR_EQ,
     INRT_STR_CONTAINS,
     INRT_PRINT,
@@ -55,7 +57,7 @@ pub fn inrt_builtin_param_slots(name: &str) -> Option<usize> {
         "__inrt_str_len" | "__inrt_array_len" => Some(1),
         "__inrt_array_load" => Some(2),
         "__inrt_array_store" => Some(3),
-        "__inrt_array_push" => Some(2),
+        "__inrt_array_push" | INRT_VECTOR_PUSH => Some(2),
         INRT_STR_CONCAT | INRT_STR_EQ | INRT_STR_CONTAINS => Some(2),
         INRT_PRINT | INRT_PRINT_INT => Some(1),
         "__inrt_str_substr" => Some(3),
@@ -635,6 +637,122 @@ fn build_inrt_array_push() -> Vec<u8> {
     buf
 }
 
+fn build_inrt_vector_push() -> Vec<u8> {
+    // Header: pointer, element length, capacity. Elements occupy one word.
+    // shortcut: mappings live until process exit, release them when Core IR models drop ownership.
+    let mut e = aarch64::CodeEmitter::new();
+    let mut failures = Vec::new();
+    e.emit_u32(aarch64::cmp_reg64(X0, XZR));
+    failures.push((e.emit_insn(aarch64::b_cond(0, 0)), 0));
+    e.emit_insns(&aarch64::load_i64(X9, 7));
+    e.emit_u32(aarch64::and_reg64(X2, X0, X9));
+    e.emit_u32(aarch64::cmp_reg64(X2, XZR));
+    failures.push((e.emit_insn(aarch64::b_cond(1, 0)), 1));
+    e.emit_u32(aarch64::stp_pre(FP, LR, -80));
+    e.emit_u32(aarch64::add_imm64(FP, SP, 0));
+    e.emit_u32(aarch64::str64(X0, SP, 16));
+    e.emit_u32(aarch64::str64(X1, SP, 24));
+    e.emit_u32(aarch64::ldr64(X2, X0, 0));
+    e.emit_u32(aarch64::ldr64(X3, X0, 8));
+    e.emit_u32(aarch64::ldr64(X4, X0, 16));
+    e.emit_u32(aarch64::str64(X2, SP, 32));
+    e.emit_u32(aarch64::str64(X3, SP, 40));
+    e.emit_u32(aarch64::cmp_reg64(X3, X4));
+    failures.push((e.emit_insn(aarch64::b_cond(8, 0)), 8));
+    e.emit_u32(aarch64::cmp_reg64(X2, XZR));
+    let pointer_present = e.emit_insn(aarch64::b_cond(1, 0));
+    e.emit_u32(aarch64::cmp_reg64(X4, XZR));
+    failures.push((e.emit_insn(aarch64::b_cond(1, 0)), 1));
+    e.patch_u32(
+        pointer_present,
+        aarch64::b_cond(1, (e.len() - pointer_present) as i32),
+    );
+    e.emit_u32(aarch64::and_reg64(X5, X2, X9));
+    e.emit_u32(aarch64::cmp_reg64(X5, XZR));
+    failures.push((e.emit_insn(aarch64::b_cond(1, 0)), 1));
+    e.emit_insns(&aarch64::load_i64(X9, 1i64 << 59));
+    e.emit_u32(aarch64::cmp_reg64(X4, X9));
+    failures.push((e.emit_insn(aarch64::b_cond(2, 0)), 2));
+    e.emit_u32(aarch64::cmp_reg64(X3, X4));
+    let has_capacity = e.emit_insn(aarch64::b_cond(3, 0));
+    e.emit_u32(aarch64::movz64(X9, 4, 0));
+    e.emit_u32(aarch64::cmp_reg64(X4, X9));
+    let double_capacity = e.emit_insn(aarch64::b_cond(2, 0));
+    e.emit_u32(aarch64::movz64(X4, 4, 0));
+    let capacity_ready = e.emit_insn(aarch64::b(0));
+    e.patch_u32(
+        double_capacity,
+        aarch64::b_cond(2, (e.len() - double_capacity) as i32),
+    );
+    e.emit_u32(aarch64::add_reg64(X4, X4, X4));
+    e.patch_u32(
+        capacity_ready,
+        aarch64::b((e.len() - capacity_ready) as i32),
+    );
+    e.emit_u32(aarch64::str64(X4, SP, 56));
+    e.emit_u32(aarch64::movz64(X9, 3, 0));
+    e.emit_u32(aarch64::lsl_reg64(X1, X4, X9));
+    e.emit_u32(aarch64::mov_zero64(X0));
+    emit_inline_mmap(&mut e.bytes);
+    failures.push((e.emit_insn(aarch64::b_cond(2, 0)), 2));
+    e.emit_u32(aarch64::cmp_reg64(X0, XZR));
+    failures.push((e.emit_insn(aarch64::b_cond(0, 0)), 0));
+    e.emit_u32(aarch64::str64(X0, SP, 64));
+    e.emit_u32(aarch64::ldr64(X2, SP, 32));
+    e.emit_u32(aarch64::ldr64(X3, SP, 40));
+    e.emit_u32(aarch64::mov_zero64(X5));
+    let copy = e.len();
+    e.emit_u32(aarch64::cmp_reg64(X5, X3));
+    let copied = e.emit_insn(aarch64::b_cond(2, 0));
+    e.emit_u32(aarch64::ldr64_reg_offset(X6, X2, X5));
+    e.emit_u32(aarch64::str64_reg_offset(X6, X0, X5));
+    e.emit_u32(aarch64::add_imm64(X5, X5, 1));
+    e.emit_u32(aarch64::b(copy as i32 - e.len() as i32));
+    e.patch_u32(copied, aarch64::b_cond(2, (e.len() - copied) as i32));
+    e.emit_u32(aarch64::ldr64(X2, SP, 16));
+    e.emit_u32(aarch64::str64(X0, X2, 0));
+    e.emit_u32(aarch64::ldr64(X4, SP, 56));
+    e.emit_u32(aarch64::str64(X4, X2, 16));
+    e.patch_u32(
+        has_capacity,
+        aarch64::b_cond(3, (e.len() - has_capacity) as i32),
+    );
+    e.emit_u32(aarch64::ldr64(X0, SP, 16));
+    e.emit_u32(aarch64::ldr64(X2, X0, 0));
+    e.emit_u32(aarch64::ldr64(X3, SP, 40));
+    e.emit_u32(aarch64::ldr64(X1, SP, 24));
+    e.emit_u32(aarch64::str64_reg_offset(X1, X2, X3));
+    e.emit_u32(aarch64::add_imm64(X3, X3, 1));
+    e.emit_u32(aarch64::str64(X3, X0, 8));
+    e.emit_u32(aarch64::movz64(X0, 1, 0));
+    e.emit_u32(aarch64::ldp_post(FP, LR, 80));
+    e.emit_u32(aarch64::ret());
+    let failed = e.len();
+    for (site, condition) in failures {
+        e.patch_u32(
+            site,
+            aarch64::b_cond(condition, failed as i32 - site as i32),
+        );
+    }
+    let message = b"inrt: invalid vector header or allocation failure\n";
+    let message_address = e.emit_insn(aarch64::adr(X1, 0));
+    e.emit_u32(aarch64::movz64(X0, 2, 0));
+    e.emit_u32(aarch64::movz64(X2, message.len() as u16, 0));
+    e.emit_u32(aarch64::movz64(X16, 4, 0));
+    e.emit_u32(aarch64::svc(0x80));
+    e.emit_u32(aarch64::movz64(X0, INRT_TRAP_EXIT_CODE, 0));
+    e.emit_u32(aarch64::movz64(X16, 1, 0));
+    e.emit_u32(aarch64::svc(0x80));
+    e.emit_u32(aarch64::b(0));
+    e.patch_u32(
+        message_address,
+        aarch64::adr(X1, e.len() as i32 - message_address as i32),
+    );
+    e.bytes.extend_from_slice(message);
+    align8(&mut e.bytes);
+    e.bytes
+}
+
 fn emit_inline_mmap(buf: &mut Vec<u8>) {
     emit_insn_blob(
         &[
@@ -684,6 +802,7 @@ pub fn build_runtime_blob() -> (Vec<u8>, BTreeMap<String, u32>) {
     }
     add_fn!("__inrt_str_len", build_inrt_str_len());
     add_fn!(INRT_STR_CONCAT, build_inrt_str_concat());
+    add_fn!(INRT_VECTOR_PUSH, build_inrt_vector_push());
     add_fn!(INRT_STR_EQ, build_inrt_str_eq());
     add_fn!(INRT_STR_CONTAINS, build_inrt_str_contains());
     add_fn!(INRT_PRINT, build_inrt_print());
@@ -760,6 +879,7 @@ mod tests {
             let f = match *name {
                 "__inrt_str_len" => build_inrt_str_len(),
                 INRT_STR_CONCAT => build_inrt_str_concat(),
+                INRT_VECTOR_PUSH => build_inrt_vector_push(),
                 INRT_STR_EQ => build_inrt_str_eq(),
                 INRT_STR_CONTAINS => build_inrt_str_contains(),
                 INRT_PRINT => build_inrt_print(),
