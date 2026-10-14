@@ -410,6 +410,9 @@ impl MatchPattern {
             Self::StructPat { fields, .. } => fields
                 .iter()
                 .all(|(_, pattern)| pattern.irrefutable_after_shape_check()),
+            Self::TuplePat(items) => items.iter().all(|pattern| {
+                matches!(pattern, Self::RestPat) || pattern.irrefutable_after_shape_check()
+            }),
             _ => false,
         }
     }
@@ -539,7 +542,7 @@ impl MatchPattern {
                     return Err("sequence pattern has multiple rests".into());
                 }
                 let tuple_fields = match typ {
-                    Typ::Array(_) | Typ::Vector(_) => None,
+                    Typ::Array(_) | Typ::Vector(_) if matches!(self, Self::ArrayPat(_)) => None,
                     Typ::Named(name) if matches!(self, Self::TuplePat(_)) => {
                         let fields = schema(name)
                             .ok_or_else(|| format!("unknown tuple pattern type `{name}`"))?;
@@ -612,6 +615,33 @@ impl MatchPattern {
                             .find(|(name, _)| name == field)
                             .is_some_and(|(_, typ)| pattern.irrefutable(typ, schema))
                     })
+                })
+            }
+            Self::TuplePat(items)
+                if matches!(typ, Typ::Named(_)) && self.typed_bindings(typ, schema).is_ok() =>
+            {
+                let Typ::Named(name) = typ else {
+                    return false;
+                };
+                let Some(fields) = schema(name) else {
+                    return false;
+                };
+                let rest = items
+                    .iter()
+                    .position(|pattern| matches!(pattern, Self::RestPat));
+                items.iter().enumerate().all(|(index, pattern)| {
+                    if matches!(pattern, Self::RestPat) {
+                        return true;
+                    }
+                    let index = if rest.is_some_and(|rest| index > rest) {
+                        fields.len() - (items.len() - index)
+                    } else {
+                        index
+                    };
+                    fields
+                        .iter()
+                        .find(|(name, _)| name == &format!("_{index}"))
+                        .is_some_and(|(_, typ)| pattern.irrefutable(typ, schema))
                 })
             }
             _ => false,
@@ -869,6 +899,29 @@ mod tests {
         let schema = |name: &str| (name == "Tuple").then_some(fields.as_slice());
         let typ = Typ::Named("Tuple".into());
         assert!(
+            MatchPattern::parse("(a,..,b)")
+                .unwrap()
+                .irrefutable(&typ, &schema)
+        );
+        assert!(
+            !MatchPattern::parse("(1,..,b)")
+                .unwrap()
+                .irrefutable(&typ, &schema)
+        );
+        assert!(
+            !MatchPattern::parse("(a,b)")
+                .unwrap()
+                .irrefutable(&typ, &schema)
+        );
+        let array_fields = vec![("_0".into(), Typ::Array(Box::new(Typ::Int)))];
+        let array_schema = |name: &str| (name == "WithArray").then_some(array_fields.as_slice());
+        assert!(
+            !MatchPattern::parse("([a,b],)")
+                .unwrap()
+                .irrefutable(&Typ::Named("WithArray".into()), &array_schema)
+        );
+
+        assert!(
             MatchPattern::parse("(.., true)")
                 .unwrap()
                 .typed_bindings(&typ, &schema)
@@ -948,6 +1001,12 @@ mod tests {
         );
         assert!(!array.irrefutable(&Typ::Array(Box::new(Typ::Bool)), &schema));
         assert!(array.typed_bindings(&Typ::Int, &schema).is_err());
+        assert!(
+            MatchPattern::parse("(a,b)")
+                .unwrap()
+                .typed_bindings(&Typ::Array(Box::new(Typ::Int)), &schema)
+                .is_err()
+        );
         assert!(
             MatchPattern::parse("[a, .., ..]")
                 .unwrap()

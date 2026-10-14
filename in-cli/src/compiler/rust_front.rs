@@ -2951,6 +2951,34 @@ fn main() {
     }
 
     #[test]
+    fn tuple_match_return_proof_preserves_guarded_and_literal_paths() {
+        for pattern in ["(1,b)", "(a,b) if a>0"] {
+            let source =
+                format!("fn main()->i64 {{let pair=(20,22);match pair {{{pattern}=>42}}}}");
+            let module = parse_rust_source(&source).unwrap();
+            let body = module
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Function { name, body, .. } if name == "main" => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(
+                matches!(body.last(), Some(Stmt::Return(None))),
+                "{pattern}: {body:?}"
+            );
+        }
+        let parsed =
+            parse_rust_source("fn main()->i64 {let values=[20,22];match values {(a,b)=>a+b}}")
+                .unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        crate::lower_core::desugar_module(&mut module);
+        assert!(!crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+    }
+
+    #[test]
     fn struct_match_return_proof_preserves_refutable_paths() {
         for pattern in ["Point { x: 1 }", "Point { x: value } if value > 0"] {
             let source = format!(
