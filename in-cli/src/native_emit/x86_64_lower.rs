@@ -2720,6 +2720,18 @@ fn lower_builtin_call(
             emitter.patch_u32(empty + 2, (emitter.len() as i32 - empty as i32 - 6) as u32);
             Ok(true)
         }
+        "vector-capacity" if args.len() == 1 => {
+            if !matches!(scalar_expr_type(&args[0], ctx), Some(Typ::Vector(_))) {
+                return Err("x86_64-lower: vector capacity requires vector storage".into());
+            }
+            lower_expr_into(emitter, ctx, &args[0], target_reg, pending_calls)?;
+            emitter.emit_insns(&x86_64::test_rr(target_reg, target_reg));
+            let empty = emitter.len();
+            emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
+            emitter.emit_insns(&x86_64::mov_r_m(target_reg, target_reg, 8));
+            emitter.patch_u32(empty + 2, emitter.len() - empty - 6);
+            return Ok(true);
+        }
         "array-len" | "array_len" if args.len() == 1 => {
             if let Expr::Ident(name) = &args[0]
                 && let Some(StackSlot::InlineArray { offsets }) = ctx.locals.get(name)

@@ -1690,6 +1690,25 @@ pub(crate) fn lower_stdlib_call(
             )?;
             return Ok(true);
         }
+        "vector-capacity" if args.len() == 1 => {
+            let Some(Typ::Vector(elem)) =
+                super::lower_expr::native_expr_type(&args[0], ctx, functions)
+            else {
+                return Err("native-lower: vector capacity requires vector storage".into());
+            };
+            super::lower_call::lower_vector_call_arg(
+                emitter,
+                ctx,
+                &args[0],
+                &elem,
+                0,
+                functions,
+                pending_calls,
+                fn_name,
+            )?;
+            emitter.emit_u32(aarch64::mov_reg64(rd, 2));
+            return Ok(true);
+        }
         "array-len" if args.len() == 1 => {
             lower_array_len(
                 emitter,

@@ -586,6 +586,9 @@ impl TypeChecker {
                     && self.expr_type(&args[1], facts, env).is_some_and(|actual| receiver.accepts_vector_source(&args[1], &actual)))
             {
                 *callee = Box::new(Expr::Ident("vector-extend".into()));
+            } else if method == "capacity" && args.len() == 1 && matches!(receiver, Typ::Vector(_))
+            {
+                *callee = Box::new(Expr::Ident("vector-capacity".into()));
             } else if method == "len"
                 && matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
             {
@@ -2043,6 +2046,7 @@ fn is_builtin_fn(name: &str) -> bool {
             | "array-push"
             | "vector-push"
             | "vector-extend"
+            | "vector-capacity"
             | "array-pop"
             | "array-len" | "array_len"
             | "bool-to-int"
@@ -2062,9 +2066,10 @@ fn builtin_return_type(name: &str) -> Typ {
         return sig.ret.clone();
     }
     match name {
-        "len" | "str-len" | "array-len" | "array_len" | "bool-to-int" | "to-int" | "str-to-int"
-        | "str-index-of" | "str-table-get-int" | "inb" | "inl" | "load8" | "load16" | "load32"
-        | "load64" | "read-cr2" | "read-cr3" | "invoke" | "invoke1" | "invoke2" => Typ::Int,
+        "len" | "str-len" | "array-len" | "array_len" | "vector-capacity" | "bool-to-int"
+        | "to-int" | "str-to-int" | "str-index-of" | "str-table-get-int" | "inb" | "inl"
+        | "load8" | "load16" | "load32" | "load64" | "read-cr2" | "read-cr3" | "invoke"
+        | "invoke1" | "invoke2" => Typ::Int,
         "str-eq" | "str-contains" | "str-starts-with" | "str-is-int" | "str-table-has"
         | "int-to-bool" => Typ::Bool,
         "str-concat" | "str-trim" | "str-slice" | "to-string" => Typ::String,

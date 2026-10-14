@@ -235,6 +235,7 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("array-push", IntrinsicRet::Void),
     ("vector-push", IntrinsicRet::Void),
     ("vector-extend", IntrinsicRet::Void),
+    ("vector-capacity", IntrinsicRet::Int),
     ("json-stringify", IntrinsicRet::String),
 ];
 
@@ -1124,7 +1125,7 @@ fn check_expr_with_array_borrow(
                             ));
                         }
                     }
-                    if matches!(name.as_str(), "array-len" | "array_len") {
+                    if matches!(name.as_str(), "array-len" | "array_len" | "vector-capacity") {
                         if args.len() != 1 {
                             return Err((
                                 "call-arity-mismatch".into(),
@@ -1138,11 +1139,18 @@ fn check_expr_with_array_borrow(
                         if !matches!(
                             actual.as_ref().map(Typ::canonical),
                             Some(Typ::Array(_) | Typ::Vector(_))
-                        ) {
+                        ) || (name == "vector-capacity"
+                            && !matches!(actual, Some(Typ::Vector(_))))
+                        {
                             return Err((
                                 "type-mismatch".into(),
                                 format!(
-                                    "argument 1 for `{name}` in `{fn_name}` expected array, got {}",
+                                    "argument 1 for `{name}` in `{fn_name}` expected {}, got {}",
+                                    if name == "vector-capacity" {
+                                        "vector"
+                                    } else {
+                                        "array"
+                                    },
                                     actual
                                         .as_ref()
                                         .map(type_name)
@@ -2487,6 +2495,9 @@ mod tests {
             ("str-eq(42, 0)", Some("type-mismatch")),
             ("vector-push()", Some("call-arity-mismatch")),
             ("vector-extend()", Some("call-arity-mismatch")),
+            ("vector-capacity()", Some("call-arity-mismatch")),
+            ("vector-capacity(42)", Some("type-mismatch")),
+            ("vector-capacity([1])", Some("type-mismatch")),
             ("vector-extend(42, [1])", Some("type-mismatch")),
             ("vector-extend([1], [2])", Some("type-mismatch")),
             ("vector-push(42, 1)", Some("type-mismatch")),

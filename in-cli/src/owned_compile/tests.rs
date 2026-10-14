@@ -94,6 +94,13 @@ fn owned_compile_rejects_unknown_field_write_before_execution() {
 fn rust_jit_executes_explicit_scalar_vector_constructors() {
     for text in [
         "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
+        "fn main()->i64{let mut items=Vec::new();items.push(42);if items.capacity()>items.len(){42}else{0}}",
+        "fn main()->i64{let mut items:Vec<i64>=Vec::new();let before=items.capacity();items.extend(vec![1,2,3,4,5,6,7,8,9,10]);if before==0 && items.capacity()>=items.len(){42}else{0}}",
+        "struct Bag{items:Vec<i64>} fn main()->i64{let bag=Bag{items:vec![20,22]};if bag.items.capacity()>=2{42}else{0}}",
+        "static mut CALLS:i64=0;fn source()->Vec<i64>{unsafe{CALLS+=1;}vec![42]} fn main()->i64{let capacity=source().capacity();unsafe{if capacity>=1 && CALLS==1{42}else{0}}}",
+        "fn main()->i64{let items=vec![42];if items.clone().capacity()>=1{42}else{0}}",
+        "fn capacity(flag:bool)->i64{0} fn main()->i64{let items=vec![42];if items.capacity()>=1{42}else{0}}",
+        "fn capacity(items:Vec<i64>)->i64{42} fn main()->i64{let items=vec![1];items.capacity()}",
         "fn main()->i64{let mut items=vec![20,22];items.extend(vec![]);items[0]+items[1]}",
         "fn main()->i64{let mut items=vec![20.0,22.0];items.extend(vec![]);(items[0]+items[1]) as i64}",
         "fn main()->i64{let mut items=vec![true];items.extend([]);if items[0]{42}else{0}}",
@@ -1743,6 +1750,13 @@ fn native_vector_runtime_refuses_invalid_headers_and_failed_allocations() {
 fn native_vector_clones_preserve_independent_storage_and_returns() {
     for text in [
         "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
+        "fn main()->i64{let mut items=Vec::new();items.push(42);if items.capacity()>items.len(){42}else{0}}",
+        "fn main()->i64{let mut items:Vec<i64>=Vec::new();let before=items.capacity();items.extend(vec![1,2,3,4,5,6,7,8,9,10]);if before==0 && items.capacity()>=items.len(){42}else{0}}",
+        "struct Bag{items:Vec<i64>} fn main()->i64{let bag=Bag{items:vec![20,22]};if bag.items.capacity()>=2{42}else{0}}",
+        "static mut CALLS:i64=0;fn source()->Vec<i64>{unsafe{CALLS+=1;}vec![42]} fn main()->i64{let capacity=source().capacity();unsafe{if capacity>=1 && CALLS==1{42}else{0}}}",
+        "fn main()->i64{let items=vec![42];if items.clone().capacity()>=1{42}else{0}}",
+        "fn capacity(flag:bool)->i64{0} fn main()->i64{let items=vec![42];if items.capacity()>=1{42}else{0}}",
+        "fn capacity(items:Vec<i64>)->i64{42} fn main()->i64{let items=vec![1];items.capacity()}",
         "fn main()->i64{let mut items=vec![20,22];items.extend(vec![]);items[0]+items[1]}",
         "fn main()->i64{let mut items=vec![20.0,22.0];items.extend(vec![]);(items[0]+items[1]) as i64}",
         "fn main()->i64{let mut items=vec![true];items.extend([]);if items[0]{42}else{0}}",
