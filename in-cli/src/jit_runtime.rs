@@ -3065,6 +3065,47 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, target_arch = "aarch64"))]
+    fn vector_receiver_index_uses_live_length() {
+        for (body, main_body) in [
+            (
+                "self.items.len = 0; return 0;",
+                "Bag::answer(&mut bag); return bag.items[0];",
+            ),
+            (
+                "self.items.len = 0; return self.items[0];",
+                "return Bag::answer(&mut bag);",
+            ),
+            (
+                "self.items.len = 1; return self.items.len;",
+                "return Bag::answer(&mut bag) + bag.items.len;",
+            ),
+        ] {
+            let source = format!(
+                "struct Bag {{ items: Vec<i64> }} impl Bag {{ fn answer(&mut self) -> i64 {{ {body} }} }} fn main() -> i64 {{ let mut bag = Bag {{ items: vec![20, 22] }}; {main_body} }}"
+            );
+            let mut module = crate::compiler::rust_front::parse_rust_source(&source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let expected = if body.contains("return self.items.len") {
+                    2
+                } else {
+                    1
+                };
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, target_arch = "aarch64"))]
     fn nested_receiver_mutation_preserves_addresses_and_value_copies() {
         for source in [
             "class Inner { x: Int; y: Int; }\nclass Wrapper { inner: Inner; fn replace() -> Int { inner = Inner { x: 20, y: 22 }; return inner.x + inner.y; } }\nfn main() -> Int { var wrapper: Wrapper = Wrapper { inner: Inner { x: 0, y: 0 } }; wrapper.replace(); return wrapper.inner.x + wrapper.inner.y; }",

@@ -333,9 +333,18 @@ pub(crate) fn lower_index(
     let negative_branch = emitter.emit_insn(aarch64::b_cond(11, 0));
     let len_reg = pick_scratch(&[rd, index_reg]);
     let base_reg = if let (Some(ptr_off), Some(len_off)) = (field_ptr_off, field_len_off) {
-        emitter.emit_u32(aarch64::ldr64(len_reg, aarch64::REG_SP, len_off));
         let scratch = pick_scratch(&[rd, index_reg, len_reg]);
-        emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, ptr_off));
+        if let Some((root, path)) = super::lower_util::field_path(base)
+            && let Some((pointer, offset)) = ctx.receiver_field(root, &format!("{path}.ptr"))
+            && let Some((_, len_offset)) = ctx.receiver_field(root, &format!("{path}.len"))
+        {
+            emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, pointer));
+            emitter.emit_u32(aarch64::ldr64(len_reg, scratch, len_offset));
+            emitter.emit_u32(aarch64::ldr64(scratch, scratch, offset));
+        } else {
+            emitter.emit_u32(aarch64::ldr64(len_reg, aarch64::REG_SP, len_off));
+            emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, ptr_off));
+        }
         scratch
     } else {
         match slot {
@@ -900,8 +909,10 @@ pub(crate) fn native_expr_type(
         Expr::Field { base, name } => {
             let mut typ = native_expr_type(base, ctx, functions)?;
             for field in name.split('.') {
-                let Typ::Named(struct_name) = typ else {
-                    return None;
+                let struct_name = match typ.canonical() {
+                    Typ::Named(name) => name,
+                    Typ::Vector(_) => "Vec".to_string(),
+                    _ => return None,
                 };
                 typ = ctx
                     .structs
