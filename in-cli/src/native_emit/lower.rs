@@ -1105,6 +1105,17 @@ fn lower_function(
 fn has_iter_once(body: &[Stmt]) -> bool {
     fn expr_has_once(expr: &Expr) -> bool {
         match expr {
+            Expr::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => [cond, then_expr, else_expr]
+                .into_iter()
+                .any(|value| expr_has_once(value)),
+            Expr::Block { body, result } => {
+                has_iter_once(body) || result.as_deref().is_some_and(expr_has_once)
+            }
+
             Expr::Call { callee, args, .. } => {
                 matches!(callee.as_ref(), Expr::Ident(name) if name == "std::iter::once")
                     || expr_has_once(callee)
@@ -1154,6 +1165,17 @@ fn has_iter_once(body: &[Stmt]) -> bool {
 fn has_iter_map(body: &[Stmt]) -> bool {
     fn expr_has_map(expr: &Expr) -> bool {
         match expr {
+            Expr::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => [cond, then_expr, else_expr]
+                .into_iter()
+                .any(|value| expr_has_map(value)),
+            Expr::Block { body, result } => {
+                has_iter_map(body) || result.as_deref().is_some_and(expr_has_map)
+            }
+
             Expr::Call { callee, args, .. } => {
                 matches!(callee.as_ref(), Expr::Ident(name) if name == "map")
                     || expr_has_map(callee)
@@ -1203,6 +1225,17 @@ fn has_iter_map(body: &[Stmt]) -> bool {
 fn has_iter_chain(body: &[Stmt]) -> bool {
     fn expr_has_chain(expr: &Expr) -> bool {
         match expr {
+            Expr::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => [cond, then_expr, else_expr]
+                .into_iter()
+                .any(|value| expr_has_chain(value)),
+            Expr::Block { body, result } => {
+                has_iter_chain(body) || result.as_deref().is_some_and(expr_has_chain)
+            }
+
             Expr::Call { callee, args, .. } => {
                 matches!(callee.as_ref(), Expr::Ident(name) if name == "chain")
                     || expr_has_chain(callee)
@@ -1252,10 +1285,25 @@ fn has_iter_chain(body: &[Stmt]) -> bool {
 }
 
 fn has_struct_return_vec_literal(body: &[Stmt]) -> bool {
+    fn contains_literal(expr: &Expr) -> bool {
+        match expr {
+            Expr::StructInit { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| matches!(value, Expr::ArrayLit(_))),
+            Expr::Block { body, result } => {
+                has_struct_return_vec_literal(body)
+                    || result.as_deref().is_some_and(contains_literal)
+            }
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => contains_literal(then_expr) || contains_literal(else_expr),
+            _ => false,
+        }
+    }
     body.iter().any(|stmt| match stmt {
-        Stmt::Return(Some(Expr::StructInit { fields, .. })) => fields
-            .iter()
-            .any(|(_, value)| matches!(value, Expr::ArrayLit(_))),
+        Stmt::Return(Some(value)) => contains_literal(value),
         Stmt::If {
             then_body,
             else_body,
@@ -1333,6 +1381,22 @@ fn max_aggregate_vector_literal_words(
         max: &mut usize,
     ) -> Result<(), String> {
         match expr {
+            Expr::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                for value in [cond, then_expr, else_expr] {
+                    inspect_expr(value, structs, fn_name, max)?;
+                }
+            }
+            Expr::Block { body, result } => {
+                inspect_body(body, structs, fn_name, max)?;
+                if let Some(value) = result {
+                    inspect_expr(value, structs, fn_name, max)?;
+                }
+            }
+
             Expr::ArrayLit(items) => {
                 if let Some(Expr::StructInit { name, .. }) = items.first() {
                     let words = lower_util::native_param_abi_slots(

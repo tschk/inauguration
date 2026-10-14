@@ -473,11 +473,12 @@ fn check_stmt(
                 ));
             }
             // Check the initializer before the new binding shadows the previous one.
-            check_expr(fn_name, expr, facts, env, call_edges)?;
+            check_expr_in_loop(fn_name, expr, facts, env, call_edges, loop_depth)?;
             let expr_typ = expr_type(expr, facts, env);
             if let (Some(expected), Some(actual)) = (typ, expr_typ.as_ref())
                 && !expected.compatible_with(actual)
                 && !expected.accepts_sequence_literal(expr, actual)
+                && !crate::core_ir::expr_diverges(expr)
             {
                 return Err((
                     "type-mismatch".to_string(),
@@ -515,7 +516,7 @@ fn check_stmt(
                     format!("cannot assign to constant global `{name}` in `{fn_name}`"),
                 ));
             }
-            check_expr(fn_name, expr, facts, env, call_edges)?;
+            check_expr_in_loop(fn_name, expr, facts, env, call_edges, loop_depth)?;
             if let Some(expr_typ) = expr_type(expr, facts, env) {
                 let expected_typ = env
                     .get(name)
@@ -542,13 +543,14 @@ fn check_stmt(
                 base: Box::new(base.clone()),
                 name: name.clone(),
             };
-            check_expr(fn_name, &destination, facts, env, call_edges)?;
-            check_expr(fn_name, value, facts, env, call_edges)?;
+            check_expr_in_loop(fn_name, &destination, facts, env, call_edges, loop_depth)?;
+            check_expr_in_loop(fn_name, value, facts, env, call_edges, loop_depth)?;
             if let (Some(expected), Some(actual)) = (
                 expr_type(&destination, facts, env),
                 expr_type(value, facts, env),
             ) && !expected.compatible_with(&actual)
                 && !expected.accepts_sequence_literal(value, &actual)
+                && !crate::core_ir::expr_diverges(value)
             {
                 return Err((
                     "type-mismatch".into(),
@@ -570,9 +572,9 @@ fn check_stmt(
                     format!("cannot mutate constant global array `{name}` in `{fn_name}`"),
                 ));
             }
-            check_expr(fn_name, base, facts, env, call_edges)?;
-            check_expr(fn_name, index, facts, env, call_edges)?;
-            check_expr(fn_name, value, facts, env, call_edges)?;
+            check_expr_in_loop(fn_name, base, facts, env, call_edges, loop_depth)?;
+            check_expr_in_loop(fn_name, index, facts, env, call_edges, loop_depth)?;
+            check_expr_in_loop(fn_name, value, facts, env, call_edges, loop_depth)?;
             require_type(fn_name, "array index", &Typ::Int, index, facts, env)?;
             match expr_type(base, facts, env) {
                 Some(Typ::Array(item) | Typ::Vector(item)) => {
@@ -602,14 +604,14 @@ fn check_stmt(
                 None => Ok(()),
             }
         }
-        Stmt::Expr(expr) => check_expr(fn_name, expr, facts, env, call_edges),
+        Stmt::Expr(expr) => check_expr_in_loop(fn_name, expr, facts, env, call_edges, loop_depth),
         Stmt::Break | Stmt::Continue if loop_depth == 0 => Err((
             "invalid-control-flow".into(),
             format!("loop jump outside a loop in `{fn_name}`"),
         )),
         Stmt::Break | Stmt::Continue => Ok(()),
         Stmt::Return(Some(expr)) => {
-            check_expr(fn_name, expr, facts, env, call_edges)?;
+            check_expr_in_loop(fn_name, expr, facts, env, call_edges, loop_depth)?;
             if canonical_type(ret) == Typ::Void {
                 return Err((
                     "return-type-mismatch".to_string(),
@@ -645,7 +647,7 @@ fn check_stmt(
             then_body,
             else_body,
         } => {
-            check_expr(fn_name, cond, facts, env, call_edges)?;
+            check_expr_in_loop(fn_name, cond, facts, env, call_edges, loop_depth)?;
             require_type(fn_name, "if condition", &Typ::Bool, cond, facts, env)?;
             check_stmts(
                 fn_name,
@@ -668,7 +670,7 @@ fn check_stmt(
         }
         Stmt::Loop { cond, body, .. } => {
             if let Some(cond) = cond {
-                check_expr(fn_name, cond, facts, env, call_edges)?;
+                check_expr_in_loop(fn_name, cond, facts, env, call_edges, loop_depth)?;
                 require_type(fn_name, "loop condition", &Typ::Bool, cond, facts, env)?;
             }
             check_stmts(
@@ -684,7 +686,7 @@ fn check_stmt(
         Stmt::Match {
             scrutinee, arms, ..
         } => {
-            check_expr(fn_name, scrutinee, facts, env, call_edges)?;
+            check_expr_in_loop(fn_name, scrutinee, facts, env, call_edges, loop_depth)?;
             for arm in arms {
                 let mut arm_env = env.clone();
                 let pattern = crate::core_ir::MatchPattern::parse(&arm.pattern)
@@ -695,7 +697,7 @@ fn check_stmt(
                     .map_err(|error| ("invalid-match-pattern".into(), error))?;
                 arm_env.extend(bindings);
                 if let Some(guard) = &arm.guard {
-                    check_expr(fn_name, guard, facts, &arm_env, call_edges)?;
+                    check_expr_in_loop(fn_name, guard, facts, &arm_env, call_edges, loop_depth)?;
                     require_type(fn_name, "match guard", &Typ::Bool, guard, facts, &arm_env)?;
                 }
                 check_stmts(
@@ -710,7 +712,7 @@ fn check_stmt(
             }
             Ok(())
         }
-        Stmt::Throw(expr) => check_expr(fn_name, expr, facts, env, call_edges),
+        Stmt::Throw(expr) => check_expr_in_loop(fn_name, expr, facts, env, call_edges, loop_depth),
         Stmt::Try { body, catches } => {
             check_stmts(
                 fn_name,
@@ -752,7 +754,18 @@ fn check_expr(
     env: &HashMap<String, Typ>,
     call_edges: &mut Vec<(String, String)>,
 ) -> Result<(), (String, String)> {
-    check_expr_with_array_borrow(fn_name, expr, facts, env, call_edges, false)
+    check_expr_in_loop(fn_name, expr, facts, env, call_edges, 0)
+}
+
+fn check_expr_in_loop(
+    fn_name: &str,
+    expr: &Expr,
+    facts: &ModuleFacts<'_>,
+    env: &HashMap<String, Typ>,
+    call_edges: &mut Vec<(String, String)>,
+    loop_depth: usize,
+) -> Result<(), (String, String)> {
+    check_expr_with_array_borrow(fn_name, expr, facts, env, call_edges, false, loop_depth)
 }
 
 fn immutable_index_root<'a>(
@@ -782,8 +795,49 @@ fn check_expr_with_array_borrow(
     env: &HashMap<String, Typ>,
     call_edges: &mut Vec<(String, String)>,
     array_borrow: bool,
+    loop_depth: usize,
 ) -> Result<(), (String, String)> {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            check_expr_in_loop(fn_name, cond, facts, env, call_edges, loop_depth)?;
+            require_type(
+                fn_name,
+                "conditional condition",
+                &Typ::Bool,
+                cond,
+                facts,
+                env,
+            )?;
+            for branch in [then_expr, else_expr] {
+                check_expr_in_loop(fn_name, branch, facts, env, call_edges, loop_depth)?;
+            }
+            if expr_type(expr, facts, env).is_none() {
+                return Err((
+                    "type-mismatch".into(),
+                    format!(
+                        "conditional branches in `{fn_name}` must have compatible resolved types"
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        Expr::Block { body, result } => {
+            let mut inner = env.clone();
+            let ret = function_sig(facts, fn_name)
+                .map(|sig| sig.ret.clone())
+                .unwrap_or(Typ::Void);
+            check_stmts(
+                fn_name, body, facts, &ret, &mut inner, call_edges, loop_depth,
+            )?;
+            if let Some(result) = result {
+                check_expr_in_loop(fn_name, result, facts, &inner, call_edges, loop_depth)?;
+            }
+            Ok(())
+        }
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => Ok(()),
         Expr::Closure { .. } => Ok(()),
         Expr::Ident(name) => {
@@ -814,7 +868,7 @@ fn check_expr_with_array_borrow(
             }
         }
         Expr::Unary { op, expr } => {
-            check_expr(fn_name, expr, facts, env, call_edges)?;
+            check_expr_in_loop(fn_name, expr, facts, env, call_edges, loop_depth)?;
             if op == "vector-clone"
                 && !matches!(expr_type(expr, facts, env), Some(Typ::Vector(item)) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
             {
@@ -896,8 +950,8 @@ fn check_expr_with_array_borrow(
             Ok(())
         }
         Expr::Binary { op, lhs, rhs, .. } => {
-            check_expr(fn_name, lhs, facts, env, call_edges)?;
-            check_expr(fn_name, rhs, facts, env, call_edges)?;
+            check_expr_in_loop(fn_name, lhs, facts, env, call_edges, loop_depth)?;
+            check_expr_in_loop(fn_name, rhs, facts, env, call_edges, loop_depth)?;
             match op.as_str() {
                 "+" => {
                     let lhs_typ = expr_type(lhs, facts, env);
@@ -957,10 +1011,10 @@ fn check_expr_with_array_borrow(
             }
         }
         Expr::StructInit { name, fields, .. } => {
-            check_struct_init(fn_name, name, fields, facts, env, call_edges)
+            check_struct_init(fn_name, name, fields, facts, env, call_edges, loop_depth)
         }
         Expr::Field { base, name, .. } => {
-            check_expr(fn_name, base, facts, env, call_edges)?;
+            check_expr_in_loop(fn_name, base, facts, env, call_edges, loop_depth)?;
             if let Some(typ) = expr_type(base, facts, env)
                 && matches!(
                     typ.canonical(),
@@ -989,7 +1043,7 @@ fn check_expr_with_array_borrow(
         Expr::ArrayLit(items) => {
             let mut expected: Option<Typ> = None;
             for item in items {
-                check_expr(fn_name, item, facts, env, call_edges)?;
+                check_expr_in_loop(fn_name, item, facts, env, call_edges, loop_depth)?;
                 if crate::core_ir::empty_sequence_literal(item) {
                     continue;
                 }
@@ -1045,8 +1099,8 @@ fn check_expr_with_array_borrow(
                 ));
             }
 
-            check_expr_with_array_borrow(fn_name, base, facts, env, call_edges, true)?;
-            check_expr(fn_name, index, facts, env, call_edges)?;
+            check_expr_with_array_borrow(fn_name, base, facts, env, call_edges, true, loop_depth)?;
+            check_expr_in_loop(fn_name, index, facts, env, call_edges, loop_depth)?;
             require_type(fn_name, "array index", &Typ::Int, index, facts, env)?;
             if let Some(base_typ) = expr_type(base, facts, env)
                 && !matches!(base_typ, Typ::Array(_) | Typ::Vector(_))
@@ -1084,7 +1138,7 @@ fn check_expr_with_array_borrow(
                         ));
                     }
                     for ((param_name, param_typ), arg) in sig.params.iter().zip(args) {
-                        check_expr(fn_name, arg, facts, env, call_edges)?;
+                        check_expr_in_loop(fn_name, arg, facts, env, call_edges, loop_depth)?;
                         if let Some(arg_typ) = expr_type(arg, facts, env)
                             && !param_typ.compatible_with(&arg_typ)
                             && !param_typ.accepts_sequence_literal(arg, &arg_typ)
@@ -1115,6 +1169,7 @@ fn check_expr_with_array_borrow(
                             env,
                             call_edges,
                             index == 0 && matches!(name.as_str(), "array-len" | "array_len"),
+                            loop_depth,
                         )?;
                     }
                     if matches!(name.as_str(), "vector-push" | "vector-extend") {
@@ -1226,11 +1281,11 @@ fn check_expr_with_array_borrow(
                 }
                 return Ok(());
             } else {
-                check_expr(fn_name, callee, facts, env, call_edges)?;
+                check_expr_in_loop(fn_name, callee, facts, env, call_edges, loop_depth)?;
             }
 
             for arg in args {
-                check_expr(fn_name, arg, facts, env, call_edges)?;
+                check_expr_in_loop(fn_name, arg, facts, env, call_edges, loop_depth)?;
             }
             Ok(())
         }
@@ -1244,6 +1299,7 @@ fn check_struct_init(
     facts: &ModuleFacts<'_>,
     env: &HashMap<String, Typ>,
     call_edges: &mut Vec<(String, String)>,
+    loop_depth: usize,
 ) -> Result<(), (String, String)> {
     let schema = facts.structs.get(struct_name).ok_or((
         "unknown-struct".to_string(),
@@ -1263,13 +1319,14 @@ fn check_struct_init(
                 format!("unknown field `{field}` for struct `{struct_name}`"),
             ));
         }
-        check_expr(fn_name, expr, facts, env, call_edges)?;
+        check_expr_in_loop(fn_name, expr, facts, env, call_edges, loop_depth)?;
         if let Some((_, expected)) = schema
             .iter()
             .find(|(schema_field, _)| schema_field == field)
             && let Some(actual) = expr_type(expr, facts, env)
             && !expected.compatible_with(&actual)
             && !expected.accepts_sequence_literal(expr, &actual)
+            && !crate::core_ir::expr_diverges(expr)
         {
             return Err((
                 "type-mismatch".to_string(),
@@ -1294,6 +1351,32 @@ fn check_struct_init(
 
 fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -> Option<Typ> {
     match expr {
+        Expr::Conditional {
+            then_expr,
+            else_expr,
+            ..
+        } => crate::core_ir::conditional_type(
+            then_expr,
+            expr_type(then_expr, facts, env),
+            else_expr,
+            expr_type(else_expr, facts, env),
+        ),
+        Expr::Block { body, result } => {
+            let mut inner = env.clone();
+            for stmt in body {
+                if let Stmt::Let(name, typ, value) = stmt {
+                    if let Some(typ) = typ.clone().or_else(|| expr_type(value, facts, &inner)) {
+                        inner.insert(name.clone(), typ);
+                    } else {
+                        inner.remove(name);
+                    }
+                }
+            }
+            result
+                .as_ref()
+                .map(|value| expr_type(value, facts, &inner))
+                .unwrap_or(Some(Typ::Void))
+        }
         Expr::IntLit(_) => Some(Typ::Int),
         Expr::FloatLit(_) => Some(Typ::Float),
         Expr::StringLit(_) => Some(Typ::String),
@@ -1413,6 +1496,7 @@ fn require_type(
     if let Some(actual) = expr_type(expr, facts, env)
         && !expected.compatible_with(&actual)
         && !expected.accepts_sequence_literal(expr, &actual)
+        && !crate::core_ir::expr_diverges(expr)
     {
         return Err((
             "type-mismatch".to_string(),
@@ -2523,6 +2607,25 @@ mod tests {
             ))
             .unwrap();
             assert!(verify_module(&module, &default_options()).ok);
+        }
+    }
+
+    #[test]
+    fn conditional_blocks_reject_invalid_types_scopes_and_loop_jumps() {
+        for source in [
+            "fn main()->i64{let x=if 1{42}else{0};x}",
+            "fn main()->i64{let x=if true{42}else{false};42}",
+            "fn main()->i64{let x={let inner=42;inner};inner}",
+            "fn main()->i64{let x=if true{return false;}else{42};x}",
+            "fn main()->i64{let x=if true{break;}else{42};x}",
+            "fn main()->i64{let x={continue;};42}",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let report = verify_for_entry(&module, "main");
+            assert!(!report.ok, "{source}: {module:?}");
         }
     }
 

@@ -131,7 +131,8 @@ fn format_stmt(stmt: &Stmt, depth: usize, out: &mut String) {
             out.push_str(&indent);
             out.push_str("return\n");
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break => out.push_str(&format!("{indent}break\n")),
+        Stmt::Continue => out.push_str(&format!("{indent}continue\n")),
         Stmt::Return(Some(expr)) => {
             out.push_str(&indent);
             out.push_str("return ");
@@ -165,7 +166,19 @@ fn format_stmt(stmt: &Stmt, depth: usize, out: &mut String) {
         } => {
             format_match(scrutinee, arms, depth, &indent, out);
         }
-        Stmt::Throw(_) | Stmt::Try { .. } | Stmt::Propagate => {}
+        Stmt::Throw(value) => out.push_str(&format!("{indent}throw {}\n", format_expr(value))),
+        Stmt::Propagate => out.push_str(&format!("{indent}propagate\n")),
+        Stmt::Try { body, catches } => {
+            out.push_str(&format!("{indent}try {{\n"));
+            format_body(body, depth + 1, out);
+            out.push_str(&format!("{indent}}}"));
+            for catch in catches {
+                out.push_str(&format!(" catch {} {{\n", catch.pattern));
+                format_body(&catch.body, depth + 1, out);
+                out.push_str(&format!("{indent}}}"));
+            }
+            out.push('\n');
+        }
     }
 }
 
@@ -221,7 +234,42 @@ fn format_expr(expr: &Expr) -> String {
             out.push(')');
             out
         }
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => format!(
+            "(if ({}) {} else {})",
+            format_expr(cond),
+            format_value_branch(then_expr),
+            format_value_branch(else_expr)
+        ),
+        Expr::Block { body, result } => {
+            let mut out = String::from("({\n");
+            for stmt in body {
+                let mut rendered = String::new();
+                format_stmt(stmt, 1, &mut rendered);
+                out.push_str(rendered.trim_end());
+                out.push_str(";\n");
+            }
+            if let Some(result) = result {
+                out.push_str("  ");
+                out.push_str(&format_expr(result));
+                out.push('\n');
+            }
+            out.push_str("})");
+            out
+        }
         Expr::Closure { .. } => "closure".to_string(),
+    }
+}
+
+fn format_value_branch(expr: &Expr) -> String {
+    let rendered = format_expr(expr);
+    if matches!(expr, Expr::Block { .. }) {
+        rendered[1..rendered.len() - 1].to_string()
+    } else {
+        format!("{{ {rendered} }}")
     }
 }
 

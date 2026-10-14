@@ -138,6 +138,22 @@ impl Typ {
 
     /// Literals acquire their sequence layout from the typed destination.
     pub(crate) fn accepts_sequence_literal(&self, expr: &Expr, actual: &Typ) -> bool {
+        match expr {
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                return [then_expr, else_expr].into_iter().all(|branch| {
+                    expr_diverges(branch) || self.accepts_sequence_literal(branch, actual)
+                });
+            }
+            Expr::Block {
+                result: Some(result),
+                ..
+            } => return self.accepts_sequence_literal(result, actual),
+            _ => {}
+        }
         let Expr::ArrayLit(items) = expr else {
             return false;
         };
@@ -182,9 +198,94 @@ pub(crate) fn bitwise_result_type(lhs: Option<Typ>, rhs: Option<Typ>) -> Option<
     }
 }
 
+pub(crate) fn stmts_diverge(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Return(_) | Stmt::Throw(_) | Stmt::Break | Stmt::Continue => true,
+        Stmt::Let(_, _, value) | Stmt::Assign(_, value) | Stmt::Expr(value) => expr_diverges(value),
+        Stmt::FieldAssign { base, value, .. } => expr_diverges(base) || expr_diverges(value),
+        Stmt::IndexAssign { base, index, value } => {
+            [base, index, value].into_iter().any(expr_diverges)
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            expr_diverges(cond)
+                || (matches!(cond, Expr::BoolLit(true))
+                    && else_body.is_empty()
+                    && stmts_diverge(then_body))
+                || (!else_body.is_empty() && stmts_diverge(then_body) && stmts_diverge(else_body))
+        }
+        Stmt::Try { body, catches } => {
+            stmts_diverge(body) && catches.iter().all(|catch| stmts_diverge(&catch.body))
+        }
+        Stmt::Match { scrutinee, arms } => {
+            let exhaustive = arms.iter().filter(|arm| arm.guard.is_none()).any(|arm| {
+                MatchPattern::parse(&arm.pattern)
+                    .is_ok_and(|pattern| pattern.irrefutable_after_shape_check())
+            }) || ["true", "false"].iter().all(|value| {
+                arms.iter()
+                    .any(|arm| arm.guard.is_none() && arm.pattern.trim() == *value)
+            });
+            expr_diverges(scrutinee)
+                || (exhaustive
+                    && !arms.is_empty()
+                    && arms.iter().all(|arm| stmts_diverge(&arm.body)))
+        }
+        _ => false,
+    })
+}
+
+pub(crate) fn expr_diverges(expr: &Expr) -> bool {
+    match expr {
+        Expr::Block { body, result } => {
+            stmts_diverge(body) || result.as_deref().is_some_and(expr_diverges)
+        }
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => expr_diverges(cond) || (expr_diverges(then_expr) && expr_diverges(else_expr)),
+        _ => false,
+    }
+}
+
+pub(crate) fn conditional_type(
+    then_expr: &Expr,
+    then_type: Option<Typ>,
+    else_expr: &Expr,
+    else_type: Option<Typ>,
+) -> Option<Typ> {
+    if expr_diverges(then_expr) {
+        return else_type;
+    }
+    if expr_diverges(else_expr) {
+        return then_type;
+    }
+    let (then_type, else_type) = (then_type?, else_type?);
+    if then_type.canonical() == else_type.canonical() {
+        return Some(then_type.canonical());
+    }
+    if then_type.accepts_sequence_literal(else_expr, &else_type) {
+        return Some(then_type.canonical());
+    }
+    if else_type.accepts_sequence_literal(then_expr, &then_type) {
+        return Some(else_type.canonical());
+    }
+    None
+}
+
 pub(crate) fn expr_contains_call(expr: &Expr) -> bool {
     match expr {
-        Expr::Call { .. } => true,
+        Expr::Call { .. } | Expr::Block { .. } => true,
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => [cond, then_expr, else_expr]
+            .into_iter()
+            .any(|value| expr_contains_call(value)),
         Expr::Unary { expr, .. } => expr_contains_call(expr),
         Expr::Binary { lhs, rhs, .. } => expr_contains_call(lhs) || expr_contains_call(rhs),
         Expr::StructInit { fields, .. } => fields.iter().any(|(_, expr)| expr_contains_call(expr)),
@@ -283,6 +384,15 @@ pub enum Expr {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+    },
+    Conditional {
+        cond: Box<Expr>,
+        then_expr: Box<Expr>,
+        else_expr: Box<Expr>,
+    },
+    Block {
+        body: Vec<Stmt>,
+        result: Option<Box<Expr>>,
     },
     Closure {
         params: Vec<(String, Typ)>,
@@ -855,6 +965,21 @@ pub fn for_each_expr_child<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
             f(lhs);
             f(rhs);
         }
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            f(cond);
+            f(then_expr);
+            f(else_expr);
+        }
+        // Statements need a scope-aware traversal, like closure bodies.
+        Expr::Block { result, .. } => {
+            if let Some(result) = result {
+                f(result);
+            }
+        }
         Expr::Unary { expr, .. } => f(expr),
         Expr::Field { base, .. } => f(base),
         Expr::Index { base, index, .. } => {
@@ -892,6 +1017,21 @@ pub(crate) fn for_each_expr_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr
         Expr::Binary { lhs, rhs, .. } => {
             f(lhs);
             f(rhs);
+        }
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            f(cond);
+            f(then_expr);
+            f(else_expr);
+        }
+        // Statements need a scope-aware traversal, like closure bodies.
+        Expr::Block { result, .. } => {
+            if let Some(result) = result {
+                f(result);
+            }
         }
         Expr::Unary { expr, .. } => f(expr),
         Expr::Field { base, .. } => f(base),

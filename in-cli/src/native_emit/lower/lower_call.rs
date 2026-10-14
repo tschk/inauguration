@@ -376,7 +376,11 @@ pub(crate) fn lower_call_arg(
             pending_calls,
             fn_name,
         ),
-        Typ::Void => Ok(reg), // Void params need no registers
+        Typ::Void => {
+            // Zero-width arguments still evaluate their producers for effects.
+            lower_expr_into(emitter, ctx, arg, 0, functions, pending_calls, fn_name)?;
+            Ok(reg)
+        }
         _ => Err(format!(
             "native-lower: unsupported parameter type `{typ:?}` for argument `{param_name}` in `{fn_name}`"
         )),
@@ -393,6 +397,32 @@ pub(crate) fn lower_vector_call_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
+    if matches!(arg, Expr::Conditional { .. } | Expr::Block { .. }) {
+        let words = 3;
+        super::lower_expr::lower_value_control(
+            emitter,
+            ctx,
+            arg,
+            functions,
+            pending_calls,
+            fn_name,
+            |emitter, ctx, value, pending_calls| {
+                lower_vector_call_arg(
+                    emitter,
+                    ctx,
+                    value,
+                    elem,
+                    reg,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )
+                .map(|_| ())
+            },
+        )?;
+        return Ok(reg + words);
+    }
+
     if let Expr::ArrayLit(items) = arg
         && !matches!(elem, Typ::Named(_))
     {
@@ -759,6 +789,32 @@ pub(crate) fn lower_array_call_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
+    if matches!(arg, Expr::Conditional { .. } | Expr::Block { .. }) {
+        let words = 2;
+        super::lower_expr::lower_value_control(
+            emitter,
+            ctx,
+            arg,
+            functions,
+            pending_calls,
+            fn_name,
+            |emitter, ctx, value, pending_calls| {
+                lower_array_call_arg(
+                    emitter,
+                    ctx,
+                    value,
+                    elem,
+                    reg,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )
+                .map(|_| ())
+            },
+        )?;
+        return Ok(reg + words);
+    }
+
     if let Expr::Ident(name) = arg
         && !ctx.locals.contains_key(name)
         && matches!(
@@ -883,6 +939,36 @@ pub(crate) fn lower_struct_call_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
+    if matches!(arg, Expr::Conditional { .. } | Expr::Block { .. }) {
+        let words = super::lower_util::native_param_abi_slots(
+            &[("value".into(), Typ::Named(struct_name.into()))],
+            ctx.structs,
+            fn_name,
+        )? as u8;
+        super::lower_expr::lower_value_control(
+            emitter,
+            ctx,
+            arg,
+            functions,
+            pending_calls,
+            fn_name,
+            |emitter, ctx, value, pending_calls| {
+                lower_struct_call_arg(
+                    emitter,
+                    ctx,
+                    value,
+                    struct_name,
+                    reg,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )
+                .map(|_| ())
+            },
+        )?;
+        return Ok(reg + words);
+    }
+
     let resolved_struct = if struct_name == "Self" {
         fn_name
             .split("::")

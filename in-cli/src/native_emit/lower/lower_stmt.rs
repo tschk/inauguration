@@ -510,6 +510,9 @@ pub(crate) fn lower_store_local(
     match slot {
         LocalSlot::Scalar(offset) => {
             lower_expr::lower_expr_into(emitter, ctx, expr, 0, functions, pending_calls, fn_name)?;
+            if ctx.scalar_types.get(name).map(Typ::canonical) == Some(Typ::Void) {
+                emitter.emit_insns(&aarch64::load_i64(0, 0));
+            }
             emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, offset));
             if let Some(tag_offset) = ctx.error_types.get(name).copied() {
                 emit_error_type(emitter, ctx, expr, functions)?;
@@ -905,6 +908,29 @@ pub(crate) fn lower_struct_expr_into_slots(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if matches!(expr, Expr::Conditional { .. } | Expr::Block { .. }) {
+        return lower_expr::lower_value_control(
+            emitter,
+            ctx,
+            expr,
+            functions,
+            pending_calls,
+            fn_name,
+            |emitter, ctx, value, pending_calls| {
+                lower_struct_expr_into_slots(
+                    emitter,
+                    ctx,
+                    value,
+                    typ,
+                    fields,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )
+            },
+        );
+    }
+
     match expr {
         Expr::Unary { op, .. } if typ == "Vec" && op == "vector-clone" => {
             lower_expr::lower_expr_into(emitter, ctx, expr, 0, functions, pending_calls, fn_name)?;
@@ -1157,6 +1183,28 @@ pub(crate) fn lower_struct_expr_into_regs(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if matches!(expr, Expr::Conditional { .. } | Expr::Block { .. }) {
+        return lower_expr::lower_value_control(
+            emitter,
+            ctx,
+            expr,
+            functions,
+            pending_calls,
+            fn_name,
+            |emitter, ctx, value, pending_calls| {
+                lower_struct_expr_into_regs(
+                    emitter,
+                    ctx,
+                    value,
+                    typ,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )
+            },
+        );
+    }
+
     if let Ok(layout) = crate::native_emit::struct_layout::scalar_fields(ctx.structs, typ) {
         // shortcut: scalar aggregate returns use eight GPRs; widen with an indirect ABI.
         if layout.len() > 8 {
@@ -1388,6 +1436,28 @@ pub(crate) fn lower_array_expr_into_regs(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if matches!(expr, Expr::Conditional { .. } | Expr::Block { .. }) {
+        return lower_expr::lower_value_control(
+            emitter,
+            ctx,
+            expr,
+            functions,
+            pending_calls,
+            fn_name,
+            |emitter, ctx, value, pending_calls| {
+                lower_array_expr_into_regs(
+                    emitter,
+                    ctx,
+                    value,
+                    elem,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )
+            },
+        );
+    }
+
     if crate::native_emit::global_data::indexed_root(expr).is_some_and(|name| {
         !ctx.locals.contains_key(name)
             && matches!(

@@ -2223,3 +2223,29 @@ fn chained_calls_keep_the_terminal_method_and_nested_arguments() {
         matches!(&args[1], crate::core_ir::Expr::Call { callee, args } if matches!(callee.as_ref(), crate::core_ir::Expr::Ident(name) if name == "later") && args == &[crate::core_ir::Expr::StringLit("(x)".into())])
     );
 }
+
+#[test]
+fn conditional_and_block_values_round_trip_canonical_source() {
+    for source in [
+        "fn main()->Int {let value=({throw 42;});return 0;}",
+        "fn main()->Int {let value=({try {throw 1;}catch _ {propagate;} 42});return value;}",
+        "fn main()->Int {while true {let value=({break;});}return 42;}",
+        "fn main()->Int { let answer = (if (true) { 42 } else { 0 }); return answer; }",
+        "fn main()->Int { return ({ let value=20; value })+22; }",
+        "fn take(value:Int)->Int {return value;}\nfn main()->Int { return take(({let value=42;value})); }",
+        "fn main()->Int { return ({ [20,22] })[1]+20; }",
+        "fn main()->Int { let value=({ return 42; }); return 0; }",
+        "fn main()->Int { let value=({ 42; }); return 42; }",
+        "fn main()->Int { let value=({ 42; // discarded\n }); return 42; }",
+        "fn main()->Int { let value=({ \"https://example.test\"; // discarded\n }); return 42; }",
+        "fn main()->Int { let value=({ \"https://example.test\" }); return 42; }",
+        "fn main()->Int {var sum:Int=0;for i in 0..3 {let value=({if i==1 {continue;} i});sum+=value;} return sum+40;}",
+    ] {
+        let before = parse_in_source(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        let canonical = crate::in_canonical::canonicalize_in_source(source)
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+        let after =
+            parse_in_source(&canonical).unwrap_or_else(|error| panic!("{canonical}: {error}"));
+        assert_eq!(before.decls, after.decls, "{source}\n{canonical}");
+    }
+}

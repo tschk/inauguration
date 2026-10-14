@@ -315,7 +315,9 @@ mod tests {
 fn nothing() -> void { return; }
 
 fn bad() -> Int {
-  let v = nothing();
+  let v: [[Int]] = [[1]];
+  let i = 0;
+  while i < 1 { return v[i][i]; }
   return 1;
 }
 

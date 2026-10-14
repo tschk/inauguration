@@ -71,7 +71,9 @@ fn expr_has_guard(expr: &Expr) -> bool {
         return true;
     }
 
-    if let Expr::Closure { body, .. } = expr {
+    if let Expr::Block { body, result } = expr {
+        return body.iter().any(stmt_has_guard) || result.as_deref().is_some_and(expr_has_guard);
+    } else if let Expr::Closure { body, .. } = expr {
         return body.iter().any(stmt_has_guard);
     }
     let mut found = false;
@@ -148,7 +150,12 @@ fn lower_expr(
     counter: &mut usize,
     native_patterns: bool,
 ) {
-    if let Expr::Closure { body, .. } = expr {
+    if let Expr::Block { body, result } = expr {
+        lower_body(body, names, counter, native_patterns);
+        if let Some(result) = result {
+            lower_expr(result, names, counter, native_patterns);
+        }
+    } else if let Expr::Closure { body, .. } = expr {
         lower_body(body, names, counter, native_patterns);
     } else {
         crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {

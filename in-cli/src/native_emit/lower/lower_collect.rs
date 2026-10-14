@@ -122,6 +122,22 @@ pub(crate) fn rename_calls(stmts: &mut [Stmt], name_map: &HashMap<String, String
 
 pub(crate) fn rename_call_expr(expr: &mut Expr, name_map: &HashMap<String, String>) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            for value in [cond, then_expr, else_expr] {
+                rename_call_expr(value, name_map);
+            }
+        }
+        Expr::Block { body, result } => {
+            rename_calls(body, name_map);
+            if let Some(value) = result {
+                rename_call_expr(value, name_map);
+            }
+        }
+
         Expr::Call { callee, args, .. } => {
             if let Expr::Ident(name) = callee.as_mut() {
                 if let Some(new_name) = name_map.get(name.as_str()) {
@@ -321,6 +337,22 @@ fn collect_pattern_strings(pattern: &str, values: &mut Vec<String>) {
 
 fn collect_expr_strings(expr: &Expr, values: &mut Vec<String>) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            for value in [cond, then_expr, else_expr] {
+                collect_expr_strings(value, values);
+            }
+        }
+        Expr::Block { body, result } => {
+            collect_body_strings(body, values);
+            if let Some(value) = result {
+                collect_expr_strings(value, values);
+            }
+        }
+
         Expr::StringLit(value) => values.push(value.clone()),
         Expr::Unary { expr, .. } => collect_expr_strings(expr, values),
         Expr::Binary { lhs, rhs, .. } => {

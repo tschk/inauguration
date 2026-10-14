@@ -78,6 +78,12 @@ pub(crate) fn reserve_expr(expr: &Expr, names: &mut HashSet<String>) {
         Expr::Ident(name) => {
             names.insert(name.clone());
         }
+        Expr::Block { body, result } => {
+            reserve_body(body, names);
+            if let Some(result) = result {
+                reserve_expr(result, names);
+            }
+        }
         Expr::Closure {
             params,
             body,
@@ -257,6 +263,22 @@ impl Bindings<'_> {
     fn expr(&mut self, expr: &mut Expr, scope: &HashMap<String, String>) {
         match expr {
             Expr::Ident(name) => Self::reference(name, scope),
+            Expr::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                self.expr(cond, scope);
+                self.expr(then_expr, scope);
+                self.expr(else_expr, scope);
+            }
+            Expr::Block { body, result } => {
+                let mut inner = scope.clone();
+                self.body(body, &mut inner);
+                if let Some(result) = result {
+                    self.expr(result, &inner);
+                }
+            }
             Expr::Unary { expr, .. } => self.expr(expr, scope),
             Expr::Binary { lhs, rhs, .. } => {
                 self.expr(lhs, scope);
@@ -372,6 +394,35 @@ impl Bindings<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expression_block_shadowing_does_not_escape() {
+        let mut params = vec![("x".into(), Typ::Int)];
+        let mut body = vec![
+            Stmt::Expr(Expr::Block {
+                body: vec![Stmt::Let("x".into(), Some(Typ::Int), Expr::IntLit(1))],
+                result: Some(Box::new(Expr::Ident("x".into()))),
+            }),
+            Stmt::Return(Some(Expr::Ident("x".into()))),
+        ];
+        normalize_function(&mut params, &mut body, &HashSet::new());
+        let Stmt::Expr(Expr::Block {
+            body: inner,
+            result: Some(result),
+        }) = &body[0]
+        else {
+            panic!()
+        };
+        let Stmt::Let(local, _, _) = &inner[0] else {
+            panic!()
+        };
+        assert_ne!(local, &params[0].0);
+        assert_eq!(result.as_ref(), &Expr::Ident(local.clone()));
+        assert_eq!(
+            body[1],
+            Stmt::Return(Some(Expr::Ident(params[0].0.clone())))
+        );
+    }
 
     #[test]
     fn nested_binders_preserve_fields_and_closure_captures() {

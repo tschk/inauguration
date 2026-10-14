@@ -27,22 +27,61 @@ pub(super) fn infer(
     }
 }
 
-fn has_candidates(body: &[Stmt]) -> bool {
-    body.iter().any(|stmt| match stmt {
-        Stmt::Let(_, Some(Typ::Vector(item)), _) => {
-            matches!(item.as_ref(), Typ::Generic(name) if name == "_")
+fn has_candidate_expr(expr: &Expr) -> bool {
+    if let Expr::Block { body, result } = expr {
+        return has_candidates(body) || result.as_deref().is_some_and(has_candidate_expr);
+    }
+    if matches!(expr, Expr::Closure { .. }) {
+        return false;
+    }
+    let mut found = false;
+    crate::core_ir::for_each_expr_child(expr, &mut |child| found |= has_candidate_expr(child));
+    found
+}
+
+fn any_stmt_expression(stmt: &Stmt, predicate: &mut impl FnMut(&Expr) -> bool) -> bool {
+    match stmt {
+        Stmt::Let(_, _, value)
+        | Stmt::Assign(_, value)
+        | Stmt::Expr(value)
+        | Stmt::Throw(value)
+        | Stmt::Return(Some(value)) => predicate(value),
+        Stmt::FieldAssign { base, value, .. } => predicate(base) || predicate(value),
+        Stmt::IndexAssign { base, index, value } => {
+            predicate(base) || predicate(index) || predicate(value)
         }
-        Stmt::If {
-            then_body,
-            else_body,
-            ..
-        } => has_candidates(then_body) || has_candidates(else_body),
-        Stmt::Loop { body, .. } => has_candidates(body),
-        Stmt::Match { arms, .. } => arms.iter().any(|arm| has_candidates(&arm.body)),
-        Stmt::Try { body, catches } => {
-            has_candidates(body) || catches.iter().any(|catch| has_candidates(&catch.body))
+        Stmt::If { cond, .. } => predicate(cond),
+        Stmt::Loop { cond, .. } => cond.as_ref().is_some_and(predicate),
+        Stmt::Match { scrutinee, arms } => {
+            predicate(scrutinee)
+                || arms
+                    .iter()
+                    .filter_map(|arm| arm.guard.as_ref())
+                    .any(predicate)
         }
         _ => false,
+    }
+}
+
+fn has_candidates(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| {
+        any_stmt_expression(stmt, &mut has_candidate_expr)
+            || match stmt {
+                Stmt::Let(_, Some(Typ::Vector(item)), _) => {
+                    matches!(item.as_ref(), Typ::Generic(name) if name == "_")
+                }
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => has_candidates(then_body) || has_candidates(else_body),
+                Stmt::Loop { body, .. } => has_candidates(body),
+                Stmt::Match { arms, .. } => arms.iter().any(|arm| has_candidates(&arm.body)),
+                Stmt::Try { body, catches } => {
+                    has_candidates(body) || catches.iter().any(|catch| has_candidates(&catch.body))
+                }
+                _ => false,
+            }
     })
 }
 
@@ -73,12 +112,46 @@ fn expression(
     env: &HashMap<String, Typ>,
     candidates: &HashSet<String>,
     constraints: &mut HashMap<String, Option<Typ>>,
+    return_type: Option<&Typ>,
 ) {
     if matches!(expr, Expr::Closure { .. }) {
         return;
     }
+    if let Expr::Block { body, result } = expr {
+        let mut inner = env.clone();
+        let mut inner_candidates = candidates.clone();
+        collect(
+            checker,
+            body,
+            facts,
+            &mut inner,
+            &mut inner_candidates,
+            constraints,
+            return_type,
+        );
+        if let Some(result) = result {
+            expression(
+                checker,
+                result,
+                facts,
+                &inner,
+                &inner_candidates,
+                constraints,
+                return_type,
+            );
+        }
+        return;
+    }
     crate::core_ir::for_each_expr_child(expr, &mut |child| {
-        expression(checker, child, facts, env, candidates, constraints)
+        expression(
+            checker,
+            child,
+            facts,
+            env,
+            candidates,
+            constraints,
+            return_type,
+        )
     });
     let Expr::Call { callee, args } = expr else {
         return;
@@ -152,7 +225,15 @@ fn collect(
     for stmt in body {
         match stmt {
             Stmt::Let(name, typ, value) => {
-                expression(checker, value, facts, env, candidates, constraints);
+                expression(
+                    checker,
+                    value,
+                    facts,
+                    env,
+                    candidates,
+                    constraints,
+                    return_type,
+                );
                 if matches!(typ, Some(Typ::Vector(item)) if matches!(item.as_ref(), Typ::Generic(name) if name == "_"))
                 {
                     candidates.insert(name.clone());
@@ -170,7 +251,15 @@ fn collect(
                 }
             }
             Stmt::Assign(name, value) => {
-                expression(checker, value, facts, env, candidates, constraints);
+                expression(
+                    checker,
+                    value,
+                    facts,
+                    env,
+                    candidates,
+                    constraints,
+                    return_type,
+                );
                 if let Some(Typ::Array(item) | Typ::Vector(item)) =
                     closure_inference::argument_type(checker, value, facts, env)
                 {
@@ -178,17 +267,39 @@ fn collect(
                 }
             }
             Stmt::Return(Some(value)) => {
-                expression(checker, value, facts, env, candidates, constraints);
+                expression(
+                    checker,
+                    value,
+                    facts,
+                    env,
+                    candidates,
+                    constraints,
+                    return_type,
+                );
                 if let (Some(Typ::Vector(item)), Expr::Ident(name)) = (return_type, value) {
                     constrain(name, (**item).clone(), candidates, constraints);
                 }
             }
-            Stmt::Expr(value) | Stmt::Throw(value) => {
-                expression(checker, value, facts, env, candidates, constraints)
-            }
+            Stmt::Expr(value) | Stmt::Throw(value) => expression(
+                checker,
+                value,
+                facts,
+                env,
+                candidates,
+                constraints,
+                return_type,
+            ),
             Stmt::IndexAssign { base, index, value } => {
                 for expr in [base, index, value] {
-                    expression(checker, expr, facts, env, candidates, constraints);
+                    expression(
+                        checker,
+                        expr,
+                        facts,
+                        env,
+                        candidates,
+                        constraints,
+                        return_type,
+                    );
                 }
                 if let Expr::Ident(name) = base
                     && let Some(typ) = closure_inference::argument_type(checker, value, facts, env)
@@ -198,7 +309,15 @@ fn collect(
             }
             Stmt::FieldAssign { base, value, .. } => {
                 for expr in [base, value] {
-                    expression(checker, expr, facts, env, candidates, constraints);
+                    expression(
+                        checker,
+                        expr,
+                        facts,
+                        env,
+                        candidates,
+                        constraints,
+                        return_type,
+                    );
                 }
             }
             Stmt::If {
@@ -206,7 +325,15 @@ fn collect(
                 then_body,
                 else_body,
             } => {
-                expression(checker, cond, facts, env, candidates, constraints);
+                expression(
+                    checker,
+                    cond,
+                    facts,
+                    env,
+                    candidates,
+                    constraints,
+                    return_type,
+                );
                 for branch in [then_body, else_body] {
                     collect(
                         checker,
@@ -221,7 +348,15 @@ fn collect(
             }
             Stmt::Loop { cond, body, .. } => {
                 if let Some(cond) = cond {
-                    expression(checker, cond, facts, env, candidates, constraints);
+                    expression(
+                        checker,
+                        cond,
+                        facts,
+                        env,
+                        candidates,
+                        constraints,
+                        return_type,
+                    );
                 }
                 collect(
                     checker,
@@ -234,14 +369,30 @@ fn collect(
                 );
             }
             Stmt::Match { scrutinee, arms } => {
-                expression(checker, scrutinee, facts, env, candidates, constraints);
+                expression(
+                    checker,
+                    scrutinee,
+                    facts,
+                    env,
+                    candidates,
+                    constraints,
+                    return_type,
+                );
                 for arm in arms {
                     let mut inner = checker
                         .expr_type(scrutinee, facts, env)
                         .and_then(|typ| checker.pattern_environment(&arm.pattern, &typ, facts, env))
                         .unwrap_or_else(|| env.clone());
                     if let Some(guard) = &arm.guard {
-                        expression(checker, guard, facts, &inner, candidates, constraints);
+                        expression(
+                            checker,
+                            guard,
+                            facts,
+                            &inner,
+                            candidates,
+                            constraints,
+                            return_type,
+                        );
                     }
                     collect(
                         checker,
@@ -284,9 +435,56 @@ fn collect(
     }
 }
 
+fn apply_expression(expr: &mut Expr, constraints: &HashMap<String, Option<Typ>>) -> bool {
+    if let Expr::Block { body, result } = expr {
+        let mut changed = apply(body, constraints);
+        if let Some(result) = result {
+            changed |= apply_expression(result, constraints);
+        }
+        return changed;
+    }
+    if matches!(expr, Expr::Closure { .. }) {
+        return false;
+    }
+    let mut changed = false;
+    crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
+        changed |= apply_expression(child, constraints)
+    });
+    changed
+}
+
 fn apply(body: &mut [Stmt], constraints: &HashMap<String, Option<Typ>>) -> bool {
     let mut changed = false;
     for stmt in body {
+        match stmt {
+            Stmt::Let(_, _, value)
+            | Stmt::Assign(_, value)
+            | Stmt::Expr(value)
+            | Stmt::Throw(value)
+            | Stmt::Return(Some(value)) => changed |= apply_expression(value, constraints),
+            Stmt::FieldAssign { base, value, .. } => {
+                changed |= apply_expression(base, constraints);
+                changed |= apply_expression(value, constraints);
+            }
+            Stmt::IndexAssign { base, index, value } => {
+                for expr in [base, index, value] {
+                    changed |= apply_expression(expr, constraints);
+                }
+            }
+            Stmt::If { cond, .. } => changed |= apply_expression(cond, constraints),
+            Stmt::Loop {
+                cond: Some(cond), ..
+            } => changed |= apply_expression(cond, constraints),
+            Stmt::Match { scrutinee, arms } => {
+                changed |= apply_expression(scrutinee, constraints);
+                for arm in arms {
+                    if let Some(guard) = &mut arm.guard {
+                        changed |= apply_expression(guard, constraints);
+                    }
+                }
+            }
+            _ => {}
+        }
         match stmt {
             Stmt::Let(name, Some(Typ::Vector(item)), _) if matches!(item.as_ref(), Typ::Generic(name) if name == "_") => {
                 if let Some(Some(typ)) = constraints.get(name) {
@@ -318,4 +516,46 @@ fn apply(body: &mut [Stmt], constraints: &HashMap<String, Option<Typ>>) -> bool 
         }
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_local_vector_candidates_are_found_and_updated() {
+        let checker = TypeChecker::new();
+        let facts = checker.collect_facts(&crate::core_ir::UnifiedModule::new(vec![]));
+        let mut body = vec![Stmt::Let(
+            "answer".into(),
+            None,
+            Expr::Block {
+                body: vec![
+                    Stmt::Let(
+                        "items".into(),
+                        Some(Typ::Vector(Box::new(Typ::Generic("_".into())))),
+                        Expr::ArrayLit(vec![]),
+                    ),
+                    Stmt::Expr(Expr::Call {
+                        callee: Box::new(Expr::Ident("vector-push".into())),
+                        args: vec![Expr::Ident("items".into()), Expr::IntLit(42)],
+                    }),
+                ],
+                result: Some(Box::new(Expr::IntLit(42))),
+            },
+        )];
+        infer(
+            &checker,
+            &mut body,
+            &facts,
+            &HashMap::new(),
+            Some(&Typ::Int),
+        );
+        let Stmt::Let(_, _, Expr::Block { body, .. }) = &body[0] else {
+            panic!("block lost");
+        };
+        assert!(
+            matches!(&body[0], Stmt::Let(_, Some(Typ::Vector(item)), _) if item.as_ref() == &Typ::Int)
+        );
+    }
 }

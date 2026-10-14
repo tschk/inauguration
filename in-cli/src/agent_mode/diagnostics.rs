@@ -254,6 +254,33 @@ fn collect_dependency_symbol_calls_from_expr<'a>(
     out: &mut std::collections::BTreeSet<(&'a str, &'a str, &'a str)>,
 ) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            for value in [cond, then_expr, else_expr] {
+                collect_dependency_symbol_calls_from_expr(
+                    value,
+                    symbols,
+                    functions,
+                    bound_aliases,
+                    out,
+                );
+            }
+        }
+        Expr::Block { body, result } => {
+            let mut inner = bound_aliases.clone();
+            for stmt in body {
+                collect_dependency_symbol_calls_from_stmt(stmt, symbols, functions, &inner, out);
+                if let Stmt::Let(name, _, _) = stmt {
+                    inner.insert(name.as_str());
+                }
+            }
+            if let Some(result) = result {
+                collect_dependency_symbol_calls_from_expr(result, symbols, functions, &inner, out);
+            }
+        }
         Expr::Unary { expr, .. } => {
             collect_dependency_symbol_calls_from_expr(expr, symbols, functions, bound_aliases, out);
         }

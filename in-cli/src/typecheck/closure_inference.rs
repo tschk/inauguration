@@ -67,6 +67,36 @@ pub(super) fn argument_type(
     }
     let mut complete = true;
     match expr {
+        Expr::Block { body, result } => {
+            let mut inner = env.clone();
+            for stmt in body {
+                if let Stmt::Let(name, typ, value) = stmt {
+                    let typ = typ
+                        .clone()
+                        .or_else(|| argument_type(checker, value, facts, &inner));
+                    inner.remove(name);
+                    if let Some(typ) = typ {
+                        inner.insert(name.clone(), typ);
+                    }
+                }
+            }
+            return result.as_deref().map_or(Some(Typ::Void), |value| {
+                argument_type(checker, value, facts, &inner)
+            });
+        }
+        Expr::Conditional {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            return crate::core_ir::conditional_type(
+                then_expr,
+                argument_type(checker, then_expr, facts, env),
+                else_expr,
+                argument_type(checker, else_expr, facts, env),
+            )
+            .filter(resolved_closure_type);
+        }
         Expr::Call { args, .. } => {
             for arg in args {
                 complete &= argument_type(checker, arg, facts, env).is_some();
@@ -94,6 +124,14 @@ fn expression_constraints(
     changed: &mut bool,
 ) {
     if matches!(expr, Expr::Closure { .. }) {
+        return;
+    }
+    if let Expr::Block { body, result } = expr {
+        let mut inner = env.clone();
+        body_constraints(checker, body, facts, generated, &mut inner, changed);
+        if let Some(result) = result {
+            expression_constraints(checker, result, facts, generated, &inner, changed);
+        }
         return;
     }
     crate::core_ir::for_each_expr_child(expr, &mut |child| {
@@ -164,6 +202,8 @@ fn body_constraints(
                     .or_else(|| argument_type(checker, value, facts, env))
                 {
                     env.insert(name.clone(), typ);
+                } else {
+                    env.remove(name);
                 }
             }
             Stmt::Assign(_, value)
@@ -251,5 +291,23 @@ fn body_constraints(
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_argument_type_uses_its_local_scope() {
+        let checker = TypeChecker::new();
+        let facts = checker.collect_facts(&UnifiedModule::new(vec![]));
+        let env = HashMap::from([("value".into(), Typ::Bool)]);
+        let expr = Expr::Block {
+            body: vec![Stmt::Let("value".into(), None, Expr::IntLit(42))],
+            result: Some(Box::new(Expr::Ident("value".into()))),
+        };
+        assert_eq!(argument_type(&checker, &expr, &facts, &env), Some(Typ::Int));
+        assert_eq!(env.get("value"), Some(&Typ::Bool));
     }
 }

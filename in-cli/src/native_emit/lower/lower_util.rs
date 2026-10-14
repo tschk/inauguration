@@ -332,6 +332,17 @@ pub(crate) fn array_item_matches(expected: &Typ, actual: &Typ) -> bool {
 
 pub(crate) fn expr_type(expr: &Expr) -> Option<Typ> {
     match expr {
+        Expr::Conditional {
+            then_expr,
+            else_expr,
+            ..
+        } => crate::core_ir::conditional_type(
+            then_expr,
+            expr_type(then_expr),
+            else_expr,
+            expr_type(else_expr),
+        ),
+        Expr::Block { result, .. } => result.as_deref().and_then(expr_type),
         Expr::IntLit(_) => Some(Typ::Int),
         Expr::FloatLit(_) => Some(Typ::Float),
         Expr::BoolLit(_) => Some(Typ::Bool),

@@ -166,7 +166,12 @@ fn rewrite_expr(expr: &mut Expr, values: &HashMap<String, Option<Expr>>) {
         });
         return;
     }
-    if let Expr::Closure { body, .. } = expr {
+    if let Expr::Block { body, result } = expr {
+        rewrite_body(body, values);
+        if let Some(result) = result {
+            rewrite_expr(result, values);
+        }
+    } else if let Expr::Closure { body, .. } = expr {
         rewrite_body(body, values);
     } else {
         crate::core_ir::for_each_expr_child_mut(expr, &mut |child| rewrite_expr(child, values));

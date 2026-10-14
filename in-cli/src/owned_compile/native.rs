@@ -246,6 +246,21 @@ fn collect_expr_calls(expr: &Expr, out: &mut HashSet<String>) {
             collect_expr_calls(base, out);
             collect_expr_calls(index, out);
         }
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            for value in [cond, then_expr, else_expr] {
+                collect_expr_calls(value, out);
+            }
+        }
+        Expr::Block { body, result } => {
+            collect_stmt_calls(body, out);
+            if let Some(value) = result {
+                collect_expr_calls(value, out);
+            }
+        }
         Expr::Closure { body, .. } => collect_stmt_calls(body, out),
         Expr::Ident(name) => {
             // Also track function names used as values (address references)

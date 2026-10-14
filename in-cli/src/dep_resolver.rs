@@ -28,8 +28,10 @@ fn collect_externals(module: &UnifiedModule) -> Vec<String> {
 
     let mut out = Vec::new();
     for decl in &module.decls {
-        if let Decl::Function { body, .. } = decl {
-            walk_stmts(body, &locals, &mut out);
+        if let Decl::Function { body, params, .. } = decl {
+            let mut scope = locals.clone();
+            scope.extend(params.iter().map(|(name, _)| name.clone()));
+            walk_stmts(body, &mut scope, &mut out);
         }
     }
     out.sort();
@@ -37,12 +39,23 @@ fn collect_externals(module: &UnifiedModule) -> Vec<String> {
     out
 }
 
-fn walk_stmts(stmts: &[Stmt], locals: &HashSet<String>, out: &mut Vec<String>) {
+fn walk_stmts(stmts: &[Stmt], locals: &mut HashSet<String>, out: &mut Vec<String>) {
     for stmt in stmts {
         match stmt {
             Stmt::Expr(e) | Stmt::Return(Some(e)) => walk_expr(e, locals, out),
-            Stmt::Let(_, _, e) | Stmt::Assign(_, e) | Stmt::FieldAssign { value: e, .. } => {
-                walk_expr(e, locals, out)
+            Stmt::Let(name, _, e) => {
+                walk_expr(e, locals, out);
+                locals.insert(name.clone());
+            }
+            Stmt::Assign(_, e) => walk_expr(e, locals, out),
+            Stmt::FieldAssign { base, value, .. } => {
+                walk_expr(base, locals, out);
+                walk_expr(value, locals, out);
+            }
+            Stmt::IndexAssign { base, index, value } => {
+                walk_expr(base, locals, out);
+                walk_expr(index, locals, out);
+                walk_expr(value, locals, out);
             }
             Stmt::If {
                 cond,
@@ -50,26 +63,37 @@ fn walk_stmts(stmts: &[Stmt], locals: &HashSet<String>, out: &mut Vec<String>) {
                 else_body,
             } => {
                 walk_expr(cond, locals, out);
-                walk_stmts(then_body, locals, out);
-                walk_stmts(else_body, locals, out);
+                walk_stmts(then_body, &mut locals.clone(), out);
+                walk_stmts(else_body, &mut locals.clone(), out);
             }
-            Stmt::Loop { cond, body, .. } => {
+            Stmt::Loop { kind, cond, body } => {
                 if let Some(c) = cond {
                     walk_expr(c, locals, out);
                 }
-                walk_stmts(body, locals, out);
+                let mut scope = locals.clone();
+                if let crate::core_ir::LoopKind::For { binding } = kind {
+                    scope.insert(binding.clone());
+                }
+                walk_stmts(body, &mut scope, out);
             }
             Stmt::Match { scrutinee, arms } => {
                 walk_expr(scrutinee, locals, out);
                 for arm in arms {
-                    walk_stmts(&arm.body, locals, out);
+                    let mut scope = locals.clone();
+                    crate::core_bindings::reserve_pattern(&arm.pattern, &mut scope);
+                    if let Some(guard) = &arm.guard {
+                        walk_expr(guard, &scope, out);
+                    }
+                    walk_stmts(&arm.body, &mut scope, out);
                 }
             }
             Stmt::Throw(e) => walk_expr(e, locals, out),
             Stmt::Try { body, catches } => {
-                walk_stmts(body, locals, out);
+                walk_stmts(body, &mut locals.clone(), out);
                 for c in catches {
-                    walk_stmts(&c.body, locals, out);
+                    let mut scope = locals.clone();
+                    crate::core_bindings::reserve_pattern(&c.pattern, &mut scope);
+                    walk_stmts(&c.body, &mut scope, out);
                 }
             }
             _ => {}
@@ -78,6 +102,21 @@ fn walk_stmts(stmts: &[Stmt], locals: &HashSet<String>, out: &mut Vec<String>) {
 }
 
 fn walk_expr(expr: &Expr, locals: &HashSet<String>, out: &mut Vec<String>) {
+    if let Expr::Block { body, result } = expr {
+        let mut scope = locals.clone();
+        walk_stmts(body, &mut scope, out);
+        if let Some(result) = result {
+            walk_expr(result, &scope, out);
+        }
+        return;
+    }
+    if let Expr::Closure { params, body, .. } = expr {
+        let mut scope = locals.clone();
+        scope.extend(params.iter().map(|(name, _)| name.clone()));
+        walk_stmts(body, &mut scope, out);
+        return;
+    }
+
     if let Expr::Call { callee, .. } = expr {
         if let Expr::Ident(target) = callee.as_ref() {
             if !locals.contains(target) && !target.starts_with("__inrt_") {
@@ -154,6 +193,33 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn expression_block_dependencies_respect_sequential_local_scope() {
+        fn call(name: &str) -> Expr {
+            Expr::Call {
+                callee: Box::new(Expr::Ident(name.into())),
+                args: vec![],
+            }
+        }
+        let expr = Expr::Block {
+            body: vec![
+                Stmt::Expr(call("before")),
+                Stmt::Let("local".into(), None, call("initializer")),
+                Stmt::Expr(call("local")),
+            ],
+            result: Some(Box::new(call("result"))),
+        };
+        let mut locals = HashSet::new();
+        let mut out = vec![];
+        walk_stmts(
+            &[Stmt::Expr(expr), Stmt::Expr(call("local"))],
+            &mut locals,
+            &mut out,
+        );
+        assert_eq!(out, vec!["before", "initializer", "result", "local"]);
+        assert!(!locals.contains("local"));
+    }
 
     #[test]
     fn test_resolve_deps_complex() {

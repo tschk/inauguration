@@ -14,8 +14,10 @@ const MAX_EMIT_NODES: usize = 100_000;
 
 pub fn emit_source_module(module: &UnifiedModule, lang: SourceLang) -> String {
     // Soft DoS guard: truncate emission rather than hang (lossy printers).
-    if !module_within_limits(module) {
-        return format!("// emit aborted: Core IR exceeds size/depth limits\n// lang={lang:?}\n");
+    if !module_within_limits(module, lang) {
+        return format!(
+            "// emit aborted: Core IR exceeds size/depth limits or uses unsupported value control flow\n// lang={lang:?}\n"
+        );
     }
     let mut out = String::with_capacity(4096);
     match lang {
@@ -298,6 +300,28 @@ fn bin_op(op: &str) -> &str {
 
 fn expr(lang: SourceLang, e: &Expr) -> String {
     match e {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => format!(
+            "(if ({}) {{ {} }} else {{ {} }})",
+            expr(lang, cond),
+            expr(lang, then_expr),
+            expr(lang, else_expr)
+        ),
+        Expr::Block { body, result } => {
+            let mut out = String::from("{\n");
+            for statement in body {
+                stmt(&mut out, lang, statement, 1);
+            }
+            if let Some(result) = result {
+                out.push_str(&expr(lang, result));
+                out.push('\n');
+            }
+            out.push('}');
+            out
+        }
         Expr::IntLit(n) => format!("{n}"),
         Expr::FloatLit(f) => format!("{:?}", f.0),
         Expr::BoolLit(b) => {
@@ -604,17 +628,17 @@ fn export_go(name: &str) -> String {
     }
 }
 
-fn module_within_limits(module: &UnifiedModule) -> bool {
+fn module_within_limits(module: &UnifiedModule, lang: SourceLang) -> bool {
     let mut nodes = 0usize;
     for d in &module.decls {
-        if !count_decl(d, 0, &mut nodes) {
+        if !count_decl(d, 0, &mut nodes, lang) {
             return false;
         }
     }
     true
 }
 
-fn count_decl(d: &Decl, depth: u32, nodes: &mut usize) -> bool {
+fn count_decl(d: &Decl, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool {
     if depth > MAX_EMIT_DEPTH {
         return false;
     }
@@ -623,18 +647,20 @@ fn count_decl(d: &Decl, depth: u32, nodes: &mut usize) -> bool {
         return false;
     }
     match d {
-        Decl::Function { body, .. } => count_stmts(body, depth + 1, nodes),
-        Decl::Class { methods, .. } => methods.iter().all(|m| count_decl(m, depth + 1, nodes)),
-        Decl::Global { init: Some(e), .. } => count_expr(e, depth + 1, nodes),
+        Decl::Function { body, .. } => count_stmts(body, depth + 1, nodes, lang),
+        Decl::Class { methods, .. } => methods
+            .iter()
+            .all(|m| count_decl(m, depth + 1, nodes, lang)),
+        Decl::Global { init: Some(e), .. } => count_expr(e, depth + 1, nodes, lang),
         _ => true,
     }
 }
 
-fn count_stmts(stmts: &[Stmt], depth: u32, nodes: &mut usize) -> bool {
-    stmts.iter().all(|s| count_stmt(s, depth, nodes))
+fn count_stmts(stmts: &[Stmt], depth: u32, nodes: &mut usize, lang: SourceLang) -> bool {
+    stmts.iter().all(|s| count_stmt(s, depth, nodes, lang))
 }
 
-fn count_stmt(s: &Stmt, depth: u32, nodes: &mut usize) -> bool {
+fn count_stmt(s: &Stmt, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool {
     if depth > MAX_EMIT_DEPTH {
         return false;
     }
@@ -644,47 +670,49 @@ fn count_stmt(s: &Stmt, depth: u32, nodes: &mut usize) -> bool {
     }
     match s {
         Stmt::Let(_, _, e) | Stmt::Assign(_, e) | Stmt::Throw(e) | Stmt::Expr(e) => {
-            count_expr(e, depth + 1, nodes)
+            count_expr(e, depth + 1, nodes, lang)
         }
-        Stmt::Return(Some(e)) => count_expr(e, depth + 1, nodes),
+        Stmt::Return(Some(e)) => count_expr(e, depth + 1, nodes, lang),
         Stmt::Return(None) | Stmt::Propagate | Stmt::Break | Stmt::Continue => true,
         Stmt::IndexAssign { base, index, value } => {
-            count_expr(base, depth + 1, nodes)
-                && count_expr(index, depth + 1, nodes)
-                && count_expr(value, depth + 1, nodes)
+            count_expr(base, depth + 1, nodes, lang)
+                && count_expr(index, depth + 1, nodes, lang)
+                && count_expr(value, depth + 1, nodes, lang)
         }
         Stmt::FieldAssign { base, value, .. } => {
-            count_expr(base, depth + 1, nodes) && count_expr(value, depth + 1, nodes)
+            count_expr(base, depth + 1, nodes, lang) && count_expr(value, depth + 1, nodes, lang)
         }
         Stmt::If {
             cond,
             then_body,
             else_body,
         } => {
-            count_expr(cond, depth + 1, nodes)
-                && count_stmts(then_body, depth + 1, nodes)
-                && count_stmts(else_body, depth + 1, nodes)
+            count_expr(cond, depth + 1, nodes, lang)
+                && count_stmts(then_body, depth + 1, nodes, lang)
+                && count_stmts(else_body, depth + 1, nodes, lang)
         }
         Stmt::Loop { cond, body, .. } => {
             cond.as_ref()
-                .map(|c| count_expr(c, depth + 1, nodes))
+                .map(|c| count_expr(c, depth + 1, nodes, lang))
                 .unwrap_or(true)
-                && count_stmts(body, depth + 1, nodes)
+                && count_stmts(body, depth + 1, nodes, lang)
         }
         Stmt::Match { scrutinee, arms } => {
-            count_expr(scrutinee, depth + 1, nodes)
-                && arms.iter().all(|a| count_stmts(&a.body, depth + 1, nodes))
+            count_expr(scrutinee, depth + 1, nodes, lang)
+                && arms
+                    .iter()
+                    .all(|a| count_stmts(&a.body, depth + 1, nodes, lang))
         }
         Stmt::Try { body, catches } => {
-            count_stmts(body, depth + 1, nodes)
+            count_stmts(body, depth + 1, nodes, lang)
                 && catches
                     .iter()
-                    .all(|c| count_stmts(&c.body, depth + 1, nodes))
+                    .all(|c| count_stmts(&c.body, depth + 1, nodes, lang))
         }
     }
 }
 
-fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> bool {
+fn count_expr(e: &Expr, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool {
     if depth > MAX_EMIT_DEPTH {
         return false;
     }
@@ -693,23 +721,42 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> bool {
         return false;
     }
     match e {
-        Expr::Unary { expr, .. } => count_expr(expr, depth + 1, nodes),
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            lang == SourceLang::Rust
+                && count_expr(cond, depth + 1, nodes, lang)
+                && count_expr(then_expr, depth + 1, nodes, lang)
+                && count_expr(else_expr, depth + 1, nodes, lang)
+        }
+        Expr::Block { body, result } => {
+            lang == SourceLang::Rust
+                && count_stmts(body, depth + 1, nodes, lang)
+                && result
+                    .as_deref()
+                    .is_none_or(|result| count_expr(result, depth + 1, nodes, lang))
+        }
+        Expr::Unary { expr, .. } => count_expr(expr, depth + 1, nodes, lang),
         Expr::Binary { lhs, rhs, .. } => {
-            count_expr(lhs, depth + 1, nodes) && count_expr(rhs, depth + 1, nodes)
+            count_expr(lhs, depth + 1, nodes, lang) && count_expr(rhs, depth + 1, nodes, lang)
         }
         Expr::StructInit { fields, .. } => fields
             .iter()
-            .all(|(_, fe)| count_expr(fe, depth + 1, nodes)),
-        Expr::Field { base, .. } => count_expr(base, depth + 1, nodes),
-        Expr::ArrayLit(items) => items.iter().all(|it| count_expr(it, depth + 1, nodes)),
+            .all(|(_, fe)| count_expr(fe, depth + 1, nodes, lang)),
+        Expr::Field { base, .. } => count_expr(base, depth + 1, nodes, lang),
+        Expr::ArrayLit(items) => items
+            .iter()
+            .all(|it| count_expr(it, depth + 1, nodes, lang)),
         Expr::Index { base, index } => {
-            count_expr(base, depth + 1, nodes) && count_expr(index, depth + 1, nodes)
+            count_expr(base, depth + 1, nodes, lang) && count_expr(index, depth + 1, nodes, lang)
         }
         Expr::Call { callee, args } => {
-            count_expr(callee, depth + 1, nodes)
-                && args.iter().all(|a| count_expr(a, depth + 1, nodes))
+            count_expr(callee, depth + 1, nodes, lang)
+                && args.iter().all(|a| count_expr(a, depth + 1, nodes, lang))
         }
-        Expr::Closure { body, .. } => count_stmts(body, depth + 1, nodes),
+        Expr::Closure { body, .. } => count_stmts(body, depth + 1, nodes, lang),
         _ => true,
     }
 }
@@ -747,6 +794,29 @@ fn is_safe_pattern(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::core_ir::{Expr, Stmt, Typ};
+
+    #[test]
+    fn rust_value_control_flow_preserves_enclosing_returns_and_go_refuses() {
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Conditional {
+                cond: Box::new(Expr::BoolLit(true)),
+                then_expr: Box::new(Expr::Block {
+                    body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                    result: None,
+                }),
+                else_expr: Box::new(Expr::IntLit(0)),
+            }))],
+        }]);
+        let rust = emit_source_module(&module, SourceLang::Rust);
+        assert!(rust.contains("if (true)"));
+        assert!(rust.contains("return 42;"));
+        assert!(!rust.contains("move ||"));
+        assert!(emit_source_module(&module, SourceLang::Go).contains("emit aborted"));
+    }
 
     #[test]
     fn go_emits_fn_and_if() {

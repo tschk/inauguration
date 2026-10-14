@@ -369,6 +369,9 @@ fn compile_expr(
     slots: &std::collections::HashMap<String, u16>,
 ) -> Result<(), String> {
     match e {
+        Expr::Conditional { .. } | Expr::Block { .. } => {
+            return Err("inisa: conditional and block values require owned native lowering".into());
+        }
         Expr::IntLit(v) => emit_pushi(&mut c.code, *v),
         Expr::BoolLit(b) => emit_pushi(&mut c.code, i64::from(*b)),
         Expr::Ident(name) => {

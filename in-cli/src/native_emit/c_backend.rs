@@ -363,6 +363,17 @@ impl Ctx {
 
     fn expr_str(&mut self, expr: &Expr) -> String {
         match expr {
+            Expr::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => format!(
+                "({} ? {} : {})",
+                self.expr_str(cond),
+                self.expr_str(then_expr),
+                self.expr_str(else_expr)
+            ),
+            Expr::Block { .. } => unreachable!("block values rejected by C backend scan"),
             Expr::IntLit(n) => format!("INT64_C({})", n),
             Expr::FloatLit(f) => {
                 let bits = f.0;

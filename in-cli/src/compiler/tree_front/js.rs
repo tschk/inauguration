@@ -262,6 +262,21 @@ fn rewrite_this_receiver_in_stmt(stmt: &mut Stmt) {
 
 fn rewrite_this_receiver_in_expr(expr: &mut Expr) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            for value in [cond, then_expr, else_expr] {
+                rewrite_this_receiver_in_expr(value);
+            }
+        }
+        Expr::Block { body, result } => {
+            rewrite_this_receiver_in_body(body);
+            if let Some(result) = result {
+                rewrite_this_receiver_in_expr(result);
+            }
+        }
         Expr::Ident(name) if name == "this" => {
             *name = "self".to_string();
         }
@@ -392,6 +407,21 @@ fn rewrite_constructor_calls_in_stmt(stmt: &mut Stmt, class_fields: &HashMap<Str
 
 fn rewrite_constructor_calls_in_expr(expr: &mut Expr, class_fields: &HashMap<String, Vec<String>>) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            for value in [cond, then_expr, else_expr] {
+                rewrite_constructor_calls_in_expr(value, class_fields);
+            }
+        }
+        Expr::Block { body, result } => {
+            rewrite_constructor_calls_in_body(body, class_fields);
+            if let Some(result) = result {
+                rewrite_constructor_calls_in_expr(result, class_fields);
+            }
+        }
         Expr::Call { callee, args, .. } => {
             rewrite_constructor_calls_in_expr(callee, class_fields);
             for arg in args.iter_mut() {

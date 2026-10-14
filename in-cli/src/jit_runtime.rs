@@ -3998,7 +3998,7 @@ mod tests {
     }
 
     #[test]
-    fn rust_unsafe_value_blocks_refuse_closure_substitution() {
+    fn rust_unsafe_value_blocks_preserve_values_without_closure_substitution() {
         for source in [
             "fn main() -> i64 { let value: i64 = unsafe { 42 }; return value; }",
             "fn main() -> i64 { let value: i64 = (unsafe { 42 }); return value; }",
@@ -4010,13 +4010,13 @@ mod tests {
                 crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
             crate::lower_core::desugar_module(&mut module);
             let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
-            assert!(!verified.ok);
-            assert!(verified.reason.unwrap().contains("__unsupported_rust_"));
+            assert!(verified.ok, "{source}: {verified:?}");
             assert!(
                 crate::typecheck::TypeChecker::new()
                     .check_module(&module)
-                    .is_err()
+                    .is_ok()
             );
+            assert!(!format!("{module:?}").contains("__closure_"));
         }
     }
 
@@ -4814,6 +4814,66 @@ mod tests {
             "fn main()->i64 { let pair=(\"abc\",42); pair.1 }",
             "fn main()->i64 { let pair=(20,22.0); let alias=pair; alias.0+alias.1 as i64 }",
             "static mut CALLS:i64=0; fn next()->i64 {unsafe{CALLS+=1;CALLS}} fn main()->i64 { let pair=(next(),next()); unsafe {pair.0*10+pair.1+CALLS+28} }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{source}: {report:?}; {module:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn conditional_and_block_values_preserve_scope_effects_and_control_flow() {
+        for source in [
+            "static mut CALLS:i64=0;fn take(unit:())->i64{unsafe{CALLS+41}}fn main()->i64{take({unsafe{CALLS+=1;}})}",
+            "fn main()->i64{let x=if {return 42;}{0}else{1};x}",
+            "fn main()->i64{let x=if true{{return 42;}}else{0};x}",
+            "static mut CALLS:i64=0;fn touch(){unsafe{CALLS+=1;}}fn main()->i64{let unit=touch();unsafe{CALLS+41}}",
+            "static mut CALLS:i64=0;fn main()->i64{let mut n=0;for i in 0..3{unsafe{CALLS+=1;if CALLS>3{return 0;}}let x=if i<2{continue;}else{42};n=x;}n}",
+            "fn take(prefix:i64,v:Vec<i64>)->i64{prefix+v[0]+v[1]} fn main()->i64{take(1,if false{vec![0]}else{vec![20,21]})}",
+            "struct Pair{x:i64,y:i64} fn take(prefix:i64,p:Pair)->i64{prefix+p.x+p.y} fn main()->i64{take(1,if true{Pair{x:20,y:21}}else{Pair{x:0,y:0}})}",
+            "fn values()->Vec<i64>{let v=if true{return Vec::with_capacity(10);}else{vec![0]};v} fn main()->i64{let mut v=values();v.push(42);if v.capacity()>=10{v[0]}else{0}}",
+            "fn main()->i64{let choose=|flag:bool| if flag{let value=42;value}else{0};choose(true)}",
+            "fn main()->i64{let y={let x=20;x+22};y}",
+            "fn main()->i64{let value=if false{0.0}else{42.0};value as i64}",
+            "fn main()->i64{let value=if false{false}else{true};if value{42}else{0}}",
+            "fn main()->i64{let text=if false{\"wrong\"}else{let name=\"answer\";name};if text==\"answer\"{42}else{0}}",
+            "fn main()->i64{let pair=if false{(0,0)}else{let x=20;(x,22)};pair.0+pair.1}",
+            "fn main()->i64{(if true{[20,22]}else{[0,0]})[1]+20}",
+            "fn main()->i64{let ignored={return 42;};0}",
+            "fn main()->i64{let ignored={return 42;1}*0;0}",
+            "fn main()->i64{let mut x=0;let y={x=42;7}*0;x+y}",
+            "fn main()->i64{let ignored={return 42;true}&&false;0}",
+            "struct Pair{x:i64,y:i64} impl Pair{fn sum(&self)->i64{self.x+self.y}} fn main()->i64{{let p=Pair{x:20,y:22};p}.sum()}",
+            "fn main()->i64{let mut v=if true{vec![20]}else{vec![0]};v.push(22);v[0]+v[1]}",
+            "fn main()->i64{let v:Vec<i64>=if false{vec![0]}else{vec![20,22]};v[0]+v[1]}",
+            "fn main()->i64{let mut x=20;let y={x+=1;x};x+y}",
+            "fn main()->i64{let x=20;let y={let x=22;x};x+y}",
+            "fn main()->i64{let x=if false{0}else if true{42}else{1};x}",
+            "fn take(x:i64,y:i64)->i64{x+y} fn main()->i64{let mut x=20;take({x+=1;x},{x+=1;x})-1}",
+            "static mut CALLS:i64=0;fn count()->bool{unsafe{CALLS+=1;}false} fn main()->i64{let x=if count(){unsafe{CALLS+=100;}0}else{41};unsafe{x+CALLS}}",
+            "fn main()->i64{let x=if true{return 42;}else{0};x}",
+            "fn main()->i64{let x:i64=if true{return 42;}else{return 0;};x}",
+            "fn take(v:Vec<i64>)->i64{v[0]+v[1]} fn main()->i64{take(if false{vec![0]}else{vec![20,22]})}",
+            "struct Pair{x:i64,y:i64} fn main()->i64{let p=if false{Pair{x:0,y:0}}else{let x=20;Pair{x,y:22}};p.x+p.y}",
+            "fn main()->i64{let mut i=0;let mut n=0;while i<3{i+=1;let x=if i<3{continue;}else{42};n=x;}n}",
+            "fn main()->i64{let mut x=0;while true{let y=if true{x=42;break;}else{0};x=y;}x}",
+            "fn main()->i64{let values={let x=20;[x,22]};values[0]+values[1]}",
+            "fn main()->i64{let mut v:Vec<i64>=if false{Vec::with_capacity(1)}else{Vec::with_capacity(10)};v.push(42);if v.capacity()>=10{v[0]}else{0}}",
         ] {
             let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
             let mut module =

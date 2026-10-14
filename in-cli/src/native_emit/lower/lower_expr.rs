@@ -9,6 +9,102 @@ use crate::core_ir::{Expr, FloatVal, Typ};
 use crate::native_emit::aarch64::{self, CodeEmitter};
 use std::collections::HashMap;
 
+pub(crate) fn lower_value_control<F>(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    expr: &Expr,
+    functions: &HashMap<String, FunctionInfo>,
+    pending_calls: &mut Vec<PendingCall>,
+    fn_name: &str,
+    mut lower: F,
+) -> Result<(), String>
+where
+    F: FnMut(
+        &mut CodeEmitter,
+        &mut LowerCtx<'_>,
+        &Expr,
+        &mut Vec<PendingCall>,
+    ) -> Result<(), String>,
+{
+    match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            if !crate::core_ir::expr_diverges(cond)
+                && native_expr_type(cond, ctx, functions).map(|typ| typ.canonical())
+                    != Some(Typ::Bool)
+            {
+                return Err("native-lower: conditional requires a Bool condition".into());
+            }
+            let then_type = native_expr_type(then_expr, ctx, functions);
+            let else_type = native_expr_type(else_expr, ctx, functions);
+            if !crate::core_ir::expr_diverges(then_expr)
+                && !crate::core_ir::expr_diverges(else_expr)
+                && let (Some(then_type), Some(else_type)) = (then_type, else_type)
+                && crate::core_ir::conditional_type(
+                    then_expr,
+                    Some(then_type),
+                    else_expr,
+                    Some(else_type),
+                )
+                .is_none()
+            {
+                return Err("native-lower: conditional branch type mismatch".into());
+            }
+            lower_expr_into(emitter, ctx, cond, 0, functions, pending_calls, fn_name)?;
+            emitter.emit_u32(aarch64::cmp_reg64(0, aarch64::REG_XZR));
+            let otherwise = emitter.emit_insn(aarch64::b_cond(0, 0));
+            lower(emitter, ctx, then_expr, pending_calls)?;
+            let done = emitter.emit_insn(aarch64::b(0));
+            emitter.patch_u32(
+                otherwise,
+                aarch64::b_cond(0, emitter.len() as i32 - otherwise as i32),
+            );
+            lower(emitter, ctx, else_expr, pending_calls)?;
+            emitter.patch_u32(done, aarch64::b(emitter.len() as i32 - done as i32));
+            Ok(())
+        }
+        Expr::Block { body, result } => {
+            let locals = ctx.locals.clone();
+            let scalar_types = ctx.scalar_types.clone();
+            let pointers = ctx.receiver_pointers.clone();
+            let params = ctx.params.clone();
+            let param_types = ctx.param_types.clone();
+            let lowered = (|| {
+                let ret = ctx.ret_typ.clone();
+                for stmt in body {
+                    super::lower_stmt::lower_stmt(
+                        emitter,
+                        ctx,
+                        stmt,
+                        functions,
+                        pending_calls,
+                        fn_name,
+                        &ret,
+                    )?;
+                }
+                if crate::core_ir::stmts_diverge(body) {
+                    return Ok(());
+                }
+                if let Some(result) = result {
+                    lower(emitter, ctx, result, pending_calls)
+                } else {
+                    lower(emitter, ctx, &Expr::IntLit(0), pending_calls)
+                }
+            })();
+            ctx.locals = locals;
+            ctx.scalar_types = scalar_types;
+            ctx.receiver_pointers = pointers;
+            ctx.params = params;
+            ctx.param_types = param_types;
+            lowered
+        }
+        _ => Err("native-lower: expected conditional or block value".into()),
+    }
+}
+
 pub(crate) fn lower_expr_into(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -18,7 +114,21 @@ pub(crate) fn lower_expr_into(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if matches!(expr, Expr::Conditional { .. } | Expr::Block { .. }) {
+        return lower_value_control(
+            emitter,
+            ctx,
+            expr,
+            functions,
+            pending_calls,
+            fn_name,
+            |emitter, ctx, value, pending_calls| {
+                lower_expr_into(emitter, ctx, value, rd, functions, pending_calls, fn_name)
+            },
+        );
+    }
     match expr {
+        Expr::Conditional { .. } | Expr::Block { .. } => unreachable!(),
         Expr::IntLit(value) => {
             emitter.emit_insns(&aarch64::load_i64(rd, *value));
             Ok(())
@@ -213,7 +323,11 @@ pub(crate) fn lower_index(
     }
     if matches!(
         base,
-        Expr::Call { .. } | Expr::ArrayLit(_) | Expr::Index { .. }
+        Expr::Call { .. }
+            | Expr::ArrayLit(_)
+            | Expr::Index { .. }
+            | Expr::Conditional { .. }
+            | Expr::Block { .. }
     ) || matches!(base, Expr::Unary {op, ..} if op == "vector-clone")
         || matches!(base, Expr::Ident(name) if !ctx.locals.contains_key(name) && matches!(ctx.global_types.get(name).map(Typ::canonical), Some(Typ::Array(_))))
     {
@@ -1011,16 +1125,58 @@ pub(crate) fn native_expr_type(
     ctx: &LowerCtx<'_>,
     functions: &HashMap<String, FunctionInfo>,
 ) -> Option<Typ> {
+    native_expr_type_with_bindings(expr, ctx, functions, &HashMap::new())
+}
+
+fn native_expr_type_with_bindings(
+    expr: &Expr,
+    ctx: &LowerCtx<'_>,
+    functions: &HashMap<String, FunctionInfo>,
+    bindings: &HashMap<String, Typ>,
+) -> Option<Typ> {
+    if let Expr::Ident(name) = expr {
+        if let Some(typ) = bindings.get(name) {
+            return Some(typ.canonical());
+        }
+    }
     if let Expr::ArrayLit(items) = expr {
         return Some(Typ::Array(Box::new(
             items
                 .iter()
                 .filter(|item| !crate::core_ir::empty_sequence_literal(item))
-                .find_map(|item| native_expr_type(item, ctx, functions))
+                .find_map(|item| native_expr_type_with_bindings(item, ctx, functions, bindings))
                 .unwrap_or(Typ::Void),
         )));
     }
-    expr_type(expr).or_else(|| match expr {
+    match expr {
+        Expr::Conditional {
+            then_expr,
+            else_expr,
+            ..
+        } => crate::core_ir::conditional_type(
+            then_expr,
+            native_expr_type_with_bindings(then_expr, ctx, functions, bindings),
+            else_expr,
+            native_expr_type_with_bindings(else_expr, ctx, functions, bindings),
+        ),
+        Expr::Block { body, result } => {
+            let mut scoped = bindings.clone();
+            for stmt in body {
+                if let crate::core_ir::Stmt::Let(name, typ, value) = stmt {
+                    if let Some(typ) = typ
+                        .clone()
+                        .or_else(|| native_expr_type_with_bindings(value, ctx, functions, &scoped))
+                    {
+                        scoped.insert(name.clone(), typ);
+                    }
+                }
+            }
+            match result {
+                Some(result) => native_expr_type_with_bindings(result, ctx, functions, &scoped),
+                None => Some(Typ::Void),
+            }
+        }
+
         Expr::Ident(name) => ctx
             .scalar_type(name)
             .or_else(|| match ctx.locals.get(name) {
@@ -1030,12 +1186,14 @@ pub(crate) fn native_expr_type(
                 }
                 _ => None,
             }),
-        Expr::Index { base, .. } => match native_expr_type(base, ctx, functions)?.canonical() {
-            Typ::Array(item) | Typ::Vector(item) => Some(*item),
-            _ => None,
-        },
+        Expr::Index { base, .. } => {
+            match native_expr_type_with_bindings(base, ctx, functions, bindings)?.canonical() {
+                Typ::Array(item) | Typ::Vector(item) => Some(*item),
+                _ => None,
+            }
+        }
         Expr::Field { base, name } => {
-            let mut typ = native_expr_type(base, ctx, functions)?;
+            let mut typ = native_expr_type_with_bindings(base, ctx, functions, bindings)?;
             for field in name.split('.') {
                 let struct_name = match typ.canonical() {
                     Typ::Named(name) => name,
@@ -1064,7 +1222,7 @@ pub(crate) fn native_expr_type(
             _ => None,
         },
         Expr::Unary { op, expr } if op == "-" || op == "vector-clone" => {
-            native_expr_type(expr, ctx, functions)
+            native_expr_type_with_bindings(expr, ctx, functions, bindings)
         }
         Expr::Unary { op, .. } if op == "!" => Some(Typ::Bool),
         Expr::Unary { op, .. }
@@ -1086,13 +1244,13 @@ pub(crate) fn native_expr_type(
         }
         Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&" | "|" | "^") => {
             crate::core_ir::bitwise_result_type(
-                native_expr_type(lhs, ctx, functions),
-                native_expr_type(rhs, ctx, functions),
+                native_expr_type_with_bindings(lhs, ctx, functions, bindings),
+                native_expr_type_with_bindings(rhs, ctx, functions, bindings),
             )
         }
         Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "<<" | ">>" | "%") => {
-            if native_expr_type(lhs, ctx, functions) == Some(Typ::Int)
-                && native_expr_type(rhs, ctx, functions) == Some(Typ::Int)
+            if native_expr_type_with_bindings(lhs, ctx, functions, bindings) == Some(Typ::Int)
+                && native_expr_type_with_bindings(rhs, ctx, functions, bindings) == Some(Typ::Int)
             {
                 Some(Typ::Int)
             } else {
@@ -1114,8 +1272,8 @@ pub(crate) fn native_expr_type(
                 "+" | "-" | "*" | "/" | "%" | "+=" | "-=" | "*=" | "/="
             ) =>
         {
-            let lhs = native_expr_type(lhs, ctx, functions);
-            let rhs = native_expr_type(rhs, ctx, functions);
+            let lhs = native_expr_type_with_bindings(lhs, ctx, functions, bindings);
+            let rhs = native_expr_type_with_bindings(rhs, ctx, functions, bindings);
             if op == "+" && (matches!(lhs, Some(Typ::String)) || matches!(rhs, Some(Typ::String))) {
                 Some(Typ::String)
             } else if matches!(lhs, Some(Typ::Float)) || matches!(rhs, Some(Typ::Float)) {
@@ -1126,8 +1284,8 @@ pub(crate) fn native_expr_type(
                 None
             }
         }
-        _ => None,
-    })
+        _ => expr_type(expr),
+    }
 }
 
 fn lower_string_concat(

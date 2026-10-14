@@ -49,7 +49,16 @@ pub(crate) fn fallible_functions<'a>(
     fallible.into_iter().map(str::to_owned).collect()
 }
 
-fn scan_expr<'a>(expr: &'a Expr, calls: &mut HashSet<&'a str>, checked: &mut bool) {
+fn scan_expr<'a>(
+    expr: &'a Expr,
+    calls: &mut HashSet<&'a str>,
+    checked: &mut bool,
+    fallible: &mut bool,
+    aggregate: bool,
+) {
+    if let Expr::Block { body, .. } = expr {
+        *fallible |= scan_body(body, calls, aggregate);
+    }
     if matches!(
         expr,
         Expr::Index { .. } | Expr::Field { .. } | Expr::StructInit { .. }
@@ -62,7 +71,9 @@ fn scan_expr<'a>(expr: &'a Expr, calls: &mut HashSet<&'a str>, checked: &mut boo
     {
         calls.insert(name);
     }
-    crate::core_ir::for_each_expr_child(expr, &mut |child| scan_expr(child, calls, checked));
+    crate::core_ir::for_each_expr_child(expr, &mut |child| {
+        scan_expr(child, calls, checked, fallible, aggregate)
+    });
 }
 
 fn scan_body<'a>(body: &'a [Stmt], calls: &mut HashSet<&'a str>, aggregate: bool) -> bool {
@@ -72,42 +83,47 @@ fn scan_body<'a>(body: &'a [Stmt], calls: &mut HashSet<&'a str>, aggregate: bool
         match stmt {
             Stmt::Throw(expr) => {
                 fallible = true;
-                scan_expr(expr, calls, &mut checked);
+                scan_expr(expr, calls, &mut checked, &mut fallible, aggregate);
             }
             Stmt::Propagate => fallible = true,
             Stmt::Let(_, _, expr)
             | Stmt::Assign(_, expr)
             | Stmt::Expr(expr)
-            | Stmt::Return(Some(expr)) => scan_expr(expr, calls, &mut checked),
+            | Stmt::Return(Some(expr)) => {
+                scan_expr(expr, calls, &mut checked, &mut fallible, aggregate)
+            }
             Stmt::FieldAssign { base, value, .. } => {
                 checked = true;
-                scan_expr(base, calls, &mut checked);
-                scan_expr(value, calls, &mut checked);
+                scan_expr(base, calls, &mut checked, &mut fallible, aggregate);
+                scan_expr(value, calls, &mut checked, &mut fallible, aggregate);
             }
             Stmt::IndexAssign { base, index, value } => {
                 checked = true;
-                scan_expr(base, calls, &mut checked);
-                scan_expr(index, calls, &mut checked);
-                scan_expr(value, calls, &mut checked);
+                scan_expr(base, calls, &mut checked, &mut fallible, aggregate);
+                scan_expr(index, calls, &mut checked, &mut fallible, aggregate);
+                scan_expr(value, calls, &mut checked, &mut fallible, aggregate);
             }
             Stmt::If {
                 cond,
                 then_body,
                 else_body,
             } => {
-                scan_expr(cond, calls, &mut checked);
+                scan_expr(cond, calls, &mut checked, &mut fallible, aggregate);
                 fallible |= scan_body(then_body, calls, aggregate);
                 fallible |= scan_body(else_body, calls, aggregate);
             }
             Stmt::Loop { cond, body, .. } => {
                 if let Some(cond) = cond {
-                    scan_expr(cond, calls, &mut checked);
+                    scan_expr(cond, calls, &mut checked, &mut fallible, aggregate);
                 }
                 fallible |= scan_body(body, calls, aggregate);
             }
             Stmt::Match { scrutinee, arms } => {
-                scan_expr(scrutinee, calls, &mut checked);
+                scan_expr(scrutinee, calls, &mut checked, &mut fallible, aggregate);
                 for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        scan_expr(guard, calls, &mut checked, &mut fallible, aggregate);
+                    }
                     fallible |= scan_body(&arm.body, calls, aggregate);
                 }
             }
@@ -126,8 +142,46 @@ fn scan_body<'a>(body: &'a [Stmt], calls: &mut HashSet<&'a str>, aggregate: bool
 
 /// Reserve type slots only for catch bindings and their direct local aliases.
 pub(crate) fn error_bindings(body: &[Stmt]) -> std::collections::BTreeSet<String> {
+    fn expr(value: &Expr, seeds: &mut Vec<String>, aliases: &mut HashMap<String, Vec<String>>) {
+        if let Expr::Closure { .. } = value {
+            return;
+        }
+        if let Expr::Block { body, .. } = value {
+            scan(body, seeds, aliases);
+        }
+        crate::core_ir::for_each_expr_child(value, &mut |child| expr(child, seeds, aliases));
+    }
     fn scan(body: &[Stmt], seeds: &mut Vec<String>, aliases: &mut HashMap<String, Vec<String>>) {
         for stmt in body {
+            match stmt {
+                Stmt::Let(_, _, value)
+                | Stmt::Assign(_, value)
+                | Stmt::Expr(value)
+                | Stmt::Throw(value)
+                | Stmt::Return(Some(value)) => expr(value, seeds, aliases),
+                Stmt::FieldAssign { base, value, .. } => {
+                    expr(base, seeds, aliases);
+                    expr(value, seeds, aliases);
+                }
+                Stmt::IndexAssign { base, index, value } => {
+                    expr(base, seeds, aliases);
+                    expr(index, seeds, aliases);
+                    expr(value, seeds, aliases);
+                }
+                Stmt::If { cond, .. } => expr(cond, seeds, aliases),
+                Stmt::Loop {
+                    cond: Some(cond), ..
+                } => expr(cond, seeds, aliases),
+                Stmt::Match { scrutinee, arms } => {
+                    expr(scrutinee, seeds, aliases);
+                    for arm in arms {
+                        if let Some(guard) = &arm.guard {
+                            expr(guard, seeds, aliases);
+                        }
+                    }
+                }
+                _ => {}
+            }
             match stmt {
                 Stmt::Let(name, _, Expr::Ident(source))
                 | Stmt::Assign(name, Expr::Ident(source)) => {
@@ -199,6 +253,68 @@ pub(crate) fn error_type_tag(typ: &crate::core_ir::Typ) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scalar_block_throws_and_calls_propagate_fallibility() {
+        let bodies = [
+            (
+                "fail",
+                vec![Stmt::Expr(Expr::Block {
+                    body: vec![Stmt::Throw(Expr::IntLit(42))],
+                    result: Some(Box::new(Expr::IntLit(0))),
+                })],
+            ),
+            (
+                "relay",
+                vec![Stmt::Return(Some(Expr::Block {
+                    body: vec![Stmt::Expr(Expr::Call {
+                        callee: Box::new(Expr::Ident("fail".into())),
+                        args: vec![],
+                    })],
+                    result: Some(Box::new(Expr::IntLit(0))),
+                }))],
+            ),
+            (
+                "propagate",
+                vec![Stmt::Expr(Expr::Block {
+                    body: vec![Stmt::Propagate],
+                    result: None,
+                })],
+            ),
+        ];
+        let ret = crate::core_ir::Typ::Int;
+        assert_eq!(
+            fallible_functions(bodies.iter().map(|(name, body)| (
+                *name,
+                body.as_slice(),
+                &ret,
+                &[][..]
+            ))),
+            HashSet::from(["fail".into(), "relay".into(), "propagate".into()])
+        );
+    }
+
+    #[test]
+    fn block_expression_catches_and_aliases_get_error_slots() {
+        let body = vec![Stmt::Expr(Expr::Block {
+            body: vec![Stmt::Try {
+                body: vec![Stmt::Throw(Expr::IntLit(42))],
+                catches: vec![crate::core_ir::CatchArm {
+                    pattern: "caught".into(),
+                    body: vec![Stmt::Let(
+                        "alias".into(),
+                        None,
+                        Expr::Ident("caught".into()),
+                    )],
+                }],
+            }],
+            result: Some(Box::new(Expr::IntLit(0))),
+        })];
+        assert_eq!(
+            error_bindings(&body),
+            ["alias".into(), "caught".into()].into_iter().collect()
+        );
+    }
+
     #[test]
     fn caught_type_slots_follow_alias_cycles_and_skip_unrelated_locals() {
         let module = crate::in_lang_parse::parse_in_source("fn main() -> Int { let plain = 7; try { throw false; } catch value { let alias = value; let next = alias; alias = next; try { throw 42; } catch other { let copy = other; } } return plain; }").unwrap();

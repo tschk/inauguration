@@ -337,6 +337,34 @@ fn parse_v2_expr(value: &Value, context: &str) -> Result<Expr, String> {
                 rhs: Box::new(rhs),
             })
         }
+        "conditional" => Ok(Expr::Conditional {
+            cond: Box::new(parse_v2_expr(
+                required_field(object, "cond", context)?,
+                context,
+            )?),
+            then_expr: Box::new(parse_v2_expr(
+                required_field(object, "then", context)?,
+                context,
+            )?),
+            else_expr: Box::new(parse_v2_expr(
+                required_field(object, "else", context)?,
+                context,
+            )?),
+        }),
+        "block" => {
+            let body = required_field(object, "body", context)?
+                .as_array()
+                .ok_or_else(|| format!("{context}: block `body` must be an array"))?
+                .iter()
+                .map(|stmt| parse_v2_stmt(stmt, context))
+                .collect::<Result<Vec<_>, _>>()?;
+            let result = object
+                .get("result")
+                .filter(|value| !value.is_null())
+                .map(|value| parse_v2_expr(value, context).map(Box::new))
+                .transpose()?;
+            Ok(Expr::Block { body, result })
+        }
         "call" => {
             let callee = parse_callee(required_field(object, "callee", context)?, context)?;
             let args = match object.get("args") {
@@ -525,6 +553,44 @@ fn validate_module(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_conditional_block_values_without_closures() {
+        let value = serde_json::json!({
+            "kind": "conditional", "cond": true,
+            "then": {"kind": "block", "body": [{"kind":"return", "expr": 42}], "result": null},
+            "else": {"kind": "block", "body": [], "result": 0}
+        });
+        let parsed = super::parse_v2_expr(&value, "test").unwrap();
+        let crate::core_ir::Expr::Conditional {
+            then_expr,
+            else_expr,
+            ..
+        } = parsed
+        else {
+            panic!("expected conditional");
+        };
+        let crate::core_ir::Expr::Block { body, result } = *then_expr else {
+            panic!("expected block");
+        };
+        assert!(result.is_none());
+        assert!(matches!(
+            body.as_slice(),
+            [crate::core_ir::Stmt::Return(Some(
+                crate::core_ir::Expr::IntLit(42)
+            ))]
+        ));
+        let crate::core_ir::Expr::Block {
+            result: Some(result),
+            ..
+        } = *else_expr
+        else {
+            panic!("expected value block");
+        };
+        assert!(matches!(*result, crate::core_ir::Expr::IntLit(0)));
+        assert!(
+            super::parse_v2_expr(&serde_json::json!({"kind":"block", "body": 1}), "test").is_err()
+        );
+    }
     use super::*;
 
     #[test]

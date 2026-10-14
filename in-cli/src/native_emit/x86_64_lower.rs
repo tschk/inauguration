@@ -759,6 +759,22 @@ fn rename_calls_in_stmt(stmt: &mut Stmt, name_map: &HashMap<String, String>) {
 
 fn rename_calls_in_expr(expr: &mut Expr, name_map: &HashMap<String, String>) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            for value in [cond, then_expr, else_expr] {
+                rename_calls_in_expr(value, name_map);
+            }
+        }
+        Expr::Block { body, result } => {
+            rename_calls(body, name_map);
+            if let Some(value) = result {
+                rename_calls_in_expr(value, name_map);
+            }
+        }
+
         Expr::Call { callee, args } => {
             if let Expr::Ident(name) = callee.as_ref() {
                 if let Some(mapped) = name_map.get(name.as_str()) {
@@ -862,6 +878,24 @@ fn collect_structs(module: &UnifiedModule) -> HashMap<String, Vec<(String, Typ)>
 
 fn collect_strings_from_expr(expr: &Expr, out: &mut Vec<String>) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            for value in [cond, then_expr, else_expr] {
+                collect_strings_from_expr(value, out);
+            }
+        }
+        Expr::Block { body, result } => {
+            for stmt in body {
+                collect_strings_from_stmt(stmt, out);
+            }
+            if let Some(value) = result {
+                collect_strings_from_expr(value, out);
+            }
+        }
+
         Expr::StringLit(s) => out.push(s.clone()),
         Expr::Unary { expr, .. } => collect_strings_from_expr(expr, out),
         Expr::Binary { lhs, rhs, .. } => {
@@ -1341,6 +1375,9 @@ fn lower_stmt(
                 return store_struct_value(emitter, ctx, expr, &fields, pending_calls);
             }
             lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
+            if ctx.scalar_types.get(name).map(Typ::canonical) == Some(Typ::Void) {
+                emitter.emit_insns(&x86_64::zero_reg(RAX));
+            }
             store_local_error_type(emitter, ctx, name, expr)?;
             match ctx.locals.get(name) {
                 Some(StackSlot::Scalar(offset)) => {
@@ -1430,6 +1467,9 @@ fn lower_stmt(
                 _ => None,
             };
             lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
+            if ctx.scalar_types.get(name).map(Typ::canonical) == Some(Typ::Void) {
+                emitter.emit_insns(&x86_64::zero_reg(RAX));
+            }
             if let Some(off) = offset {
                 emitter.emit_insns(&x86_64::str64(RAX, off as u16));
                 store_local_error_type(emitter, ctx, name, expr)?;
@@ -2300,23 +2340,66 @@ fn lower_checked_div_or_mod(
 }
 
 fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
+    scalar_expr_type_with_bindings(expr, ctx, &HashMap::new())
+}
+
+fn scalar_expr_type_with_bindings(
+    expr: &Expr,
+    ctx: &LowerCtx<'_>,
+    bindings: &HashMap<String, Typ>,
+) -> Option<Typ> {
+    if let Expr::Ident(name) = expr {
+        if let Some(typ) = bindings.get(name) {
+            return Some(typ.canonical());
+        }
+    }
     if let Expr::ArrayLit(items) = expr {
         return Some(Typ::Array(Box::new(
             items
                 .iter()
                 .filter(|item| !crate::core_ir::empty_sequence_literal(item))
-                .find_map(|item| scalar_expr_type(item, ctx))
+                .find_map(|item| scalar_expr_type_with_bindings(item, ctx, bindings))
                 .unwrap_or(Typ::Void),
         )));
     }
-    crate::native_emit::lower::expr_type(expr).or_else(|| match expr {
+    match expr {
+        Expr::Conditional {
+            then_expr,
+            else_expr,
+            ..
+        } => crate::core_ir::conditional_type(
+            then_expr,
+            scalar_expr_type_with_bindings(then_expr, ctx, bindings),
+            else_expr,
+            scalar_expr_type_with_bindings(else_expr, ctx, bindings),
+        ),
+        Expr::Block { body, result } => {
+            let mut scoped = bindings.clone();
+            for stmt in body {
+                if let crate::core_ir::Stmt::Let(name, typ, value) = stmt {
+                    if let Some(typ) = typ
+                        .clone()
+                        .or_else(|| scalar_expr_type_with_bindings(value, ctx, &scoped))
+                    {
+                        scoped.insert(name.clone(), typ);
+                    }
+                }
+            }
+            match result {
+                Some(result) => scalar_expr_type_with_bindings(result, ctx, &scoped),
+                None => Some(Typ::Void),
+            }
+        }
+
         Expr::Ident(name) => ctx.scalar_types.get(name).map(Typ::canonical),
-        Expr::Index { base, .. } => match scalar_expr_type(base, ctx)?.canonical() {
-            Typ::Array(item) | Typ::Vector(item) => Some(*item),
-            _ => None,
-        },
+        Expr::Index { base, .. } => {
+            match scalar_expr_type_with_bindings(base, ctx, bindings)?.canonical() {
+                Typ::Array(item) | Typ::Vector(item) => Some(*item),
+                _ => None,
+            }
+        }
         Expr::Field { base, name } => {
-            let mut typ = scalar_expr_type(base, ctx)?;
+            let mut typ = scalar_expr_type_with_bindings(base, ctx, bindings)?;
             for field in name.split('.') {
                 let Typ::Named(struct_name) = typ else {
                     return None;
@@ -2340,7 +2423,7 @@ fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
             _ => None,
         },
         Expr::Unary { op, expr } if op == "-" || op == "vector-clone" => {
-            scalar_expr_type(expr, ctx)
+            scalar_expr_type_with_bindings(expr, ctx, bindings)
         }
         Expr::Unary { op, .. } if op == "!" => Some(Typ::Bool),
         Expr::Unary { op, .. }
@@ -2362,13 +2445,13 @@ fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
         }
         Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&" | "|" | "^") => {
             crate::core_ir::bitwise_result_type(
-                scalar_expr_type(lhs, ctx),
-                scalar_expr_type(rhs, ctx),
+                scalar_expr_type_with_bindings(lhs, ctx, bindings),
+                scalar_expr_type_with_bindings(rhs, ctx, bindings),
             )
         }
         Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "<<" | ">>" | "%") => {
-            if scalar_expr_type(lhs, ctx) == Some(Typ::Int)
-                && scalar_expr_type(rhs, ctx) == Some(Typ::Int)
+            if scalar_expr_type_with_bindings(lhs, ctx, bindings) == Some(Typ::Int)
+                && scalar_expr_type_with_bindings(rhs, ctx, bindings) == Some(Typ::Int)
             {
                 Some(Typ::Int)
             } else {
@@ -2390,16 +2473,16 @@ fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
                 "+" | "-" | "*" | "/" | "+=" | "-=" | "*=" | "/="
             ) =>
         {
-            if scalar_expr_type(lhs, ctx) == Some(Typ::Float)
-                || scalar_expr_type(rhs, ctx) == Some(Typ::Float)
+            if scalar_expr_type_with_bindings(lhs, ctx, bindings) == Some(Typ::Float)
+                || scalar_expr_type_with_bindings(rhs, ctx, bindings) == Some(Typ::Float)
             {
                 Some(Typ::Float)
             } else {
                 Some(Typ::Int)
             }
         }
-        _ => None,
-    })
+        _ => crate::native_emit::lower::expr_type(expr),
+    }
 }
 
 fn lower_binary_expr(
@@ -3134,6 +3217,18 @@ fn lower_call_argument(
     target_reg: u8,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if matches!(arg, Expr::Conditional { .. } | Expr::Block { .. }) {
+        return lower_value_control(
+            emitter,
+            ctx,
+            arg,
+            pending_calls,
+            |emitter, ctx, value, pending_calls| {
+                lower_call_argument(emitter, ctx, value, target_reg, pending_calls)
+            },
+        );
+    }
+
     if let Expr::StructInit { name, fields } = arg {
         if !ctx.structs.contains_key(name)
             || crate::native_emit::struct_layout::x86_fields(ctx.structs, name).is_err()
@@ -3511,6 +3606,18 @@ fn store_struct_value(
     fields: &HashMap<String, u32>,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if matches!(expr, Expr::Conditional { .. } | Expr::Block { .. }) {
+        return lower_value_control(
+            emitter,
+            ctx,
+            expr,
+            pending_calls,
+            |emitter, ctx, value, pending_calls| {
+                store_struct_value(emitter, ctx, value, fields, pending_calls)
+            },
+        );
+    }
+
     let mut offsets: Vec<_> = fields.values().copied().collect();
     offsets.sort_unstable_by(|a, b| b.cmp(a));
     if matches!(expr, Expr::IntLit(0)) {
@@ -4091,6 +4198,97 @@ fn lower_string_lit(
     Ok(())
 }
 
+fn lower_value_control<F>(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    expr: &Expr,
+    pending_calls: &mut Vec<PendingCall>,
+    mut lower: F,
+) -> Result<(), String>
+where
+    F: FnMut(
+        &mut CodeEmitter,
+        &mut LowerCtx<'_>,
+        &Expr,
+        &mut Vec<PendingCall>,
+    ) -> Result<(), String>,
+{
+    match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            if !crate::core_ir::expr_diverges(cond)
+                && scalar_expr_type(cond, ctx).map(|typ| typ.canonical()) != Some(Typ::Bool)
+            {
+                return Err("x86_64-lower: conditional requires a Bool condition".into());
+            }
+            let then_type = scalar_expr_type(then_expr, ctx);
+            let else_type = scalar_expr_type(else_expr, ctx);
+            if !crate::core_ir::expr_diverges(then_expr)
+                && !crate::core_ir::expr_diverges(else_expr)
+                && let (Some(then_type), Some(else_type)) = (then_type, else_type)
+                && crate::core_ir::conditional_type(
+                    then_expr,
+                    Some(then_type),
+                    else_expr,
+                    Some(else_type),
+                )
+                .is_none()
+            {
+                return Err("x86_64-lower: conditional branch type mismatch".into());
+            }
+            lower_expr_into(emitter, ctx, cond, RAX, pending_calls)?;
+            emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 0));
+            let otherwise = emitter.len();
+            emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
+            lower(emitter, ctx, then_expr, pending_calls)?;
+            let done = emitter.len();
+            emitter.emit_insns(&x86_64::jmp_rel32(0));
+            emitter.patch_u32(otherwise + 2, emitter.len() - otherwise - 6);
+            lower(emitter, ctx, else_expr, pending_calls)?;
+            emitter.patch_u32(done + 1, emitter.len() - done - 5);
+            Ok(())
+        }
+        Expr::Block { body, result } => {
+            let locals = ctx.locals.clone();
+            let types = ctx.scalar_types.clone();
+            let pointers = ctx.receiver_pointers.clone();
+            let empty = ctx.empty_struct_bases.clone();
+            let lowered = (|| {
+                for stmt in body {
+                    if let Stmt::Let(name, typ, value) = stmt {
+                        let resolved = typ
+                            .clone()
+                            .or_else(|| scalar_expr_type(value, ctx))
+                            .ok_or("x86_64-lower: unknown block local type")?;
+                        ctx.locals.remove(name);
+                        ctx.receiver_pointers.remove(name);
+                        ctx.empty_struct_bases.remove(name);
+                        ctx.alloc_local(name, &resolved)?;
+                    }
+                    lower_stmt(emitter, ctx, stmt, pending_calls)?;
+                }
+                if crate::core_ir::stmts_diverge(body) {
+                    return Ok(());
+                }
+                if let Some(result) = result {
+                    lower(emitter, ctx, result, pending_calls)
+                } else {
+                    lower(emitter, ctx, &Expr::IntLit(0), pending_calls)
+                }
+            })();
+            ctx.locals = locals;
+            ctx.scalar_types = types;
+            ctx.receiver_pointers = pointers;
+            ctx.empty_struct_bases = empty;
+            lowered
+        }
+        _ => Err("x86_64-lower: expected conditional or block value".into()),
+    }
+}
+
 fn lower_expr_into(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -4098,7 +4296,20 @@ fn lower_expr_into(
     target_reg: u8,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if matches!(expr, Expr::Conditional { .. } | Expr::Block { .. }) {
+        return lower_value_control(
+            emitter,
+            ctx,
+            expr,
+            pending_calls,
+            |emitter, ctx, value, pending_calls| {
+                lower_expr_into(emitter, ctx, value, target_reg, pending_calls)
+            },
+        );
+    }
+
     match expr {
+        Expr::Conditional { .. } | Expr::Block { .. } => unreachable!(),
         Expr::IntLit(value) => lower_int_lit(emitter, target_reg, *value),
         Expr::BoolLit(value) => lower_bool_lit(emitter, target_reg, *value),
         Expr::Ident(name) => {

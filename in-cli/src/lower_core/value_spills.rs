@@ -60,6 +60,12 @@ fn expr_needs_spills(expr: &Expr, facts: &crate::typecheck::Facts) -> bool {
     {
         return true;
     }
+    if let Expr::Block { body, result } = expr {
+        return body.iter().any(|stmt| stmt_needs_spills(stmt, facts))
+            || result
+                .as_deref()
+                .is_some_and(|value| expr_needs_spills(value, facts));
+    }
     if let Expr::Closure { body, .. } = expr {
         return body.iter().any(|stmt| stmt_needs_spills(stmt, facts));
     }
@@ -320,6 +326,45 @@ impl Lower {
     }
 
     fn expr(&mut self, expr: &mut Expr, out: &mut Vec<Stmt>) {
+        if let Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } = expr
+        {
+            self.expr(cond, out);
+            for branch in [then_expr, else_expr] {
+                let mut body = Vec::new();
+                self.expr(branch, &mut body);
+                if !body.is_empty() {
+                    **branch = Expr::Block {
+                        body,
+                        result: Some(Box::new((**branch).clone())),
+                    };
+                }
+            }
+            return;
+        }
+        if let Expr::Block { body, result } = expr {
+            let constants = self.constants.clone();
+            let types = self.types.clone();
+            self.body(body);
+            for stmt in body.iter() {
+                if let Stmt::Let(name, typ, value) = stmt {
+                    self.constants.remove(name);
+                    if let Some(typ) = typ.clone().or_else(|| self.expr_type(value)) {
+                        self.types.insert(name.clone(), typ);
+                    }
+                }
+            }
+            if let Some(result) = result {
+                self.expr(result, body);
+            }
+            self.constants = constants;
+            self.types = types;
+            return;
+        }
+
         if let Expr::Call { callee, args } = expr
             && matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW)
             && let [value] = args.as_mut_slice()

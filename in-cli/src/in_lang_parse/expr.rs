@@ -1,12 +1,121 @@
-use super::stmt::parse_function_body;
+use super::stmt::{LoopParseContext, parse_function_body, parse_function_body_with_context};
 use super::types::{parse_in_type, parse_param};
 use super::util::*;
-use crate::core_ir::{Expr, FloatVal, Typ};
+use crate::core_ir::{Expr, FloatVal, Stmt, Typ};
+
+fn value_block_ends_with_semicolon(inner: &str) -> bool {
+    let mut chars = inner.chars().peekable();
+    let (mut in_string, mut escape, mut comment) = (false, false, false);
+    let mut last = None;
+    while let Some(c) = chars.next() {
+        if comment {
+            if c == '\n' {
+                comment = false;
+            }
+            continue;
+        }
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+                last = Some('"');
+            }
+            continue;
+        }
+        if c == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            comment = true;
+        } else if c == '"' {
+            in_string = true;
+        } else if !c.is_whitespace() {
+            last = Some(c);
+        }
+    }
+    last == Some(';')
+}
+
+fn try_parse_control_value(s: &str, context: &mut LoopParseContext<'_>) -> Option<Expr> {
+    if let Some(rest) = s
+        .strip_prefix("if ")
+        .or_else(|| s.strip_prefix("if(").map(|_| &s[2..]))
+    {
+        let rest = trim(rest);
+        let open = if rest.starts_with('(') {
+            find_fn_body_open_brace(rest)?
+        } else {
+            rest.find('{')?
+        };
+        let condition = trim(&rest[..open]);
+        let (_, close) = brace_content_bounds_after_open(rest, open)?;
+        let tail = trim(&rest[close + 1..]).strip_prefix("else")?;
+        let tail = trim(tail);
+        let then_expr = try_parse_control_value(&rest[open..=close], context)?;
+        let else_expr = try_parse_control_value(tail, context)?;
+        if condition.is_empty() {
+            return None;
+        }
+        return Some(Expr::Conditional {
+            cond: Box::new(parse_expr_with_context(condition, context)),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        });
+    }
+    if !s.starts_with('{') {
+        return None;
+    }
+    let (inner, close) = brace_content_bounds_after_open(s, 0)?;
+    if !trim(&s[close + 1..]).is_empty() {
+        return None;
+    }
+    let mut parts = split_function_statements(inner);
+    let mut result = None;
+    if !value_block_ends_with_semicolon(inner)
+        && let Some(last) = parts.last()
+    {
+        let value = if trim(last).starts_with("if ") || trim(last).starts_with("if(") {
+            try_parse_control_value(last, context)
+        } else {
+            match super::stmt::parse_stmt_line(last, context) {
+                Ok(Stmt::Expr(value)) => Some(value),
+                Ok(_) => None,
+                Err(error) => {
+                    context.error = Some(error);
+                    None
+                }
+            }
+        };
+        if let Some(value) = value {
+            result = Some(Box::new(value));
+            parts.pop();
+        }
+    }
+    let body = match parse_function_body_with_context(&parts.join(";\n"), context) {
+        Ok(body) => body,
+        Err(error) => {
+            context.error = Some(error);
+            return Some(Expr::Call {
+                callee: Box::new(Expr::Ident("__unsupported_in_block_value".into())),
+                args: vec![],
+            });
+        }
+    };
+    Some(Expr::Block { body, result })
+}
 
 pub(crate) fn parse_expr(s: &str) -> Expr {
+    parse_expr_with_context(s, &mut LoopParseContext::new(s))
+}
+
+pub(crate) fn parse_expr_with_context(s: &str, context: &mut LoopParseContext<'_>) -> Expr {
     let s = trim(s);
     if let Some(inner) = strip_enclosing_parens(s) {
-        return parse_expr(inner);
+        return parse_expr_with_context(inner, context);
+    }
+    if let Some(value) = try_parse_control_value(s, context) {
+        return value;
     }
     if let Some(closure) = try_parse_closure_expr(s) {
         return closure;
@@ -41,8 +150,8 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
             if !lhs.is_empty() && !rhs.is_empty() {
                 return Expr::Binary {
                     op: op.to_string(),
-                    lhs: Box::new(parse_expr(lhs)),
-                    rhs: Box::new(parse_expr(rhs)),
+                    lhs: Box::new(parse_expr_with_context(lhs, context)),
+                    rhs: Box::new(parse_expr_with_context(rhs, context)),
                 };
             }
         }
@@ -52,7 +161,7 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
     {
         return Expr::Unary {
             op: "!".into(),
-            expr: Box::new(parse_expr(rest)),
+            expr: Box::new(parse_expr_with_context(rest, context)),
         };
     }
     if let Some(rest) = s.strip_prefix('~')
@@ -60,7 +169,7 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
     {
         return Expr::Unary {
             op: "~".into(),
-            expr: Box::new(parse_expr(rest)),
+            expr: Box::new(parse_expr_with_context(rest, context)),
         };
     }
     if let Some(rest) = s.strip_prefix('-')
@@ -75,7 +184,7 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
         }
         return Expr::Unary {
             op: "-".into(),
-            expr: Box::new(parse_expr(rest)),
+            expr: Box::new(parse_expr_with_context(rest, context)),
         };
     }
     if s == "true" {
@@ -105,8 +214,8 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
         let index = trim(&s[open + 1..s.len() - 1]);
         if !base.is_empty() && !index.is_empty() {
             return Expr::Index {
-                base: Box::new(parse_expr(base)),
-                index: Box::new(parse_expr(index)),
+                base: Box::new(parse_expr_with_context(base, context)),
+                index: Box::new(parse_expr_with_context(index, context)),
             };
         }
     }
@@ -115,7 +224,7 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
         return Expr::ArrayLit(
             split_call_args(inner)
                 .into_iter()
-                .map(|arg| parse_expr(&arg))
+                .map(|arg| parse_expr_with_context(&arg, context))
                 .collect(),
         );
     }
@@ -129,7 +238,10 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
                 .into_iter()
                 .filter_map(|field| {
                     let (name, expr) = field.split_once(':')?;
-                    Some((trim(name).to_string(), parse_expr(trim(expr))))
+                    Some((
+                        trim(name).to_string(),
+                        parse_expr_with_context(trim(expr), context),
+                    ))
                 })
                 .collect();
             return Expr::StructInit {
@@ -146,13 +258,13 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
             let inner = &s[open + 1..s.len() - 1];
             let mut args = split_call_args(inner)
                 .into_iter()
-                .map(|arg| parse_expr(&arg))
+                .map(|arg| parse_expr_with_context(&arg, context))
                 .collect::<Vec<_>>();
             if let Some(dot) = find_top_level_field_dot(callee) {
                 let base = trim(&callee[..dot]);
                 let name = trim(&callee[dot + 1..]);
                 if !base.is_empty() && !name.is_empty() {
-                    args.insert(0, parse_expr(base));
+                    args.insert(0, parse_expr_with_context(base, context));
                     return Expr::Call {
                         callee: Box::new(Expr::Ident(format!("__method__{name}"))),
                         args,
@@ -170,7 +282,7 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
         let name = trim(&s[dot + 1..]);
         if !base.is_empty() && !name.is_empty() {
             return Expr::Field {
-                base: Box::new(parse_expr(base)),
+                base: Box::new(parse_expr_with_context(base, context)),
                 name: name.to_string(),
             };
         }

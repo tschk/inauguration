@@ -262,7 +262,7 @@ impl TypeChecker {
                         init: Some(expr),
                         ..
                     } if !closure_phase => {
-                        self.resolve_typed_expr(expr, &facts, &globals, promote_c_bool);
+                        self.resolve_typed_expr(expr, &facts, &globals, promote_c_bool, None);
                         if promote_c_bool {
                             self.resolve_c_value(expr, typ, &facts, &globals);
                         }
@@ -463,6 +463,22 @@ impl TypeChecker {
     }
 
     fn resolve_vector_allocation(&self, expr: &mut Expr, expected: &Typ, facts: &Facts) -> bool {
+        match expr {
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                let left = self.resolve_vector_allocation(then_expr, expected, facts);
+                let right = self.resolve_vector_allocation(else_expr, expected, facts);
+                return left || right;
+            }
+            Expr::Block {
+                result: Some(result),
+                ..
+            } => return self.resolve_vector_allocation(result, expected, facts),
+            _ => {}
+        }
         let Expr::Call { callee, args } = expr else {
             return false;
         };
@@ -504,6 +520,7 @@ impl TypeChecker {
         facts: &Facts,
         env: &HashMap<String, Typ>,
         promote_c_bool: bool,
+        return_type: Option<&Typ>,
     ) {
         if let Expr::StructInit { name, fields } = expr
             && let Some(schema) = facts.structs.get(name)
@@ -522,7 +539,13 @@ impl TypeChecker {
                 self.resolve_vector_allocation(arg, expected, facts);
             }
         }
-        if let Expr::Closure {
+        if let Expr::Block { body, result } = expr {
+            let mut inner = env.clone();
+            self.resolve_typed_body(body, facts, &mut inner, return_type, promote_c_bool);
+            if let Some(result) = result {
+                self.resolve_typed_expr(result, facts, &inner, promote_c_bool, return_type);
+            }
+        } else if let Expr::Closure {
             params, ret, body, ..
         } = expr
         {
@@ -538,7 +561,7 @@ impl TypeChecker {
             }
         } else {
             crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
-                self.resolve_typed_expr(child, facts, env, promote_c_bool)
+                self.resolve_typed_expr(child, facts, env, promote_c_bool, return_type)
             });
         }
         if let Expr::Call { callee, args } = expr
@@ -916,7 +939,7 @@ impl TypeChecker {
         {
             for (arg, (_, expected)) in args.iter_mut().zip(params) {
                 if self.resolve_vector_allocation(arg, expected, facts) {
-                    self.resolve_typed_expr(arg, facts, env, promote_c_bool);
+                    self.resolve_typed_expr(arg, facts, env, promote_c_bool, return_type);
                 }
             }
         }
@@ -946,7 +969,7 @@ impl TypeChecker {
                     if let Some(expected) = typ.as_ref() {
                         self.resolve_vector_allocation(expr, expected, facts);
                     }
-                    self.resolve_typed_expr(expr, facts, env, promote_c_bool);
+                    self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
                     if let Some(Typ::Vector(item)) = typ.as_mut()
                         && matches!(item.as_ref(), Typ::Generic(name) if name == "_")
                         && let Some(Typ::Array(element) | Typ::Vector(element)) =
@@ -970,7 +993,7 @@ impl TypeChecker {
                     if let Some(expected) = env.get(name) {
                         self.resolve_vector_allocation(expr, expected, facts);
                     }
-                    self.resolve_typed_expr(expr, facts, env, promote_c_bool);
+                    self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
                     if promote_c_bool && let Some(typ) = env.get(name) {
                         self.resolve_c_value(expr, typ, facts, env);
                     }
@@ -979,17 +1002,17 @@ impl TypeChecker {
                     if let Some(expected) = return_type {
                         self.resolve_vector_allocation(expr, expected, facts);
                     }
-                    self.resolve_typed_expr(expr, facts, env, promote_c_bool);
+                    self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
                     if promote_c_bool && let Some(typ) = return_type {
                         self.resolve_c_value(expr, typ, facts, env);
                     }
                 }
                 Stmt::Expr(expr) | Stmt::Throw(expr) => {
-                    self.resolve_typed_expr(expr, facts, env, promote_c_bool)
+                    self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type)
                 }
                 Stmt::IndexAssign { base, index, value } => {
                     for expr in [&mut *base, &mut *index, &mut *value] {
-                        self.resolve_typed_expr(expr, facts, env, promote_c_bool);
+                        self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
                     }
                     if promote_c_bool
                         && let Some(typ) = self.expr_type(
@@ -1016,7 +1039,7 @@ impl TypeChecker {
                         self.resolve_vector_allocation(value, &expected, facts);
                     }
                     for expr in [&mut *base, &mut *value] {
-                        self.resolve_typed_expr(expr, facts, env, promote_c_bool);
+                        self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
                     }
                     if promote_c_bool
                         && let Some(typ) = self.expr_type(
@@ -1036,7 +1059,7 @@ impl TypeChecker {
                     then_body,
                     else_body,
                 } => {
-                    self.resolve_typed_expr(cond, facts, env, promote_c_bool);
+                    self.resolve_typed_expr(cond, facts, env, promote_c_bool, return_type);
                     if promote_c_bool {
                         self.resolve_c_value(cond, &Typ::Bool, facts, env);
                     }
@@ -1057,7 +1080,7 @@ impl TypeChecker {
                 }
                 Stmt::Loop { cond, body, .. } => {
                     if let Some(cond) = cond {
-                        self.resolve_typed_expr(cond, facts, env, promote_c_bool);
+                        self.resolve_typed_expr(cond, facts, env, promote_c_bool, return_type);
                         if promote_c_bool {
                             self.resolve_c_value(cond, &Typ::Bool, facts, env);
                         }
@@ -1071,7 +1094,7 @@ impl TypeChecker {
                     );
                 }
                 Stmt::Match { scrutinee, arms } => {
-                    self.resolve_typed_expr(scrutinee, facts, env, promote_c_bool);
+                    self.resolve_typed_expr(scrutinee, facts, env, promote_c_bool, return_type);
                     let typ = self
                         .expr_type(scrutinee, facts, env)
                         .unwrap_or(Typ::Named("Any".into()));
@@ -1080,7 +1103,13 @@ impl TypeChecker {
                             .pattern_environment(&arm.pattern, &typ, facts, env)
                             .unwrap_or_else(|| env.clone());
                         if let Some(guard) = &mut arm.guard {
-                            self.resolve_typed_expr(guard, facts, &inner, promote_c_bool);
+                            self.resolve_typed_expr(
+                                guard,
+                                facts,
+                                &inner,
+                                promote_c_bool,
+                                return_type,
+                            );
                         }
                         self.resolve_typed_body(
                             &mut arm.body,
@@ -1319,6 +1348,7 @@ impl TypeChecker {
                 if let (Some(expected), Some(actual)) = (annot, &expr_typ)
                     && !is_compatible(expected, actual)
                     && !expected.accepts_sequence_literal(expr, actual)
+                    && !crate::core_ir::expr_diverges(expr)
                 {
                     errors.push(TypeError::TypeMismatch {
                         context: format!("let binding `{name}` in `{fn_name}`"),
@@ -1361,6 +1391,7 @@ impl TypeChecker {
                 } else if let Some(actual) = self.expr_type(expr, facts, env)
                     && !is_compatible(fn_ret, &actual)
                     && !fn_ret.accepts_sequence_literal(expr, &actual)
+                    && !crate::core_ir::expr_diverges(expr)
                 {
                     errors.push(TypeError::ReturnTypeMismatch {
                         fn_name: fn_name.to_string(),
@@ -1509,6 +1540,7 @@ impl TypeChecker {
                     self.expr_type(value, facts, env),
                 ) && !is_compatible(&expected, &actual)
                     && !expected.accepts_sequence_literal(value, &actual)
+                    && !crate::core_ir::expr_diverges(value)
                 {
                     errors.push(TypeError::TypeMismatch {
                         context: format!("field assignment `{name}` in `{fn_name}`"),
@@ -1530,6 +1562,48 @@ impl TypeChecker {
         errors: &mut Vec<TypeError>,
     ) {
         match expr {
+            Expr::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                for value in [cond, then_expr, else_expr] {
+                    self.check_expr(fn_name, value, facts, env, errors);
+                }
+                if let Some(actual) = self.expr_type(cond, facts, env)
+                    && !crate::core_ir::expr_diverges(cond)
+                    && actual.canonical() != Typ::Bool
+                {
+                    errors.push(TypeError::TypeMismatch {
+                        context: format!("conditional in `{fn_name}`"),
+                        expected: Typ::Bool,
+                        got: actual,
+                    });
+                }
+                if self.expr_type(expr, facts, env).is_none() {
+                    errors.push(TypeError::TypeMismatch {
+                        context: format!("conditional branches in `{fn_name}`"),
+                        expected: self
+                            .expr_type(then_expr, facts, env)
+                            .unwrap_or(Typ::Generic("unknown".into())),
+                        got: self
+                            .expr_type(else_expr, facts, env)
+                            .unwrap_or(Typ::Generic("unknown".into())),
+                    });
+                }
+            }
+            Expr::Block { body, result } => {
+                let mut inner = env.clone();
+                let ret = facts
+                    .functions
+                    .get(fn_name)
+                    .map(|(_, ret)| ret.clone())
+                    .unwrap_or(Typ::Void);
+                self.check_stmts(fn_name, &ret, body, facts, &mut inner, errors);
+                if let Some(value) = result {
+                    self.check_expr(fn_name, value, facts, &inner, errors);
+                }
+            }
             Expr::IntLit(_)
             | Expr::FloatLit(_)
             | Expr::StringLit(_)
@@ -1748,6 +1822,7 @@ impl TypeChecker {
                                 if let Some(actual) = self.expr_type(field_expr, facts, env)
                                     && !is_compatible(expected, &actual)
                                     && !expected.accepts_sequence_literal(field_expr, &actual)
+                                    && !crate::core_ir::expr_diverges(field_expr)
                                 {
                                     errors.push(TypeError::TypeMismatch {
                                         context: format!("field `{field_name}` in struct `{name}`"),
@@ -1926,6 +2001,31 @@ impl TypeChecker {
         env: &HashMap<String, Typ>,
     ) -> Option<Typ> {
         match expr {
+            Expr::Conditional {
+                cond: _,
+                then_expr,
+                else_expr,
+            } => crate::core_ir::conditional_type(
+                then_expr,
+                self.expr_type(then_expr, facts, env),
+                else_expr,
+                self.expr_type(else_expr, facts, env),
+            ),
+            Expr::Block { body, result } => {
+                let mut inner = env.clone();
+                for stmt in body {
+                    if let Stmt::Let(name, typ, value) = stmt
+                        && let Some(typ) =
+                            typ.clone().or_else(|| self.expr_type(value, facts, &inner))
+                    {
+                        inner.insert(name.clone(), typ);
+                    }
+                }
+                result
+                    .as_ref()
+                    .map(|value| self.expr_type(value, facts, &inner))
+                    .unwrap_or(Some(Typ::Void))
+            }
             Expr::IntLit(_) => Some(Typ::Int),
             Expr::FloatLit(_) => Some(Typ::Float),
             Expr::StringLit(_) => Some(Typ::String),

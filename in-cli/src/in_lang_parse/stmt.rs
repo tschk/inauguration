@@ -1,14 +1,23 @@
-use super::expr::parse_expr;
+use super::expr::parse_expr_with_context;
 use super::types::parse_in_type;
 use super::util::*;
 use crate::core_ir::{Expr, LoopKind, Stmt};
 
-struct LoopParseContext<'a> {
+pub(crate) struct LoopParseContext<'a> {
     source: &'a str,
     counter: usize,
+    pub(crate) error: Option<String>,
 }
 
-impl LoopParseContext<'_> {
+impl<'a> LoopParseContext<'a> {
+    pub(crate) fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            counter: 0,
+            error: None,
+        }
+    }
+
     fn fresh_counter(&mut self) -> usize {
         while [
             format!("__for_{}", self.counter),
@@ -25,7 +34,10 @@ impl LoopParseContext<'_> {
     }
 }
 
-pub(crate) fn parse_let_stmt(s: &str) -> Result<Stmt, String> {
+fn parse_let_stmt_with_context(
+    s: &str,
+    context: &mut LoopParseContext<'_>,
+) -> Result<Stmt, String> {
     let declaration = trim(s);
     let rest = declaration
         .strip_prefix("let ")
@@ -50,10 +62,13 @@ pub(crate) fn parse_let_stmt(s: &str) -> Result<Stmt, String> {
         }
         (lhs.to_string(), None)
     };
-    Ok(Stmt::Let(name, typ, parse_expr(rhs)))
+    Ok(Stmt::Let(name, typ, parse_expr_with_context(rhs, context)))
 }
 
-pub(crate) fn parse_return_stmt(s: &str) -> Result<Stmt, String> {
+fn parse_return_stmt_with_context(
+    s: &str,
+    context: &mut LoopParseContext<'_>,
+) -> Result<Stmt, String> {
     let rest = trim(s)
         .strip_prefix("return")
         .ok_or_else(|| ".in: internal return parse".to_string())?;
@@ -61,7 +76,7 @@ pub(crate) fn parse_return_stmt(s: &str) -> Result<Stmt, String> {
     if rest.is_empty() || rest == ";" {
         return Ok(Stmt::Return(None));
     }
-    Ok(Stmt::Return(Some(parse_expr(rest))))
+    Ok(Stmt::Return(Some(parse_expr_with_context(rest, context))))
 }
 
 /// Compound operators reuse assignment lowering; indexed targets spill their place once.
@@ -83,11 +98,17 @@ fn compound_binary(op: &str, lhs: Expr, rhs: Expr) -> Expr {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn parse_assign_stmt(s: &str) -> Option<Stmt> {
+    let mut context = LoopParseContext::new(s);
+    parse_assign_stmt_with_context(s, &mut context)
+}
+
+fn parse_assign_stmt_with_context(s: &str, context: &mut LoopParseContext<'_>) -> Option<Stmt> {
     if let Some((op_idx, op)) = find_compound_assign_op(s) {
         let target = trim(&s[..op_idx]);
-        let rhs = parse_expr(trim(&s[op_idx + op.len()..]));
-        return match parse_expr(target) {
+        let rhs = parse_expr_with_context(trim(&s[op_idx + op.len()..]), context);
+        return match parse_expr_with_context(target, context) {
             Expr::Index { base, index } => Some(Stmt::Expr(Expr::Call {
                 callee: Box::new(Expr::Ident("index-modify-place-first".into())),
                 args: vec![
@@ -122,8 +143,8 @@ pub(crate) fn parse_assign_stmt(s: &str) -> Option<Stmt> {
     if name.is_empty() {
         return None;
     }
-    let value = parse_expr(trim(&s[eq_pos + 1..]));
-    match parse_expr(name) {
+    let value = parse_expr_with_context(trim(&s[eq_pos + 1..]), context);
+    match parse_expr_with_context(name, context) {
         Expr::Index { base, index, .. } => Some(Stmt::IndexAssign {
             base: *base,
             index: *index,
@@ -146,7 +167,7 @@ fn parse_if_stmt(s: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt, St
     let open = rest
         .find('{')
         .ok_or_else(|| ".in: `if` needs `{` body".to_string())?;
-    let cond = parse_expr(trim(&rest[..open]));
+    let cond = parse_expr_with_context(trim(&rest[..open]), context);
     let (then_inner, then_close) = brace_content_bounds_after_open(rest, open)
         .ok_or_else(|| ".in: unclosed `if` body".to_string())?;
     let tail = trim(&rest[then_close + 1..]);
@@ -179,7 +200,7 @@ fn parse_while_stmt(s: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt,
     let open = rest
         .find('{')
         .ok_or_else(|| ".in: `while` needs `{` body".to_string())?;
-    let cond = parse_expr(trim(&rest[..open]));
+    let cond = parse_expr_with_context(trim(&rest[..open]), context);
     let (inner, _) = brace_content_bounds_after_open(rest, open)
         .ok_or_else(|| ".in: unclosed `while` body".to_string())?;
     Ok(Stmt::Loop {
@@ -196,7 +217,7 @@ fn parse_match_stmt(s: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt,
     let open = rest
         .find('{')
         .ok_or_else(|| ".in: `match` needs `{` body".to_string())?;
-    let scrutinee = parse_expr(trim(&rest[..open]));
+    let scrutinee = parse_expr_with_context(trim(&rest[..open]), context);
     let (inner, _) = brace_content_bounds_after_open(rest, open)
         .ok_or_else(|| ".in: unclosed `match` body".to_string())?;
     let arms = parse_match_arms(inner, context)?;
@@ -232,7 +253,7 @@ fn parse_match_arms(
         }
         // Quoted patterns containing ` if ` are not guard separators.
         let guard = if let Some((_, index)) = find_top_level_binary_op(&pattern, &[" if "]) {
-            let guard = parse_expr(trim(&pattern[index + 4..]));
+            let guard = parse_expr_with_context(trim(&pattern[index + 4..]), context);
             pattern = trim(&pattern[..index]).to_string();
             Some(guard)
         } else {
@@ -262,7 +283,10 @@ fn parse_match_arms(
     Ok(arms)
 }
 
-pub(crate) fn parse_throw_stmt(s: &str) -> Result<Stmt, String> {
+fn parse_throw_stmt_with_context(
+    s: &str,
+    context: &mut LoopParseContext<'_>,
+) -> Result<Stmt, String> {
     let rest = trim(s)
         .strip_prefix("throw")
         .ok_or_else(|| ".in: internal throw parse".to_string())?;
@@ -270,7 +294,7 @@ pub(crate) fn parse_throw_stmt(s: &str) -> Result<Stmt, String> {
     if rest.is_empty() {
         return Err(".in: `throw` needs an expression".into());
     }
-    Ok(Stmt::Throw(parse_expr(rest)))
+    Ok(Stmt::Throw(parse_expr_with_context(rest, context)))
 }
 
 fn parse_try_stmt(s: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt, String> {
@@ -332,13 +356,19 @@ fn parse_try_stmt_inner(rest: &str, context: &mut LoopParseContext<'_>) -> Resul
     })
 }
 
-fn parse_stmt_line(line: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt, String> {
+pub(crate) fn parse_stmt_line(
+    line: &str,
+    context: &mut LoopParseContext<'_>,
+) -> Result<Stmt, String> {
     let s = trim(line);
     if s.is_empty() {
         return Err(".in: empty statement".into());
     }
+    if s == "propagate" {
+        return Ok(Stmt::Propagate);
+    }
     if s.starts_with("let ") || s.starts_with("var ") {
-        return parse_let_stmt(s);
+        return parse_let_stmt_with_context(s, context);
     }
     if s.starts_with("if ") {
         return parse_if_stmt(s, context);
@@ -377,28 +407,25 @@ fn parse_stmt_line(line: &str, context: &mut LoopParseContext<'_>) -> Result<Stm
     if s.starts_with("throw")
         && (s.len() == 5 || s.chars().nth(5).is_some_and(|c| c.is_whitespace()))
     {
-        return parse_throw_stmt(s);
+        return parse_throw_stmt_with_context(s, context);
     }
     if s.starts_with("return")
         && (s.len() == 6 || s.chars().nth(6).is_some_and(|c| c.is_whitespace()))
     {
-        return parse_return_stmt(s);
+        return parse_return_stmt_with_context(s, context);
     }
-    if let Some(assign) = parse_assign_stmt(s) {
+    if let Some(assign) = parse_assign_stmt_with_context(s, context) {
         return Ok(assign);
     }
-    Ok(Stmt::Expr(parse_expr(s)))
+    Ok(Stmt::Expr(parse_expr_with_context(s, context)))
 }
 
 pub(crate) fn parse_function_body(inner: &str) -> Result<Vec<Stmt>, String> {
-    let mut context = LoopParseContext {
-        source: inner,
-        counter: 0,
-    };
+    let mut context = LoopParseContext::new(inner);
     parse_function_body_with_context(inner, &mut context)
 }
 
-fn parse_function_body_with_context(
+pub(crate) fn parse_function_body_with_context(
     inner: &str,
     context: &mut LoopParseContext<'_>,
 ) -> Result<Vec<Stmt>, String> {
@@ -409,6 +436,9 @@ fn parse_function_body_with_context(
         } else {
             stmts.push(parse_stmt_line(&part, context)?);
         }
+    }
+    if let Some(error) = context.error.take() {
+        return Err(error);
     }
     Ok(stmts)
 }
@@ -444,21 +474,21 @@ fn parse_for_expanded(s: &str, context: &mut LoopParseContext<'_>) -> Result<Vec
             Some(end) => ("range-inclusive", trim(end)),
             None => ("range-exclusive", end),
         };
-        let mut args = vec![parse_expr(start)];
+        let mut args = vec![parse_expr_with_context(start, context)];
         if end.is_empty() {
             if range_name == "range-inclusive" {
                 return Err(".in: an inclusive range needs an end value".into());
             }
             range_name = "range-from";
         } else {
-            args.push(parse_expr(end));
+            args.push(parse_expr_with_context(end, context));
         }
         Expr::Call {
             callee: Box::new(Expr::Ident(range_name.into())),
             args,
         }
     } else {
-        parse_expr(iterator)
+        parse_expr_with_context(iterator, context)
     };
     let (inner, _) = brace_content_bounds_after_open(rest, open)
         .ok_or_else(|| ".in: unclosed `for` body".to_string())?;

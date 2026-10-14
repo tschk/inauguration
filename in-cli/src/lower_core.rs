@@ -139,7 +139,12 @@ fn desugar_for_loops(
     declared: &HashSet<String>,
 ) {
     let mut out = Vec::with_capacity(body.len());
-    for stmt in std::mem::take(body) {
+    for mut stmt in std::mem::take(body) {
+        crate::core_opt::map_stmt_exprs_mut(&mut stmt, &mut |expr| {
+            if let Expr::Block { body, .. } = expr {
+                desugar_for_loops(body, counter, names, declared);
+            }
+        });
         match stmt {
             Stmt::Loop {
                 kind: LoopKind::For { binding },
@@ -340,6 +345,7 @@ pub(crate) fn expand_for_loop(
 pub(crate) fn advance_for_continues(body: &mut Vec<Stmt>, advance: &Stmt) {
     let mut rewritten = Vec::with_capacity(body.len());
     for mut stmt in std::mem::take(body) {
+        advance_expr_continues_in_stmt(&mut stmt, advance);
         match &mut stmt {
             Stmt::Continue => rewritten.push(advance.clone()),
             Stmt::If {
@@ -366,6 +372,50 @@ pub(crate) fn advance_for_continues(body: &mut Vec<Stmt>, advance: &Stmt) {
         rewritten.push(stmt);
     }
     *body = rewritten;
+}
+
+fn advance_expr_continues_in_stmt(stmt: &mut Stmt, advance: &Stmt) {
+    if matches!(stmt, Stmt::Loop { .. }) {
+        return;
+    }
+    fn expr(expr: &mut Expr, advance: &Stmt) {
+        if let Expr::Closure { .. } = expr {
+            return;
+        }
+        if let Expr::Block { body, .. } = expr {
+            advance_for_continues(body, advance);
+        }
+        crate::core_ir::for_each_expr_child_mut(expr, &mut |child| expr_walk(child, advance));
+    }
+    fn expr_walk(value: &mut Expr, advance: &Stmt) {
+        expr(value, advance);
+    }
+    match stmt {
+        Stmt::Let(_, _, e)
+        | Stmt::Assign(_, e)
+        | Stmt::Expr(e)
+        | Stmt::Throw(e)
+        | Stmt::Return(Some(e)) => expr(e, advance),
+        Stmt::If { cond, .. } => expr(cond, advance),
+        Stmt::Match { scrutinee, arms } => {
+            expr(scrutinee, advance);
+            for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    expr(guard, advance);
+                }
+            }
+        }
+        Stmt::FieldAssign { base, value, .. } => {
+            expr(base, advance);
+            expr(value, advance);
+        }
+        Stmt::IndexAssign { base, index, value } => {
+            expr(base, advance);
+            expr(index, advance);
+            expr(value, advance);
+        }
+        _ => {}
+    }
 }
 
 /// Rewrite bare field reads and writes inside a class method body to
@@ -438,6 +488,12 @@ fn collect_bound_names_in_body(body: &[Stmt], bound: &mut HashSet<String>) {
 
 fn collect_bound_names_in_expr(expr: &Expr, bound: &mut HashSet<String>) {
     match expr {
+        Expr::Block { body, result } => {
+            collect_bound_names_in_body(body, bound);
+            if let Some(result) = result {
+                collect_bound_names_in_expr(result, bound);
+            }
+        }
         Expr::Closure { params, body, .. } => {
             for (p, _) in params {
                 bound.insert(p.clone());
@@ -529,6 +585,25 @@ fn rewrite_field_refs_in_stmt(stmt: &mut Stmt, fields: &HashSet<String>, bound: 
 
 fn rewrite_field_refs_in_expr(expr: &mut Expr, fields: &HashSet<String>, bound: &HashSet<String>) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            rewrite_field_refs_in_expr(cond, fields, bound);
+            rewrite_field_refs_in_expr(then_expr, fields, bound);
+            rewrite_field_refs_in_expr(else_expr, fields, bound);
+        }
+        Expr::Block { body, result } => {
+            let mut inner = bound.clone();
+            collect_bound_names_in_body(body, &mut inner);
+            for stmt in body {
+                rewrite_field_refs_in_stmt(stmt, fields, &inner);
+            }
+            if let Some(result) = result {
+                rewrite_field_refs_in_expr(result, fields, &inner);
+            }
+        }
         Expr::Ident(n) => {
             if fields.contains(n) && !bound.contains(n) {
                 let field = std::mem::take(n);
@@ -639,6 +714,12 @@ fn desugar_closures_in_body(
 
 fn collect_declared_vars_in_body(body: &[Stmt], out: &mut HashSet<String>) {
     for stmt in body {
+        let mut copied = stmt.clone();
+        crate::core_opt::map_stmt_exprs_mut(&mut copied, &mut |expr| {
+            if let Expr::Block { body, .. } = expr {
+                collect_declared_vars_in_body(body, out);
+            }
+        });
         match stmt {
             Stmt::Let(name, _, _) => {
                 out.insert(name.clone());
@@ -752,6 +833,21 @@ fn rewrite_captures_in_body(body: &mut [Stmt], captures: &HashSet<&str>) {
 
 fn rewrite_captures_in_expr(expr: &mut Expr, captures: &HashSet<&str>) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            rewrite_captures_in_expr(cond, captures);
+            rewrite_captures_in_expr(then_expr, captures);
+            rewrite_captures_in_expr(else_expr, captures);
+        }
+        Expr::Block { body, result } => {
+            rewrite_captures_in_body(body, captures);
+            if let Some(result) = result {
+                rewrite_captures_in_expr(result, captures);
+            }
+        }
         Expr::Ident(name) if captures.contains(name.as_str()) => {
             *expr = Expr::Field {
                 base: Box::new(Expr::Ident("self".into())),
@@ -801,6 +897,21 @@ fn desugar_closures_in_expr(
     globals: &HashSet<String>,
 ) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            desugar_closures_in_expr(cond, counter, extra_decls, names, globals);
+            desugar_closures_in_expr(then_expr, counter, extra_decls, names, globals);
+            desugar_closures_in_expr(else_expr, counter, extra_decls, names, globals);
+        }
+        Expr::Block { body, result } => {
+            desugar_closures_in_body(body, counter, extra_decls, names, globals);
+            if let Some(result) = result {
+                desugar_closures_in_expr(result, counter, extra_decls, names, globals);
+            }
+        }
         Expr::Closure {
             params, ret, body, ..
         } => {
@@ -954,6 +1065,21 @@ fn rewrite_method_calls_in_body(body: &mut [Stmt], method_map: &HashMap<String, 
 
 fn rewrite_method_calls_in_expr(expr: &mut Expr, method_map: &HashMap<String, String>) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            rewrite_method_calls_in_expr(cond, method_map);
+            rewrite_method_calls_in_expr(then_expr, method_map);
+            rewrite_method_calls_in_expr(else_expr, method_map);
+        }
+        Expr::Block { body, result } => {
+            rewrite_method_calls_in_body(body, method_map);
+            if let Some(result) = result {
+                rewrite_method_calls_in_expr(result, method_map);
+            }
+        }
         Expr::Call { callee, args, .. } => {
             for arg in args.iter_mut() {
                 rewrite_method_calls_in_expr(arg, method_map);
@@ -1026,6 +1152,12 @@ fn lower_expr(
     out: &mut String,
 ) -> usize {
     match e {
+        Expr::Conditional { .. } | Expr::Block { .. } => {
+            let id = *ssa;
+            *ssa += 1;
+            out.push_str(&format!("%{id} = unsupported_structured_value\n"));
+            id
+        }
         Expr::IntLit(n) => {
             let id = *ssa;
             *ssa += 1;
@@ -1268,6 +1400,21 @@ fn fold_bool_binop(op: &str, lhs: &Expr, rhs: &Expr) -> Option<bool> {
 
 fn collect_expr_reads(e: &Expr, reads: &mut HashSet<String>) {
     match e {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_reads(cond, reads);
+            collect_expr_reads(then_expr, reads);
+            collect_expr_reads(else_expr, reads);
+        }
+        Expr::Block { body, result } => {
+            collect_body_reads(body, reads);
+            if let Some(result) = result {
+                collect_expr_reads(result, reads);
+            }
+        }
         Expr::Ident(name) => {
             reads.insert(name.clone());
         }
@@ -1999,6 +2146,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn expression_block_continue_advances_enclosing_for() {
+        let advance = Stmt::Assign("index".into(), Expr::IntLit(1));
+        let mut body = vec![Stmt::Let(
+            "value".into(),
+            Some(Typ::Int),
+            Expr::Block {
+                body: vec![Stmt::Continue],
+                result: Some(Box::new(Expr::IntLit(42))),
+            },
+        )];
+        advance_for_continues(&mut body, &advance);
+        let Stmt::Let(_, _, Expr::Block { body, .. }) = &body[0] else {
+            panic!()
+        };
+        assert_eq!(body, &vec![advance, Stmt::Continue]);
+    }
+
     use crate::core_ir::MethodSig;
     use crate::core_ir::Typ;
     use crate::core_ir::{Expr, Stmt};

@@ -302,6 +302,21 @@ fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
                     expr_uses_value(arg, arrays, functions, index == 0 && (read || store))
                 })
             }
+            Expr::Block { body, result } => {
+                body_uses_value(body, arrays, functions)
+                    || result
+                        .as_ref()
+                        .is_some_and(|value| expr_uses_value(value, arrays, functions, borrow))
+            }
+            Expr::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                expr_uses_value(cond, arrays, functions, false)
+                    || expr_uses_value(then_expr, arrays, functions, borrow)
+                    || expr_uses_value(else_expr, arrays, functions, borrow)
+            }
             Expr::Closure { body, .. } => body_uses_value(body, arrays, functions),
             _ => {
                 let mut value = false;
@@ -1430,6 +1445,55 @@ fn map_type(ty: &syn::Type) -> Typ {
     }
 }
 
+fn vector_value_initializer(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Macro(value) => value.mac.path.is_ident("vec"),
+        syn::Expr::If(value) => value.then_branch.stmts.last().is_some_and(
+            |stmt| matches!(stmt, syn::Stmt::Expr(value, None) if vector_value_initializer(value)),
+        ) || value
+            .else_branch
+            .as_ref()
+            .is_some_and(|(_, value)| vector_value_initializer(value)),
+        syn::Expr::Block(value) => value.block.stmts.last().is_some_and(
+            |stmt| matches!(stmt, syn::Stmt::Expr(value, None) if vector_value_initializer(value)),
+        ),
+        syn::Expr::Paren(value) => vector_value_initializer(&value.expr),
+        syn::Expr::Group(value) => vector_value_initializer(&value.expr),
+        _ => false,
+    }
+}
+
+fn lower_block_value(block: &syn::Block, local_types: &HashMap<String, String>) -> Expr {
+    let mut inner = local_types.clone();
+    let mut prefix = block.clone();
+    let tail = match prefix.stmts.last() {
+        Some(syn::Stmt::Expr(_, None)) => match prefix.stmts.pop().unwrap() {
+            syn::Stmt::Expr(expr, None) => Some(expr),
+            _ => unreachable!(),
+        },
+        _ => None,
+    };
+    let mut body = lower_block_inner_with_types(&prefix, false, &mut inner);
+    let result = match tail {
+        Some(syn::Expr::Return(value)) => {
+            lower_return_expr(value.expr.as_deref(), &mut body, &mut inner);
+            None
+        }
+        Some(syn::Expr::Break(value)) => {
+            lower_expr_stmt(&syn::Expr::Break(value), &mut body, &mut inner);
+            None
+        }
+        Some(syn::Expr::Continue(value)) => {
+            lower_expr_stmt(&syn::Expr::Continue(value), &mut body, &mut inner);
+            None
+        }
+        Some(syn::Expr::Tuple(value)) if value.elems.is_empty() => None,
+        Some(value) => Some(Box::new(lower_expr_with_types(&value, &mut inner))),
+        None => None,
+    };
+    Expr::Block { body, result }
+}
+
 fn lower_block_with_types(
     block: &syn::Block,
     local_types: &mut HashMap<String, String>,
@@ -1674,7 +1738,7 @@ fn lower_block_inner_with_types_go(
                         )
                         .then(|| Typ::Vector(Box::new(Typ::Generic("_".to_string()))))
                     }).or_else(|| {
-                        matches!(init.expr.as_ref(), syn::Expr::Macro(m) if m.mac.path.is_ident("vec"))
+                        vector_value_initializer(&init.expr)
                             .then(|| Typ::Vector(Box::new(Typ::Generic("_".to_string()))))
                     });
                     if is_simple
@@ -2411,29 +2475,28 @@ fn lower_expr_with_types_inner(
             body: lower_block_with_types(&a.block, local_types),
             captures: vec![],
         },
-        syn::Expr::If(eif) => {
-            let then_body = lower_block_with_types(&eif.then_branch, local_types);
-            let else_body = eif
-                .else_branch
-                .as_ref()
-                .map(|(_, e)| lower_else_body_with_types(e, local_types, true))
-                .unwrap_or_default();
-            Expr::Closure {
-                params: vec![],
-                ret: Typ::Generic("_".into()),
-                body: vec![Stmt::If {
-                    cond: lower_expr_with_types(&eif.cond, local_types),
-                    then_body,
-                    else_body,
-                }],
-                captures: vec![],
+        syn::Expr::If(eif) if !matches!(eif.cond.as_ref(), syn::Expr::Let(_)) => {
+            Expr::Conditional {
+                cond: Box::new(lower_expr_with_types(&eif.cond, local_types)),
+                then_expr: Box::new(lower_block_value(&eif.then_branch, local_types)),
+                else_expr: Box::new(
+                    eif.else_branch
+                        .as_ref()
+                        .map(|(_, branch)| lower_expr_with_types(branch, &mut local_types.clone()))
+                        .unwrap_or(Expr::Block {
+                            body: vec![],
+                            result: None,
+                        }),
+                ),
             }
         }
-        // shortcut: refuse block values until their statements can be spilled into the caller.
-        syn::Expr::Block(_) => Expr::Call {
-            callee: Box::new(Expr::Ident("__unsupported_rust_block_value".into())),
+        // shortcut: match values need an explicit value-producing match representation.
+        syn::Expr::If(_) => Expr::Call {
+            callee: Box::new(Expr::Ident("#unsupported-rust-if-let-value".into())),
             args: vec![],
         },
+        syn::Expr::Block(value) => lower_block_value(&value.block, local_types),
+        syn::Expr::Unsafe(value) => lower_block_value(&value.block, local_types),
         syn::Expr::Repeat(repeat) => Expr::Call {
             callee: Box::new(Expr::Ident("array-repeat".into())),
             args: vec![
@@ -2469,11 +2532,6 @@ fn lower_expr_with_types_inner(
                 .iter()
                 .map(|e| lower_expr_with_types(e, local_types))
                 .collect(),
-        },
-        // shortcut: refuse value-position unsafe blocks until their statements can be spilled.
-        syn::Expr::Unsafe(_) => Expr::Call {
-            callee: Box::new(Expr::Ident("__unsupported_rust_unsafe_value".into())),
-            args: vec![],
         },
         syn::Expr::Match(value) => {
             let mut body = Vec::new();

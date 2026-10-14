@@ -53,6 +53,20 @@ in execute --path hello.in
 in graph --path hello.in --json
 ```
 
+## Values from conditions and blocks
+
+Brace-form expressions can select a value with `if` or evaluate statements before a trailing block value:
+
+```in
+fn main() -> Int {
+  let base = 20;
+  let answer = (if (false) { 0 } else { let value = 22; value });
+  return base + answer;
+}
+```
+
+A semicolon discards the last expression, leaving a unit value. A block-local binding stays inside the block. Returns and loop jumps inside a value block still target the enclosing function or loop; evaluating a block does not create a closure.
+
 ## Syntax by example
 
 Params are always **`name: Type`** in signatures. Prefer **human-readable** for docs and scripts; use **brace form** when you want explicit `{` / `}` or C-like bodies.

@@ -2,6 +2,27 @@
 
 Multiple source languages lower to **Core IR** and share desugaring, verification, optimization, and native JIT/emission. Guarded matches use the same native pipeline as ordinary control flow.
 
+## Conditional and block values
+
+Core IR represents value control flow explicitly. `Conditional { cond, then_expr, else_expr }` evaluates a Bool condition once and executes only the selected branch. `Block { body, result }` has a local scope and an optional trailing value; its `return`, `break`, and `continue` retain their enclosing function or loop targets. Branch values must have compatible types, while a branch that exits does not need to produce a value.
+
+Rust and brace-form `.in` lower these expressions through the shared verifier and owned AArch64/x86_64 backends, including scalar, array, tuple, record, and scalar-vector values. Canonical `.in` output preserves block statements and the distinction between a trailing result and a discarded expression. Go source projection, Thumb, and INISA explicitly refuse structured value forms they cannot preserve.
+
+For `.icore` version 2 or 3, expression objects use `kind: "conditional"` with `cond`, `then`, and `else`, or `kind: "block"` with `body` and optional `result`. For example, this expression produces 42:
+
+```json
+{
+  "kind": "conditional",
+  "cond": true,
+  "then": {
+    "kind": "block",
+    "body": [{"kind": "let", "name": "base", "type": "Int", "value": 20}],
+    "result": {"kind": "binary", "op": "+", "lhs": {"kind": "ident", "name": "base"}, "rhs": 22}
+  },
+  "else": 0
+}
+```
+
 ## Historical textual SIL merge behavior (`hybrid_sil`)
 
 `parse_textual_sil` keeps the legacy top-level **`function_id`** as whichever **`sil @name`** line appeared **last** in the input, and still exposes flattened block / instruction vectors for existing callers. It also records explicit per-function entries in **`SilArtifact::functions`**, each with its own blocks and instructions. **`extract_call_graph`** prefers those per-function records, then falls back to **`instruction_callers`**, then to the legacy **`function_id`** behavior for old artifacts. Emitters still typically place **`sil @main` last** so single-function views line up with `main`. For full detail see [in-language.md](in-language.md#hybrid_sil-and-merged-textual-sil).
@@ -53,7 +74,7 @@ x86 stages arguments in source order before loading ABI registers and outgoing s
 
 ## Receiver addresses and argument positions
 
-AArch64 named `self` parameters occupy one pointer word regardless of field count; the callee saves that pointer separately from its local field copies. Register and incoming stack arguments are saved before reading receiver fields, and null/failure sentinels return failure before reads. Supported global receiver layouts use their data-section addresses. x86 empty locals reserve stable address storage separately from value fields, so their receiver addresses do not add an ABI value word or trigger a fake field copy. Scalar receiver field reads and writes, forwarding, and value copies use the saved object pointer; ordinary value parameters remain independent copies. Whole receiver replacements stage the source before committing fields. AArch64 also resolves nested receiver addresses and materializes nested struct field values; known nested aggregate replacements stage every field before stores. Shared lowering materializes call and constructor results once for known value-layout receivers, preserving source argument order and conditional execution. Addressable receiver and field-assignment bases retain their identity when later operands spill. `.in` chained calls keep the terminal call. Vector operations remain a separate coverage gap.
+AArch64 named `self` parameters occupy one pointer word regardless of field count; the callee saves that pointer separately from its local field copies. Register and incoming stack arguments are saved before reading receiver fields, and null/failure sentinels return failure before reads. Supported global receiver layouts use their data-section addresses. x86 empty locals reserve stable address storage separately from value fields, so their receiver addresses do not add an ABI value word or trigger a fake field copy. Scalar receiver field reads and writes, forwarding, and value copies use the saved object pointer; ordinary value parameters remain independent copies. Whole receiver replacements stage the source before committing fields. AArch64 also resolves nested receiver addresses and materializes nested struct field values; known nested aggregate replacements stage every field before stores. Shared lowering materializes call and constructor results once for known value-layout receivers, preserving source argument order and conditional execution. Addressable receiver and field-assignment bases retain their identity when later operands spill. `.in` chained calls keep the terminal call. Scalar vectors support construction, growth, extension, cloning, capacity queries, and clearing; borrowed headers and aggregate elements still require additional ownership and drop semantics.
 
 ## Writable array literal results
 

@@ -129,6 +129,9 @@ pub(crate) fn lower_expr_into(
         Expr::Field { base, name } => lower_field_load(emitter, ctx, base, name, dest, pending),
         Expr::ArrayLit(_) => Err("thumb-lower: array literal in expression position".into()),
         Expr::Index { base, index } => lower_index_load(emitter, ctx, base, index, dest, pending),
+        Expr::Conditional { .. } | Expr::Block { .. } => Err(
+            "thumb-lower: conditional and block values require structured value lowering".into(),
+        ),
         Expr::Closure { .. } => Err("thumb-lower: closures not supported".into()),
     }
 }

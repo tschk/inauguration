@@ -1,6 +1,37 @@
 use crate::core_ir::{Decl, Expr, MethodSig, Stmt, Typ, UnifiedModule, looks_like_int_literal};
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+mod value_scope_tests {
+    use super::*;
+
+    #[test]
+    fn block_values_keep_inference_and_constants_in_local_scope() {
+        let mut value = Expr::Block {
+            body: vec![Stmt::Let(
+                "answer".into(),
+                None,
+                Expr::Ident("answer".into()),
+            )],
+            result: Some(Box::new(Expr::Ident("answer".into()))),
+        };
+        let consts = HashMap::from([("answer".into(), Expr::IntLit(42))]);
+        replace_idents(&mut value, &consts);
+        assert!(matches!(&value, Expr::Block { body, result: Some(result) }
+            if matches!(body.as_slice(), [Stmt::Let(_, _, Expr::IntLit(42))])
+                && matches!(result.as_ref(), Expr::Ident(name) if name == "answer")));
+        let env = HashMap::from([("answer".into(), Typ::Float)]);
+        assert_eq!(
+            infer_in_expr_type(&value, &env, &HashMap::new(), &HashMap::new()),
+            Some(Typ::Int)
+        );
+        assert_eq!(env.get("answer"), Some(&Typ::Float));
+        let mut outside = Expr::Ident("answer".into());
+        replace_idents(&mut outside, &consts);
+        assert_eq!(outside, Expr::IntLit(42));
+    }
+}
+
 pub(crate) fn collect_top_level_type_names(module: &UnifiedModule) -> Vec<String> {
     module
         .decls
@@ -117,6 +148,25 @@ pub(crate) fn validate_expr_shapes(
     expr: &Expr,
 ) -> Result<(), String> {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            validate_expr_shapes(fn_name, structs, cond)?;
+            validate_expr_shapes(fn_name, structs, then_expr)?;
+            validate_expr_shapes(fn_name, structs, else_expr)
+        }
+        Expr::Block { body, result } => {
+            let names = structs.keys().map(String::as_str).collect();
+            for stmt in body {
+                validate_stmt_types(fn_name, &names, structs, stmt)?;
+            }
+            if let Some(result) = result {
+                validate_expr_shapes(fn_name, structs, result)?;
+            }
+            Ok(())
+        }
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => Ok(()),
         Expr::Ident(name) => {
             // The expression parser turns tokens it cannot classify into
@@ -377,6 +427,22 @@ pub(crate) fn desugar_method_calls_in_expr(
     fn_rets: &HashMap<String, Typ>,
 ) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            for value in [cond, then_expr, else_expr] {
+                desugar_method_calls_in_expr(value, env, structs, fn_rets);
+            }
+        }
+        Expr::Block { body, result } => {
+            let mut inner = env.clone();
+            desugar_method_calls_in_body(body, &mut inner, structs, fn_rets);
+            if let Some(result) = result {
+                desugar_method_calls_in_expr(result, &inner, structs, fn_rets);
+            }
+        }
         Expr::Unary { expr, .. } => desugar_method_calls_in_expr(expr, env, structs, fn_rets),
         Expr::Binary { lhs, rhs, .. } => {
             desugar_method_calls_in_expr(lhs, env, structs, fn_rets);
@@ -436,6 +502,33 @@ pub(crate) fn infer_in_expr_type(
     fn_rets: &HashMap<String, Typ>,
 ) -> Option<Typ> {
     match expr {
+        Expr::Conditional {
+            then_expr,
+            else_expr,
+            ..
+        } => crate::core_ir::conditional_type(
+            then_expr,
+            infer_in_expr_type(then_expr, env, structs, fn_rets),
+            else_expr,
+            infer_in_expr_type(else_expr, env, structs, fn_rets),
+        ),
+        Expr::Block { body, result } => {
+            let mut inner = env.clone();
+            for stmt in body {
+                if let Stmt::Let(name, typ, value) = stmt {
+                    let value_type = typ
+                        .clone()
+                        .or_else(|| infer_in_expr_type(value, &inner, structs, fn_rets));
+                    inner.remove(name);
+                    if let Some(typ) = value_type {
+                        inner.insert(name.clone(), typ);
+                    }
+                }
+            }
+            result.as_deref().map_or(Some(Typ::Void), |value| {
+                infer_in_expr_type(value, &inner, structs, fn_rets)
+            })
+        }
         Expr::IntLit(_) => Some(Typ::Int),
         Expr::FloatLit(_) => Some(Typ::Float),
         Expr::StringLit(_) => Some(Typ::String),
@@ -502,6 +595,27 @@ pub(crate) fn infer_in_expr_type(
 
 fn replace_idents(expr: &mut Expr, consts: &std::collections::HashMap<String, Expr>) {
     match expr {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            for value in [cond, then_expr, else_expr] {
+                replace_idents(value, consts);
+            }
+        }
+        Expr::Block { body, result } => {
+            let mut inner = consts.clone();
+            for stmt in body {
+                replace_stmt_idents(stmt, &inner);
+                if let Stmt::Let(name, _, _) = stmt {
+                    inner.remove(name);
+                }
+            }
+            if let Some(result) = result {
+                replace_idents(result, &inner);
+            }
+        }
         Expr::Ident(name) => {
             if let Some(replacement) = consts.get(name) {
                 *expr = replacement.clone();

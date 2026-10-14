@@ -2544,7 +2544,7 @@ fn skipped_function_traps_instead_of_returning_zero() {
 fn nothing() -> void { return; }
 
 fn bad() -> Int {
-  let v = nothing();
+  let v: [[Int]] = [[1]];
   return 1;
 }
 
@@ -2584,7 +2584,7 @@ fn unreachable_skipped_function_is_marked_not_reachable() {
 fn nothing() -> void { return; }
 
 fn unused() -> Int {
-  let v = nothing();
+  let v: [[Int]] = [[1]];
   return 7;
 }
 
@@ -2744,4 +2744,40 @@ fn main() -> String {
     let len = unsafe { *(ptr as *const u64) as usize };
     let bytes = unsafe { std::slice::from_raw_parts(ptr.add(8), len) };
     assert_eq!(String::from_utf8_lossy(bytes), "hello world");
+}
+
+#[test]
+fn raw_conditional_lowering_rejects_condition_and_branch_type_mismatches() {
+    for (cond, then_expr, else_expr, expected) in [
+        (
+            Expr::IntLit(1),
+            Expr::IntLit(20),
+            Expr::IntLit(22),
+            "Bool condition",
+        ),
+        (
+            Expr::BoolLit(true),
+            Expr::IntLit(42),
+            Expr::FloatLit(FloatVal(42.0)),
+            "branch type mismatch",
+        ),
+    ] {
+        let mut module = answer_module();
+        let Decl::Function { body, .. } = &mut module.decls[0] else {
+            unreachable!()
+        };
+        *body = vec![Stmt::Return(Some(Expr::Conditional {
+            cond: Box::new(cond),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        }))];
+        let arm_error = lower_module(&module, "answer", NativeLinkage::Executable)
+            .err()
+            .expect("ARM must reject raw mismatch");
+        let x86_error = crate::native_emit::x86_64_lower::lower_module(&module, "answer")
+            .err()
+            .expect("x86 must reject raw mismatch");
+        assert!(arm_error.contains(expected), "{arm_error}");
+        assert!(x86_error.contains(expected), "{x86_error}");
+    }
 }

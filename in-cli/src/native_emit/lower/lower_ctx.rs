@@ -6,30 +6,68 @@ use crate::core_ir::{Expr, LoopKind, Stmt, Typ};
 use crate::native_emit::aarch64::{self, CodeEmitter};
 use std::collections::HashMap;
 
+fn expr_try_depth(expr: &Expr) -> usize {
+    let mut depth = if let Expr::Block { body, .. } = expr {
+        max_try_depth(body)
+    } else {
+        0
+    };
+    crate::core_ir::for_each_expr_child(expr, &mut |child| {
+        depth = depth.max(expr_try_depth(child))
+    });
+    depth
+}
+
 pub(crate) fn max_try_depth(body: &[Stmt]) -> usize {
     body.iter()
-        .map(|stmt| match stmt {
-            Stmt::Try { body, catches } => {
-                1 + max_try_depth(body).max(
-                    catches
-                        .iter()
-                        .map(|catch| max_try_depth(&catch.body))
-                        .max()
-                        .unwrap_or(0),
-                )
-            }
-            Stmt::If {
-                then_body,
-                else_body,
-                ..
-            } => max_try_depth(then_body).max(max_try_depth(else_body)),
-            Stmt::Loop { body, .. } => max_try_depth(body),
-            Stmt::Match { arms, .. } => arms
-                .iter()
-                .map(|arm| max_try_depth(&arm.body))
-                .max()
-                .unwrap_or(0),
-            _ => 0,
+        .map(|stmt| {
+            let nested = match stmt {
+                Stmt::Try { body, catches } => {
+                    1 + max_try_depth(body).max(
+                        catches
+                            .iter()
+                            .map(|catch| max_try_depth(&catch.body))
+                            .max()
+                            .unwrap_or(0),
+                    )
+                }
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => max_try_depth(then_body).max(max_try_depth(else_body)),
+                Stmt::Loop { body, .. } => max_try_depth(body),
+                Stmt::Match { arms, .. } => arms
+                    .iter()
+                    .map(|arm| max_try_depth(&arm.body))
+                    .max()
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            let expressions = match stmt {
+                Stmt::Let(_, _, value)
+                | Stmt::Assign(_, value)
+                | Stmt::Expr(value)
+                | Stmt::Return(Some(value))
+                | Stmt::Throw(value) => expr_try_depth(value),
+                Stmt::If { cond, .. } => expr_try_depth(cond),
+                Stmt::Loop {
+                    cond: Some(cond), ..
+                } => expr_try_depth(cond),
+                Stmt::Match { scrutinee, .. } => expr_try_depth(scrutinee),
+                Stmt::FieldAssign { base, value, .. } => {
+                    expr_try_depth(base).max(expr_try_depth(value))
+                }
+                Stmt::IndexAssign {
+                    base, index, value, ..
+                } => [base, index, value]
+                    .into_iter()
+                    .map(expr_try_depth)
+                    .max()
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            nested.max(expressions)
         })
         .max()
         .unwrap_or(0)
@@ -89,6 +127,24 @@ pub(crate) fn append_string_table(
     Ok(())
 }
 
+fn alloc_expr_locals(
+    ctx: &mut LowerCtx<'_>,
+    expr: &Expr,
+    fn_name: &str,
+    functions: &HashMap<String, super::FunctionInfo>,
+) -> Result<(), String> {
+    if let Expr::Block { body, .. } = expr {
+        alloc_declared_locals(ctx, body, fn_name, functions)?;
+    }
+    let mut result = Ok(());
+    crate::core_ir::for_each_expr_child(expr, &mut |child| {
+        if result.is_ok() {
+            result = alloc_expr_locals(ctx, child, fn_name, functions);
+        }
+    });
+    result
+}
+
 pub(crate) fn alloc_declared_locals(
     ctx: &mut LowerCtx<'_>,
     body: &[Stmt],
@@ -96,6 +152,28 @@ pub(crate) fn alloc_declared_locals(
     functions: &HashMap<String, super::FunctionInfo>,
 ) -> Result<(), String> {
     for stmt in body {
+        let mut expressions = Vec::new();
+        match stmt {
+            Stmt::Let(_, _, value)
+            | Stmt::Assign(_, value)
+            | Stmt::Expr(value)
+            | Stmt::Return(Some(value))
+            | Stmt::Throw(value) => expressions.push(value),
+            Stmt::If { cond, .. } => expressions.push(cond),
+            Stmt::Loop {
+                cond: Some(cond), ..
+            } => expressions.push(cond),
+            Stmt::Match { scrutinee, .. } => expressions.push(scrutinee),
+            Stmt::FieldAssign { base, value, .. } => expressions.extend([base, value]),
+            Stmt::IndexAssign {
+                base, index, value, ..
+            } => expressions.extend([base, index, value]),
+            _ => {}
+        }
+        for expr in expressions {
+            alloc_expr_locals(ctx, expr, fn_name, functions)?;
+        }
+
         match stmt {
             Stmt::Let(name, typ, expr) => {
                 ctx.alloc_let_local(name, typ.as_ref(), expr, fn_name, functions)?
@@ -658,7 +736,7 @@ impl<'a> LowerCtx<'a> {
                 self.scalar_types.insert(name.to_string(), Typ::Int);
                 Ok(())
             }
-            Some(Typ::Int | Typ::Bool | Typ::String | Typ::Float) => {
+            Some(Typ::Int | Typ::Bool | Typ::String | Typ::Float | Typ::Void) => {
                 let offset = self.alloc_slot();
                 self.locals
                     .insert(name.to_string(), LocalSlot::Scalar(offset));

@@ -78,6 +78,14 @@ fn stmt_needs_invec(s: &Stmt) -> bool {
 
 fn expr_needs_invec(e: &Expr) -> bool {
     match e {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => expr_needs_invec(cond) || expr_needs_invec(then_expr) || expr_needs_invec(else_expr),
+        Expr::Block { body, result } => {
+            stmts_need_invec(body) || result.as_deref().is_some_and(expr_needs_invec)
+        }
         Expr::Unary { expr, .. } => expr_needs_invec(expr),
         Expr::Binary { lhs, rhs, .. } => expr_needs_invec(lhs) || expr_needs_invec(rhs),
         Expr::StructInit { fields, .. } => fields.iter().any(|(_, e)| expr_needs_invec(e)),
@@ -220,6 +228,16 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
     depth_ok(depth)?;
     bump(nodes)?;
     match e {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            count_expr(cond, depth + 1, nodes)?;
+            count_expr(then_expr, depth + 1, nodes)?;
+            count_expr(else_expr, depth + 1, nodes)
+        }
+        Expr::Block { .. } => Err("c-backend: block values require owned native lowering".into()),
         Expr::Unary { op, expr } => {
             if op == "vector-clone" {
                 return Err("c-backend: vector clone requires owned native lowering".into());

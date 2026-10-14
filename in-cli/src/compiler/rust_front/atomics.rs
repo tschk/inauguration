@@ -71,7 +71,12 @@ fn typ(ty: &mut Typ, aliases: &HashMap<String, String>) {
     }
 }
 fn expr(value: &mut Expr, aliases: &HashMap<String, String>, own: &HashSet<String>) {
-    if let Expr::Closure {
+    if let Expr::Block { body, result } = value {
+        stmts(body, aliases, own);
+        if let Some(result) = result {
+            expr(result, aliases, own);
+        }
+    } else if let Expr::Closure {
         params, ret, body, ..
     } = value
     {

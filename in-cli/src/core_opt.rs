@@ -128,6 +128,12 @@ fn fn_bodies_mut(decls: &mut [Decl]) -> impl Iterator<Item = &mut Vec<Stmt>> {
 
 fn walk_expr<F: FnMut(&Expr)>(e: &Expr, f: &mut F) {
     f(e);
+    if let Expr::Block { body, .. } = e {
+        for stmt in body {
+            let mut stmt = stmt.clone();
+            map_stmt_mut(&mut stmt, &mut |expr| f(expr));
+        }
+    }
     crate::core_ir::for_each_expr_child(e, &mut |child| walk_expr(child, f));
 }
 
@@ -138,8 +144,10 @@ fn expr_has_call(e: &Expr) -> bool {
     let mut has = false;
     walk_expr(e, &mut |n| {
         // Cloning allocates; substitution must not duplicate its storage or evaluation.
-        if matches!(n, Expr::Call { .. })
-            || matches!(n, Expr::Unary {op, ..} if op == "vector-clone")
+        if matches!(
+            n,
+            Expr::Call { .. } | Expr::Block { .. } | Expr::Conditional { .. }
+        ) || matches!(n, Expr::Unary {op, ..} if op == "vector-clone")
         {
             has = true;
         }
@@ -149,6 +157,23 @@ fn expr_has_call(e: &Expr) -> bool {
 
 fn map_expr_mut<F: FnMut(&mut Expr)>(e: &mut Expr, f: &mut F) {
     match e {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            map_expr_mut(cond, f);
+            map_expr_mut(then_expr, f);
+            map_expr_mut(else_expr, f);
+        }
+        Expr::Block { body, result } => {
+            for stmt in body {
+                map_stmt_mut(stmt, f);
+            }
+            if let Some(result) = result {
+                map_expr_mut(result, f);
+            }
+        }
         Expr::Call { callee, args, .. } => {
             map_expr_mut(callee, f);
             for a in args.iter_mut() {
@@ -183,6 +208,10 @@ fn map_expr_mut<F: FnMut(&mut Expr)>(e: &mut Expr, f: &mut F) {
         _ => {}
     }
     f(e);
+}
+
+pub(crate) fn map_stmt_exprs_mut(stmt: &mut Stmt, rewrite: &mut impl FnMut(&mut Expr)) {
+    map_stmt_mut(stmt, rewrite);
 }
 
 fn map_stmt_mut<F: FnMut(&mut Expr)>(s: &mut Stmt, f: &mut F) {
@@ -255,6 +284,19 @@ fn map_stmt_mut<F: FnMut(&mut Expr)>(s: &mut Stmt, f: &mut F) {
 
 fn map_expr<F: FnMut(Expr) -> Expr + Copy>(e: Expr, f: &mut F) -> Expr {
     let mapped = match e {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => Expr::Conditional {
+            cond: Box::new(map_expr(*cond, f)),
+            then_expr: Box::new(map_expr(*then_expr, f)),
+            else_expr: Box::new(map_expr(*else_expr, f)),
+        },
+        Expr::Block { body, result } => Expr::Block {
+            body: body.into_iter().map(|s| map_stmt(s, f)).collect(),
+            result: result.map(|e| Box::new(map_expr(*e, f))),
+        },
         Expr::Call { callee, args, .. } => Expr::Call {
             callee: Box::new(map_expr(*callee, f)),
             args: args.into_iter().map(|a| map_expr(a, f)).collect(),
@@ -638,6 +680,21 @@ fn ptr_in_stmts(stmts: &[Stmt], out: &mut Vec<String>) {
 }
 fn ptr_in_expr(e: &Expr, out: &mut Vec<String>) {
     match e {
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            ptr_in_expr(cond, out);
+            ptr_in_expr(then_expr, out);
+            ptr_in_expr(else_expr, out);
+        }
+        Expr::Block { body, result } => {
+            ptr_in_stmts(body, out);
+            if let Some(result) = result {
+                ptr_in_expr(result, out);
+            }
+        }
         Expr::Call { callee, args, .. } => {
             if let Expr::Ident(name) = callee.as_ref() {
                 if matches!(name.as_str(), "invoke" | "invoke1" | "invoke2") {
@@ -702,6 +759,10 @@ fn fold_int_constants(op: &str, a: i64, b: i64) -> Option<Expr> {
 }
 
 fn simplify_binary_expr(original: Expr, op: &str, lhs: &Expr, rhs: &Expr) -> Expr {
+    // Absorbing identities must retain calls, mutation, and nonlocal block exits.
+    if expr_has_call(lhs) || expr_has_call(rhs) {
+        return original;
+    }
     if let (Expr::IntLit(a), Expr::IntLit(b)) = (lhs, rhs) {
         if let Some(folded) = fold_int_constants(op, *a, *b) {
             return folded;
@@ -1017,7 +1078,7 @@ fn collect_calls_in_expr(e: &Expr, out: &mut HashSet<String>) {
                 out.insert(name.clone());
             }
         }
-        if let Expr::Closure { body, .. } = e {
+        if let Expr::Closure { body, .. } | Expr::Block { body, .. } = e {
             for s in body {
                 collect_calls_in_stmt(s, out);
             }
@@ -1295,6 +1356,14 @@ fn is_propagatable_const(e: &Expr) -> bool {
 }
 
 fn collect_assigned_names(s: &Stmt, assigned: &mut HashSet<String>) {
+    let mut stmt = s.clone();
+    map_stmt_mut(&mut stmt, &mut |expr| {
+        if let Expr::Block { body, .. } = expr {
+            for inner in body {
+                collect_assigned_names(inner, assigned);
+            }
+        }
+    });
     match s {
         Stmt::Assign(n, _) => {
             assigned.insert(n.clone());
@@ -1497,6 +1566,9 @@ fn collect_used(stmts: &[Stmt], out: &mut HashSet<String>) {
 
 fn collect_used_in_expr(e: &Expr, out: &mut HashSet<String>) {
     walk_expr(e, &mut |e| {
+        if let Expr::Block { body, .. } = e {
+            collect_used(body, out);
+        }
         if let Expr::Ident(n) = e {
             out.insert(n.clone());
         }
@@ -2048,7 +2120,9 @@ fn harden_mba_arithmetic(decls: &mut [Decl]) {
         let unshadowed = match body.as_slice() {
             [Stmt::Return(Some(expr))] => {
                 let mut closure = false;
-                walk_expr(expr, &mut |e| closure |= matches!(e, Expr::Closure { .. }));
+                walk_expr(expr, &mut |e| {
+                    closure |= matches!(e, Expr::Closure { .. } | Expr::Block { .. })
+                });
                 !closure
             }
             _ => false,
@@ -2256,6 +2330,14 @@ fn harden_junk_stmts(decls: &mut [Decl]) {
 /// flow or redirect loop jumps into the synthetic dispatcher.
 fn stmts_forbid_cfg_dispatch(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
+        let mut structured = false;
+        let mut copied = stmt.clone();
+        map_stmt_mut(&mut copied, &mut |expr| {
+            structured |= matches!(expr, Expr::Block { .. })
+        });
+        if structured {
+            return true;
+        }
         match stmt {
             Stmt::Loop { .. }
             | Stmt::Break
@@ -2465,6 +2547,21 @@ fn rename_calls_in_expr(e: &mut Expr, rename: &HashMap<String, String>) {
                 rename_calls_in_expr(a, rename);
             }
         }
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            rename_calls_in_expr(cond, rename);
+            rename_calls_in_expr(then_expr, rename);
+            rename_calls_in_expr(else_expr, rename);
+        }
+        Expr::Block { body, result } => {
+            rename_calls_in_stmts(body, rename);
+            if let Some(result) = result {
+                rename_calls_in_expr(result, rename);
+            }
+        }
         Expr::Closure { body, .. } => rename_calls_in_stmts(body, rename),
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => {}
     }
@@ -2473,6 +2570,124 @@ fn rename_calls_in_expr(e: &mut Expr, rename: &HashMap<String, String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hardened_block_array_keeps_local_type_and_result_scope() {
+        let mut decls = vec![Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![
+                Stmt::Let(
+                    "values".into(),
+                    Some(Typ::Array(Box::new(Typ::Int))),
+                    Expr::Block {
+                        body: vec![Stmt::Let("x".into(), Some(Typ::Int), Expr::IntLit(20))],
+                        result: Some(Box::new(Expr::ArrayLit(vec![
+                            Expr::Ident("x".into()),
+                            Expr::IntLit(22),
+                        ]))),
+                    },
+                ),
+                Stmt::Return(Some(Expr::Index {
+                    base: Box::new(Expr::Ident("values".into())),
+                    index: Box::new(Expr::IntLit(0)),
+                })),
+            ],
+        }];
+        optimize_with_profile(&mut decls, Some("main"), EmitProfile::Harden);
+        let mut found = false;
+        map_decl_exprs_mut(&mut decls, &mut |expr| {
+            if let Expr::Block {
+                body,
+                result: Some(result),
+            } = expr
+            {
+                let [Stmt::Let(local, Some(Typ::Int), value)] = body.as_slice() else {
+                    panic!("block local type lost: {body:?}")
+                };
+                assert!(matches!(value, Expr::Binary { .. }));
+                let Expr::ArrayLit(items) = result.as_ref() else {
+                    panic!("block result shape lost")
+                };
+                assert_eq!(&items[0], &Expr::Ident(local.clone()));
+                assert!(matches!(&items[1], Expr::Binary { .. }));
+                found = true;
+            }
+        });
+        assert!(found);
+    }
+
+    #[test]
+    fn structured_exits_survive_absorbing_identities_and_unused_bindings() {
+        let exit = Expr::Block {
+            body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+            result: Some(Box::new(Expr::IntLit(7))),
+        };
+        for op in ["*", "&", "|", "&&", "||"] {
+            let rhs = if op == "|" {
+                Expr::IntLit(-1)
+            } else if op == "||" {
+                Expr::BoolLit(true)
+            } else if op == "&&" {
+                Expr::BoolLit(false)
+            } else {
+                Expr::IntLit(0)
+            };
+            let original = bin_expr(op, exit.clone(), rhs.clone());
+            assert_eq!(
+                simplify_binary_expr(original.clone(), op, &exit, &rhs),
+                original
+            );
+        }
+        let mut body = vec![
+            Stmt::Let("unused".into(), Some(Typ::Int), exit),
+            Stmt::Return(Some(Expr::IntLit(0))),
+        ];
+        dce_body(&mut body);
+        assert!(matches!(
+            body.first(),
+            Some(Stmt::Let(_, _, Expr::Block { .. }))
+        ));
+        assert!(fold_body_to_expr(&body, &[]).is_none());
+        assert!(stmts_forbid_cfg_dispatch(&body));
+    }
+
+    #[test]
+    fn structured_values_keep_outer_mutations_and_live_calls() {
+        let mut body = vec![
+            Stmt::Let("x".into(), Some(Typ::Int), Expr::IntLit(20)),
+            Stmt::Let(
+                "unused".into(),
+                Some(Typ::Int),
+                Expr::Block {
+                    body: vec![
+                        Stmt::Assign("x".into(), Expr::IntLit(42)),
+                        Stmt::Expr(Expr::Call {
+                            callee: Box::new(Expr::Ident("helper".into())),
+                            args: vec![],
+                        }),
+                    ],
+                    result: Some(Box::new(Expr::IntLit(0))),
+                },
+            ),
+            Stmt::Return(Some(Expr::Ident("x".into()))),
+        ];
+        propagate_in_body(&mut body);
+        dce_body(&mut body);
+        assert!(matches!(body.last(), Some(Stmt::Return(Some(Expr::Ident(name)))) if name == "x"));
+        assert!(
+            body.iter()
+                .any(|stmt| matches!(stmt, Stmt::Let(_, _, Expr::Block { .. })))
+        );
+        let mut calls = HashSet::new();
+        for stmt in &body {
+            collect_calls_in_stmt(stmt, &mut calls);
+        }
+        assert!(calls.contains("helper"));
+    }
+
     use crate::core_ir::{CatchArm, Decl, Expr, LoopKind, Stmt, Typ};
     use crate::emit_profile::EmitProfile;
 

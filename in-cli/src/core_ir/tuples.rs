@@ -115,6 +115,7 @@ pub(crate) fn register(module: &mut UnifiedModule) {
     fn expr(value: &Expr, shapes: &mut BTreeMap<String, Vec<(String, Typ)>>) {
         match value {
             Expr::StructInit { name, .. } => add(&Typ::Named(name.clone()), shapes),
+            Expr::Block { body: stmts, .. } => body(stmts, shapes),
             Expr::Closure {
                 params,
                 ret,
@@ -251,6 +252,44 @@ pub(crate) fn register(module: &mut UnifiedModule) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expression_blocks_register_body_types_and_result_shapes() {
+        let local = typ(&[Typ::Int, Typ::Bool]);
+        let result = typ(&[Typ::Float, Typ::String]);
+        let Typ::Named(result_name) = &result else {
+            panic!()
+        };
+        let mut module = UnifiedModule::new(vec![Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Void,
+            type_params: vec![],
+            body: vec![Stmt::Expr(Expr::Block {
+                body: vec![Stmt::Let(
+                    "local".into(),
+                    Some(local.clone()),
+                    Expr::IntLit(0),
+                )],
+                result: Some(Box::new(Expr::StructInit {
+                    name: result_name.clone(),
+                    fields: vec![],
+                })),
+            })],
+        }]);
+        register(&mut module);
+        for expected in [local, result] {
+            let Typ::Named(expected) = expected else {
+                panic!()
+            };
+            assert!(
+                module
+                    .decls
+                    .iter()
+                    .any(|decl| matches!(decl,Decl::Struct {name,..} if name==&expected))
+            );
+        }
+    }
+
     #[test]
     fn registration_is_idempotent_and_conflicting_names_fail_verification() {
         let typ = typ(&[Typ::Int, Typ::Bool]);
