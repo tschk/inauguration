@@ -517,13 +517,7 @@ fn check_stmt(
         Stmt::IndexAssign {
             base, index, value, ..
         } => {
-            if let Expr::Ident(name) = base
-                && !env.contains_key(name)
-                && facts
-                    .globals
-                    .get(name.as_str())
-                    .is_some_and(|global| !global.mutable)
-            {
+            if let Some(name) = immutable_index_root(base, facts, env) {
                 return Err((
                     "immutable-global".into(),
                     format!("cannot mutate constant global array `{name}` in `{fn_name}`"),
@@ -713,6 +707,26 @@ fn check_expr(
     call_edges: &mut Vec<(String, String)>,
 ) -> Result<(), (String, String)> {
     check_expr_with_array_borrow(fn_name, expr, facts, env, call_edges, false)
+}
+
+fn immutable_index_root<'a>(
+    expr: &'a Expr,
+    facts: &ModuleFacts<'_>,
+    env: &HashMap<String, Typ>,
+) -> Option<&'a str> {
+    let mut root = expr;
+    while let Expr::Index { base, .. } = root {
+        root = base;
+    }
+    let Expr::Ident(name) = root else {
+        return None;
+    };
+    (!env.contains_key(name)
+        && facts
+            .globals
+            .get(name.as_str())
+            .is_some_and(|global| !global.mutable))
+    .then_some(name.as_str())
 }
 
 fn check_expr_with_array_borrow(
@@ -950,6 +964,21 @@ fn check_expr_with_array_borrow(
             Ok(())
         }
         Expr::Index { base, index, .. } => {
+            if !array_borrow
+                && matches!(
+                    expr_type(expr, facts, env).map(|typ| typ.canonical()),
+                    Some(Typ::Array(_) | Typ::Vector(_))
+                )
+                && let Some(name) = immutable_index_root(expr, facts, env)
+            {
+                return Err((
+                    "immutable-global-reference".into(),
+                    format!(
+                        "constant global array `{name}` row cannot escape as a mutable reference in `{fn_name}`"
+                    ),
+                ));
+            }
+
             check_expr_with_array_borrow(fn_name, base, facts, env, call_edges, true)?;
             check_expr(fn_name, index, facts, env, call_edges)?;
             require_type(fn_name, "array index", &Typ::Int, index, facts, env)?;
@@ -2207,6 +2236,81 @@ mod tests {
 
         assert!(!report.ok);
         assert_eq!(report.reason_code.as_deref(), Some("type-mismatch"));
+    }
+
+    #[test]
+    fn immutable_nested_array_rows_cannot_escape_or_be_written() {
+        for body in [
+            "let row = items[0]; row[0]=0; return 42;",
+            "items[0][0]=0; return 42;",
+            "return accept(items[0]);",
+        ] {
+            let source = format!(
+                "var items: [[Int]] = [[20,22]];\nfn accept(row: [Int]) -> Int {{ return row[0]; }}\nfn main() -> Int {{ {body} }}"
+            );
+            let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            for decl in &mut module.decls {
+                if let Decl::Global { mutable, .. } = decl {
+                    *mutable = false;
+                }
+            }
+            let report = verify_for_entry(&module, "main");
+            assert!(!report.ok, "{source}: {report:?}");
+            assert!(
+                matches!(
+                    report.reason_code.as_deref(),
+                    Some("immutable-global" | "immutable-global-reference")
+                ),
+                "{source}: {report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_static_array_reads_preserve_borrow_and_copy_boundaries() {
+        for (body, valid) in [
+            ("return items[0][0]+items[0][1];", true),
+            ("return array_len(items[0]);", true),
+            (
+                "let items = [[42]]; items[0][0]=42; return items[0][0];",
+                true,
+            ),
+            ("let row = items[0]; row[0]=42; return row[0];", false),
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(&format!(
+                "var items: [[Int]] = [[20,22]];\nfn main() -> Int {{ {body} }}"
+            ))
+            .unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            for decl in &mut module.decls {
+                if let Decl::Global { mutable, .. } = decl {
+                    *mutable = false;
+                }
+            }
+            assert_eq!(verify_for_entry(&module, "main").ok, valid, "{body}");
+        }
+        for (body, valid) in [
+            ("unsafe { return ITEMS[0][0]+ITEMS[0][1]; }", true),
+            ("unsafe { return ITEMS[0].len() as i64; }", true),
+            (
+                "unsafe { let mut row = ITEMS[0]; row[0]=0; return ITEMS[0][0]; }",
+                false,
+            ),
+        ] {
+            let module = crate::compiler::rust_front::parse_rust_source(&format!(
+                "static mut ITEMS: [[i64;2];1]=[[20,22]]; fn main() -> i64 {{ {body} }}"
+            ))
+            .unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &module);
+            crate::lower_core::desugar_module(&mut module);
+            assert_eq!(
+                verify_for_entry(&module, "main").ok,
+                valid,
+                "{body}: {module:?}"
+            );
+        }
     }
 
     #[test]

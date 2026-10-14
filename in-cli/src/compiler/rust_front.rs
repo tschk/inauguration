@@ -97,11 +97,11 @@ fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
         .filter_map(|decl| match decl {
             Decl::Global {
                 name,
-                typ: Typ::Array(_),
+                typ: typ @ Typ::Array(_),
                 mutable,
                 constant_value: false,
                 ..
-            } => Some((name.clone(), *mutable)),
+            } => Some((name.clone(), (*mutable, typ.clone()))),
             _ => None,
         })
         .collect();
@@ -116,16 +116,30 @@ fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
             _ => None,
         })
         .collect();
+    fn static_index_type<'a>(
+        expr: &Expr,
+        arrays: &'a HashMap<String, (bool, Typ)>,
+    ) -> Option<&'a Typ> {
+        match expr {
+            Expr::Ident(name) => arrays.get(name).map(|(_, typ)| typ),
+            Expr::Index { base, .. } => match static_index_type(base, arrays)? {
+                Typ::Array(elem) => Some(elem),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
     fn expr_uses_value(
         expr: &Expr,
-        arrays: &HashMap<String, bool>,
+        arrays: &HashMap<String, (bool, Typ)>,
         functions: &HashSet<String>,
         borrow: bool,
     ) -> bool {
         match expr {
             Expr::Ident(name) => !borrow && arrays.contains_key(name),
             Expr::Index { base, index } => {
-                expr_uses_value(base, arrays, functions, true)
+                (!borrow && matches!(static_index_type(expr, arrays), Some(Typ::Array(_))))
+                    || expr_uses_value(base, arrays, functions, true)
                     || expr_uses_value(index, arrays, functions, false)
             }
             Expr::Call { callee, args } => {
@@ -146,7 +160,7 @@ fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
                     ) || name.ends_with("::is_empty"));
                 let store = name.starts_with("index-assign-") || name.starts_with("index-modify-");
                 if store
-                    && matches!(args.first(), Some(Expr::Ident(name)) if arrays.get(name) == Some(&false))
+                    && matches!(args.first(), Some(Expr::Ident(name)) if arrays.get(name).is_some_and(|(mutable, _)| !mutable))
                 {
                     return true;
                 }
@@ -166,7 +180,7 @@ fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
     }
     fn body_uses_value(
         body: &[Stmt],
-        arrays: &HashMap<String, bool>,
+        arrays: &HashMap<String, (bool, Typ)>,
         functions: &HashSet<String>,
     ) -> bool {
         body.iter().any(|stmt| match stmt {
