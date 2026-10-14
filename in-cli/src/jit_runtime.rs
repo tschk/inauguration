@@ -4327,6 +4327,37 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn closure_match_and_catch_scopes_preserve_binding_types() {
+        for source in [
+            "fn main()->i64 { let answer=||{ match 42 { value=>value } }; answer() }",
+            "fn main()->i64 { let answer=||{ match 20.5 { value=>value+21.5 } }; answer() as i64 }",
+            "fn main()->i64 { let answer=||{ match true { true=>42, false=>0 } }; answer() }",
+            "fn main()->i64 { let answer=||{ match 20.5 { value=>{ let f=|x|x+x; f(value)+1.0 } } }; answer() as i64 }",
+            "fn fail()->Result<i64,i64> { Err(1) } fn main()->i64 { let answer=||{ if let Err(error)=fail() { let f=|x|x+2; return f(40); } return 0; }; answer() }",
+            "fn main()->i64 { let value=40; let answer=||{ match 42 { value=>value } }; answer() }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{source}: {report:?}; {module:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn closure_parameters_infer_monomorphic_call_types() {
         for source in [
             "fn main()->i64 { let f=|x|x+2; f(40) }",

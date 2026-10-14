@@ -650,14 +650,13 @@ fn check_stmt(
             check_expr(fn_name, scrutinee, facts, env, call_edges)?;
             for arm in arms {
                 let mut arm_env = env.clone();
-                if let Ok(crate::core_ir::MatchPattern::IdentPat(name)) =
-                    crate::core_ir::MatchPattern::parse(&arm.pattern)
-                {
-                    arm_env.insert(
-                        name,
-                        expr_type(scrutinee, facts, env).unwrap_or(Typ::Named("Any".into())),
-                    );
-                }
+                let pattern = crate::core_ir::MatchPattern::parse(&arm.pattern)
+                    .map_err(|error| ("invalid-match-pattern".into(), error))?;
+                let typ = expr_type(scrutinee, facts, env).unwrap_or(Typ::Named("Any".into()));
+                let bindings = pattern
+                    .typed_bindings(&typ, &|name| facts.structs.get(name).copied())
+                    .map_err(|error| ("invalid-match-pattern".into(), error))?;
+                arm_env.extend(bindings);
                 if let Some(guard) = &arm.guard {
                     check_expr(fn_name, guard, facts, &arm_env, call_edges)?;
                     require_type(fn_name, "match guard", &Typ::Bool, guard, facts, &arm_env)?;

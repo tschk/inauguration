@@ -1451,7 +1451,7 @@ fn all_paths_return(stmts: &[Stmt]) -> bool {
 
 fn stmt_ensures_return(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Return(_) => true,
+        Stmt::Return(_) | Stmt::Throw(_) => true,
         Stmt::If {
             cond: Expr::BoolLit(true),
             then_body,
@@ -1764,7 +1764,6 @@ fn lower_return_expr(
                 call.args.first().expect("one Err argument"),
                 local_types,
             )));
-            out.push(Stmt::Return(None));
         }
         _ => out.push(Stmt::Return(Some(lower_expr_with_types(expr, local_types)))),
     }
@@ -2334,6 +2333,15 @@ fn lower_expr_with_types_inner(
 mod tests {
     use super::*;
     use crate::boundary_ir::{BoundaryRepr, BoundaryTransfer};
+
+    #[test]
+    fn terminal_result_errors_do_not_add_void_returns() {
+        let module = parse_rust_source("fn fail()->Result<i64,i64> { Err(1) }").unwrap();
+        let Decl::Function { body, .. } = &module.decls[0] else {
+            unreachable!()
+        };
+        assert!(matches!(body.as_slice(), [Stmt::Throw(Expr::IntLit(1))]));
+    }
 
     #[test]
     fn nominal_types_preserve_paths_and_generic_arguments() {

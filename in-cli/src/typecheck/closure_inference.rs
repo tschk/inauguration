@@ -211,12 +211,43 @@ fn body_constraints(
                 }
                 body_constraints(checker, body, facts, generated, &mut env.clone(), changed);
             }
-            // shortcut: infer calls in match/catch scopes after their binding environments are typed.
-            Stmt::Match { scrutinee, .. } => {
-                expression_constraints(checker, scrutinee, facts, generated, env, changed)
+            Stmt::Match { scrutinee, arms } => {
+                expression_constraints(checker, scrutinee, facts, generated, env, changed);
+                let Some(typ) = argument_type(checker, scrutinee, facts, env) else {
+                    continue;
+                };
+                for arm in arms {
+                    if let Some(mut inner) =
+                        checker.pattern_environment(&arm.pattern, &typ, facts, env)
+                    {
+                        if let Some(guard) = &arm.guard {
+                            expression_constraints(
+                                checker, guard, facts, generated, &inner, changed,
+                            );
+                        }
+                        body_constraints(checker, &arm.body, facts, generated, &mut inner, changed);
+                    }
+                }
             }
-            Stmt::Try { body, .. } => {
-                body_constraints(checker, body, facts, generated, &mut env.clone(), changed)
+            Stmt::Try { body, catches } => {
+                body_constraints(checker, body, facts, generated, &mut env.clone(), changed);
+                for catch in catches {
+                    if let Some(mut inner) = checker.pattern_environment(
+                        &catch.pattern,
+                        &Typ::Named("Any".into()),
+                        facts,
+                        env,
+                    ) {
+                        body_constraints(
+                            checker,
+                            &catch.body,
+                            facts,
+                            generated,
+                            &mut inner,
+                            changed,
+                        );
+                    }
+                }
             }
             _ => {}
         }

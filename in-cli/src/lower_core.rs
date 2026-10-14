@@ -637,11 +637,11 @@ fn desugar_closures_in_body(
     }
 }
 
-fn collect_declared_vars_in_body<'a>(body: &'a [Stmt], out: &mut HashSet<&'a str>) {
+fn collect_declared_vars_in_body(body: &[Stmt], out: &mut HashSet<String>) {
     for stmt in body {
         match stmt {
             Stmt::Let(name, _, _) => {
-                out.insert(name.as_str());
+                out.insert(name.clone());
             }
             Stmt::If {
                 then_body,
@@ -656,12 +656,14 @@ fn collect_declared_vars_in_body<'a>(body: &'a [Stmt], out: &mut HashSet<&'a str
             }
             Stmt::Match { arms, .. } => {
                 for arm in arms {
+                    crate::core_bindings::reserve_pattern(&arm.pattern, out);
                     collect_declared_vars_in_body(&arm.body, out);
                 }
             }
             Stmt::Try { body, catches, .. } => {
                 collect_declared_vars_in_body(body, out);
                 for catch in catches {
+                    crate::core_bindings::reserve_pattern(&catch.pattern, out);
                     collect_declared_vars_in_body(&catch.body, out);
                 }
             }
@@ -674,7 +676,7 @@ fn collect_free_vars(body: &[Stmt], params: &[(String, Typ)]) -> Vec<String> {
     let mut reads = HashSet::new();
     collect_body_reads(body, &mut reads);
 
-    let mut declared: HashSet<&str> = HashSet::new();
+    let mut declared: HashSet<String> = HashSet::new();
     collect_declared_vars_in_body(body, &mut declared);
 
     let mut param_refs = HashSet::with_capacity(params.len());
@@ -1881,6 +1883,16 @@ fn lower_to_textual_sil_inner(module: UnifiedModule) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unknown_catch_payloads_do_not_infer_closure_parameters() {
+        let parsed=crate::compiler::rust_front::parse_rust_source("fn fail()->Result<i64,i64> { Err(42) } fn main()->i64 { let answer=||{ if let Err(error)=fail() { let f=|x|x; return f(error); } return 0; }; answer() }").unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        super::desugar_module(&mut module);
+        assert!(!crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        assert!(module.decls.iter().any(|decl| matches!(decl,crate::core_ir::Decl::Function{params,..} if params.iter().any(|(_,typ)|matches!(typ,crate::core_ir::Typ::Generic(_))))));
+    }
+
     #[test]
     fn named_generic_closure_types_are_not_erased_by_call_inference() {
         use crate::core_ir::{Decl, Expr, Stmt, Typ, UnifiedModule};

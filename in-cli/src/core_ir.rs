@@ -489,6 +489,72 @@ impl MatchPattern {
     }
 }
 
+impl MatchPattern {
+    pub(crate) fn typed_bindings<'a>(
+        &self,
+        typ: &Typ,
+        schema: &impl Fn(&str) -> Option<&'a [(String, Typ)]>,
+    ) -> Result<Vec<(String, Typ)>, String> {
+        let mut bindings = Vec::new();
+        match self {
+            Self::IdentPat(name) => bindings.push((name.clone(), typ.clone())),
+            Self::StructPat { name, fields } => {
+                if typ.canonical() != Typ::Named(name.clone()) {
+                    return Err(format!("struct pattern `{name}` does not match {typ:?}"));
+                }
+                let fields_schema =
+                    schema(name).ok_or_else(|| format!("unknown pattern struct `{name}`"))?;
+                for (field, pattern) in fields {
+                    let field_type = fields_schema
+                        .iter()
+                        .find(|(name, _)| name == field)
+                        .map(|(_, typ)| typ)
+                        .ok_or_else(|| format!("unknown pattern field `{name}.{field}`"))?;
+                    bindings.extend(pattern.typed_bindings(field_type, schema)?);
+                }
+            }
+            Self::TuplePat(items) | Self::ArrayPat(items) => {
+                for (index, pattern) in items.iter().enumerate() {
+                    let item_type = match typ {
+                        Typ::Array(item) | Typ::Vector(item) => item.as_ref(),
+                        Typ::Named(name) if matches!(self, Self::TuplePat(_)) => schema(name)
+                            .and_then(|fields| {
+                                fields.iter().find(|(name, _)| name == &format!("_{index}"))
+                            })
+                            .map(|(_, typ)| typ)
+                            .ok_or_else(|| format!("unknown tuple pattern field {index}"))?,
+                        _ => return Err(format!("sequence pattern does not match {typ:?}")),
+                    };
+                    bindings.extend(pattern.typed_bindings(item_type, schema)?);
+                }
+            }
+            _ => {}
+        }
+        Ok(bindings)
+    }
+
+    pub(crate) fn irrefutable<'a>(
+        &self,
+        typ: &Typ,
+        schema: &impl Fn(&str) -> Option<&'a [(String, Typ)]>,
+    ) -> bool {
+        match self {
+            Self::WildPat | Self::IdentPat(_) | Self::RestPat => true,
+            Self::StructPat { name, fields } if typ.canonical() == Typ::Named(name.clone()) => {
+                schema(name).is_some_and(|declared| {
+                    fields.iter().all(|(field, pattern)| {
+                        declared
+                            .iter()
+                            .find(|(name, _)| name == field)
+                            .is_some_and(|(_, typ)| pattern.irrefutable(typ, schema))
+                    })
+                })
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchArm {
     pub pattern: String,
@@ -729,6 +795,36 @@ pub(crate) fn for_each_expr_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn typed_pattern_bindings_preserve_fields_and_reject_wrong_shapes() {
+        let fields = vec![("value".to_string(), Typ::Float)];
+        let schema = |name: &str| (name == "Point").then_some(fields.as_slice());
+        let pattern = MatchPattern::parse("Point { value: item }").unwrap();
+        assert_eq!(
+            pattern
+                .typed_bindings(&Typ::Named("Point".into()), &schema)
+                .unwrap(),
+            vec![("item".into(), Typ::Float)]
+        );
+        assert!(pattern.irrefutable(&Typ::Named("Point".into()), &schema));
+        assert!(pattern.typed_bindings(&Typ::Int, &schema).is_err());
+        assert!(
+            MatchPattern::parse("Point { missing: item }")
+                .unwrap()
+                .typed_bindings(&Typ::Named("Point".into()), &schema)
+                .is_err()
+        );
+        let array = MatchPattern::parse("[a, b]").unwrap();
+        assert_eq!(
+            array
+                .typed_bindings(&Typ::Array(Box::new(Typ::Bool)), &schema)
+                .unwrap(),
+            vec![("a".into(), Typ::Bool), ("b".into(), Typ::Bool)]
+        );
+        assert!(!array.irrefutable(&Typ::Array(Box::new(Typ::Bool)), &schema));
+        assert!(array.typed_bindings(&Typ::Int, &schema).is_err());
+    }
+
     use super::*;
 
     // ─── Span ───────────────────────────────────────────────────────────

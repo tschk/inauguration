@@ -265,6 +265,22 @@ impl TypeChecker {
         }
     }
 
+    fn pattern_environment(
+        &self,
+        pattern: &str,
+        typ: &Typ,
+        facts: &Facts,
+        env: &HashMap<String, Typ>,
+    ) -> Option<HashMap<String, Typ>> {
+        let pattern = MatchPattern::parse(pattern).ok()?;
+        let bindings = pattern
+            .typed_bindings(typ, &|name| facts.structs.get(name).map(Vec::as_slice))
+            .ok()?;
+        let mut inner = env.clone();
+        inner.extend(bindings);
+        Some(inner)
+    }
+
     fn infer_closure_return(
         &self,
         body: &[Stmt],
@@ -316,8 +332,46 @@ impl TypeChecker {
                     Stmt::Loop { body, .. } => {
                         walk(checker, body, facts, &mut env.clone(), returns)?;
                     }
-                    // shortcut: infer match/catch returns when their binding types are available.
-                    Stmt::Match { .. } | Stmt::Try { .. } | Stmt::Propagate => return None,
+                    Stmt::Match { scrutinee, arms } => {
+                        let typ = closure_inference::argument_type(checker, scrutinee, facts, env)?;
+                        let schema = |name: &str| facts.structs.get(name).map(Vec::as_slice);
+                        let mut exhaustive = false;
+                        let mut arm_falls = false;
+                        for arm in arms {
+                            let pattern = MatchPattern::parse(&arm.pattern).ok()?;
+                            if arm.guard.is_none() && pattern.irrefutable(&typ, &schema) {
+                                exhaustive = true;
+                            }
+                            let mut inner =
+                                checker.pattern_environment(&arm.pattern, &typ, facts, env)?;
+                            arm_falls |= walk(checker, &arm.body, facts, &mut inner, returns)?;
+                        }
+                        if typ == Typ::Bool
+                            && [true, false].iter().all(|value| {
+                                arms.iter().any(|arm| {
+                                    arm.guard.is_none()
+                                        && MatchPattern::parse(&arm.pattern).ok()
+                                            == Some(MatchPattern::BoolPat(*value))
+                                })
+                            })
+                        {
+                            exhaustive = true;
+                        }
+                        falls = !exhaustive || arm_falls;
+                    }
+                    Stmt::Try { body, catches } => {
+                        falls = walk(checker, body, facts, &mut env.clone(), returns)?;
+                        for catch in catches {
+                            let mut inner = checker.pattern_environment(
+                                &catch.pattern,
+                                &Typ::Named("Any".into()),
+                                facts,
+                                env,
+                            )?;
+                            falls |= walk(checker, &catch.body, facts, &mut inner, returns)?;
+                        }
+                    }
+                    Stmt::Propagate => return None,
                     Stmt::Throw(_) => falls = false,
                     Stmt::Break | Stmt::Continue => break,
                     _ => {}
@@ -746,21 +800,15 @@ impl TypeChecker {
                 }
                 Stmt::Match { scrutinee, arms } => {
                     self.resolve_typed_expr(scrutinee, facts, env, promote_c_bool);
+                    let typ = self
+                        .expr_type(scrutinee, facts, env)
+                        .unwrap_or(Typ::Named("Any".into()));
                     for arm in arms {
-                        let mut inner = env.clone();
-                        if let Ok(pattern) = MatchPattern::parse(&arm.pattern) {
-                            self.check_match_pattern(
-                                "",
-                                &pattern,
-                                facts,
-                                &mut inner,
-                                &mut Vec::new(),
-                            );
-                            if let MatchPattern::IdentPat(name) = pattern
-                                && let Some(typ) = self.expr_type(scrutinee, facts, env)
-                            {
-                                inner.insert(name, typ);
-                            }
+                        let mut inner = self
+                            .pattern_environment(&arm.pattern, &typ, facts, env)
+                            .unwrap_or_else(|| env.clone());
+                        if let Some(guard) = &mut arm.guard {
+                            self.resolve_typed_expr(guard, facts, &inner, promote_c_bool);
                         }
                         self.resolve_typed_body(
                             &mut arm.body,
@@ -780,16 +828,14 @@ impl TypeChecker {
                         promote_c_bool,
                     );
                     for catch in catches {
-                        let mut inner = env.clone();
-                        if let Ok(pattern) = MatchPattern::parse(&catch.pattern) {
-                            self.check_match_pattern(
-                                "",
-                                &pattern,
+                        let mut inner = self
+                            .pattern_environment(
+                                &catch.pattern,
+                                &Typ::Named("Any".into()),
                                 facts,
-                                &mut inner,
-                                &mut Vec::new(),
-                            );
-                        }
+                                env,
+                            )
+                            .unwrap_or_else(|| env.clone());
                         self.resolve_typed_body(
                             &mut catch.body,
                             facts,
