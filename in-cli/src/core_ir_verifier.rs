@@ -856,6 +856,20 @@ fn check_expr(
         }
         Expr::Field { base, name, .. } => {
             check_expr(fn_name, base, facts, env, call_edges)?;
+            if let Some(typ) = expr_type(base, facts, env)
+                && matches!(
+                    typ.canonical(),
+                    Typ::Int | Typ::Float | Typ::Bool | Typ::String | Typ::Void
+                )
+            {
+                return Err((
+                    "invalid-field-base".into(),
+                    format!(
+                        "field `{name}` in `{fn_name}` requires an object, got {}",
+                        type_name(&typ)
+                    ),
+                ));
+            }
             if let Some(Typ::Named(struct_name)) = expr_type(base, facts, env)
                 && let Some(schema) = facts.structs.get(struct_name.as_str())
                 && !schema.iter().any(|(field, _)| field == name)
@@ -1288,6 +1302,65 @@ mod tests {
             entry: None,
             require_entry: false,
         }
+    }
+
+    #[test]
+    fn primitive_words_cannot_be_field_bases() {
+        for (typ, value) in [
+            (Typ::Int, Expr::IntLit(0)),
+            (Typ::Named("i64".into()), Expr::IntLit(0)),
+            (Typ::Float, Expr::FloatLit(crate::core_ir::FloatVal(1.0))),
+            (Typ::Bool, Expr::BoolLit(false)),
+            (Typ::String, Expr::StringLit("text".into())),
+        ] {
+            for write in [false, true] {
+                let access = if write {
+                    Stmt::FieldAssign {
+                        base: Expr::Ident("value".into()),
+                        name: "missing".into(),
+                        value: Expr::IntLit(42),
+                    }
+                } else {
+                    Stmt::Expr(Expr::Field {
+                        base: Box::new(Expr::Ident("value".into())),
+                        name: "missing".into(),
+                    })
+                };
+                let module = module(vec![function(
+                    "main",
+                    vec![
+                        Stmt::Let("value".into(), Some(typ.clone()), value.clone()),
+                        access,
+                    ],
+                )]);
+                let report = verify_for_entry(&module, "main");
+                assert_eq!(
+                    report.reason_code.as_deref(),
+                    Some("invalid-field-base"),
+                    "{typ:?} write={write}: {report:?}"
+                );
+                assert!(
+                    crate::typecheck::TypeChecker::new()
+                        .check_module(&module)
+                        .is_err()
+                );
+            }
+        }
+        let module = module(vec![function_with_params(
+            "main",
+            vec![("handle".into(), Typ::Named("ForeignHandle".into()))],
+            Typ::Void,
+            vec![Stmt::Expr(Expr::Field {
+                base: Box::new(Expr::Ident("handle".into())),
+                name: "member".into(),
+            })],
+        )]);
+        assert!(verify_for_entry(&module, "main").ok);
+        assert!(
+            crate::typecheck::TypeChecker::new()
+                .check_module(&module)
+                .is_ok()
+        );
     }
 
     #[test]

@@ -1171,6 +1171,19 @@ impl TypeChecker {
             },
             Expr::Field { base, name, .. } => {
                 self.check_expr(fn_name, base, facts, env, errors);
+                if let Some(typ) = self.expr_type(base, facts, env)
+                    && matches!(
+                        typ.canonical(),
+                        Typ::Int | Typ::Float | Typ::Bool | Typ::String | Typ::Void
+                    )
+                {
+                    errors.push(TypeError::TypeMismatch {
+                        context: format!("field `{name}` base in `{fn_name}`"),
+                        expected: Typ::Named("object".into()),
+                        got: typ,
+                    });
+                    return;
+                }
                 if let Some(base_typ) = self.expr_type(base, facts, env)
                     && let Typ::Named(struct_name) = &base_typ
                     && let Some(schema) = facts.structs.get(struct_name)

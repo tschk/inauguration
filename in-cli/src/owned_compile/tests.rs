@@ -41,6 +41,33 @@ fn default_request(
 }
 
 #[test]
+fn owned_compile_rejects_primitive_field_read_and_write() {
+    for source in [
+        "fn main() -> i64 { let mut value: i64 = 0; value.missing = 42; return value; }",
+        "fn main() -> i64 { let value: i64 = 42; return value.missing; }",
+        "fn value() -> f64 { return 42.0; } fn main() -> i64 { value().missing = 0; return 42; }",
+        "struct Point { x: i64 } fn main() -> i64 { let mut point: Point = Point { x: 0 }; point.x.missing = 42; return point.x; }",
+    ] {
+        let path = temp_path("primitive-field.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        fs::remove_file(path).unwrap();
+        assert!(!report.success, "{report:?}: {source}");
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("verify-invalid-field-base"),
+            "{report:?}: {source}"
+        );
+        assert!(report.eval_result.is_none());
+    }
+}
+
+#[test]
 fn owned_compile_rejects_unknown_field_write_before_execution() {
     let path = temp_path("unknown-field.rs");
     fs::write(&path, "struct Point { x: i64 } fn main() -> i64 { let mut point: Point = Point { x: 0 }; point.missing = 42; return 42; }").unwrap();
