@@ -253,6 +253,37 @@ impl TypeChecker {
             });
         }
         if let Expr::Call { callee, args } = expr
+            && let Expr::Ident(name) = callee.as_mut()
+            && let Some((_, short)) = name.rsplit_once("::")
+            && matches!(short, "clone" | "is_empty")
+            && !facts.functions.contains_key(name)
+            && facts.functions.contains_key(short)
+            && let [source] = args.as_slice()
+            && matches!(
+                self.expr_type(source, facts, env),
+                Some(Typ::Vector(_) | Typ::Array(_))
+            )
+        {
+            *name = short.to_owned();
+        }
+        if let Expr::Call { callee, args } = expr
+            && matches!(callee.as_ref(), Expr::Ident(name) if name.rsplit("::").next() == Some("is_empty") && !facts.functions.contains_key(name) && !facts.functions.contains_key("is_empty"))
+            && let [source] = args.as_slice()
+            && matches!(
+                self.expr_type(source, facts, env),
+                Some(Typ::Vector(_) | Typ::Array(_))
+            )
+        {
+            *expr = Expr::Binary {
+                op: "==".into(),
+                lhs: Box::new(Expr::Call {
+                    callee: Box::new(Expr::Ident("array-len".into())),
+                    args: vec![source.clone()],
+                }),
+                rhs: Box::new(Expr::IntLit(0)),
+            };
+        }
+        if let Expr::Call { callee, args } = expr
             && matches!(callee.as_ref(), Expr::Ident(name) if name == "len" && !facts.functions.contains_key(name))
             && let [source] = args.as_slice()
             && matches!(

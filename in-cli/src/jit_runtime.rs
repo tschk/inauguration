@@ -3556,6 +3556,60 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn typed_sequence_empty_uses_length() {
+        let mut sources = vec![
+            "fn clone(items: Vec<i64>) -> Vec<i64> { return vec![20,22]; } fn main() -> i64 { let items: Vec<i64> = vec![0]; let copied: Vec<i64> = items.clone(); return copied[0]+copied[1]; }",
+            "fn is_empty(items: Vec<i64>) -> bool { return false; } fn main() -> i64 { let items: Vec<i64> = vec![]; if items.is_empty() { return 0; } return 42; }",
+            "fn main() -> i64 { let items: Vec<i64> = vec![]; if items.is_empty() { return 42; } return 0; }",
+            "fn main() -> i64 { let items: Vec<i64> = vec![1]; if items.is_empty() { return 0; } return 42; }",
+            "fn values() -> Vec<i64> { return vec![]; } fn main() -> i64 { if values().is_empty() { return 42; } return 0; }",
+            "fn main() -> i64 { let items: Vec<i64> = vec![]; if items.clone().is_empty() { return 42; } return 0; }",
+            "fn main() -> i64 { let items: [i64;2] = [20,22]; if items.is_empty() { return 0; } return 42; }",
+            "fn values() -> [i64;2] { return [20,22]; } fn main() -> i64 { if values().is_empty() { return 0; } return 42; }",
+        ];
+        if cfg!(target_arch = "aarch64") {
+            sources.push("struct Bag { items: Vec<i64> } impl Bag { fn answer(&mut self) -> i64 { self.items=vec![]; if self.items.is_empty() { return 42; } return 0; } } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![1] }; return Bag::answer(&mut bag); }");
+            sources.push("struct Bag { items: Vec<i64> } fn main() -> i64 { let bag: Bag = Bag { items: vec![] }; if bag.items.is_empty() { return 42; } return 0; }");
+        }
+        for source in sources {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{verified:?}: {source}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn sequence_empty_evaluates_producer_once() {
+        let mut module = crate::in_lang_parse::parse_in_source("var calls: Int = 0;\nfn values() -> [Int] { calls += 1; return []; }\nfn main() -> Int { if is_empty(values()) { return calls; } return 0; }").unwrap();
+        crate::lower_core::desugar_module(&mut module);
+        let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+        assert!(verified.ok, "{verified:?}");
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(invoke_module(&module, profile, &[]), Some(1));
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn scalar_vector_literals_preserve_call_and_return_values() {
         for source in [
             "fn values() -> Vec<i64> { return vec![20, 22]; } fn main() -> i64 { let items: Vec<i64> = values(); let mut sum = 0; for value in items { sum += value; } return sum; }",

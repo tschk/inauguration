@@ -882,7 +882,7 @@ pub(crate) fn lower_stdlib_call(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<bool, String> {
-    if target == "len" && functions.contains_key(target) {
+    if matches!(target, "len" | "is_empty" | "clone") && functions.contains_key(target) {
         return Ok(false);
     }
 
