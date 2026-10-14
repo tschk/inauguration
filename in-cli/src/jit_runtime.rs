@@ -4272,6 +4272,107 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn closure_parameters_do_not_shadow_generated_receivers() {
+        use crate::core_ir::{Decl, Expr, Stmt, Typ, UnifiedModule};
+        let mut module = UnifiedModule {
+            identity: Default::default(),
+            decls: vec![Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![
+                    Stmt::Let(
+                        "answer".into(),
+                        None,
+                        Expr::Closure {
+                            params: vec![("self".into(), Typ::Int)],
+                            ret: Typ::Int,
+                            captures: vec![],
+                            body: vec![Stmt::Return(Some(Expr::Ident("self".into())))],
+                        },
+                    ),
+                    Stmt::Return(Some(Expr::Call {
+                        callee: Box::new(Expr::Ident("answer".into())),
+                        args: vec![Expr::IntLit(42)],
+                    })),
+                ],
+            }],
+        };
+        crate::lower_core::desugar_module(&mut module);
+        assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(invoke_module(&module, profile, &[]), Some(42));
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn in_stateless_closure_calls_share_native_lowering() {
+        let mut module = crate::in_lang_parse::parse_in_source("fn main() -> Int { let add = fn(a: Int, b: Int) -> Int { return a + b; }; return add(20, 22); }").unwrap();
+        crate::lower_core::desugar_module(&mut module);
+        assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(invoke_module(&module, profile, &[]), Some(42));
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn local_stateless_closures_execute_through_generated_functions() {
+        for source in [
+            "fn main()->i64 { let answer=||42; answer() }",
+            "fn helper()->i64 { 42 } fn main()->i64 { let answer=||helper(); answer() }",
+            "static VALUE:i64=42; fn main()->i64 { let answer=||VALUE; answer() }",
+            "fn main()->i64 { let answer=||{ let inner=||42; inner() }; answer() }",
+            "fn main()->i64 { let factory=|| ||42; let answer=factory(); answer() }",
+            "fn main()->i64 { let answer=||{ if true { 42 } else { 7 } }; answer() }",
+            "fn main()->i64 { let answer=||{ let mut x=0; while x<42 { x+=1; } x }; answer() }",
+            "fn main()->i64 { let answer=||20.5; (answer() as i64)+22 }",
+            "mod alpha { pub struct Point { pub value:i64 } } fn main()->i64 { let answer=|point:alpha::Point|point.value; answer(alpha::Point { value:42 }) }",
+            "fn answer()->i64 { 7 } fn main()->i64 { let answer=||42; answer() }",
+            "fn main()->i64 { (||42)() }",
+            "fn main()->i64 { let answer=||{}; answer(); return 42; }",
+            "fn main()->i64 { let answer=||\"ok\"; if answer()==\"ok\" { return 42; } return 0; }",
+            "fn main()->i64 { let answer=||40; if true { let answer=||0; answer(); } answer()+2 }",
+            "static mut COUNT:i64=0; fn next()->i64 { unsafe { COUNT+=1; return COUNT; } } fn main()->i64 { let pair=|x:i64,y:i64| -> i64 { x*10+y }; pair(next(),next())+30 }",
+            "fn main()->i64 { let answer=|x:i64| -> i64 { x+2 }; answer(40) }",
+            "fn main()->i64 { let answer=||42; let alias=answer; alias() }",
+            "fn __closure_0()->i64 { 7 } struct __closure_1_captures { value:i64 } fn main()->i64 { let answer=||42; answer() }",
+            "fn main()->i64 { let answer=||true; if answer() { return 42; } return 0; }",
+            "fn main()->i64 { let answer=||20.5; (answer()+21.5) as i64 }",
+            "fn main()->i64 { let answer=||[20,22]; let items=answer(); items[0]+items[1] }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{source}: {report:?}; module={module:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn qualified_struct_paths_execute_through_native_parameters() {
         let parsed = crate::compiler::rust_front::parse_rust_source("mod alpha { pub struct Point { pub value:i64 } } fn answer(point:alpha::Point)->i64 { point.value } fn main()->i64 { answer(alpha::Point { value:42 }) }").unwrap();
         let mut module =

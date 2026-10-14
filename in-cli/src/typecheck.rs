@@ -73,9 +73,27 @@ pub struct TypeChecker;
 pub(crate) struct Facts {
     functions: HashMap<String, (Vec<(String, Typ)>, Typ)>,
     structs: HashMap<String, Vec<(String, Typ)>>,
+    closures: HashMap<String, String>,
 }
 
 impl Facts {
+    fn closure_target(&self, captures: &str) -> Option<&str> {
+        if !self.structs.get(captures)?.is_empty() {
+            return None;
+        }
+        let target = self.closures.get(captures)?;
+        let (params, ret) = self.functions.get(target)?;
+        fn resolved(typ: &Typ) -> bool {
+            match typ {
+                Typ::Generic(_) => false,
+                Typ::Named(name) => !matches!(name.as_str(), "Any" | "_"),
+                Typ::Array(item) | Typ::Vector(item) => resolved(item),
+                _ => true,
+            }
+        }
+        (resolved(ret) && params.iter().all(|(_, typ)| resolved(typ))).then_some(target.as_str())
+    }
+
     pub(crate) fn value_receiver_index(&self, function: &str) -> Option<usize> {
         self.functions
             .get(function)?
@@ -136,15 +154,31 @@ impl TypeChecker {
 
     /// Resolve type-dependent complement into the canonical boolean or integer operator.
     pub(crate) fn resolve_complements(&self, module: &mut UnifiedModule) {
-        self.resolve_typed_operators(module, false);
+        self.resolve_typed_operators(module, false, None);
     }
 
     fn resolve_c_value_promotions(&self, module: &mut UnifiedModule) {
-        self.resolve_typed_operators(module, true);
+        self.resolve_typed_operators(module, true, None);
     }
 
-    fn resolve_typed_operators(&self, module: &mut UnifiedModule, promote_c_bool: bool) {
-        let facts = self.collect_facts(module);
+    pub(crate) fn resolve_closure_calls(
+        &self,
+        module: &mut UnifiedModule,
+        closures: &HashMap<String, String>,
+    ) {
+        self.resolve_typed_operators(module, false, Some(closures));
+    }
+
+    fn resolve_typed_operators(
+        &self,
+        module: &mut UnifiedModule,
+        promote_c_bool: bool,
+        closures: Option<&HashMap<String, String>>,
+    ) {
+        let mut facts = self.collect_facts(module);
+        if let Some(closures) = closures {
+            facts.closures = closures.clone();
+        }
         let globals: HashMap<String, Typ> = module
             .decls
             .iter()
@@ -153,28 +187,120 @@ impl TypeChecker {
                 _ => None,
             })
             .collect();
-        for decl in &mut module.decls {
-            match decl {
-                Decl::Function {
-                    params, ret, body, ..
-                } => {
-                    let mut env = globals.clone();
-                    env.extend(params.iter().cloned());
-                    self.resolve_typed_body(body, &facts, &mut env, Some(ret), promote_c_bool);
-                }
-                Decl::Global {
-                    typ,
-                    init: Some(expr),
-                    ..
-                } => {
-                    self.resolve_typed_expr(expr, &facts, &globals, promote_c_bool);
-                    if promote_c_bool {
-                        self.resolve_c_value(expr, typ, &facts, &globals);
+        let generated: std::collections::HashSet<_> = facts.closures.values().cloned().collect();
+        // Nested closures are appended before their parents during lifting.
+        for closure_phase in [true, false] {
+            if closure_phase && generated.is_empty() {
+                continue;
+            }
+            for decl in &mut module.decls {
+                match decl {
+                    Decl::Function {
+                        name,
+                        params,
+                        ret,
+                        body,
+                        ..
+                    } if generated.contains(name) == closure_phase => {
+                        let mut env = globals.clone();
+                        env.extend(params.iter().cloned());
+                        let initial = env.clone();
+                        self.resolve_typed_body(body, &facts, &mut env, Some(ret), promote_c_bool);
+                        if closure_phase {
+                            if matches!(ret, Typ::Generic(_))
+                                && let Some(inferred) =
+                                    self.infer_closure_return(body, &facts, &initial)
+                            {
+                                *ret = inferred;
+                            }
+                            facts
+                                .functions
+                                .insert(name.clone(), (params.clone(), ret.clone()));
+                        }
                     }
+                    Decl::Global {
+                        typ,
+                        init: Some(expr),
+                        ..
+                    } if !closure_phase => {
+                        self.resolve_typed_expr(expr, &facts, &globals, promote_c_bool);
+                        if promote_c_bool {
+                            self.resolve_c_value(expr, typ, &facts, &globals);
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
+    }
+
+    fn infer_closure_return(
+        &self,
+        body: &[Stmt],
+        facts: &Facts,
+        initial: &HashMap<String, Typ>,
+    ) -> Option<Typ> {
+        fn walk(
+            checker: &TypeChecker,
+            body: &[Stmt],
+            facts: &Facts,
+            env: &mut HashMap<String, Typ>,
+            returns: &mut Vec<Typ>,
+        ) -> Option<bool> {
+            let mut falls = true;
+            for stmt in body {
+                if !falls {
+                    break;
+                }
+                match stmt {
+                    Stmt::Let(name, typ, value) => {
+                        if let Some(typ) =
+                            typ.clone().or_else(|| checker.expr_type(value, facts, env))
+                        {
+                            env.insert(name.clone(), typ);
+                        }
+                    }
+                    Stmt::Return(value) => {
+                        returns.push(match value {
+                            Some(value) => checker.expr_type(value, facts, env)?,
+                            None => Typ::Void,
+                        });
+                        falls = false;
+                    }
+                    Stmt::If {
+                        cond,
+                        then_body,
+                        else_body,
+                    } => {
+                        let left = walk(checker, then_body, facts, &mut env.clone(), returns)?;
+                        let right = walk(checker, else_body, facts, &mut env.clone(), returns)?;
+                        falls = match cond {
+                            Expr::BoolLit(true) => left,
+                            Expr::BoolLit(false) => right,
+                            _ => left || right,
+                        };
+                    }
+                    Stmt::Loop { body, .. } => {
+                        walk(checker, body, facts, &mut env.clone(), returns)?;
+                    }
+                    // shortcut: infer match/catch returns when their binding types are available.
+                    Stmt::Match { .. } | Stmt::Try { .. } | Stmt::Propagate => return None,
+                    Stmt::Throw(_) => falls = false,
+                    Stmt::Break | Stmt::Continue => break,
+                    _ => {}
+                }
+            }
+            Some(falls)
+        }
+        let mut returns = Vec::new();
+        if walk(self, body, facts, &mut initial.clone(), &mut returns)? {
+            returns.push(Typ::Void);
+        }
+        let typ = returns.first()?.canonical();
+        returns
+            .iter()
+            .all(|returned| returned.canonical() == typ)
+            .then_some(typ)
     }
 
     fn resolve_c_value(
@@ -243,16 +369,37 @@ impl TypeChecker {
         env: &HashMap<String, Typ>,
         promote_c_bool: bool,
     ) {
-        if let Expr::Closure { params, body, .. } = expr {
+        if let Expr::Closure {
+            params, ret, body, ..
+        } = expr
+        {
             let mut inner = env.clone();
             inner.extend(params.iter().cloned());
+            let initial = inner.clone();
             self.resolve_typed_body(body, facts, &mut inner, None, promote_c_bool);
+            if matches!(ret, Typ::Generic(_))
+                && let Some(inferred) = self.infer_closure_return(body, facts, &initial)
+            {
+                *ret = inferred;
+            }
         } else {
             crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
                 self.resolve_typed_expr(child, facts, env, promote_c_bool)
             });
         }
         if let Expr::Call { callee, args } = expr {
+            let captures = match callee.as_ref() {
+                Expr::Ident(local) => match env.get(local) {
+                    Some(Typ::Named(name)) => Some(name.as_str()),
+                    _ => None,
+                },
+                Expr::StructInit { name, fields } if fields.is_empty() => Some(name.as_str()),
+                _ => None,
+            };
+            if let Some(function) = captures.and_then(|captures| facts.closure_target(captures)) {
+                args.insert(0, callee.as_ref().clone());
+                *callee = Box::new(Expr::Ident(function.to_string()));
+            }
             if let Expr::Ident(name) = callee.as_ref() {
                 if let Some(op) = name
                     .strip_prefix("__method__")
@@ -677,7 +824,11 @@ impl TypeChecker {
             }
         }
 
-        Facts { functions, structs }
+        Facts {
+            functions,
+            structs,
+            closures: HashMap::new(),
+        }
     }
 
     fn check_interface_conformance(&self, module: &UnifiedModule, errors: &mut Vec<TypeError>) {
@@ -1499,7 +1650,7 @@ impl TypeChecker {
                     None
                 }
             }
-            Expr::Closure { ret, .. } => Some(ret.clone()),
+            Expr::Closure { .. } => None,
         }
     }
 }

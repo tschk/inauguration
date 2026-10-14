@@ -938,7 +938,7 @@ fn remove_dead_functions(decls: &mut Vec<Decl>, entry: Option<&str>) {
     });
 }
 
-fn collect_calls_in_stmt(s: &Stmt, out: &mut HashSet<String>) {
+pub(crate) fn collect_calls_in_stmt(s: &Stmt, out: &mut HashSet<String>) {
     match s {
         Stmt::Let(_, _, e) | Stmt::Assign(_, e) | Stmt::Return(Some(e)) | Stmt::Expr(e) => {
             collect_calls_in_expr(e, out)

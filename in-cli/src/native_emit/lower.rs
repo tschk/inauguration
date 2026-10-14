@@ -634,7 +634,15 @@ pub fn lower_module_with_jobs(
     let mut pending_inrt_calls = Vec::new();
     let mut pending_strings = Vec::new();
     let mut names: Vec<String> = functions.keys().cloned().collect();
-    names.retain(|name| !name.starts_with("__closure_"));
+    let mut called = std::collections::HashSet::new();
+    for function in functions.values() {
+        for stmt in &function.body {
+            crate::core_opt::collect_calls_in_stmt(stmt, &mut called);
+        }
+    }
+    names.retain(|name| {
+        !name.starts_with("__closure_") || called.contains(name) || name == &resolved_entry
+    });
     names.sort();
 
     // Lower each function. Failures are skipped; callers get return-0 stubs.

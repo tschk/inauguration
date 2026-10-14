@@ -17,6 +17,7 @@ pub(crate) use match_guards::{lower_guarded_decls, prepared_native_module};
 pub(crate) use value_spills::lower_value_spills;
 
 pub fn desugar_module(module: &mut UnifiedModule) {
+    crate::core_bindings::normalize_decls(&mut module.decls);
     lower_guarded_decls(&mut module.decls);
     let mut method_map: HashMap<String, String> = HashMap::new();
     let mut new_decls: Vec<Decl> = Vec::new();
@@ -88,6 +89,10 @@ pub fn desugar_module(module: &mut UnifiedModule) {
     let mut for_counter = 0usize;
     let declared_names = crate::core_bindings::module_names(&new_decls);
     let mut for_names = declared_names.clone();
+    for_names.extend(new_decls.iter().filter_map(|decl| match decl {
+        Decl::Struct { name, .. } => Some(name.clone()),
+        _ => None,
+    }));
     for decl in &new_decls {
         if let Decl::Function { params, body, .. } = decl {
             for_names.extend(params.iter().map(|(name, _)| name.clone()));
@@ -100,13 +105,31 @@ pub fn desugar_module(module: &mut UnifiedModule) {
             bound.extend(params.iter().map(|(name, _)| name.clone()));
             collect_bound_names_in_body(body, &mut bound);
             desugar_for_loops(body, &mut for_counter, &for_names, &bound);
-            desugar_closures_in_body(body, &mut closure_counter, &mut extra_decls);
+            desugar_closures_in_body(
+                body,
+                &mut closure_counter,
+                &mut extra_decls,
+                &for_names,
+                &declared_names,
+            );
         }
     }
+    let closures = extra_decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Function { name, params, .. } => match params.first() {
+                Some((receiver, Typ::Named(captures))) if receiver == "self" => {
+                    Some((captures.clone(), name.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
     new_decls.extend(extra_decls);
 
     module.decls = new_decls;
-    crate::typecheck::TypeChecker::new().resolve_complements(module);
+    crate::typecheck::TypeChecker::new().resolve_closure_calls(module, &closures);
 }
 
 fn desugar_for_loops(
@@ -553,7 +576,13 @@ fn rewrite_field_refs_in_expr(expr: &mut Expr, fields: &HashSet<String>, bound: 
     }
 }
 
-fn desugar_closures_in_body(body: &mut [Stmt], counter: &mut usize, extra_decls: &mut Vec<Decl>) {
+fn desugar_closures_in_body(
+    body: &mut [Stmt],
+    counter: &mut usize,
+    extra_decls: &mut Vec<Decl>,
+    names: &HashSet<String>,
+    globals: &HashSet<String>,
+) {
     for stmt in body {
         match stmt {
             Stmt::Let(_, _, e)
@@ -561,47 +590,47 @@ fn desugar_closures_in_body(body: &mut [Stmt], counter: &mut usize, extra_decls:
             | Stmt::FieldAssign { value: e, .. }
             | Stmt::Return(Some(e))
             | Stmt::Expr(e) => {
-                desugar_closures_in_expr(e, counter, extra_decls);
+                desugar_closures_in_expr(e, counter, extra_decls, names, globals);
             }
             Stmt::IndexAssign {
                 base, index, value, ..
             } => {
-                desugar_closures_in_expr(base, counter, extra_decls);
-                desugar_closures_in_expr(index, counter, extra_decls);
-                desugar_closures_in_expr(value, counter, extra_decls);
+                desugar_closures_in_expr(base, counter, extra_decls, names, globals);
+                desugar_closures_in_expr(index, counter, extra_decls, names, globals);
+                desugar_closures_in_expr(value, counter, extra_decls, names, globals);
             }
             Stmt::If {
                 cond,
                 then_body,
                 else_body,
             } => {
-                desugar_closures_in_expr(cond, counter, extra_decls);
-                desugar_closures_in_body(then_body, counter, extra_decls);
-                desugar_closures_in_body(else_body, counter, extra_decls);
+                desugar_closures_in_expr(cond, counter, extra_decls, names, globals);
+                desugar_closures_in_body(then_body, counter, extra_decls, names, globals);
+                desugar_closures_in_body(else_body, counter, extra_decls, names, globals);
             }
             Stmt::Loop { cond, body, .. } => {
                 if let Some(c) = cond {
-                    desugar_closures_in_expr(c, counter, extra_decls);
+                    desugar_closures_in_expr(c, counter, extra_decls, names, globals);
                 }
-                desugar_closures_in_body(body, counter, extra_decls);
+                desugar_closures_in_body(body, counter, extra_decls, names, globals);
             }
             Stmt::Match {
                 scrutinee, arms, ..
             } => {
-                desugar_closures_in_expr(scrutinee, counter, extra_decls);
+                desugar_closures_in_expr(scrutinee, counter, extra_decls, names, globals);
                 for arm in arms {
-                    desugar_closures_in_body(&mut arm.body, counter, extra_decls);
+                    desugar_closures_in_body(&mut arm.body, counter, extra_decls, names, globals);
                 }
             }
             Stmt::Return(None) => {}
             Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
             Stmt::Throw(e) => {
-                desugar_closures_in_expr(e, counter, extra_decls);
+                desugar_closures_in_expr(e, counter, extra_decls, names, globals);
             }
             Stmt::Try { body, catches, .. } => {
-                desugar_closures_in_body(body, counter, extra_decls);
+                desugar_closures_in_body(body, counter, extra_decls, names, globals);
                 for catch in catches {
-                    desugar_closures_in_body(&mut catch.body, counter, extra_decls);
+                    desugar_closures_in_body(&mut catch.body, counter, extra_decls, names, globals);
                 }
             }
         }
@@ -762,17 +791,38 @@ fn rewrite_captures_in_expr(expr: &mut Expr, captures: &HashSet<&str>) {
     }
 }
 
-fn desugar_closures_in_expr(expr: &mut Expr, counter: &mut usize, extra_decls: &mut Vec<Decl>) {
+fn desugar_closures_in_expr(
+    expr: &mut Expr,
+    counter: &mut usize,
+    extra_decls: &mut Vec<Decl>,
+    names: &HashSet<String>,
+    globals: &HashSet<String>,
+) {
     match expr {
         Expr::Closure {
             params, ret, body, ..
         } => {
+            crate::core_bindings::normalize_function(
+                params,
+                body,
+                &HashSet::from(["self".to_string()]),
+            );
+            desugar_closures_in_body(body, counter, extra_decls, names, globals);
+            while names.contains(&format!("__closure_{counter}"))
+                || names.contains(&format!("__closure_{counter}_captures"))
+            {
+                *counter += 1;
+            }
             let id = *counter;
             *counter += 1;
             let fn_name = format!("__closure_{id}");
             let caps_name = format!("{fn_name}_captures");
             let closure_params = params.clone();
-            let captures = collect_free_vars(body, &closure_params);
+            // shortcut: globals named self need distinct receiver identity before capture-free dispatch.
+            let captures: Vec<_> = collect_free_vars(body, &closure_params)
+                .into_iter()
+                .filter(|name| name == "self" || !globals.contains(name))
+                .collect();
             let captures_set: HashSet<&str> = captures.iter().map(|s| s.as_str()).collect();
             rewrite_captures_in_body(body, &captures_set);
             let mut caps_fields = Vec::with_capacity(captures.len());
@@ -802,37 +852,39 @@ fn desugar_closures_in_expr(expr: &mut Expr, counter: &mut usize, extra_decls: &
                 fields: init_fields,
             };
         }
-        Expr::Unary { expr: inner, .. } => desugar_closures_in_expr(inner, counter, extra_decls),
+        Expr::Unary { expr: inner, .. } => {
+            desugar_closures_in_expr(inner, counter, extra_decls, names, globals)
+        }
         Expr::Binary { lhs, rhs, .. } => {
-            desugar_closures_in_expr(lhs, counter, extra_decls);
-            desugar_closures_in_expr(rhs, counter, extra_decls);
+            desugar_closures_in_expr(lhs, counter, extra_decls, names, globals);
+            desugar_closures_in_expr(rhs, counter, extra_decls, names, globals);
         }
         Expr::StructInit { fields, .. } => {
             for (_, field_expr) in fields {
-                desugar_closures_in_expr(field_expr, counter, extra_decls);
+                desugar_closures_in_expr(field_expr, counter, extra_decls, names, globals);
             }
         }
         Expr::Field { base, .. } => {
-            desugar_closures_in_expr(base, counter, extra_decls);
+            desugar_closures_in_expr(base, counter, extra_decls, names, globals);
         }
         Expr::ArrayLit(items) => {
             for item in items {
-                desugar_closures_in_expr(item, counter, extra_decls);
+                desugar_closures_in_expr(item, counter, extra_decls, names, globals);
             }
         }
         Expr::Index { base, index, .. } => {
-            desugar_closures_in_expr(base, counter, extra_decls);
-            desugar_closures_in_expr(index, counter, extra_decls);
+            desugar_closures_in_expr(base, counter, extra_decls, names, globals);
+            desugar_closures_in_expr(index, counter, extra_decls, names, globals);
         }
         Expr::Call { callee, args, .. } => {
-            desugar_closures_in_expr(callee, counter, extra_decls);
+            desugar_closures_in_expr(callee, counter, extra_decls, names, globals);
             let preserves_map_closure =
                 matches!(callee.as_ref(), Expr::Ident(name) if name == "map") && args.len() == 2;
             for (index, arg) in args.iter_mut().enumerate() {
                 if preserves_map_closure && index == 1 && matches!(arg, Expr::Closure { .. }) {
                     continue;
                 }
-                desugar_closures_in_expr(arg, counter, extra_decls);
+                desugar_closures_in_expr(arg, counter, extra_decls, names, globals);
             }
         }
         Expr::IntLit(_)
@@ -1829,6 +1881,56 @@ fn lower_to_textual_sil_inner(module: UnifiedModule) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn closure_calls_preserve_signature_checks_and_refuse_unproven_environments() {
+        for (source, code) in [
+            (
+                "fn main()->i64 { let f=|x:i64| -> i64 { x }; f() }",
+                "call-arity-mismatch",
+            ),
+            (
+                "fn main()->i64 { let f=|x:i64| -> i64 { x }; f(true) }",
+                "type-mismatch",
+            ),
+            (
+                "fn main()->i64 { let f=|| -> bool { 42 }; if f() { return 42; } return 0; }",
+                "return-type-mismatch",
+            ),
+            (
+                "fn main()->i64 { let x=42; let f=||x; f() }",
+                "unresolved-symbol",
+            ),
+            (
+                "fn main()->i64 { let f=|x|x+2; f(40) }",
+                "unresolved-symbol",
+            ),
+            (
+                "fn main()->i64 { let f=|| ||42; f() }",
+                "return-type-mismatch",
+            ),
+            (
+                "fn main()->i64 { let f=|| -> i64 { ||42 }; f() }",
+                "return-type-mismatch",
+            ),
+            (
+                "fn main()->i64 { let mut f=||42; f=||7; f() }",
+                "type-mismatch",
+            ),
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            super::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(!report.ok, "{source}");
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some(code),
+                "{source}: {report:?}"
+            );
+        }
+    }
+
     use super::*;
     use crate::core_ir::MethodSig;
     use crate::core_ir::Typ;

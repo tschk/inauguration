@@ -2028,7 +2028,10 @@ fn lower_expr_with_types_inner(
             };
             Expr::Closure {
                 params,
-                ret: Typ::Generic("_".to_string()),
+                ret: match &closure.output {
+                    syn::ReturnType::Default => Typ::Generic("_".to_string()),
+                    syn::ReturnType::Type(_, ty) => map_type(ty),
+                },
                 body,
                 captures: vec![],
             }
