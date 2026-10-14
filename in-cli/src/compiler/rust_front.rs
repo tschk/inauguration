@@ -1614,7 +1614,7 @@ fn lower_block_inner_with_types_go(
                             Expr::Call { callee, .. }
                                 if matches!(
                                     callee.as_ref(),
-                                    Expr::Ident(name) if name == "Vec::new"
+                                    Expr::Ident(name) if matches!(name.as_str(), "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new")
                                 )
                         )
                         .then(|| Typ::Vector(Box::new(Typ::Generic("_".to_string()))))
@@ -3031,6 +3031,8 @@ fn main() {
             "fn main()->i64 {let pair=(missing(),true);42}",
             "fn main()->i64 {let items=vec![20,true];42}",
             "fn main()->i64 {let mut items=Vec::new();if true {items.push(42);} else {items.push(false);} 42}",
+            "fn main()->i64 {let mut items=std::vec::Vec::new();items.push(42);items.push(false);42}",
+            "fn main()->i64 {let items=alloc::vec::Vec::new();items.len()+42}",
             "fn main()->i64 {let mut items=Vec::new();items.push(missing());42}",
             "fn main()->i64 {let items=Vec::new();items.len()+42}",
             "mod geo {pub struct Vec<T> {value:T} impl Vec<i64> {pub fn new()->Self {Self{value:0}} pub fn is_empty(&self)->bool {false}}} use geo::Vec; fn main()->i64 {let items:Vec<i64>=Vec::new();if items.is_empty() {42} else {0}}",
