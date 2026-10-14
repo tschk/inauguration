@@ -848,6 +848,14 @@ impl TypeChecker {
             match stmt {
                 Stmt::Let(name, typ, expr) => {
                     self.resolve_typed_expr(expr, facts, env, promote_c_bool);
+                    if let Some(Typ::Vector(item)) = typ.as_mut()
+                        && matches!(item.as_ref(), Typ::Generic(name) if name == "_")
+                        && let Some(Typ::Array(element) | Typ::Vector(element)) =
+                            closure_inference::argument_type(self, expr, facts, env)
+                        && resolved_closure_type(&element)
+                    {
+                        *item = element;
+                    }
                     if promote_c_bool && let Some(typ) = typ.as_ref() {
                         self.resolve_c_value(expr, typ, facts, env);
                     }

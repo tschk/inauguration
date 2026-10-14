@@ -1276,6 +1276,7 @@ fn map_type(ty: &syn::Type) -> Typ {
                 None => Typ::Named(tp.path.to_token_stream().to_string()),
             }
         }
+        syn::Type::Infer(_) => Typ::Generic("_".into()),
         syn::Type::Reference(r) => {
             let typ = map_type(&r.elem);
             if matches!(&typ, Typ::Named(name) if crate::core_ir::tuples::fields(name).is_some()) {
@@ -2923,6 +2924,8 @@ fn main() {
     fn typed_tuples_do_not_guess_unknown_elements_or_erase_shape_mismatches() {
         for source in [
             "fn main()->i64 {let pair=(missing(),true);42}",
+            "fn main()->i64 {let items=vec![20,true];42}",
+            "fn main()->i64 {let items=vec![missing(),42];items[1]}",
             "fn pair()->(i64,bool) {(42,7)} fn main()->i64 {pair().0}",
         ] {
             let parsed = parse_rust_source(source).unwrap();
