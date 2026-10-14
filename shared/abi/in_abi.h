@@ -65,6 +65,7 @@ InArenaHandle in_arena_create(uint64_t reserve_bytes, uint32_t flags);
 void in_arena_reset(InArenaHandle arena);
 void in_arena_destroy(InArenaHandle arena);
 
+// align is a power of two (0 means 1); invalid requests return a null, empty buffer.
 InBufU8 in_buf_from_host_arena(InArenaHandle arena, uint64_t len, uint64_t align);
 InSliceU8 in_borrow_bytes(InBufU8 *buf, InBorrowToken *out_token);
 uint32_t in_borrow_validate(InBorrowToken token);

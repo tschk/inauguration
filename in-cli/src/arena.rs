@@ -86,41 +86,60 @@ pub fn in_arena_destroy(arena: InArenaHandle) {
 }
 
 pub fn in_buf_from_host_arena(arena: InArenaHandle, len: u64, align: u64) -> InBufU8 {
-    let align = align.max(1) as usize;
-    let len = len as usize;
+    let failed = InBufU8 {
+        ptr: std::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+        allocator_id: arena.id,
+    };
+    let (Ok(align), Ok(len)) = (usize::try_from(align.max(1)), usize::try_from(len)) else {
+        return failed;
+    };
+    if !align.is_power_of_two() {
+        return failed;
+    }
     let mut map = arenas().lock().expect("arena map lock");
     let Some(state) = map.get_mut(&arena.id) else {
-        return InBufU8 {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-            allocator_id: arena.id,
-        };
+        return failed;
     };
     if state.generation != arena.generation {
-        return InBufU8 {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-            allocator_id: arena.id,
-        };
+        return failed;
     }
-    let aligned = align_up(state.cursor, align);
-    let end = aligned.saturating_add(len);
-    if end > state.storage.len() {
+    let Some(reserved_end) = state
+        .cursor
+        .checked_add(align - 1)
+        .and_then(|start| start.checked_add(len))
+    else {
+        return failed;
+    };
+    if reserved_end > isize::MAX as usize {
+        return failed;
+    }
+    if reserved_end > state.storage.capacity() {
         let Some(epoch) = state.borrow_epoch.checked_add(1) else {
-            return InBufU8 {
-                ptr: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-                allocator_id: arena.id,
-            };
+            return failed;
         };
-        let reallocates = end > state.storage.capacity();
-        state.storage.resize(end, 0);
-        if reallocates {
-            state.borrow_epoch = epoch;
+        if state
+            .storage
+            .try_reserve(reserved_end - state.storage.len())
+            .is_err()
+        {
+            return failed;
         }
+        state.borrow_epoch = epoch;
+    }
+    // Reserve worst-case padding first: relocation can change the base alignment.
+    let base = state.storage.as_ptr() as usize;
+    let Some(address) = base
+        .checked_add(state.cursor)
+        .and_then(|address| align_up(address, align))
+    else {
+        return failed;
+    };
+    let aligned = address - base;
+    let end = aligned + len; // Bounded above by reserved_end.
+    if end > state.storage.len() {
+        state.storage.resize(end, 0);
     }
     state.cursor = end;
     let ptr = unsafe { state.storage.as_mut_ptr().add(aligned) };
@@ -183,14 +202,68 @@ pub fn in_borrow_validate(token: InBorrowToken) -> u32 {
     0
 }
 
-fn align_up(value: usize, align: usize) -> usize {
-    let mask = align.saturating_sub(1);
-    (value + mask) & !mask
+fn align_up(value: usize, align: usize) -> Option<usize> {
+    let mask = align - 1;
+    value.checked_add(mask).map(|value| value & !mask)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allocation_alignment_uses_actual_addresses_after_growth() {
+        let arena = in_arena_create(64, 0);
+        for align in [1, 8, 64, 256, 4096] {
+            let first = in_buf_from_host_arena(arena, 3, align);
+            assert!(!first.ptr.is_null());
+            assert_eq!(first.ptr as usize % align as usize, 0);
+            let cursor = arenas().lock().unwrap().get(&arena.id).unwrap().cursor;
+            let second = in_buf_from_host_arena(arena, 5, align);
+            assert!(!second.ptr.is_null());
+            assert_eq!(second.ptr as usize % align as usize, 0);
+            let map = arenas().lock().unwrap();
+            let state = map.get(&arena.id).unwrap();
+            let offset = second.ptr as usize - state.storage.as_ptr() as usize;
+            assert!(offset >= cursor);
+            assert!(offset + second.len as usize <= state.storage.len());
+        }
+        in_arena_destroy(arena);
+    }
+
+    #[test]
+    fn invalid_allocation_requests_preserve_cursor_and_tokens() {
+        let arena = in_arena_create(64, 0);
+        let mut first = in_buf_from_host_arena(arena, 8, 8);
+        let mut token = InBorrowToken {
+            arena_id: 0,
+            generation: 0,
+            start: 0,
+            len: 0,
+            flags: 0,
+        };
+        in_borrow_bytes(&mut first, &mut token);
+        let cursor = arenas().lock().unwrap().get(&arena.id).unwrap().cursor;
+        for (len, align) in [
+            (8, 3),
+            (8, u64::MAX),
+            (u64::MAX, 8),
+            (u64::MAX, 1),
+            (8, 1u64 << 63),
+        ] {
+            let failed = in_buf_from_host_arena(arena, len, align);
+            assert!(failed.ptr.is_null(), "{len} {align}");
+            assert_eq!((failed.len, failed.cap), (0, 0));
+            assert_eq!(
+                arenas().lock().unwrap().get(&arena.id).unwrap().cursor,
+                cursor
+            );
+            assert_eq!(in_borrow_validate(token), 0);
+        }
+        assert!(!in_buf_from_host_arena(arena, 0, 0).ptr.is_null());
+        assert_eq!(align_up(usize::MAX, 8), None);
+        in_arena_destroy(arena);
+    }
 
     #[test]
     fn arena_alloc_and_reset() {
