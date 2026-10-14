@@ -142,6 +142,10 @@ fn register_explicit_vector_constructors(module: &mut UnifiedModule) {
         let Some(syn::GenericArgument::Type(item)) = generics.args.first() else {
             return;
         };
+        if matches!(item, syn::Type::Infer(_)) {
+            *callee = Box::new(Expr::Ident(owner));
+            return;
+        }
         // References need an ownership model; do not erase them into scalar elements.
         let syn::Type::Path(item_path) = item else {
             return;
@@ -1614,7 +1618,7 @@ fn lower_block_inner_with_types_go(
                             Expr::Call { callee, .. }
                                 if matches!(
                                     callee.as_ref(),
-                                    Expr::Ident(name) if matches!(name.as_str(), "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new")
+                                    Expr::Ident(name) if matches!(name.as_str(), "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new" | "Vec::<_>::new" | "std::vec::Vec::<_>::new" | "alloc::vec::Vec::<_>::new")
                                 )
                         )
                         .then(|| Typ::Vector(Box::new(Typ::Generic("_".to_string()))))
@@ -3012,6 +3016,7 @@ fn main() {
             "fn main()->i64{let items=Vec::<i64,bool>::new();items.len()+42}",
             "struct Vec{value:i64} fn main()->i64{let items=Vec::<i64>::new();42}",
             "mod Vec{pub fn new<T>()->i64{0}} fn main()->i64{let items=Vec::<i64>::new();42}",
+            "mod Vec{pub fn new<T>()->i64{0}} fn main()->i64{let items=Vec::<_>::new();42}",
             "mod geo{pub struct Vec{value:i64}} use geo::Vec; fn main()->i64{let items=Vec::<i64>::new();42}",
         ] {
             let parsed = parse_rust_source(source).unwrap();
@@ -3033,6 +3038,8 @@ fn main() {
             "fn main()->i64 {let mut items=Vec::new();if true {items.push(42);} else {items.push(false);} 42}",
             "fn main()->i64 {let mut items=std::vec::Vec::new();items.push(42);items.push(false);42}",
             "fn main()->i64 {let items=alloc::vec::Vec::new();items.len()+42}",
+            "fn main()->i64 {let items=Vec::<_>::new();items.len()+42}",
+            "fn main()->i64 {let mut items=std::vec::Vec::<_>::new();items.push(42);items.push(false);42}",
             "fn main()->i64 {let mut items=Vec::new();items.push(missing());42}",
             "fn main()->i64 {let items=Vec::new();items.len()+42}",
             "mod geo {pub struct Vec<T> {value:T} impl Vec<i64> {pub fn new()->Self {Self{value:0}} pub fn is_empty(&self)->bool {false}}} use geo::Vec; fn main()->i64 {let items:Vec<i64>=Vec::new();if items.is_empty() {42} else {0}}",
