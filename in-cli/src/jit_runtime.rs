@@ -4358,6 +4358,42 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn native_destructuring_preserves_shapes_bindings_and_guards() {
+        for source in [
+            "fn main()->i64 { let values=[20,22]; match values { [a,b]=>a+b, _=>0 } }",
+            "fn main()->i64 { let values: [i64;0]=[]; match values { [a]=>a, []=>42, _=>0 } }",
+            "fn main()->i64 { let values=[true,false]; match values { [a,b]=>if a && !b {42} else {0}, _=>0 } }",
+            "fn main()->i64 { let values=[20.5,21.5]; match values { [a,b]=>(a+b) as i64, _=>0 } }",
+            "static mut CALLS:i64=0; fn values()->[i64;2] { unsafe {CALLS+=1;} [20,21] } fn main()->i64 { match values() { [a,b]=>unsafe {a+b+CALLS}, _=>0 } }",
+            "fn main()->i64 { let values=[42]; match values { [a,b]=>a+b, [a]=>a, _=>0 } }",
+            "fn main()->i64 { let values=[20,1,2,22]; match values { [a,..,b]=>a+b, _=>0 } }",
+            "fn main()->i64 { let values=[1,42]; match values { [2,a]=>0, [1,a]=>a, _=>0 } }",
+            "fn main()->i64 { let values=[20,22]; match values { [a,b] if a==0=>0, [a,b]=>a+b, _=>0 } }",
+            "struct Point { x:i64,y:i64 } fn main()->i64 { let p=Point{x:20,y:22}; match p { Point{x:a,y:b}=>{return a+b;} } return 0; }",
+            "struct Point { x:i64,y:i64 } fn main()->i64 { let p=Point{x:1,y:42}; match p { Point{x:2,y:a}=>0, Point{x:1,y:a}=>a, _=>0 } }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{source}: {report:?}; {module:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn closure_parameters_infer_monomorphic_call_types() {
         for source in [
             "fn main()->i64 { let f=|x|x+2; f(40) }",

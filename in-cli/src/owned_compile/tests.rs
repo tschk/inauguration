@@ -1367,10 +1367,25 @@ fn native_matches_reject_unsupported_and_incompatible_patterns() {
     for body in [
         "match 5 { [value] { return 1; } _ { return 2; } } return 3;",
         "match false { 0 { return 1; } _ { return 2; } } return 3;",
+        "match 5 { 5 { return 1; } _ { return 2; } } return 3;",
     ] {
         let mut module =
             crate::in_lang_parse::parse_in_source(&format!("fn main() -> Int {{ {body} }}"))
                 .unwrap();
+        if body.starts_with("match 5 { 5") {
+            module.decls.push(crate::core_ir::Decl::Struct {
+                name: "Point".into(),
+                fields: vec![("x".into(), crate::core_ir::Typ::Int)],
+                type_params: vec![],
+            });
+            if let crate::core_ir::Decl::Function { body, .. } = &mut module.decls[0]
+                && let crate::core_ir::Stmt::Match { arms, .. } = &mut body[0]
+            {
+                arms[0].pattern = "Point {}".into();
+            } else {
+                panic!("expected match fixture");
+            }
+        }
         for optimized in [false, true] {
             if optimized {
                 crate::core_opt::optimize_with_profile(
@@ -1387,7 +1402,9 @@ fn native_matches_reject_unsupported_and_incompatible_patterns() {
                 let error = result.unwrap_err();
                 assert!(
                     error.contains("unsupported match pattern")
-                        || error.contains("compatible scrutinee"),
+                        || error.contains("compatible scrutinee")
+                        || error.contains("is not an array")
+                        || error.contains("unsupported array-len argument"),
                     "{error}"
                 );
             }

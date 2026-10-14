@@ -91,6 +91,10 @@ pub(crate) struct Facts {
 }
 
 impl Facts {
+    pub(crate) fn pattern_fields(&self, name: &str) -> Option<&[(String, Typ)]> {
+        self.structs.get(name).map(Vec::as_slice)
+    }
+
     fn closure_target(&self, captures: &str) -> Option<&str> {
         if !self.structs.get(captures)?.is_empty() {
             return None;
