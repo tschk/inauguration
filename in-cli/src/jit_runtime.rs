@@ -4220,6 +4220,58 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn pure_static_initializer_blocks_build_native_tables() {
+        let source = "const BASE: [i64;4]=[20,22,1,2]; static TABLE: [[i64;2];2] = { let mut out = [[0;2];2]; let mut i=0; while i<2 { out[i]=[BASE[2*i],BASE[2*i+1]]; i+=1; } out }; fn main() -> i64 { return TABLE[0][0]+TABLE[0][1]; }";
+        let source = source.replace("fn main() -> i64", "pub fn main() -> i64");
+        let source =
+            format!("mod tables {{ {source} }} fn main() -> i64 {{ return tables::main(); }}");
+        let module = crate::compiler::rust_front::parse_rust_source(&source).unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &module);
+        crate::lower_core::desugar_module(&mut module);
+        assert!(
+            crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+            "{module:?}"
+        );
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(invoke_module(&module, profile, &[]), Some(42));
+        }
+    }
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn static_initializer_scopes_preserve_local_shadowing() {
+        let parsed = crate::compiler::rust_front::parse_rust_source("mod tables { static BASE:i64=20; pub static VALUE:i64={let BASE=40; {let BASE=0;} BASE+2}; } fn main()->i64 { return tables::VALUE; }").unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        crate::lower_core::desugar_module(&mut module);
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(invoke_module(&module, profile, &[]), Some(42));
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn boolean_static_initializer_blocks_close_short_circuit_operations() {
+        let parsed = crate::compiler::rust_front::parse_rust_source("static VALUE:bool={true && (false || true)}; fn main()->i64 { if VALUE {return 42;} return 0; }").unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        crate::lower_core::desugar_module(&mut module);
+        assert_eq!(
+            invoke_module(&module, crate::emit_profile::EmitProfile::Default, &[]),
+            Some(42)
+        );
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn reference_return_checked_failure_does_not_escape_as_a_pointer() {
         if std::env::var_os("IN_ARRAY_RETURN_BOUNDS_CHILD").is_some() {
             for (body, consumer) in [

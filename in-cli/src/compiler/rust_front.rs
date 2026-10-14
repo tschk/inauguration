@@ -569,8 +569,29 @@ fn rewrite_global_references(
                 params, body, &names, references,
             );
         }
+        if let Decl::Global {
+            init: Some(init), ..
+        } = decl
+        {
+            crate::core_bindings::normalize_initializer_with_references(init, &names, references);
+        }
         crate::core_opt::rewrite_constant_references(std::slice::from_mut(decl), references);
     }
+}
+
+fn lower_initializer(expr: &syn::Expr, typ: &Typ, locals: &mut HashMap<String, String>) -> Expr {
+    if let syn::Expr::Block(block) = expr {
+        return Expr::Call {
+            callee: Box::new(Expr::Closure {
+                params: vec![],
+                ret: typ.clone(),
+                body: lower_block_inner_with_types(&block.block, true, locals),
+                captures: vec![],
+            }),
+            args: vec![],
+        };
+    }
+    lower_expr_with_types(expr, locals)
 }
 
 fn lower_const_item(c: &syn::ItemConst) -> Option<Decl> {
@@ -578,7 +599,11 @@ fn lower_const_item(c: &syn::ItemConst) -> Option<Decl> {
     Some(Decl::Global {
         name: c.ident.to_string(),
         typ: map_type(&c.ty),
-        init: Some(Box::new(lower_expr_with_types(&c.expr, &mut locals))),
+        init: Some(Box::new(lower_initializer(
+            &c.expr,
+            &map_type(&c.ty),
+            &mut locals,
+        ))),
         mutable: false,
         constant_value: true,
     })
@@ -589,7 +614,11 @@ fn lower_static_item(s: &syn::ItemStatic) -> Option<Decl> {
     Some(Decl::Global {
         name: s.ident.to_string(),
         typ: map_type(&s.ty),
-        init: Some(Box::new(lower_expr_with_types(&s.expr, &mut locals))),
+        init: Some(Box::new(lower_initializer(
+            &s.expr,
+            &map_type(&s.ty),
+            &mut locals,
+        ))),
         mutable: matches!(s.mutability, syn::StaticMutability::Mut(_)),
         constant_value: false,
     })

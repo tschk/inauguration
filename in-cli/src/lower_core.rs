@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 #[path = "lower_core/constant_values.rs"]
 mod constant_values;
+#[path = "lower_core/static_initializers.rs"]
+mod static_initializers;
 #[path = "lower_core/value_spills.rs"]
 mod value_spills;
 pub(crate) use constant_values::lower_named_constants;
@@ -77,6 +79,7 @@ pub fn desugar_module(module: &mut UnifiedModule) {
             }
         }
     }
+    static_initializers::fold_static_initializers(&mut new_decls);
     lower_named_constants(&mut new_decls);
     lower_value_spills(&mut new_decls);
 

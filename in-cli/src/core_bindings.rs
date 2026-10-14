@@ -57,6 +57,22 @@ pub(crate) fn normalize_function_with_references(
     bindings.body(body, &mut scope);
 }
 
+pub(crate) fn normalize_initializer_with_references(
+    expr: &mut Expr,
+    names: &HashSet<String>,
+    references: &HashMap<String, String>,
+) {
+    let mut reserved = HashSet::new();
+    reserve_expr(expr, &mut reserved);
+    let mut bindings = Bindings {
+        reserved,
+        module_names: names,
+        declared: HashSet::new(),
+        next: 0,
+    };
+    bindings.expr(expr, &mut references.clone());
+}
+
 pub(crate) fn reserve_expr(expr: &Expr, names: &mut HashSet<String>) {
     match expr {
         Expr::Ident(name) => {
