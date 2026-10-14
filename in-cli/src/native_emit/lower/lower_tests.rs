@@ -1707,6 +1707,28 @@ fn main() -> Int {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
+fn checked_array_return_executable_patches_the_error_slot() {
+    for (consumer, expected) in [
+        ("return values()[0];", 1),
+        (
+            "try { return values()[0]; } catch 1 { return 42; } return 0;",
+            42,
+        ),
+    ] {
+        let source = format!(
+            "var position: Int = 5;\nfn values() -> [Int] {{ let items = [20]; return [items[position]]; }}\nfn main() -> Int {{ {consumer} }}"
+        );
+        let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+        let path = temp_executable("checked-array-return-exe");
+        compile_native_executable(&module, "main", &path).expect("compile");
+        let output = run_native_exe(&path);
+        assert_eq!(output.status.code(), Some(expected), "{source}: {output:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
 fn bool_string_array_executable_exits_with_comparison_value() {
     let module = crate::in_lang_parse::parse_in_source(
         r#"

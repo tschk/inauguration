@@ -95,9 +95,20 @@ fn emit_function_epilogue(emitter: &mut CodeEmitter, is_interrupt: bool) {
     }
 }
 
-fn emit_failure_return(emitter: &mut CodeEmitter, is_interrupt: bool) {
+fn emit_failure_return(emitter: &mut CodeEmitter, ctx: &mut LowerCtx<'_>) -> Result<(), String> {
     emitter.emit_insns(&x86_64::load_i64(RAX, 1));
-    emit_function_epilogue(emitter, is_interrupt);
+    if matches!(
+        ctx.ret_typ.canonical(),
+        Typ::Array(_) | Typ::Vector(_) | Typ::Named(_)
+    ) {
+        store_error_global(emitter, ctx, "__inrt_err_val")?;
+        store_error_global(emitter, ctx, "__inrt_err_type")?;
+        store_error_global(emitter, ctx, "__inrt_err_flag")?;
+        emit_error_exit(emitter, ctx)?;
+    } else {
+        emit_function_epilogue(emitter, ctx.is_interrupt);
+    }
+    Ok(())
 }
 
 pub struct X86_64CompileResult {
@@ -670,11 +681,14 @@ fn collect_functions(module: &UnifiedModule) -> Result<HashMap<String, FunctionI
         crate::core_bindings::normalize_function(&mut func.params, &mut func.body, &module_names);
         rename_calls(&mut func.body, &name_map);
     }
-    let fallible = crate::core_effects::fallible_functions(
-        functions
-            .values()
-            .map(|info| (info.name.as_str(), info.body.as_slice())),
-    );
+    let fallible = crate::core_effects::fallible_functions(functions.values().map(|info| {
+        (
+            info.name.as_str(),
+            info.body.as_slice(),
+            &info.ret,
+            info.params.as_slice(),
+        )
+    }));
     for info in functions.values_mut() {
         info.may_throw = fallible.contains(&info.name);
     }
@@ -706,7 +720,10 @@ fn rename_calls_in_stmt(stmt: &mut Stmt, name_map: &HashMap<String, String>) {
             rename_calls(then_body, name_map);
             rename_calls(else_body, name_map);
         }
-        Stmt::Loop { body, .. } => {
+        Stmt::Loop { body, cond, .. } => {
+            if let Some(cond) = cond {
+                rename_calls_in_expr(cond, name_map);
+            }
             rename_calls(body, name_map);
         }
         Stmt::FieldAssign { base, value, .. } => {
@@ -1105,7 +1122,7 @@ fn lower_function(
         emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 1));
         let valid = emitter.len();
         emitter.emit_insns(&x86_64::jcc_near(0x07, 0));
-        emit_failure_return(emitter, ctx.is_interrupt);
+        emit_failure_return(emitter, &mut ctx)?;
         emitter.patch_u32(valid + 2, emitter.len() - valid - 6);
         let mut offsets: Vec<_> = fields.values().copied().collect();
         offsets.sort_unstable_by(|lhs, rhs| rhs.cmp(lhs));
@@ -1522,7 +1539,7 @@ fn lower_stmt(
                 let end = emitter.len();
                 emitter.emit_insns(&x86_64::jmp_rel32(0));
                 emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
-                emit_failure_return(emitter, ctx.is_interrupt);
+                emit_failure_return(emitter, ctx)?;
                 emitter.patch_u32(end + 1, emitter.len() - end - 5);
                 return Ok(());
             }
@@ -1555,7 +1572,7 @@ fn lower_stmt(
             emitter.emit_insns(&x86_64::jmp_rel32(0));
             emitter.patch_u32(null + 2, emitter.len() - null - 6);
             emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
-            emit_failure_return(emitter, ctx.is_interrupt);
+            emit_failure_return(emitter, ctx)?;
             emitter.patch_u32(end + 1, emitter.len() - end - 5);
             Ok(())
         }
@@ -2232,14 +2249,17 @@ fn lower_ident_ref(
     Ok(())
 }
 
-fn lower_checked_div_or_mod(emitter: &mut CodeEmitter, is_interrupt: bool, modulo: bool) {
+fn lower_checked_div_or_mod(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    modulo: bool,
+) -> Result<(), String> {
     emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
     emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
     emitter.emit_insns(&x86_64::test_rr(RCX, RCX));
     let nonzero = emitter.len();
     emitter.emit_insns(&x86_64::jcc_near(5, 0));
-    emitter.emit_insns(&x86_64::load_i64(RAX, 1));
-    emit_function_epilogue(emitter, is_interrupt);
+    emit_failure_return(emitter, ctx)?;
     let valid = emitter.len();
     emitter.patch_u32(nonzero + 2, (valid as i32 - nonzero as i32 - 6) as u32);
 
@@ -2275,6 +2295,7 @@ fn lower_checked_div_or_mod(emitter: &mut CodeEmitter, is_interrupt: bool, modul
         overflow_done + 1,
         (end as i32 - overflow_done as i32 - 5) as u32,
     );
+    Ok(())
 }
 
 fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
@@ -2493,7 +2514,7 @@ fn lower_binary_expr(
             emitter.emit_insns(&x86_64::movzx_r8(RAX, RAX));
         }
         "/" | "/=" | "%" | "%=" => {
-            lower_checked_div_or_mod(emitter, ctx.is_interrupt, matches!(op, "%" | "%="));
+            lower_checked_div_or_mod(emitter, ctx, matches!(op, "%" | "%="))?;
         }
         "<" => {
             emitter.emit_insns(&x86_64::cmp_rr(RDX, RAX));
@@ -3272,7 +3293,7 @@ fn store_struct_value(
     emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 1));
     let valid = emitter.len();
     emitter.emit_insns(&x86_64::jcc_near(0x07, 0));
-    emit_failure_return(emitter, ctx.is_interrupt);
+    emit_failure_return(emitter, ctx)?;
     emitter.patch_u32(valid + 2, emitter.len() - valid - 6);
 
     for (index, offset) in offsets.into_iter().enumerate() {
@@ -3565,12 +3586,12 @@ fn lower_array_elem_read(
                 return Ok(());
             }
         }
-        emit_failure_return(emitter, ctx.is_interrupt);
+        emit_failure_return(emitter, ctx)?;
         return Ok(());
     }
     let Some(&first) = offsets.first() else {
         lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
-        emit_failure_return(emitter, ctx.is_interrupt);
+        emit_failure_return(emitter, ctx)?;
         return Ok(());
     };
     lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
@@ -3587,7 +3608,7 @@ fn lower_array_elem_read(
     let end = emitter.len();
     emitter.emit_insns(&x86_64::jmp_rel32(0));
     emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
-    emit_failure_return(emitter, ctx.is_interrupt);
+    emit_failure_return(emitter, ctx)?;
     emitter.patch_u32(end + 1, emitter.len() - end - 5);
     if target_reg != RAX {
         emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
@@ -3721,7 +3742,7 @@ fn lower_index_expr(
     emitter.emit_insns(&x86_64::jmp_rel32(0));
     emitter.patch_u32(null + 2, emitter.len() - null - 6);
     emitter.patch_u32(out_of_bounds + 2, emitter.len() - out_of_bounds - 6);
-    emit_failure_return(emitter, ctx.is_interrupt);
+    emit_failure_return(emitter, ctx)?;
     emitter.patch_u32(end + 1, emitter.len() - end - 5);
     if target_reg != RAX {
         emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));

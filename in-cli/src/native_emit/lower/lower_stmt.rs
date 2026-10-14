@@ -35,7 +35,7 @@ fn emit_error_type(
 /// leave a placeholder instruction and record the site for `build_assembly`.
 /// Refusing is the only other option, because writing through an unset x27 is
 /// what used to crash these programs.
-fn emit_error_slot_adr(emitter: &mut CodeEmitter, fn_name: &str) -> Result<(), String> {
+pub(crate) fn emit_error_slot_adr(emitter: &mut CodeEmitter, fn_name: &str) -> Result<(), String> {
     match super::error_slot_mode() {
         super::ErrorSlotMode::RuntimeProvided => Ok(()),
         super::ErrorSlotMode::AssemblyProvided => {
@@ -864,7 +864,7 @@ pub(crate) fn lower_index_assign(
         oob_branch,
         aarch64::b_cond(10, failure_offset - oob_branch as i32),
     );
-    emit_failure_return(emitter, ctx.prologue_stack_reserve);
+    emit_failure_return(emitter, ctx, fn_name)?;
     let end_offset = emitter.len() as i32 - end_branch as i32;
     emitter.patch_u32(end_branch, aarch64::b(end_offset));
     if global_temps {

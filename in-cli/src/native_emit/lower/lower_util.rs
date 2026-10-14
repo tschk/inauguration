@@ -21,9 +21,25 @@ pub(crate) fn pick_scratch(exclude: &[u8]) -> u8 {
     (2..=15).find(|reg| !exclude.contains(reg)).unwrap_or(15)
 }
 
-pub(crate) fn emit_failure_return(emitter: &mut CodeEmitter, stack_reserve: u32) {
+pub(crate) fn emit_failure_return(
+    emitter: &mut CodeEmitter,
+    ctx: &mut super::LowerCtx<'_>,
+    fn_name: &str,
+) -> Result<(), String> {
     emitter.emit_insns(&aarch64::load_i64(0, 1));
-    emit_epilogue(emitter, stack_reserve);
+    if matches!(
+        ctx.ret_typ.canonical(),
+        Typ::Array(_) | Typ::Vector(_) | Typ::Named(_)
+    ) {
+        super::lower_stmt::emit_error_slot_adr(emitter, fn_name)?;
+        emitter.emit_u32(aarch64::str64(0, 27, 8));
+        emitter.emit_u32(aarch64::str64(0, 27, 16));
+        emitter.emit_u32(aarch64::strb(0, 27, 0));
+        super::lower_stmt::emit_error_exit(emitter, ctx);
+    } else {
+        emit_epilogue(emitter, ctx.prologue_stack_reserve);
+    }
+    Ok(())
 }
 
 pub(crate) fn field_path(expr: &Expr) -> Option<(&str, String)> {

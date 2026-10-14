@@ -54,11 +54,14 @@ pub(crate) fn collect_functions(
         crate::core_bindings::normalize_function(&mut func.params, &mut func.body, &module_names);
         rename_calls(&mut func.body, &name_map);
     }
-    let fallible = crate::core_effects::fallible_functions(
-        functions
-            .values()
-            .map(|info| (info.name.as_str(), info.body.as_slice())),
-    );
+    let fallible = crate::core_effects::fallible_functions(functions.values().map(|info| {
+        (
+            info.name.as_str(),
+            info.body.as_slice(),
+            &info.ret,
+            info.params.as_slice(),
+        )
+    }));
     for info in functions.values_mut() {
         info.may_throw = fallible.contains(&info.name);
     }
@@ -71,10 +74,25 @@ pub(crate) fn collect_functions(
 pub(crate) fn rename_calls(stmts: &mut [Stmt], name_map: &HashMap<String, String>) {
     for stmt in stmts {
         match stmt {
-            Stmt::Expr(expr) | Stmt::Return(Some(expr)) => rename_call_expr(expr, name_map),
-            Stmt::Let(_, _, expr)
-            | Stmt::Assign(_, expr)
-            | Stmt::FieldAssign { value: expr, .. } => rename_call_expr(expr, name_map),
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+                rename_call_expr(expr, name_map)
+            }
+            Stmt::Let(_, _, expr) | Stmt::Assign(_, expr) => rename_call_expr(expr, name_map),
+            Stmt::FieldAssign { base, value, .. } => {
+                rename_call_expr(base, name_map);
+                rename_call_expr(value, name_map);
+            }
+            Stmt::IndexAssign { base, index, value } => {
+                rename_call_expr(base, name_map);
+                rename_call_expr(index, name_map);
+                rename_call_expr(value, name_map);
+            }
+            Stmt::Try { body, catches } => {
+                rename_calls(body, name_map);
+                for catch in catches {
+                    rename_calls(&mut catch.body, name_map);
+                }
+            }
             Stmt::If {
                 then_body,
                 else_body,
@@ -91,7 +109,8 @@ pub(crate) fn rename_calls(stmts: &mut [Stmt], name_map: &HashMap<String, String
                 }
                 rename_calls(body, name_map);
             }
-            Stmt::Match { arms, .. } => {
+            Stmt::Match { scrutinee, arms } => {
+                rename_call_expr(scrutinee, name_map);
                 for arm in arms {
                     rename_calls(&mut arm.body, name_map);
                 }

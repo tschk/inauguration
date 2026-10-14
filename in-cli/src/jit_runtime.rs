@@ -4053,6 +4053,85 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn array_return_bounds_failure_does_not_escape_as_a_pointer() {
+        if std::env::var_os("IN_ARRAY_RETURN_BOUNDS_CHILD").is_some() {
+            for (body, consumer) in [
+                (
+                    "let items = [20]; let value = items[position]; return [value];",
+                    "return values()[0];",
+                ),
+                (
+                    "let items = [20]; let value = items[position]; return [value];",
+                    "return array_len(values());",
+                ),
+                (
+                    "let items = [20]; items[position] = 22; return items;",
+                    "let items = values(); items[0] = 42; return items[0];",
+                ),
+                (
+                    "let value = 20 / (position - 5); return [value];",
+                    "return values()[0];",
+                ),
+                (
+                    "let value = 20 % (position - 5); return [value];",
+                    "return array_len(values());",
+                ),
+            ] {
+                let source = format!(
+                    "var position: Int = 5;\nfn values() -> [Int] {{ {body} }}\nfn main() -> Int {{ {consumer} }}"
+                );
+                let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                crate::lower_core::desugar_module(&mut module);
+                assert!(
+                    crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                    "{source}"
+                );
+                for profile in [
+                    crate::emit_profile::EmitProfile::Default,
+                    crate::emit_profile::EmitProfile::Lean,
+                    crate::emit_profile::EmitProfile::Harden,
+                ] {
+                    let rt = runtime_for_module(&module, profile);
+                    assert_eq!(unsafe { rt.invoke("main", &[]) }, Some(1), "{source}");
+                    assert_eq!(rt.invocation_error(), Some(1), "{source}");
+                }
+            }
+            for position in [0, 5] {
+                let source = format!(
+                    "var position: Int = {position};\nfn values() -> [Int] {{ let items = [42]; return [items[position]]; }}\nfn relay() -> [Int] {{ return values(); }}\nfn main() -> Int {{ try {{ return relay()[0]; }} catch 1 {{ return 42; }} return 0; }}"
+                );
+                let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                crate::lower_core::desugar_module(&mut module);
+                for profile in [
+                    crate::emit_profile::EmitProfile::Default,
+                    crate::emit_profile::EmitProfile::Lean,
+                    crate::emit_profile::EmitProfile::Harden,
+                ] {
+                    let rt = runtime_for_module(&module, profile);
+                    assert_eq!(unsafe { rt.invoke("main", &[]) }, Some(42), "{source}");
+                    assert_eq!(rt.invocation_error(), None, "{source}");
+                }
+            }
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("jit_runtime::tests::array_return_bounds_failure_does_not_escape_as_a_pointer")
+            .arg("--nocapture")
+            .env("IN_ARRAY_RETURN_BOUNDS_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "status: {}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn scalar_vector_literals_preserve_call_and_return_values() {
         for source in [
             "fn values() -> Vec<i64> { return vec![20, 22]; } fn main() -> i64 { let items: Vec<i64> = values(); let mut sum = 0; for value in items { sum += value; } return sum; }",

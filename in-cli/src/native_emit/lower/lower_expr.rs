@@ -272,7 +272,7 @@ pub(crate) fn lower_index(
             oob_branch,
             aarch64::b_cond(10, failure_offset - oob_branch as i32),
         );
-        emit_failure_return(emitter, ctx.prologue_stack_reserve);
+        emit_failure_return(emitter, ctx, fn_name)?;
         let end_offset = emitter.len() as i32 - end_branch as i32;
         emitter.patch_u32(end_branch, aarch64::b(end_offset));
         ctx.release_binop_temp();
@@ -431,7 +431,7 @@ pub(crate) fn lower_index(
         oob_branch,
         aarch64::b_cond(10, failure_offset - oob_branch as i32),
     );
-    emit_failure_return(emitter, ctx.prologue_stack_reserve);
+    emit_failure_return(emitter, ctx, fn_name)?;
     let end_offset = emitter.len() as i32 - end_branch as i32;
     emitter.patch_u32(end_branch, aarch64::b(end_offset));
     Ok(())
@@ -883,10 +883,10 @@ pub(crate) fn lower_binary(
         "*" | "*=" => aarch64::mul64(rd, lhs_reg, rhs_reg),
 
         "/" | "/=" => {
-            return lower_checked_div_or_mod(emitter, ctx, rd, lhs_reg, rhs_reg, false);
+            return lower_checked_div_or_mod(emitter, ctx, rd, lhs_reg, rhs_reg, false, fn_name);
         }
         "%" => {
-            return lower_checked_div_or_mod(emitter, ctx, rd, lhs_reg, rhs_reg, true);
+            return lower_checked_div_or_mod(emitter, ctx, rd, lhs_reg, rhs_reg, true, fn_name);
         }
         "??" => {
             lower_truthy_result(emitter, lhs_reg);
@@ -1134,11 +1134,12 @@ fn lower_string_concat(
 
 pub(crate) fn lower_checked_div_or_mod(
     emitter: &mut CodeEmitter,
-    ctx: &LowerCtx<'_>,
+    ctx: &mut LowerCtx<'_>,
     rd: u8,
     lhs_reg: u8,
     rhs_reg: u8,
     modulo: bool,
+    fn_name: &str,
 ) -> Result<(), String> {
     emitter.emit_u32(aarch64::cmp_reg64(rhs_reg, aarch64::REG_XZR));
     let failure_branch = emitter.emit_insn(aarch64::b_cond(0, 0));
@@ -1155,7 +1156,7 @@ pub(crate) fn lower_checked_div_or_mod(
         failure_branch,
         aarch64::b_cond(0, failure_offset - failure_branch as i32),
     );
-    emit_failure_return(emitter, ctx.prologue_stack_reserve);
+    emit_failure_return(emitter, ctx, fn_name)?;
     let end_offset = emitter.len() as i32 - end_branch as i32;
     emitter.patch_u32(end_branch, aarch64::b(end_offset));
     Ok(())

@@ -1002,14 +1002,14 @@ fn lower_function(
     for (name, typ) in &func.params {
         if name == "self"
             && let Typ::Named(struct_name) = typ
-            && let Some(LocalSlot::Struct { fields, .. }) = ctx.locals.get(name)
+            && let Some(LocalSlot::Struct { fields, .. }) = ctx.locals.get(name).cloned()
             && let Some(&pointer_slot) = ctx.receiver_pointers.get(name)
         {
             emitter.emit_u32(aarch64::ldr64(15, aarch64::REG_SP, pointer_slot));
             emitter.emit_insns(&aarch64::load_i64(14, 1));
             emitter.emit_u32(aarch64::cmp_reg64(15, 14));
             let valid = emitter.emit_insn(aarch64::b_cond(8, 0));
-            emit_failure_return(emitter, ctx.prologue_stack_reserve);
+            emit_failure_return(emitter, &mut ctx, &func.name)?;
             emitter.patch_u32(
                 valid,
                 aarch64::b_cond(8, emitter.len() as i32 - valid as i32),

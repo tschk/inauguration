@@ -3,14 +3,34 @@ use crate::core_ir::{Expr, Stmt};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub(crate) fn fallible_functions<'a>(
-    functions: impl IntoIterator<Item = (&'a str, &'a [Stmt])>,
+    functions: impl IntoIterator<
+        Item = (
+            &'a str,
+            &'a [Stmt],
+            &'a crate::core_ir::Typ,
+            &'a [(String, crate::core_ir::Typ)],
+        ),
+    >,
 ) -> HashSet<String> {
     let mut callers: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut fallible = HashSet::new();
     let mut queue = VecDeque::new();
-    for (name, body) in functions {
+    for (name, body, ret, params) in functions {
         let mut calls = HashSet::new();
-        if scan_body(body, &mut calls) {
+        let aggregate = matches!(
+            ret.canonical(),
+            crate::core_ir::Typ::Array(_)
+                | crate::core_ir::Typ::Vector(_)
+                | crate::core_ir::Typ::Named(_)
+        );
+        let body_fallible = scan_body(body, &mut calls, aggregate);
+        // Aggregate pointer checks in parameter unpacking and copies also fail before the body.
+        let pointer_checks = aggregate
+            && (matches!(ret.canonical(), crate::core_ir::Typ::Named(_))
+                || params
+                    .iter()
+                    .any(|(_, typ)| matches!(typ.canonical(), crate::core_ir::Typ::Named(_))));
+        if body_fallible || pointer_checks {
             fallible.insert(name);
             queue.push_back(name);
         }
@@ -28,69 +48,79 @@ pub(crate) fn fallible_functions<'a>(
     fallible.into_iter().map(str::to_owned).collect()
 }
 
-fn scan_expr<'a>(expr: &'a Expr, calls: &mut HashSet<&'a str>) {
+fn scan_expr<'a>(expr: &'a Expr, calls: &mut HashSet<&'a str>, checked: &mut bool) {
+    if matches!(
+        expr,
+        Expr::Index { .. } | Expr::Field { .. } | Expr::StructInit { .. }
+    ) || matches!(expr, Expr::Binary { op, .. } if matches!(op.as_str(), "/" | "%" | "/=" | "%="))
+    {
+        *checked = true;
+    }
     if let Expr::Call { callee, .. } = expr
         && let Expr::Ident(name) = callee.as_ref()
     {
         calls.insert(name);
     }
-    crate::core_ir::for_each_expr_child(expr, &mut |child| scan_expr(child, calls));
+    crate::core_ir::for_each_expr_child(expr, &mut |child| scan_expr(child, calls, checked));
 }
 
-fn scan_body<'a>(body: &'a [Stmt], calls: &mut HashSet<&'a str>) -> bool {
+fn scan_body<'a>(body: &'a [Stmt], calls: &mut HashSet<&'a str>, aggregate: bool) -> bool {
     let mut fallible = false;
+    let mut checked = false;
     for stmt in body {
         match stmt {
             Stmt::Throw(expr) => {
                 fallible = true;
-                scan_expr(expr, calls);
+                scan_expr(expr, calls, &mut checked);
             }
             Stmt::Propagate => fallible = true,
             Stmt::Let(_, _, expr)
             | Stmt::Assign(_, expr)
             | Stmt::Expr(expr)
-            | Stmt::Return(Some(expr)) => scan_expr(expr, calls),
+            | Stmt::Return(Some(expr)) => scan_expr(expr, calls, &mut checked),
             Stmt::FieldAssign { base, value, .. } => {
-                scan_expr(base, calls);
-                scan_expr(value, calls);
+                checked = true;
+                scan_expr(base, calls, &mut checked);
+                scan_expr(value, calls, &mut checked);
             }
             Stmt::IndexAssign { base, index, value } => {
-                scan_expr(base, calls);
-                scan_expr(index, calls);
-                scan_expr(value, calls);
+                checked = true;
+                scan_expr(base, calls, &mut checked);
+                scan_expr(index, calls, &mut checked);
+                scan_expr(value, calls, &mut checked);
             }
             Stmt::If {
                 cond,
                 then_body,
                 else_body,
             } => {
-                scan_expr(cond, calls);
-                fallible |= scan_body(then_body, calls);
-                fallible |= scan_body(else_body, calls);
+                scan_expr(cond, calls, &mut checked);
+                fallible |= scan_body(then_body, calls, aggregate);
+                fallible |= scan_body(else_body, calls, aggregate);
             }
             Stmt::Loop { cond, body, .. } => {
                 if let Some(cond) = cond {
-                    scan_expr(cond, calls);
+                    scan_expr(cond, calls, &mut checked);
                 }
-                fallible |= scan_body(body, calls);
+                fallible |= scan_body(body, calls, aggregate);
             }
             Stmt::Match { scrutinee, arms } => {
-                scan_expr(scrutinee, calls);
+                scan_expr(scrutinee, calls, &mut checked);
                 for arm in arms {
-                    fallible |= scan_body(&arm.body, calls);
+                    fallible |= scan_body(&arm.body, calls, aggregate);
                 }
             }
             Stmt::Try { body, catches } => {
                 fallible = true;
-                scan_body(body, calls);
+                scan_body(body, calls, aggregate);
                 for catch in catches {
-                    scan_body(&catch.body, calls);
+                    scan_body(&catch.body, calls, aggregate);
                 }
             }
             _ => {}
         }
     }
-    fallible
+    fallible || (aggregate && checked)
 }
 
 /// Reserve type slots only for catch bindings and their direct local aliases.
@@ -185,12 +215,35 @@ mod tests {
     }
 
     #[test]
+    fn checked_aggregate_failures_reach_callers_without_changing_scalar_failures() {
+        let module = crate::in_lang_parse::parse_in_source("fn values() -> [Int] { let items = [20]; return [items[5]]; }\nfn relay() -> [Int] { return values(); }\nfn main() -> Int { return relay()[0]; }\nfn scalar() -> Int { let items = [20]; return items[5]; }\nfn pure() -> [Int] { return [42]; }").unwrap();
+        let functions = module.decls.iter().filter_map(|decl| match decl {
+            crate::core_ir::Decl::Function {
+                name,
+                body,
+                ret,
+                params,
+                ..
+            } => Some((name.as_str(), body.as_slice(), ret, params.as_slice())),
+            _ => None,
+        });
+        assert_eq!(
+            fallible_functions(functions),
+            HashSet::from(["values".into(), "relay".into(), "main".into()])
+        );
+    }
+
+    #[test]
     fn error_effects_reach_recursive_callers_but_not_pure_functions() {
         let module = crate::in_lang_parse::parse_in_source("fn fail() -> Int { throw 42; return 0; }\nfn first() -> Int { return second(); }\nfn second() -> Int { first(); return fail(); }\nfn pure() -> Int { return 7; }\nfn main() -> Int { return pure(); }").unwrap();
         let functions = module.decls.iter().filter_map(|decl| match decl {
-            crate::core_ir::Decl::Function { name, body, .. } => {
-                Some((name.as_str(), body.as_slice()))
-            }
+            crate::core_ir::Decl::Function {
+                name,
+                body,
+                ret,
+                params,
+                ..
+            } => Some((name.as_str(), body.as_slice(), ret, params.as_slice())),
             _ => None,
         });
         assert_eq!(
