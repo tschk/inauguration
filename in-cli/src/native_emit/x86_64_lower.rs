@@ -99,7 +99,7 @@ fn emit_failure_return(emitter: &mut CodeEmitter, ctx: &mut LowerCtx<'_>) -> Res
     emitter.emit_insns(&x86_64::load_i64(RAX, 1));
     if matches!(
         ctx.ret_typ.canonical(),
-        Typ::Array(_) | Typ::Vector(_) | Typ::Named(_)
+        Typ::String | Typ::Array(_) | Typ::Vector(_) | Typ::Named(_)
     ) {
         store_error_global(emitter, ctx, "__inrt_err_val")?;
         store_error_global(emitter, ctx, "__inrt_err_type")?;
@@ -1238,7 +1238,7 @@ fn emit_error_exit(emitter: &mut CodeEmitter, ctx: &mut LowerCtx<'_>) -> Result<
     } else {
         if matches!(
             ctx.ret_typ.canonical(),
-            Typ::Named(_) | Typ::Array(_) | Typ::Vector(_) | Typ::Void
+            Typ::String | Typ::Named(_) | Typ::Array(_) | Typ::Vector(_) | Typ::Void
         ) {
             emitter.emit_insns(&x86_64::load_i64(RAX, 0));
         } else {

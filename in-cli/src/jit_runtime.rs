@@ -4053,7 +4053,7 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
-    fn array_return_bounds_failure_does_not_escape_as_a_pointer() {
+    fn reference_return_checked_failure_does_not_escape_as_a_pointer() {
         if std::env::var_os("IN_ARRAY_RETURN_BOUNDS_CHILD").is_some() {
             for (body, consumer) in [
                 (
@@ -4096,6 +4096,54 @@ mod tests {
                     assert_eq!(rt.invocation_error(), Some(1), "{source}");
                 }
             }
+            for body in [
+                "let items = [20]; let value = items[position]; if value == 20 { return \"hi\"; } return \"no\";",
+                "let value = 20 / (position - 5); if value == 20 { return \"hi\"; } return \"no\";",
+            ] {
+                for position in [0, 5] {
+                    for caught in [false, true] {
+                        let consumer = if caught {
+                            "try { return str_len(text()); } catch 1 { return 42; } return 0;"
+                        } else {
+                            "return str_len(text());"
+                        };
+                        let source = format!(
+                            "var position: Int = {position};\nfn text() -> String {{ {body} }}\nfn main() -> Int {{ {consumer} }}"
+                        );
+                        let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                        crate::lower_core::desugar_module(&mut module);
+                        assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+                        for profile in [
+                            crate::emit_profile::EmitProfile::Default,
+                            crate::emit_profile::EmitProfile::Lean,
+                            crate::emit_profile::EmitProfile::Harden,
+                        ] {
+                            let rt = runtime_for_module(&module, profile);
+                            let expected = if position == 0 {
+                                2
+                            } else if caught {
+                                42
+                            } else {
+                                1
+                            };
+                            assert_eq!(
+                                unsafe { rt.invoke("main", &[]) },
+                                Some(expected),
+                                "{source}"
+                            );
+                            assert_eq!(
+                                rt.invocation_error(),
+                                (position == 5 && !caught).then_some(1),
+                                "{source}"
+                            );
+                            if position == 5 {
+                                assert_eq!(unsafe { rt.invoke("text", &[]) }, Some(0), "{source}");
+                                assert_eq!(rt.invocation_error(), Some(1), "{source}");
+                            }
+                        }
+                    }
+                }
+            }
             for position in [0, 5] {
                 let source = format!(
                     "var position: Int = {position};\nfn values() -> [Int] {{ let items = [42]; return [items[position]]; }}\nfn relay() -> [Int] {{ return values(); }}\nfn main() -> Int {{ try {{ return relay()[0]; }} catch 1 {{ return 42; }} return 0; }}"
@@ -4116,7 +4164,9 @@ mod tests {
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
-            .arg("jit_runtime::tests::array_return_bounds_failure_does_not_escape_as_a_pointer")
+            .arg(
+                "jit_runtime::tests::reference_return_checked_failure_does_not_escape_as_a_pointer",
+            )
             .arg("--nocapture")
             .env("IN_ARRAY_RETURN_BOUNDS_CHILD", "1")
             .output()

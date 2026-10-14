@@ -59,7 +59,7 @@ pub(crate) fn emit_error_exit(emitter: &mut CodeEmitter, ctx: &mut LowerCtx<'_>)
     } else {
         if matches!(
             ctx.ret_typ.canonical(),
-            Typ::Void | Typ::Named(_) | Typ::Array(_) | Typ::Vector(_)
+            Typ::String | Typ::Void | Typ::Named(_) | Typ::Array(_) | Typ::Vector(_)
         ) {
             emitter.emit_insns(&aarch64::load_i64(0, 0));
         } else {

@@ -29,7 +29,7 @@ pub(crate) fn emit_failure_return(
     emitter.emit_insns(&aarch64::load_i64(0, 1));
     if matches!(
         ctx.ret_typ.canonical(),
-        Typ::Array(_) | Typ::Vector(_) | Typ::Named(_)
+        Typ::String | Typ::Array(_) | Typ::Vector(_) | Typ::Named(_)
     ) {
         super::lower_stmt::emit_error_slot_adr(emitter, fn_name)?;
         emitter.emit_u32(aarch64::str64(0, 27, 8));

@@ -19,7 +19,8 @@ pub(crate) fn fallible_functions<'a>(
         let mut calls = HashSet::new();
         let aggregate = matches!(
             ret.canonical(),
-            crate::core_ir::Typ::Array(_)
+            crate::core_ir::Typ::String
+                | crate::core_ir::Typ::Array(_)
                 | crate::core_ir::Typ::Vector(_)
                 | crate::core_ir::Typ::Named(_)
         );

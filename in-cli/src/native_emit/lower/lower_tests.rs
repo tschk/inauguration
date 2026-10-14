@@ -1707,7 +1707,7 @@ fn main() -> Int {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
-fn checked_array_return_executable_patches_the_error_slot() {
+fn checked_reference_return_executable_patches_the_error_slot() {
     for (consumer, expected) in [
         ("return values()[0];", 1),
         (
@@ -1723,6 +1723,21 @@ fn checked_array_return_executable_patches_the_error_slot() {
         compile_native_executable(&module, "main", &path).expect("compile");
         let output = run_native_exe(&path);
         assert_eq!(output.status.code(), Some(expected), "{source}: {output:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+    for position in [0, 5] {
+        let source = format!(
+            "var position: Int = {position};\nfn text() -> String {{ let items = [20]; let value = items[position]; if value == 20 {{ return \"hi\"; }} return \"no\"; }}\nfn main() -> Int {{ try {{ return str_len(text()); }} catch 1 {{ return 42; }} return 0; }}"
+        );
+        let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+        let path = temp_executable("checked-string-return-exe");
+        compile_native_executable(&module, "main", &path).expect("compile");
+        let output = run_native_exe(&path);
+        assert_eq!(
+            output.status.code(),
+            Some(if position == 0 { 2 } else { 42 }),
+            "{source}: {output:?}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
