@@ -1,6 +1,74 @@
 use crate::core_ir::{Decl, Expr, Typ, UnifiedModule};
 use std::collections::HashMap;
 
+fn array_storage_size(init: Option<&Expr>) -> usize {
+    let Some(Expr::ArrayLit(items)) = init else {
+        return 16;
+    };
+    (items.len() + 2) * 8
+        + items
+            .iter()
+            .filter(|item| matches!(item, Expr::ArrayLit(_)))
+            .map(|item| array_storage_size(Some(item)))
+            .sum::<usize>()
+}
+
+fn append_array(
+    data: &mut Vec<u8>,
+    elem: &Typ,
+    init: Option<&Expr>,
+    name: &str,
+) -> Result<(), String> {
+    let items = match init {
+        Some(Expr::ArrayLit(items)) => items.as_slice(),
+        None => &[],
+        _ => {
+            return Err(format!(
+                "unsupported native initializer for global `{name}`; expected an array literal"
+            ));
+        }
+    };
+    let elem = elem.canonical();
+    if !matches!(elem, Typ::Int | Typ::Float | Typ::Bool | Typ::Array(_)) {
+        return Err(format!(
+            "unsupported native initializer for global `{name}`; expected numeric or boolean array elements"
+        ));
+    }
+    let header = data.len();
+    data.extend_from_slice(&(items.len() as u64).to_le_bytes());
+    data.extend_from_slice(&(items.len() as u64).to_le_bytes());
+    data.resize(data.len() + items.len() * 8, 0);
+    for (index, item) in items.iter().enumerate() {
+        let word = match (&elem, item) {
+            (Typ::Int, Expr::IntLit(value)) => *value,
+            (Typ::Float, Expr::FloatLit(value)) => value.0.to_bits() as i64,
+            (Typ::Bool, Expr::BoolLit(value)) => i64::from(*value),
+            (Typ::Array(child), Expr::ArrayLit(_)) => {
+                // Relative child headers keep static data relocatable.
+                let offset = (data.len() - header) as i64;
+                append_array(data, child, Some(item), name)?;
+                offset
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported native initializer for global `{name}`; expected scalar array elements or nested array literals"
+                ));
+            }
+        };
+        let slot = header + 16 + index * 8;
+        data[slot..slot + 8].copy_from_slice(&word.to_le_bytes());
+    }
+    Ok(())
+}
+
+pub(crate) fn indexed_root(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Ident(name) => Some(name),
+        Expr::Index { base, .. } => indexed_root(base),
+        _ => None,
+    }
+}
+
 /// Assign byte offsets in the writable data section, including scalar struct fields.
 pub(crate) fn collect_globals(
     module: &UnifiedModule,
@@ -19,11 +87,7 @@ pub(crate) fn collect_globals(
         {
             globals.insert(name.clone(), offset);
             if matches!(typ.canonical(), Typ::Array(_)) {
-                let len = match init.as_deref() {
-                    Some(Expr::ArrayLit(items)) => items.len(),
-                    _ => 0,
-                };
-                offset += (len as u64 + 2) * 8;
+                offset += array_storage_size(init.as_deref()) as u64;
                 continue;
             }
             // Struct-typed globals reserve one word per known field so that
@@ -62,38 +126,8 @@ pub(crate) fn build_data_section(
         {
             let offset = *globals.get(name).unwrap_or(&0);
             if let Typ::Array(elem) = typ.canonical() {
-                if !matches!(elem.canonical(), Typ::Int | Typ::Float | Typ::Bool) {
-                    return Err(format!(
-                        "unsupported native initializer for global `{name}`; expected numeric or boolean array elements"
-                    ));
-                }
-                let items = match init.as_deref() {
-                    Some(Expr::ArrayLit(items)) => items.as_slice(),
-                    None => &[],
-                    _ => {
-                        return Err(format!(
-                            "unsupported native initializer for global `{name}`; expected a scalar array literal"
-                        ));
-                    }
-                };
-                let mut words = vec![items.len() as i64, items.len() as i64];
-                for item in items {
-                    let word = match (elem.canonical(), item) {
-                        (Typ::Int, Expr::IntLit(value)) => *value,
-                        (Typ::Float, Expr::FloatLit(value)) => value.0.to_bits() as i64,
-                        (Typ::Bool, Expr::BoolLit(value)) => i64::from(*value),
-                        _ => {
-                            return Err(format!(
-                                "unsupported native initializer for global `{name}`; expected scalar array elements"
-                            ));
-                        }
-                    };
-                    words.push(word);
-                }
                 data.resize(offset as usize, 0);
-                for word in words {
-                    data.extend_from_slice(&word.to_le_bytes());
-                }
+                append_array(&mut data, &elem, init.as_deref(), name)?;
                 continue;
             }
             let val: i64 = match init.as_deref() {
@@ -126,6 +160,23 @@ pub(crate) fn build_data_section(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_headers_use_relative_offsets_and_preserve_neighbors() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "var before: Int = 7;\nvar items: [[Int]] = [[20,22],[]];\nvar after: Int = 9;\nfn main() -> Int { return 42; }",
+        )
+        .unwrap();
+        let globals = collect_globals(&module, &HashMap::new());
+        assert_eq!(globals["items"], 8);
+        assert_eq!(globals["after"], 88);
+        let data = build_data_section(&module, &globals).unwrap();
+        let words = data
+            .chunks_exact(8)
+            .map(|word| i64::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(words, [7, 2, 2, 32, 64, 2, 2, 20, 22, 0, 0, 9]);
+    }
 
     #[test]
     fn literal_array_headers_do_not_overlap_neighboring_globals() {

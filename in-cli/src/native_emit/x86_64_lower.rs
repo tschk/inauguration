@@ -1516,6 +1516,11 @@ fn lower_stmt(
         Stmt::IndexAssign {
             base, index, value, ..
         } => {
+            if matches!(scalar_expr_type(base, ctx), Some(Typ::Array(elem)) if matches!(elem.canonical(), Typ::Array(_)))
+            {
+                return Err("x86_64-lower: whole nested array assignment is unsupported".into());
+            }
+
             if let Expr::Ident(name) = base
                 && let Some(StackSlot::InlineArray { offsets }) = ctx.locals.get(name).cloned()
             {
@@ -2303,6 +2308,7 @@ fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
         return Some(Typ::Array(Box::new(
             items
                 .iter()
+                .filter(|item| !crate::core_ir::empty_sequence_literal(item))
                 .find_map(|item| scalar_expr_type(item, ctx))
                 .unwrap_or(Typ::Void),
         )));
@@ -3139,7 +3145,26 @@ fn lower_call_expr(
             .next()
             .unwrap_or(&target_name)
             .replace('_', "-");
-        if let Some(wrapper) = jit_stdlib_wrapper(&base)
+        if !ctx.functions.contains_key(&target_name)
+            && matches!(
+                base.as_str(),
+                "push"
+                    | "array-push"
+                    | "insert"
+                    | "remove"
+                    | "pop"
+                    | "clear"
+                    | "reserve"
+                    | "extend"
+            )
+            && args
+                .first()
+                .is_some_and(|arg| matches!(scalar_expr_type(arg, ctx), Some(Typ::Array(_))))
+        {
+            return Err("x86_64-lower: vector mutation cannot use fixed array storage".into());
+        }
+        if !ctx.functions.contains_key(&target_name)
+            && let Some(wrapper) = jit_stdlib_wrapper(&base)
             && let Some(ptr) = crate::native_emit::native_link::resolve_native_fn(wrapper)
         {
             if x86_64::is_32bit() || args.len() > 6 {
@@ -3735,9 +3760,22 @@ fn lower_index_expr(
     emitter.emit_insns(&x86_64::cmp_rr(RAX, RDX));
     let out_of_bounds = emitter.len();
     emitter.emit_insns(&x86_64::jcc_near(0x03, 0));
+    let nested = matches!(scalar_expr_type(base, ctx), Some(Typ::Array(elem)) if matches!(elem.canonical(), Typ::Array(_)));
+    if nested {
+        let root = crate::native_emit::global_data::indexed_root(base)
+            .ok_or("x86_64-lower: nested indexing needs static array storage")?;
+        if ctx.locals.contains_key(root) || !ctx.globals.contains_key(root) {
+            return Err("x86_64-lower: nested indexing needs static array storage".into());
+        }
+        emitter.emit_insns(&x86_64::mov_rr(RDX, RDI));
+    }
     emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
     emitter.emit_insns(&x86_64::add_rr(RDI, RAX));
     emitter.emit_insns(&x86_64::mov_r_m(RAX, RDI, 16));
+    if nested {
+        emitter.emit_insns(&x86_64::add_rr(RAX, RDX));
+    }
+
     let end = emitter.len();
     emitter.emit_insns(&x86_64::jmp_rel32(0));
     emitter.patch_u32(null + 2, emitter.len() - null - 6);

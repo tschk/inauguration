@@ -3960,6 +3960,8 @@ mod tests {
             "static ITEMS: [i64;2]=[20,22]; fn main() -> i64 { return ITEMS[0]+ITEMS[1]; }",
             "static ITEMS: [i64;2]=[20,22]; fn main() -> i64 { return ITEMS.len()+40; }",
             "static mut ITEMS: [i64;2]=[0,22]; fn main() -> i64 { unsafe { ITEMS[0]=20; } return unsafe { ITEMS[0]+ITEMS[1] }; }",
+            "static TABLE: [[i64;2];2]=[[20,22],[1,2]]; fn main() -> i64 { return TABLE[0][0]+TABLE[0][1]; }",
+            "static mut TABLE: [[i64;2];1]=[[0,22]]; fn main() -> i64 { unsafe { TABLE[0][0]=20; return TABLE[0][0]+TABLE[0][1]; } }",
         ] {
             let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
             let mut module =
@@ -4049,6 +4051,171 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn nested_static_arrays_read_checked_rows_on_both_backends() {
+        for (source, expected) in [
+            (
+                "var items: [[Int]] = [[20],[22]];\nfn main() -> Int { return items[0][0]+items[1][0]; }",
+                42,
+            ),
+            (
+                "var items: [[[Int]]] = [[[20,22]]];\nfn main() -> Int { return items[0][0][0]+items[0][0][1]; }",
+                42,
+            ),
+            (
+                "var items: [[Int]] = [[],[20,22]];\nfn main() -> Int { return array_len(items[0])+items[1][0]+items[1][1]; }",
+                42,
+            ),
+            (
+                "var items: [[Int]] = [[],[42]];\nfn main() -> Int { return items[0][0]; }",
+                1,
+            ),
+            (
+                "var items: [[Int]] = [[42]];\nfn main() -> Int { return items[2][0]; }",
+                1,
+            ),
+            (
+                "var items: [[Int]] = [[20,22]];\nfn row() -> [Int] { return items[0]; }\nfn main() -> Int { return row()[0]+row()[1]; }",
+                42,
+            ),
+            (
+                "var items: [[Int]] = [[20,22]];\nfn sum(row: [Int]) -> Int { return row[0]+row[1]; }\nfn main() -> Int { return sum(items[0]); }",
+                42,
+            ),
+            (
+                "var items: [[Int]] = [[20,22]];\nfn main() -> Int { let row = items[0]; return row[0]+row[1]; }",
+                42,
+            ),
+            (
+                "var items: [[Int]] = [[0,22]];\nfn main() -> Int { items[0][0]=20; return items[0][0]+items[0][1]; }",
+                42,
+            ),
+            (
+                "var items: [[Float]] = [[20.0,22.0]];\nfn main() -> Int { if items[0][0]+items[0][1] == 42.0 { return 42; } return 0; }",
+                42,
+            ),
+            (
+                "var items: [[Bool]] = [[true,false]];\nfn main() -> Int { if items[0][0] && !items[0][1] { return 42; } return 0; }",
+                42,
+            ),
+            (
+                "var items: [[Int]] = [[20,22]];\nvar count: Int = 0;\nfn row_index() -> Int { count+=1; return 0; }\nfn col_index() -> Int { count*=10; return 1; }\nfn main() -> Int { return items[row_index()][col_index()]+count*2; }",
+                42,
+            ),
+            (
+                "var items: [[Int]] = [[20,22]];\nfn row() -> [Int] { return items[5]; }\nfn main() -> Int { try { return array_len(row()); } catch 1 { return 42; } return 0; }",
+                42,
+            ),
+            (
+                "var items: [[Int]] = [[20,22]];\nfn sum(base: Int, row: [Int]) -> Int { return base+row[0]+row[1]; }\nfn main() -> Int { return sum(0,items[0]); }",
+                42,
+            ),
+            (
+                "var before: Int = 7;\nvar items: [[Int]] = [[],[0,22]];\nvar after: Int = 9;\nfn sum(row: [Int]) -> Int { return row[0]+row[1]; }\nfn main() -> Int { items[1][0]=20; return sum(items[1])+array_len(items[0])+before - after+2; }",
+                42,
+            ),
+            (
+                "var items: [[Int]] = [[20,22]];\nfn main() -> Int { let sum = 0; for value in items[0] { sum+=value; } return sum; }",
+                42,
+            ),
+            (
+                "var items: [[Int]] = [[20,22]];\nfn push(row: [Int], value: Int) -> Int { return row[0]+row[1]; }\nfn main() -> Int { return push(items[0],42); }",
+                42,
+            ),
+            (
+                "var items: [[Int]] = [[0,22]];\nfn main() -> Int { let row = items[0]; row[0]=20; return items[0][0]+items[0][1]; }",
+                42,
+            ),
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            let typed = crate::typecheck::TypeChecker::new().check_module(&module);
+            assert!(typed.is_ok(), "{source}: {typed:?}");
+            assert!(
+                crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}"
+            );
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nested_array_literals_reject_scalar_and_depth_mismatches() {
+        for value in ["[[],42]", "[42,[]]", "[[[]],[20]]", "[[20],[[]]]"] {
+            let source = format!("fn main() -> Int {{ let items = {value}; return 42; }}");
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}"
+            );
+            assert!(
+                crate::typecheck::TypeChecker::new()
+                    .check_module(&module)
+                    .is_err(),
+                "{source}"
+            );
+        }
+        let module = crate::in_lang_parse::parse_in_source(
+            "var items: [[Int]] = [[20,22]];\nfn main() -> Int { items[0]=[42]; return 42; }",
+        )
+        .unwrap();
+        assert!(
+            crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .err()
+            .unwrap()
+            .contains("whole nested array assignment")
+        );
+        assert!(
+            crate::native_emit::x86_64_lower::lower_module(&module, "main")
+                .err()
+                .unwrap()
+                .contains("whole nested array assignment")
+        );
+        let module = crate::in_lang_parse::parse_in_source("var items: [[Int]] = [[20,22]];\nfn main() -> Int { let row = items[0]; array-push(row,42); return 42; }").unwrap();
+        assert!(
+            crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .err()
+            .unwrap()
+            .contains("fixed array storage")
+        );
+        let module = crate::in_lang_parse::parse_in_source("var items: [[Int]] = [[20,22]];\nfn main() -> Int { let row = items[0]; push(row,42); return 42; }").unwrap();
+        assert!(
+            crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .err()
+            .unwrap()
+            .contains("fixed array storage")
+        );
+        assert!(
+            crate::native_emit::x86_64_lower::lower_module(&module, "main")
+                .err()
+                .unwrap()
+                .contains("fixed array storage")
+        );
     }
 
     #[test]

@@ -755,6 +755,12 @@ pub(crate) fn lower_array_call_arg(
             Some(Typ::Array(_))
         )
     {
+        if !matches!(ctx.global_types.get(name), Some(Typ::Array(actual)) if actual.canonical() == elem.canonical())
+        {
+            return Err(format!(
+                "native-lower: global array argument element type mismatch in `{fn_name}`"
+            ));
+        }
         lower_expr_into(emitter, ctx, arg, reg, functions, pending_calls, fn_name)?;
         return Ok(reg + 2);
     }

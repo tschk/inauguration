@@ -112,9 +112,18 @@ impl Typ {
             return false;
         };
         match self.canonical() {
-            Typ::Array(item) | Typ::Vector(item) => {
-                items.is_empty() || item.compatible_with(&actual_item)
-            }
+            Typ::Array(item) | Typ::Vector(item) => items.iter().all(|value| {
+                if matches!(value, Expr::ArrayLit(_)) {
+                    let nested_actual = if matches!(actual_item.as_ref(), Typ::Array(_)) {
+                        actual_item.as_ref().clone()
+                    } else {
+                        Typ::Array(Box::new(Typ::Void))
+                    };
+                    item.accepts_sequence_literal(value, &nested_actual)
+                } else {
+                    item.compatible_with(&actual_item)
+                }
+            }),
             _ => false,
         }
     }
@@ -125,6 +134,10 @@ impl Typ {
         let b = other.canonical();
         a == b || a.is_any() || b.is_any()
     }
+}
+
+pub(crate) fn empty_sequence_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::ArrayLit(items) if items.iter().all(empty_sequence_literal))
 }
 
 /// Bitwise operations preserve either the integer or boolean operand type.

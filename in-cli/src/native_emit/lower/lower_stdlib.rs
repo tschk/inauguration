@@ -362,6 +362,22 @@ fn lower_array_into_iter(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Some(Typ::Array(elem)) = super::lower_expr::native_expr_type(source, ctx, functions) {
+        if !super::is_native_scalar_type(&elem) {
+            return Err("native-lower: nested parent array iteration is unsupported".into());
+        }
+        super::lower_call::lower_array_call_arg(
+            emitter,
+            ctx,
+            source,
+            &elem,
+            rd,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        return Ok(());
+    }
     match source {
         Expr::Call { callee, args } => super::lower_call::lower_call(
             emitter,
@@ -392,12 +408,9 @@ fn lower_array_into_iter(
                 "native-lower: into_iter source `{name}` is not an array in `{fn_name}`"
             )),
         },
-        _ => {
-            // Unsupported into_iter source — emit empty iterator
-            emitter.emit_insns(&aarch64::load_i64(rd, 0));
-            emitter.emit_insns(&aarch64::load_i64(rd + 1, 0));
-            Ok(())
-        }
+        _ => Err(format!(
+            "native-lower: unsupported into_iter source in `{fn_name}`"
+        )),
     }
 }
 
@@ -805,7 +818,7 @@ fn lower_array_len(
                 "native-lower: array_len source `{local}` is not an array in `{fn_name}`"
             )),
         },
-        Expr::Call { .. } => {
+        Expr::Call { .. } | Expr::Index { .. } => {
             let Some(Typ::Array(elem)) =
                 super::lower_expr::native_expr_type(source, ctx, functions)
             else {
@@ -894,6 +907,31 @@ pub(crate) fn lower_stdlib_call(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<bool, String> {
+    let mutation = matches!(
+        target.rsplit("::").next().unwrap_or(target),
+        "push"
+            | "array-push"
+            | "array_push"
+            | "insert"
+            | "remove"
+            | "pop"
+            | "clear"
+            | "reserve"
+            | "extend"
+    );
+    if mutation && functions.contains_key(target) {
+        return Ok(false);
+    }
+    if mutation
+        && args.first().is_some_and(|arg| {
+            matches!(
+                super::lower_expr::native_expr_type(arg, ctx, functions),
+                Some(Typ::Array(_))
+            )
+        })
+    {
+        return Err("native-lower: vector mutation cannot use fixed array storage".into());
+    }
     if matches!(target, "len" | "is_empty" | "clone") && functions.contains_key(target) {
         return Ok(false);
     }

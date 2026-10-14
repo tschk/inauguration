@@ -1707,6 +1707,17 @@ fn main() -> Int {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
+fn nested_static_array_executable_preserves_rows_and_neighbors() {
+    let module = crate::in_lang_parse::parse_in_source("var before: Int = 7;\nvar items: [[Int]] = [[],[0,22]];\nvar after: Int = 9;\nfn sum(row: [Int]) -> Int { return row[0]+row[1]; }\nfn main() -> Int { items[1][0]=20; return sum(items[1])+array_len(items[0])+before - after+2; }").unwrap();
+    let path = temp_executable("nested-static-array-exe");
+    compile_native_executable(&module, "main", &path).expect("compile");
+    let output = run_native_exe(&path);
+    assert_eq!(output.status.code(), Some(42), "{output:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
 fn checked_reference_return_executable_patches_the_error_slot() {
     for (consumer, expected) in [
         ("return values()[0];", 1),

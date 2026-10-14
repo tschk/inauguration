@@ -1276,6 +1276,9 @@ impl TypeChecker {
                 let mut item_typ: Option<Typ> = None;
                 for item in items {
                     self.check_expr(fn_name, item, facts, env, errors);
+                    if crate::core_ir::empty_sequence_literal(item) {
+                        continue;
+                    }
                     let typ = self.expr_type(item, facts, env);
                     match (&item_typ, typ) {
                         (Some(expected), Some(actual)) => {
@@ -1289,6 +1292,21 @@ impl TypeChecker {
                         }
                         (None, Some(actual)) => item_typ = Some(actual),
                         _ => {}
+                    }
+                }
+                if let Some(expected) = item_typ {
+                    for item in items
+                        .iter()
+                        .filter(|item| crate::core_ir::empty_sequence_literal(item))
+                    {
+                        let actual = self.expr_type(item, facts, env).unwrap_or(Typ::Void);
+                        if !expected.accepts_sequence_literal(item, &actual) {
+                            errors.push(TypeError::TypeMismatch {
+                                context: format!("empty array literal element in `{fn_name}`"),
+                                expected: expected.clone(),
+                                got: actual,
+                            });
+                        }
                     }
                 }
             }
@@ -1398,6 +1416,7 @@ impl TypeChecker {
             Expr::ArrayLit(items) => {
                 let item_typ = items
                     .iter()
+                    .filter(|item| !crate::core_ir::empty_sequence_literal(item))
                     .find_map(|item| self.expr_type(item, facts, env));
                 Some(Typ::Array(Box::new(item_typ.unwrap_or(Typ::Void))))
             }
@@ -1555,7 +1574,7 @@ fn is_builtin_fn(name: &str) -> bool {
             | "str-table-get-int"
             | "array-push"
             | "array-pop"
-            | "array-len"
+            | "array-len" | "array_len"
             | "bool-to-int"
             | "int-to-bool"
             // x86 bare-metal intrinsics
@@ -1570,7 +1589,7 @@ fn is_builtin_fn(name: &str) -> bool {
 
 fn builtin_return_type(name: &str) -> Typ {
     match name {
-        "len" | "str-len" | "array-len" | "bool-to-int" | "to-int" | "str-to-int"
+        "len" | "str-len" | "array-len" | "array_len" | "bool-to-int" | "to-int" | "str-to-int"
         | "str-index-of" | "str-table-get-int" | "inb" | "inl" | "load8" | "load16" | "load32"
         | "load64" | "read-cr2" | "read-cr3" | "invoke" | "invoke1" | "invoke2" => Typ::Int,
         "str-eq" | "str-contains" | "str-starts-with" | "str-is-int" | "str-table-has"

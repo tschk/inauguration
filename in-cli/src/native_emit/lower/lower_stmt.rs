@@ -745,10 +745,13 @@ pub(crate) fn lower_index_assign(
         ctx.release_binop_temp();
         return Ok(());
     }
-    let Expr::Ident(name) = base else {
-        return Err(format!(
-            "native-lower: unsupported array assignment base in `{fn_name}`"
-        ));
+    if matches!(lower_expr::native_expr_type(base, ctx, functions).map(|typ| typ.canonical()), Some(Typ::Array(elem)) if matches!(elem.canonical(), Typ::Array(_)))
+    {
+        return Err("native-lower: whole nested array assignment is unsupported".into());
+    }
+    let name = match base {
+        Expr::Ident(name) => Some(name.as_str()),
+        _ => None,
     };
     if expr_contains_call(index) || expr_contains_call(value) {
         return Err(format!(
@@ -756,12 +759,15 @@ pub(crate) fn lower_index_assign(
         ));
     }
     let mut global_temps = false;
-    let slot = if let Some(slot) = ctx.locals.get(name).cloned() {
+    let slot = if let Some(slot) = name.and_then(|name| ctx.locals.get(name)).cloned() {
         slot
-    } else if let Some(Typ::Array(elem)) = ctx.global_types.get(name).map(Typ::canonical) {
+    } else if let Some(Typ::Array(elem)) = name
+        .and_then(|name| ctx.global_types.get(name))
+        .map(Typ::canonical)
+    {
         let offset = ctx
             .globals
-            .get(name)
+            .get(name.unwrap())
             .copied()
             .ok_or("native-lower: missing global array storage")?;
         let ptr_offset = ctx.acquire_binop_temp(fn_name)?;
@@ -769,6 +775,21 @@ pub(crate) fn lower_index_assign(
         ctx.emit_global_address(emitter, 0, offset);
         emitter.emit_u32(aarch64::ldr64(1, 0, 0));
         emitter.emit_u32(aarch64::add_imm64(0, 0, 16));
+        emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, ptr_offset));
+        emitter.emit_u32(aarch64::str64(1, aarch64::REG_SP, len_offset));
+        global_temps = true;
+        LocalSlot::ArrayParam {
+            elem: *elem,
+            ptr_offset,
+            len_offset,
+        }
+    } else if matches!(base, Expr::Index { .. }) {
+        let Some(Typ::Array(elem)) = lower_expr::native_expr_type(base, ctx, functions) else {
+            return Err("native-lower: indexed store base must be an array".into());
+        };
+        let ptr_offset = ctx.acquire_binop_temp(fn_name)?;
+        let len_offset = ctx.acquire_binop_temp(fn_name)?;
+        lower_array_expr_into_regs(emitter, ctx, base, &elem, functions, pending_calls, fn_name)?;
         emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, ptr_offset));
         emitter.emit_u32(aarch64::str64(1, aarch64::REG_SP, len_offset));
         global_temps = true;
@@ -1332,18 +1353,19 @@ pub(crate) fn lower_array_expr_into_regs(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
-    if !is_native_scalar_type(elem) {
-        return Err(format!(
-            "native-lower: unsupported array element type `{elem:?}` in `{fn_name}`"
-        ));
-    }
-    if let Expr::Ident(name) = expr
-        && !ctx.locals.contains_key(name)
-        && matches!(
-            ctx.global_types.get(name).map(Typ::canonical),
-            Some(Typ::Array(_))
-        )
-    {
+    if crate::native_emit::global_data::indexed_root(expr).is_some_and(|name| {
+        !ctx.locals.contains_key(name)
+            && matches!(
+                ctx.global_types.get(name).map(Typ::canonical),
+                Some(Typ::Array(_))
+            )
+    }) {
+        if !matches!(lower_expr::native_expr_type(expr, ctx, functions), Some(Typ::Array(actual)) if actual.canonical() == elem.canonical())
+        {
+            return Err(format!(
+                "native-lower: static array element type mismatch in `{fn_name}`"
+            ));
+        }
         return lower_expr::lower_expr_into(
             emitter,
             ctx,
@@ -1353,6 +1375,11 @@ pub(crate) fn lower_array_expr_into_regs(
             pending_calls,
             fn_name,
         );
+    }
+    if !is_native_scalar_type(elem) {
+        return Err(format!(
+            "native-lower: unsupported array element type `{elem:?}` in `{fn_name}`"
+        ));
     }
     match expr {
         Expr::Ident(local) => {

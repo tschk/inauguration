@@ -944,6 +944,9 @@ fn check_expr_with_array_borrow(
             let mut expected: Option<Typ> = None;
             for item in items {
                 check_expr(fn_name, item, facts, env, call_edges)?;
+                if crate::core_ir::empty_sequence_literal(item) {
+                    continue;
+                }
                 if let Some(item_typ) = expr_type(item, facts, env) {
                     if let Some(expected_typ) = &expected {
                         if !expected_typ.compatible_with(&item_typ) {
@@ -958,6 +961,23 @@ fn check_expr_with_array_borrow(
                         }
                     } else {
                         expected = Some(item_typ);
+                    }
+                }
+            }
+            if let Some(expected) = expected {
+                for item in items
+                    .iter()
+                    .filter(|item| crate::core_ir::empty_sequence_literal(item))
+                {
+                    let actual = expr_type(item, facts, env).unwrap_or(Typ::Void);
+                    if !expected.accepts_sequence_literal(item, &actual) {
+                        return Err((
+                            "array-element-type-mismatch".into(),
+                            format!(
+                                "empty array literal in `{fn_name}` does not match {}",
+                                type_name(&expected)
+                            ),
+                        ));
                     }
                 }
             }
@@ -1203,6 +1223,7 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
         Expr::ArrayLit(items) => {
             let item_typ = items
                 .iter()
+                .filter(|item| !crate::core_ir::empty_sequence_literal(item))
                 .find_map(|item| expr_type(item, facts, env))
                 .unwrap_or(Typ::Void);
             Some(Typ::Array(Box::new(item_typ)))

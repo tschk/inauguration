@@ -211,8 +211,10 @@ pub(crate) fn lower_index(
         ctx.release_binop_temp();
         return Ok(());
     }
-    if matches!(base, Expr::Call { .. } | Expr::ArrayLit(_))
-        || matches!(base, Expr::Ident(name) if !ctx.locals.contains_key(name) && matches!(ctx.global_types.get(name).map(Typ::canonical), Some(Typ::Array(_))))
+    if matches!(
+        base,
+        Expr::Call { .. } | Expr::ArrayLit(_) | Expr::Index { .. }
+    ) || matches!(base, Expr::Ident(name) if !ctx.locals.contains_key(name) && matches!(ctx.global_types.get(name).map(Typ::canonical), Some(Typ::Array(_))))
     {
         let ptr_slot = ctx.acquire_binop_temp(fn_name)?;
         let len_slot = ctx.acquire_binop_temp(fn_name)?;
@@ -261,7 +263,22 @@ pub(crate) fn lower_index(
         let negative_branch = emitter.emit_insn(aarch64::b_cond(11, 0));
         emitter.emit_u32(aarch64::cmp_reg64(index_reg, 1));
         let oob_branch = emitter.emit_insn(aarch64::b_cond(10, 0));
-        emitter.emit_u32(aarch64::ldr64_reg_offset(rd, 0, index_reg));
+        if matches!(native_expr_type(base, ctx, functions).map(|typ| typ.canonical()), Some(Typ::Array(elem)) if matches!(elem.canonical(), Typ::Array(_)))
+        {
+            let root = crate::native_emit::global_data::indexed_root(base)
+                .ok_or("native-lower: nested indexing needs static array storage")?;
+            if ctx.locals.contains_key(root) || !ctx.global_types.contains_key(root) {
+                return Err("native-lower: nested indexing needs static array storage".into());
+            }
+            let offset_reg = pick_scratch(&[0, 1, rd, rd + 1, index_reg]);
+            emitter.emit_u32(aarch64::ldr64_reg_offset(offset_reg, 0, index_reg));
+            emitter.emit_u32(aarch64::sub_imm64(0, 0, 16));
+            emitter.emit_u32(aarch64::add_reg64(rd, 0, offset_reg));
+            emitter.emit_u32(aarch64::ldr64(rd + 1, rd, 0));
+            emitter.emit_u32(aarch64::add_imm64(rd, rd, 16));
+        } else {
+            emitter.emit_u32(aarch64::ldr64_reg_offset(rd, 0, index_reg));
+        }
         let end_branch = emitter.emit_insn(aarch64::b(0));
         let failure_offset = emitter.len() as i32;
         emitter.patch_u32(
@@ -978,6 +995,7 @@ pub(crate) fn native_expr_type(
         return Some(Typ::Array(Box::new(
             items
                 .iter()
+                .filter(|item| !crate::core_ir::empty_sequence_literal(item))
                 .find_map(|item| native_expr_type(item, ctx, functions))
                 .unwrap_or(Typ::Void),
         )));
