@@ -3706,6 +3706,11 @@ fn lower_unary_expr(
         let value = crate::core_ir::integer_cast_expr(value, op).unwrap();
         return lower_expr_into(emitter, ctx, &value, target_reg, pending_calls);
     }
+    if op == "vector-clone"
+        && !matches!(scalar_expr_type(expr, ctx), Some(Typ::Vector(item)) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
+    {
+        return Err("x86_64-lower: vector clone requires scalar vector elements".into());
+    }
     lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
     match op {
         "vector-clone" => {

@@ -133,7 +133,10 @@ fn walk_expr<F: FnMut(&Expr)>(e: &Expr, f: &mut F) {
 fn expr_has_call(e: &Expr) -> bool {
     let mut has = false;
     walk_expr(e, &mut |n| {
-        if matches!(n, Expr::Call { .. }) {
+        // Cloning allocates; substitution must not duplicate its storage or evaluation.
+        if matches!(n, Expr::Call { .. })
+            || matches!(n, Expr::Unary {op, ..} if op == "vector-clone")
+        {
             has = true;
         }
     });

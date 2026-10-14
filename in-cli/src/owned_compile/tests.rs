@@ -1656,6 +1656,83 @@ fn native_vector_runtime_refuses_invalid_headers_and_failed_allocations() {
 }
 
 #[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_vector_clones_preserve_independent_storage_and_returns() {
+    for text in [
+        "fn main()->i64 {let mut items=vec![20,22];let copied=items.clone();items[0]=0;copied[0]+copied[1]}",
+        "fn main()->i64 {let items=vec![42];items.clone()[0]}",
+        "fn main()->i64 {let items:Vec<i64>=Vec::new();let mut copied=items.clone();copied.push(42);items.len()+copied[0]}",
+        "fn take(prefix:i64,items:Vec<i64>)->i64 {prefix+items[0]+items[1]} fn main()->i64 {let items=vec![20,21];take(1,items.clone())}",
+        "struct Bag {items:Vec<i64>} struct Outer {bag:Bag} fn main()->i64 {let mut outer=Outer{bag:Bag{items:vec![20,22]}};let copied=outer.bag.items.clone();outer.bag.items[0]=0;copied[0]+copied[1]}",
+        "static mut CALLS:i64=0;fn values()->Vec<i64> {unsafe{CALLS+=1;}vec![20,21]} fn main()->i64 {let copied=values().clone();unsafe{copied[0]+copied[1]+CALLS}}",
+        "fn main()->i64 {let items=vec![20.0,22.0];let mut copied=items.clone();copied[0]=0.0;(items[0]+copied[1]) as i64}",
+        "fn main()->i64 {let items=vec![true,false];let mut copied=items.clone();copied[0]=false;if items[0] && !copied[0] && !copied[1] {42} else {0}}",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("vector-clone-native.rs");
+            let binary = temp_path("vector-clone-native");
+            fs::write(&source, text).unwrap();
+            let mut request = default_request(
+                source.clone(),
+                CompileTarget::Native,
+                Some("main"),
+                Some(binary.clone()),
+            );
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{text} {profile:?}: {report:?}");
+            assert_eq!(
+                std::process::Command::new(&binary).status().unwrap().code(),
+                Some(42),
+                "{text} {profile:?}"
+            );
+            fs::remove_file(source).unwrap();
+            fs::remove_file(binary).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_vector_clone_refuses_invalid_descriptors_and_failed_allocations() {
+    for text in [
+        "fn main()->i64 {__inrt_vector_clone(0,1,0);0}",
+        "fn main()->i64 {__inrt_vector_clone(1,1,1);0}",
+        "fn main()->i64 {__inrt_vector_clone(0,0,1);0}",
+        "fn main()->i64 {__inrt_vector_clone(8,0,1152921504606846976);0}",
+        "fn main()->i64 {__inrt_vector_clone(8,576460752303423488,576460752303423488);0}",
+    ] {
+        let source = temp_path("vector-clone-invalid-native.rs");
+        let binary = temp_path("vector-clone-invalid-native");
+        fs::write(&source, text).unwrap();
+        let report = compile_owned(&default_request(
+            source.clone(),
+            CompileTarget::Native,
+            Some("main"),
+            Some(binary.clone()),
+        ));
+        assert!(report.success, "{text}: {report:?}");
+        let output = std::process::Command::new(&binary).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(crate::inrt::INRT_TRAP_EXIT_CODE as i32),
+            "{text}: {output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("invalid vector header or allocation failure"),
+            "{output:?}"
+        );
+        fs::remove_file(source).unwrap();
+        fs::remove_file(binary).unwrap();
+    }
+}
+
+#[test]
 fn owned_jit_uses_runtime_builtin_result_types() {
     if !native_backend::native_subset_host_available() {
         return;

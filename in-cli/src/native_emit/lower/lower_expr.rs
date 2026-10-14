@@ -214,7 +214,8 @@ pub(crate) fn lower_index(
     if matches!(
         base,
         Expr::Call { .. } | Expr::ArrayLit(_) | Expr::Index { .. }
-    ) || matches!(base, Expr::Ident(name) if !ctx.locals.contains_key(name) && matches!(ctx.global_types.get(name).map(Typ::canonical), Some(Typ::Array(_))))
+    ) || matches!(base, Expr::Unary {op, ..} if op == "vector-clone")
+        || matches!(base, Expr::Ident(name) if !ctx.locals.contains_key(name) && matches!(ctx.global_types.get(name).map(Typ::canonical), Some(Typ::Array(_))))
     {
         let ptr_slot = ctx.acquire_binop_temp(fn_name)?;
         let len_slot = ctx.acquire_binop_temp(fn_name)?;
@@ -224,6 +225,17 @@ pub(crate) fn lower_index(
                 ctx,
                 callee,
                 args,
+                0,
+                functions,
+                pending_calls,
+                fn_name,
+            )?;
+        } else if let Some(Typ::Vector(elem)) = native_expr_type(base, ctx, functions) {
+            super::lower_call::lower_vector_call_arg(
+                emitter,
+                ctx,
+                base,
+                &elem,
                 0,
                 functions,
                 pending_calls,
@@ -590,12 +602,12 @@ pub(crate) fn lower_unary(
     fn_name: &str,
 ) -> Result<(), String> {
     if op == "vector-clone" {
-        if super::TL_NATIVE_MODE.with(|mode| *mode.borrow()) {
-            return Err("native-lower: vector clone requires the JIT runtime".into());
-        }
         let Some(Typ::Vector(elem)) = native_expr_type(expr, ctx, functions) else {
             return Err("native-lower: vector clone requires a vector".into());
         };
+        if !matches!(elem.canonical(), Typ::Int | Typ::Float | Typ::Bool) {
+            return Err("native-lower: vector clone requires scalar elements".into());
+        }
         super::lower_call::lower_vector_call_arg(
             emitter,
             ctx,
@@ -606,6 +618,20 @@ pub(crate) fn lower_unary(
             pending_calls,
             fn_name,
         )?;
+        if super::TL_NATIVE_MODE.with(|mode| *mode.borrow()) {
+            let site = emitter.len();
+            emitter.emit_u32(aarch64::bl(0));
+            ctx.pending_inrt_calls.push(super::PendingInrtCall {
+                site,
+                target: crate::inrt::INRT_VECTOR_CLONE.into(),
+            });
+            if rd != 0 {
+                for index in (0u8..3).rev() {
+                    emitter.emit_u32(aarch64::mov_reg64(rd + index, index));
+                }
+            }
+            return Ok(());
+        }
         emitter.emit_u32(aarch64::mov_reg64(2, 1));
         emitter.emit_u32(aarch64::mov_reg64(1, 0));
         emitter.emit_u32(aarch64::mov_reg64(0, 27));

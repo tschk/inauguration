@@ -3479,7 +3479,7 @@ mod tests {
         assert!(
             crate::native_emit::c_backend::emit_c_module(&module)
                 .unwrap_err()
-                .contains("vector clone requires the JIT runtime")
+                .contains("vector clone requires owned native lowering")
         );
         let native = crate::compiler::rust_front::parse_rust_source(
             "fn main(items: Vec<i64>) -> Vec<i64> { return items.clone(); }",
@@ -3488,16 +3488,12 @@ mod tests {
         let native =
             crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &native);
         #[cfg(target_arch = "aarch64")]
-        assert!(
-            crate::native_emit::lower::lower_native_module(
-                &native,
-                "main",
-                crate::native_emit::NativeLinkage::Executable
-            )
-            .err()
-            .unwrap()
-            .contains("vector clone requires the JIT runtime")
-        );
+        crate::native_emit::lower::lower_native_module(
+            &native,
+            "main",
+            crate::native_emit::NativeLinkage::Executable,
+        )
+        .expect("native vector cloning is supported");
         #[cfg(target_arch = "x86_64")]
         assert!(
             crate::native_emit::x86_64_lower::lower_native_module(&native, "main")
@@ -4534,6 +4530,8 @@ mod tests {
             "fn values()->Vec<i64> {Vec::new()} fn main()->i64 {if values().is_empty() {42} else {0}}",
             "fn main()->i64 {let mut items:Vec<i64>=std::vec::Vec::new();items.push(42);items[0]}",
             "fn main()->i64 {let items=vec![20,22];items[0]+items[1]}",
+            "fn take(prefix:i64,items:Vec<i64>)->i64 {prefix+items[0]+items[1]} fn main()->i64 {let items=vec![20,21];take(1,items.clone())}",
+            "fn main()->i64 {let items=vec![42];items.clone()[0]}",
             "fn main()->i64 {let items:Vec<_>=vec![20,22];items[0]+items[1]}",
             "fn main()->i64 {let items=vec![20.0,22.0];(items[0]+items[1]) as i64}",
             "fn main()->i64 {let items=vec![true,false];if items[0] && !items[1] {42} else {0}}",

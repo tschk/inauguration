@@ -222,7 +222,7 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
     match e {
         Expr::Unary { op, expr } => {
             if op == "vector-clone" {
-                return Err("c-backend: vector clone requires the JIT runtime".into());
+                return Err("c-backend: vector clone requires owned native lowering".into());
             }
             if op == "complement" {
                 return Err("c-backend: complement requires a resolved Int or Bool operand".into());
