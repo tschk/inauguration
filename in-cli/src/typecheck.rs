@@ -70,6 +70,20 @@ pub enum ModuleKind {
 #[derive(Default)]
 pub struct TypeChecker;
 
+#[path = "typecheck/closure_inference.rs"]
+mod closure_inference;
+
+fn resolved_closure_type(typ: &Typ) -> bool {
+    match typ {
+        Typ::Generic(_) => false,
+        Typ::Named(name) => !matches!(name.as_str(), "Any" | "_"),
+        Typ::Array(item) | Typ::Vector(item) => {
+            item.canonical() != Typ::Void && resolved_closure_type(item)
+        }
+        _ => true,
+    }
+}
+
 pub(crate) struct Facts {
     functions: HashMap<String, (Vec<(String, Typ)>, Typ)>,
     structs: HashMap<String, Vec<(String, Typ)>>,
@@ -83,15 +97,8 @@ impl Facts {
         }
         let target = self.closures.get(captures)?;
         let (params, ret) = self.functions.get(target)?;
-        fn resolved(typ: &Typ) -> bool {
-            match typ {
-                Typ::Generic(_) => false,
-                Typ::Named(name) => !matches!(name.as_str(), "Any" | "_"),
-                Typ::Array(item) | Typ::Vector(item) => resolved(item),
-                _ => true,
-            }
-        }
-        (resolved(ret) && params.iter().all(|(_, typ)| resolved(typ))).then_some(target.as_str())
+        (resolved_closure_type(ret) && params.iter().all(|(_, typ)| resolved_closure_type(typ)))
+            .then_some(target.as_str())
     }
 
     pub(crate) fn value_receiver_index(&self, function: &str) -> Option<usize> {
@@ -166,7 +173,30 @@ impl TypeChecker {
         module: &mut UnifiedModule,
         closures: &HashMap<String, String>,
     ) {
-        self.resolve_typed_operators(module, false, Some(closures));
+        let generated: std::collections::HashSet<_> = closures.values().cloned().collect();
+        loop {
+            let returns: HashMap<_, _> = module
+                .decls
+                .iter()
+                .filter_map(|decl| match decl {
+                    Decl::Function { name, ret, .. } if generated.contains(name) => {
+                        Some((name.clone(), ret.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            self.resolve_typed_operators(module, false, Some(closures));
+            let parameters_changed = closure_inference::infer(self, module, closures);
+            let returns_changed = module.decls.iter().any(|decl| match decl {
+                Decl::Function { name, ret, .. } => {
+                    returns.get(name).is_some_and(|previous| previous != ret)
+                }
+                _ => false,
+            });
+            if !parameters_changed && !returns_changed {
+                break;
+            }
+        }
     }
 
     fn resolve_typed_operators(
@@ -207,7 +237,8 @@ impl TypeChecker {
                         let initial = env.clone();
                         self.resolve_typed_body(body, &facts, &mut env, Some(ret), promote_c_bool);
                         if closure_phase {
-                            if matches!(ret, Typ::Generic(_))
+                            if matches!(ret, Typ::Generic(name) if name == "_")
+                                && params.iter().all(|(_, typ)| resolved_closure_type(typ))
                                 && let Some(inferred) =
                                     self.infer_closure_return(body, &facts, &initial)
                             {
@@ -254,15 +285,17 @@ impl TypeChecker {
                 }
                 match stmt {
                     Stmt::Let(name, typ, value) => {
-                        if let Some(typ) =
-                            typ.clone().or_else(|| checker.expr_type(value, facts, env))
-                        {
+                        if let Some(typ) = typ.clone().or_else(|| {
+                            closure_inference::argument_type(checker, value, facts, env)
+                        }) {
                             env.insert(name.clone(), typ);
                         }
                     }
                     Stmt::Return(value) => {
                         returns.push(match value {
-                            Some(value) => checker.expr_type(value, facts, env)?,
+                            Some(value) => {
+                                closure_inference::argument_type(checker, value, facts, env)?
+                            }
                             None => Typ::Void,
                         });
                         falls = false;
@@ -377,7 +410,8 @@ impl TypeChecker {
             inner.extend(params.iter().cloned());
             let initial = inner.clone();
             self.resolve_typed_body(body, facts, &mut inner, None, promote_c_bool);
-            if matches!(ret, Typ::Generic(_))
+            if matches!(ret, Typ::Generic(name) if name == "_")
+                && params.iter().all(|(_, typ)| resolved_closure_type(typ))
                 && let Some(inferred) = self.infer_closure_return(body, facts, &initial)
             {
                 *ret = inferred;

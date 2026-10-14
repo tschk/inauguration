@@ -1882,6 +1882,57 @@ fn lower_to_textual_sil_inner(module: UnifiedModule) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn named_generic_closure_types_are_not_erased_by_call_inference() {
+        use crate::core_ir::{Decl, Expr, Stmt, Typ, UnifiedModule};
+        for (params, ret, args) in [
+            (
+                vec![
+                    ("a".into(), Typ::Generic("T".into())),
+                    ("b".into(), Typ::Generic("T".into())),
+                ],
+                Typ::Int,
+                vec![
+                    Expr::IntLit(42),
+                    Expr::FloatLit(crate::core_ir::FloatVal(1.0)),
+                ],
+            ),
+            (
+                vec![("x".into(), Typ::Generic("_".into()))],
+                Typ::Generic("T".into()),
+                vec![Expr::IntLit(42)],
+            ),
+        ] {
+            let mut module = UnifiedModule {
+                identity: Default::default(),
+                decls: vec![Decl::Function {
+                    name: "main".into(),
+                    params: vec![],
+                    ret: Typ::Int,
+                    type_params: vec![],
+                    body: vec![
+                        Stmt::Let(
+                            "f".into(),
+                            None,
+                            Expr::Closure {
+                                params,
+                                ret,
+                                captures: vec![],
+                                body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                            },
+                        ),
+                        Stmt::Return(Some(Expr::Call {
+                            callee: Box::new(Expr::Ident("f".into())),
+                            args,
+                        })),
+                    ],
+                }],
+            };
+            super::desugar_module(&mut module);
+            assert!(!crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        }
+    }
+
+    #[test]
     fn closure_calls_preserve_signature_checks_and_refuse_unproven_environments() {
         for (source, code) in [
             (
@@ -1901,9 +1952,10 @@ mod tests {
                 "unresolved-symbol",
             ),
             (
-                "fn main()->i64 { let f=|x|x+2; f(40) }",
-                "unresolved-symbol",
+                "fn main()->i64 { let f=|x|x; f(42)+f(true) }",
+                "type-mismatch",
             ),
+            ("fn main()->i64 { let f=|x|x; f() }", "unresolved-symbol"),
             (
                 "fn main()->i64 { let f=|| ||42; f() }",
                 "return-type-mismatch",

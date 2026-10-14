@@ -4327,6 +4327,44 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn closure_parameters_infer_monomorphic_call_types() {
+        for source in [
+            "fn main()->i64 { let f=|x|x+2; f(40) }",
+            "fn main()->i64 { let outer=|g|g(10.5)+g(10.5); let make=|| |x|x; let id=make(); (outer(id)*2.0) as i64 }",
+            "fn main()->i64 { let f=|x|x; f(42) }",
+            "fn main()->i64 { let f=|x|x+x; f(21.0) as i64 }",
+            "fn main()->i64 { let f=|x|x; if f(true) { return 42; } return 0; }",
+            "fn main()->i64 { let f=|x|x[0]+x[1]; f([20,22]) }",
+            "struct Point { value:i64 } fn main()->i64 { let f=|x|x.value; f(Point { value:42 }) }",
+            "fn main()->i64 { let f=|x|x; let alias=f; alias(42) }",
+            "fn main()->i64 { let factory=|| |x|x; let f=factory(); f(42) }",
+            "fn main()->i64 { let f=|x| { let inner=|y|y+2; inner(x) }; f(40) }",
+            "fn main()->i64 { let id=|x|x; let f=|x|x; f(id(42)) }",
+            "fn main()->i64 { let id=|x|x; let f=|x| { let inner=|y|y; inner(x+x) }; f(id(21.0)) as i64 }",
+            "fn main()->i64 { let id=|x|x; let f=|x| { let sum=x+x; let inner=|y|y; inner(sum) }; f(id(21.0)) as i64 }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{source}: {report:?}; {module:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{source}: {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn local_stateless_closures_execute_through_generated_functions() {
         for source in [
             "fn main()->i64 { let answer=||42; answer() }",
