@@ -1719,6 +1719,32 @@ pub(crate) fn lower_stdlib_call(
             )?;
             return Ok(true);
         }
+        "vector-push" if args.len() == 2 => {
+            // shortcut: projected vector headers need an address path before wrapper calls.
+            if !matches!(&args[0], Expr::Ident(_)) {
+                return Err("native-lower: vector push requires a local vector header".into());
+            }
+            let Some(Typ::Vector(item)) =
+                super::lower_expr::native_expr_type(&args[0], ctx, functions)
+            else {
+                return Err("native-lower: vector push requires vector storage".into());
+            };
+            if !matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
+                || super::lower_expr::native_expr_type(&args[1], ctx, functions)
+                    .map(|typ| typ.canonical())
+                    != Some(item.canonical())
+            {
+                return Err("native-lower: vector push requires matching scalar elements".into());
+            }
+            lower_expr_into(emitter, ctx, &args[0], 0, functions, pending_calls, fn_name)?;
+            let saved = ctx.acquire_binop_temp(fn_name)?;
+            emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, saved));
+            lower_expr_into(emitter, ctx, &args[1], 1, functions, pending_calls, fn_name)?;
+            emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, saved));
+            ctx.release_binop_temp();
+            emit_stdlib_wrapper_register_call(emitter, ctx, "in_vec_push", rd)?;
+            return Ok(true);
+        }
         "array-push" if args.len() == 2 => {
             lower_expr_into(emitter, ctx, &args[0], 0, functions, pending_calls, fn_name)?;
             lower_expr_into(emitter, ctx, &args[1], 1, functions, pending_calls, fn_name)?;
@@ -1941,7 +1967,11 @@ pub(crate) fn lower_stdlib_call(
             Ok(true)
         }
         // Vec::new → return pointer to empty vec (0 for ptr, 0 for len, 0 for cap)
-        "new" if args.is_empty() && (target.contains("Vec") || target.contains("vec")) => {
+        "new"
+            if args.is_empty()
+                && (target.contains("Vec") || target.contains("vec"))
+                && !functions.contains_key(target) =>
+        {
             emitter.emit_insns(&aarch64::load_i64(0, 0));
             emitter.emit_insns(&aarch64::load_i64(1, 0));
             emitter.emit_insns(&aarch64::load_i64(2, 0));

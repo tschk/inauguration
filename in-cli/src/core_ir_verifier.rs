@@ -233,6 +233,7 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("str-table-get-int", IntrinsicRet::Int),
     ("array-len", IntrinsicRet::Int),
     ("array-push", IntrinsicRet::Void),
+    ("vector-push", IntrinsicRet::Void),
     ("json-stringify", IntrinsicRet::String),
 ];
 
@@ -1085,6 +1086,29 @@ fn check_expr_with_array_borrow(
                             call_edges,
                             index == 0 && matches!(name.as_str(), "array-len" | "array_len"),
                         )?;
+                    }
+                    if name == "vector-push" {
+                        if args.len() != 2 {
+                            return Err((
+                                "call-arity-mismatch".into(),
+                                "vector push expects two arguments".into(),
+                            ));
+                        }
+                        let Some(Typ::Vector(item)) = expr_type(&args[0], facts, env) else {
+                            return Err((
+                                "type-mismatch".into(),
+                                "vector push requires vector storage".into(),
+                            ));
+                        };
+                        if !matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
+                            || expr_type(&args[1], facts, env).map(|typ| typ.canonical())
+                                != Some(item.canonical())
+                        {
+                            return Err((
+                                "type-mismatch".into(),
+                                "vector push requires matching scalar elements".into(),
+                            ));
+                        }
                     }
                     if matches!(name.as_str(), "array-len" | "array_len") {
                         if args.len() != 1 {
@@ -2447,6 +2471,9 @@ mod tests {
     fn checks_scalar_intrinsic_argument_types_and_arity() {
         for (expression, reason) in [
             ("str-eq(42, 0)", Some("type-mismatch")),
+            ("vector-push()", Some("call-arity-mismatch")),
+            ("vector-push(42, 1)", Some("type-mismatch")),
+            ("vector-push([1], 2)", Some("type-mismatch")),
             ("array-len(\"abc\")", Some("type-mismatch")),
             ("array_len(42)", Some("type-mismatch")),
             ("array-len()", Some("call-arity-mismatch")),

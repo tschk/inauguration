@@ -397,7 +397,11 @@ impl Lower {
                 self.expr(callee, out);
             }
             let receiver = if let Expr::Ident(name) = callee.as_ref() {
-                self.facts.value_receiver_index(name)
+                if name == "vector-push" {
+                    Some(0)
+                } else {
+                    self.facts.value_receiver_index(name)
+                }
             } else {
                 None
             };

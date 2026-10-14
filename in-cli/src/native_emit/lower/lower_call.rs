@@ -33,6 +33,9 @@ pub(crate) fn lower_call(
             "native-lower: unresolved private compiler operation `{target}`"
         ));
     }
+    if target == "vector-push" && args.len() != 2 {
+        return Err("native-lower: vector push requires two arguments".into());
+    }
     if is_inrt_builtin(target) {
         return lower_inrt_call(
             emitter,

@@ -486,6 +486,14 @@ impl TypeChecker {
             });
         }
         if let Expr::Call { callee, args } = expr
+            && matches!(callee.as_ref(), Expr::Ident(name) if matches!(name.as_str(), "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new") && !facts.functions.contains_key(name))
+            && args.is_empty()
+            && !matches!(callee.as_ref(), Expr::Ident(name) if name == "Vec::new"
+                && facts.structs.keys().any(|owner| owner == "Vec" || owner.ends_with("::Vec")))
+        {
+            *expr = Expr::ArrayLit(vec![]);
+        }
+        if let Expr::Call { callee, args } = expr
             && matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::tuples::VALUE)
             && !args.is_empty()
             && let Some(types) = args
@@ -563,6 +571,12 @@ impl TypeChecker {
                 })
             {
                 *callee = Box::new(Expr::Ident(method.into()));
+            } else if method == "push"
+                && args.len() == 2
+                && matches!(&receiver, Typ::Vector(item) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
+                    && self.expr_type(&args[1], facts, env).is_some_and(|actual| is_compatible(item, &actual)))
+            {
+                *callee = Box::new(Expr::Ident("vector-push".into()));
             } else if method == "len"
                 && matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
             {
@@ -2017,6 +2031,7 @@ fn is_builtin_fn(name: &str) -> bool {
             | "str-table-has"
             | "str-table-get-int"
             | "array-push"
+            | "vector-push"
             | "array-pop"
             | "array-len" | "array_len"
             | "bool-to-int"

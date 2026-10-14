@@ -110,6 +110,60 @@ unsafe fn clone_array_words(error_page: *mut u8, source: *const u64, len: usize)
     destination
 }
 
+#[cfg(target_arch = "x86_64")]
+pub(crate) unsafe extern "sysv64" fn push_array(
+    error_page: *mut u8,
+    source: *mut u64,
+    value: u64,
+) -> *mut u64 {
+    unsafe { push_array_words(error_page, source, value) }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub(crate) unsafe extern "C" fn push_array(
+    error_page: *mut u8,
+    source: *mut u64,
+    value: u64,
+) -> *mut u64 {
+    unsafe { push_array_words(error_page, source, value) }
+}
+
+unsafe fn push_array_words(error_page: *mut u8, source: *mut u64, value: u64) -> *mut u64 {
+    let arena =
+        unsafe { error_page.add(24).cast::<usize>().read() as *const Mutex<Vec<Box<[u64]>>> };
+    let mut arrays = unsafe { &*arena }.lock().unwrap();
+    let Some(words) = arrays.iter_mut().find(|words| words.as_ptr() == source) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(len) = usize::try_from(words[0]) else {
+        return std::ptr::null_mut();
+    };
+    let capacity = words.len() - 2;
+    if len > capacity {
+        return std::ptr::null_mut();
+    }
+    if len < capacity {
+        words[len + 2] = value;
+        words[0] += 1;
+        return words.as_mut_ptr();
+    }
+    let Some(capacity) = capacity.max(2).checked_mul(2).filter(|cap| {
+        cap.checked_add(2)
+            .and_then(|words| words.checked_mul(8))
+            .is_some_and(|bytes| bytes <= isize::MAX as usize)
+    }) else {
+        return std::ptr::null_mut();
+    };
+    let mut grown = vec![0_u64; capacity + 2].into_boxed_slice();
+    grown[0] = (len + 1) as u64;
+    grown[1] = capacity as u64;
+    grown[2..len + 2].copy_from_slice(&words[2..len + 2]);
+    grown[len + 2] = value;
+    let pointer = grown.as_mut_ptr();
+    arrays.push(grown);
+    pointer
+}
+
 struct MappedPage {
     ptr: *mut u8,
     size: usize,
@@ -555,6 +609,29 @@ impl JitRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn owned_array_push_grows_and_checks_allocations() {
+        let runtime = JitRuntime::new();
+        let context = runtime.error_page.as_ref().unwrap().ptr;
+        unsafe {
+            let mut array = allocate_array(context, 0);
+            for value in 0..10 {
+                array = push_array(context, array, value);
+                assert!(!array.is_null());
+                assert_eq!(*array, value + 1);
+            }
+            assert_eq!(
+                std::slice::from_raw_parts(array.add(2), 10),
+                &(0..10).collect::<Vec<_>>()
+            );
+            assert!(push_array(context, std::ptr::null_mut(), 42).is_null());
+            let capacity = *array.add(1);
+            *array = capacity + 1;
+            assert!(push_array(context, array, 42).is_null());
+        }
+    }
 
     #[test]
     fn missing_error_page_refuses_loading_before_publishing_functions() {
@@ -4430,6 +4507,15 @@ mod tests {
             "fn main()->i64 { let pair=(20,22.0); match pair {(a,b)=>{return a+b as i64;}} return 0; }",
             "fn main()->i64 { let pair=(1,20.0,22); match pair {(..,a,b)=>{return a as i64+b;}} return 0; }",
             "fn main()->i64 { let pair=(42,); pair.0 }",
+            "struct Vec {value:i64} impl Vec {fn new()->i64 {42}} fn main()->i64 {Vec::new()}",
+            "fn main()->i64 {let mut items:Vec<i64>=Vec::new();items.push(20);items.push(22);items[0]+items[1]}",
+            "fn main()->i64 {let mut items:Vec<i64>=Vec::new();let mut index=0;while index<10 {items.push(index);index+=1;} items.len()+items[8]+items[9]+15}",
+            "fn main()->i64 {let mut items:Vec<f64>=Vec::new();items.push(20.0);items.push(22.0);(items[0]+items[1]) as i64}",
+            "fn main()->i64 {let mut items:Vec<bool>=Vec::new();items.push(true);items.push(false);if items[0] && !items[1] {42} else {0}}",
+            "static mut CALLS:i64=0; fn next()->i64 {unsafe{CALLS+=1;} 22} fn main()->i64 {let mut items:Vec<i64>=Vec::new();items.push(20);items.push(next());unsafe{items[0]+items[1]+CALLS-1}}",
+            "fn main()->i64 {let items:Vec<i64>=Vec::new();if items.is_empty() {42} else {0}}",
+            "fn values()->Vec<i64> {Vec::new()} fn main()->i64 {if values().is_empty() {42} else {0}}",
+            "fn main()->i64 {let mut items:Vec<i64>=std::vec::Vec::new();items.push(42);items[0]}",
             "fn main()->i64 {let items=vec![20,22];items[0]+items[1]}",
             "fn main()->i64 {let items:Vec<_>=vec![20,22];items[0]+items[1]}",
             "fn main()->i64 {let items=vec![20.0,22.0];(items[0]+items[1]) as i64}",

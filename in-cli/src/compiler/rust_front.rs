@@ -2925,6 +2925,7 @@ fn main() {
         for source in [
             "fn main()->i64 {let pair=(missing(),true);42}",
             "fn main()->i64 {let items=vec![20,true];42}",
+            "mod geo {pub struct Vec<T> {value:T} impl Vec<i64> {pub fn new()->Self {Self{value:0}} pub fn is_empty(&self)->bool {false}}} use geo::Vec; fn main()->i64 {let items:Vec<i64>=Vec::new();if items.is_empty() {42} else {0}}",
             "fn main()->i64 {let items=vec![missing(),42];items[1]}",
             "fn pair()->(i64,bool) {(42,7)} fn main()->i64 {pair().0}",
         ] {

@@ -3239,6 +3239,56 @@ fn lower_call_expr(
         ));
     }
 
+    if target_name == "vector-push" {
+        let [vector, value] = args else {
+            return Err("x86_64-lower: vector push requires two arguments".into());
+        };
+        // shortcut: projected vector headers need an address path before wrapper calls.
+        if !matches!(vector, Expr::Ident(_)) {
+            return Err("x86_64-lower: vector push requires a local vector header".into());
+        }
+        let Some(Typ::Vector(item)) = scalar_expr_type(vector, ctx) else {
+            return Err("x86_64-lower: vector push requires vector storage".into());
+        };
+        if !matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
+            || scalar_expr_type(value, ctx).map(|typ| typ.canonical()) != Some(item.canonical())
+        {
+            return Err("x86_64-lower: vector push requires matching scalar elements".into());
+        }
+        if !ctx.runtime_error_slot || x86_64::is_32bit() || ctx.is_interrupt {
+            return Err("x86_64-lower: vector push requires the 64-bit JIT runtime".into());
+        }
+        let Expr::Ident(local) = vector else {
+            unreachable!()
+        };
+        let destination = ctx.slot_offset(local)?;
+        let saved = ctx.alloc_slot();
+        lower_expr_into(emitter, ctx, vector, RAX, pending_calls)?;
+        emitter.emit_insns(&x86_64::str64(RAX, saved as u16));
+        lower_expr_into(emitter, ctx, value, RDX, pending_calls)?;
+        emitter.emit_insns(&x86_64::ldr64(RSI, saved as u16));
+        emitter.emit_insns(&x86_64::mov_rr(RDI, 15));
+        emitter.emit_insns(&x86_64::load_i64(
+            RAX,
+            crate::jit_runtime::push_array as *const () as i64,
+        ));
+        emitter.emit_insns(&x86_64::mov_rr(11, x86_64::REG_SP));
+        emitter.emit_insns(&x86_64::load_i64(10, -16));
+        emitter.emit_insns(&x86_64::and_rr(x86_64::REG_SP, 10));
+        emitter.emit_insns(&x86_64::sub_rsp_i8(16));
+        emitter.emit_insns(&x86_64::mov_m_r(x86_64::REG_SP, 0, 11));
+        emitter.emit_insns(&[0xFF, 0xD0]);
+        emitter.emit_insns(&x86_64::mov_r_m(x86_64::REG_SP, x86_64::REG_SP, 0));
+        emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+        let valid = emitter.len();
+        emitter.emit_insns(&x86_64::jcc_near(0x05, 0));
+        emit_failure_return(emitter, ctx)?;
+        emitter.patch_u32(valid + 2, emitter.len() - valid - 6);
+        emitter.emit_insns(&x86_64::str64(RAX, destination as u16));
+        emitter.emit_insns(&x86_64::zero_reg(target_reg));
+        return Ok(());
+    }
+
     if lower_builtin_call(
         emitter,
         ctx,
