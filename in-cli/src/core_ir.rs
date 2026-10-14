@@ -525,6 +525,9 @@ impl MatchPattern {
                 }
             }
             Self::TuplePat(items) | Self::ArrayPat(items) => {
+                let rest = items
+                    .iter()
+                    .position(|pattern| matches!(pattern, Self::RestPat));
                 if items
                     .iter()
                     .filter(|pattern| matches!(pattern, Self::RestPat))
@@ -533,19 +536,44 @@ impl MatchPattern {
                 {
                     return Err("sequence pattern has multiple rests".into());
                 }
+                let tuple_fields = match typ {
+                    Typ::Array(_) | Typ::Vector(_) => None,
+                    Typ::Named(name) if matches!(self, Self::TuplePat(_)) => {
+                        let fields = schema(name)
+                            .ok_or_else(|| format!("unknown tuple pattern type `{name}`"))?;
+                        let fixed = items.len() - usize::from(rest.is_some());
+                        if (rest.is_none() && fields.len() != fixed) || fields.len() < fixed {
+                            return Err(format!("tuple pattern arity does not match {typ:?}"));
+                        }
+                        if !(0..fields.len()).all(|index| {
+                            fields.iter().any(|(name, _)| name == &format!("_{index}"))
+                        }) {
+                            return Err(format!("invalid tuple pattern schema for {typ:?}"));
+                        }
+                        Some(fields)
+                    }
+                    _ => return Err(format!("sequence pattern does not match {typ:?}")),
+                };
                 for (index, pattern) in items.iter().enumerate() {
                     if matches!(pattern, Self::RestPat) {
                         continue;
                     }
-                    let item_type = match typ {
-                        Typ::Array(item) | Typ::Vector(item) => item.as_ref(),
-                        Typ::Named(name) if matches!(self, Self::TuplePat(_)) => schema(name)
-                            .and_then(|fields| {
-                                fields.iter().find(|(name, _)| name == &format!("_{index}"))
-                            })
-                            .map(|(_, typ)| typ)
-                            .ok_or_else(|| format!("unknown tuple pattern field {index}"))?,
-                        _ => return Err(format!("sequence pattern does not match {typ:?}")),
+                    let item_type = if let Some(fields) = tuple_fields {
+                        let index = if rest.is_some_and(|rest| index > rest) {
+                            fields.len() - (items.len() - index)
+                        } else {
+                            index
+                        };
+                        &fields
+                            .iter()
+                            .find(|(name, _)| name == &format!("_{index}"))
+                            .ok_or_else(|| format!("unknown tuple pattern field {index}"))?
+                            .1
+                    } else {
+                        match typ {
+                            Typ::Array(item) | Typ::Vector(item) => item.as_ref(),
+                            _ => unreachable!(),
+                        }
                     };
                     bindings.extend(pattern.typed_bindings(item_type, schema)?);
                 }
@@ -829,6 +857,67 @@ pub(crate) fn for_each_expr_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tuple_rest_bindings_use_actual_suffix_field_types() {
+        let fields = vec![
+            ("_0".into(), Typ::Int),
+            ("_1".into(), Typ::String),
+            ("_2".into(), Typ::Bool),
+        ];
+        let schema = |name: &str| (name == "Tuple").then_some(fields.as_slice());
+        let typ = Typ::Named("Tuple".into());
+        assert!(
+            MatchPattern::parse("(.., true)")
+                .unwrap()
+                .typed_bindings(&typ, &schema)
+                .is_ok()
+        );
+        assert!(
+            MatchPattern::parse("(.., \"wrong\")")
+                .unwrap()
+                .typed_bindings(&typ, &schema)
+                .is_err()
+        );
+        assert_eq!(
+            MatchPattern::parse("(a, .., b)")
+                .unwrap()
+                .typed_bindings(&typ, &schema)
+                .unwrap(),
+            vec![("a".into(), Typ::Int), ("b".into(), Typ::Bool)]
+        );
+        assert_eq!(
+            MatchPattern::parse("(.., b)")
+                .unwrap()
+                .typed_bindings(&typ, &schema)
+                .unwrap(),
+            vec![("b".into(), Typ::Bool)]
+        );
+        assert!(
+            MatchPattern::parse("(a,b)")
+                .unwrap()
+                .typed_bindings(&typ, &schema)
+                .is_err()
+        );
+        assert!(
+            MatchPattern::parse("(a,b,c,d,..)")
+                .unwrap()
+                .typed_bindings(&typ, &schema)
+                .is_err()
+        );
+        assert!(
+            MatchPattern::parse("[]")
+                .unwrap()
+                .typed_bindings(&Typ::Int, &schema)
+                .is_err()
+        );
+        assert!(
+            MatchPattern::parse("(..)")
+                .unwrap()
+                .typed_bindings(&Typ::Int, &schema)
+                .is_err()
+        );
+    }
+
     #[test]
     fn typed_pattern_bindings_preserve_fields_and_reject_wrong_shapes() {
         let fields = vec![("value".to_string(), Typ::Float)];
