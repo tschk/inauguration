@@ -105,7 +105,21 @@ fn register_explicit_vector_constructors(module: &mut UnifiedModule) {
         let Expr::Ident(name) = callee.as_ref() else {
             return;
         };
-        if !name.contains("::<") || !args.is_empty() || names.contains(name) {
+        if names.contains(name) {
+            return;
+        }
+        if matches!(
+            name.as_str(),
+            "Vec::with_capacity"
+                | "std::vec::Vec::with_capacity"
+                | "alloc::vec::Vec::with_capacity"
+        ) {
+            if args.len() == 1 && !(name == "Vec::with_capacity" && shadowed) {
+                *callee = Box::new(Expr::Ident(crate::core_ir::VECTOR_ALLOCATION.into()));
+            }
+            return;
+        }
+        if !name.contains("::<") {
             return;
         }
         let Ok(path) = syn::parse_str::<syn::ExprPath>(name) else {
@@ -122,9 +136,15 @@ fn register_explicit_vector_constructors(module: &mut UnifiedModule) {
             .join("::");
         if !matches!(
             owner.as_str(),
-            "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new"
-        ) || names.contains(&owner)
-            || (owner == "Vec::new" && shadowed)
+            "Vec::new"
+                | "std::vec::Vec::new"
+                | "alloc::vec::Vec::new"
+                | "Vec::with_capacity"
+                | "std::vec::Vec::with_capacity"
+                | "alloc::vec::Vec::with_capacity"
+        ) || args.len() != usize::from(owner.ends_with("::with_capacity"))
+            || names.contains(&owner)
+            || (owner.starts_with("Vec::") && shadowed)
             || !matches!(segments.last().unwrap().arguments, syn::PathArguments::None)
             || segments[..segments.len() - 2]
                 .iter()
@@ -143,7 +163,11 @@ fn register_explicit_vector_constructors(module: &mut UnifiedModule) {
             return;
         };
         if matches!(item, syn::Type::Infer(_)) {
-            *callee = Box::new(Expr::Ident(owner));
+            *callee = Box::new(Expr::Ident(if owner.ends_with("::with_capacity") {
+                crate::core_ir::VECTOR_ALLOCATION.into()
+            } else {
+                owner
+            }));
             return;
         }
         // References need an ownership model; do not erase them into scalar elements.
@@ -161,17 +185,40 @@ fn register_explicit_vector_constructors(module: &mut UnifiedModule) {
         }
         let typ = map_type(item);
         if matches!(typ, Typ::Int | Typ::Float | Typ::Bool) {
-            constructors.insert(name.clone(), Typ::Vector(Box::new(typ)));
+            constructors.insert(
+                name.clone(),
+                (
+                    Typ::Vector(Box::new(typ)),
+                    owner.ends_with("::with_capacity"),
+                ),
+            );
         }
     });
     module
         .decls
-        .extend(constructors.into_iter().map(|(name, ret)| Decl::Function {
-            name,
-            params: vec![],
-            ret,
-            body: vec![Stmt::Return(Some(Expr::ArrayLit(vec![])))],
-            type_params: vec![],
+        .extend(constructors.into_iter().map(|(name, (ret, reserved))| {
+            let params = if reserved {
+                vec![("capacity".into(), Typ::Int)]
+            } else {
+                vec![]
+            };
+            let value = if reserved {
+                Expr::Call {
+                    callee: Box::new(Expr::Ident(
+                        ret.vector_allocation_intrinsic().unwrap().into(),
+                    )),
+                    args: vec![Expr::Ident("capacity".into())],
+                }
+            } else {
+                Expr::ArrayLit(vec![])
+            };
+            Decl::Function {
+                name,
+                params,
+                ret,
+                body: vec![Stmt::Return(Some(value))],
+                type_params: vec![],
+            }
         }));
 }
 
@@ -1618,7 +1665,7 @@ fn lower_block_inner_with_types_go(
                             Expr::Call { callee, .. }
                                 if matches!(
                                     callee.as_ref(),
-                                    Expr::Ident(name) if matches!(name.as_str(), "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new" | "Vec::<_>::new" | "std::vec::Vec::<_>::new" | "alloc::vec::Vec::<_>::new")
+                                    Expr::Ident(name) if matches!(name.as_str(), "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new" | "Vec::<_>::new" | "std::vec::Vec::<_>::new" | "alloc::vec::Vec::<_>::new" | "Vec::with_capacity" | "std::vec::Vec::with_capacity" | "alloc::vec::Vec::with_capacity" | "Vec::<_>::with_capacity" | "std::vec::Vec::<_>::with_capacity" | "alloc::vec::Vec::<_>::with_capacity")
                                 )
                         )
                         .then(|| Typ::Vector(Box::new(Typ::Generic("_".to_string()))))
@@ -3008,6 +3055,12 @@ fn main() {
     #[test]
     fn explicit_vector_constructors_preserve_types_and_do_not_erase_borrows() {
         for source in [
+            "fn main()->i64{let items=Vec::with_capacity(10);items.capacity()+42}",
+            "fn main()->i64{let items:Vec<i64>=Vec::with_capacity(true);42}",
+            "fn main()->i64{let items:Vec<bool>=Vec::<i64>::with_capacity(10);42}",
+            "fn main()->i64{let items=Vec::<&i64>::with_capacity(10);42}",
+            "fn main()->i64{let items=Vec::<i64,bool>::with_capacity(10);42}",
+            "struct Vec{value:i64} fn main()->i64{let items:Vec<i64>=Vec::with_capacity(10);42}",
             "fn values()->Vec<bool>{Vec::<i64>::new()} fn main()->i64{values().len()+42}",
             "fn main()->i64{let mut items=Vec::<i64>::new();items.push(true);42}",
             "fn main()->i64{let items:Vec<bool>=Vec::<i64>::new();items.len()+42}",

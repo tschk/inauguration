@@ -94,6 +94,20 @@ fn owned_compile_rejects_unknown_field_write_before_execution() {
 fn rust_jit_executes_explicit_scalar_vector_constructors() {
     for text in [
         "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
+        "mod Vec{pub fn with_capacity(value:i64)->i64{value}} fn main()->i64{Vec::with_capacity(42)}",
+        "struct Reader{value:i64} impl Reader{fn take(&self,items:Vec<i64>)->i64{if items.capacity()>=10{self.value}else{0}}} fn main()->i64{let reader=Reader{value:42};reader.take(Vec::with_capacity(10))}",
+        "struct Bag{items:Vec<i64>} fn main()->i64{let mut bag=Bag{items:Vec::new()};bag.items=Vec::with_capacity(10);if bag.items.capacity()>=10{42}else{0}}",
+        "fn main()->i64{let items:Vec<i64>=Vec::with_capacity(10).clone();if items.capacity()==0 && items.len()==0{42}else{0}}",
+        "fn main()->i64{let mut items:Vec<i64>=Vec::with_capacity(10);let before=items.len();items.push(42);if before==0 && items.capacity()>=10{items[0]}else{0}}",
+        "fn main()->i64{let mut items=Vec::with_capacity(2);items.push(20);items.push(22);if items.capacity()>=2{items[0]+items[1]}else{0}}",
+        "fn main()->i64{let mut items=std::vec::Vec::<f64>::with_capacity(3);items.push(42.0);items[0] as i64}",
+        "fn main()->i64{let mut items=alloc::vec::Vec::<_>::with_capacity(3);items.push(true);if items[0]{42}else{0}}",
+        "fn source()->Vec<i64>{Vec::with_capacity(10)} fn main()->i64{let mut items=source();items.push(42);if items.capacity()>=10{items[0]}else{0}}",
+        "fn take(items:Vec<i64>)->i64{if items.len()==0 && items.capacity()>=10{42}else{0}} fn main()->i64{take(Vec::with_capacity(10))}",
+        "struct Bag{items:Vec<i64>} fn main()->i64{let mut bag=Bag{items:Vec::with_capacity(10)};bag.items.push(42);if bag.items.capacity()>=10{bag.items[0]}else{0}}",
+        "fn main()->i64{let make=||->Vec<i64>{Vec::with_capacity(10)};let mut items=make();items.push(42);if items.capacity()>=10{items[0]}else{0}}",
+        "static mut CALLS:i64=0;fn count()->i64{unsafe{CALLS+=1;}10} fn main()->i64{let mut items=Vec::<i64>::with_capacity(count());items.push(41);unsafe{items[0]+CALLS}}",
+        "fn main()->i64{let mut items=Vec::<i64>::with_capacity(0);if items.capacity()!=0{return 0;}items.push(20);items.push(22);items[0]+items[1]}",
         "fn main()->i64{let mut items=Vec::new();items.push(42);if items.capacity()>items.len(){42}else{0}}",
         "fn main()->i64{let mut items:Vec<i64>=Vec::new();let before=items.capacity();items.extend(vec![1,2,3,4,5,6,7,8,9,10]);if before==0 && items.capacity()>=items.len(){42}else{0}}",
         "struct Bag{items:Vec<i64>} fn main()->i64{let bag=Bag{items:vec![20,22]};if bag.items.capacity()>=2{42}else{0}}",
@@ -1750,6 +1764,20 @@ fn native_vector_runtime_refuses_invalid_headers_and_failed_allocations() {
 fn native_vector_clones_preserve_independent_storage_and_returns() {
     for text in [
         "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
+        "mod Vec{pub fn with_capacity(value:i64)->i64{value}} fn main()->i64{Vec::with_capacity(42)}",
+        "struct Reader{value:i64} impl Reader{fn take(&self,items:Vec<i64>)->i64{if items.capacity()>=10{self.value}else{0}}} fn main()->i64{let reader=Reader{value:42};reader.take(Vec::with_capacity(10))}",
+        "struct Bag{items:Vec<i64>} fn main()->i64{let mut bag=Bag{items:Vec::new()};bag.items=Vec::with_capacity(10);if bag.items.capacity()>=10{42}else{0}}",
+        "fn main()->i64{let items:Vec<i64>=Vec::with_capacity(10).clone();if items.capacity()==0 && items.len()==0{42}else{0}}",
+        "fn main()->i64{let mut items:Vec<i64>=Vec::with_capacity(10);let before=items.len();items.push(42);if before==0 && items.capacity()>=10{items[0]}else{0}}",
+        "fn main()->i64{let mut items=Vec::with_capacity(2);items.push(20);items.push(22);if items.capacity()>=2{items[0]+items[1]}else{0}}",
+        "fn main()->i64{let mut items=std::vec::Vec::<f64>::with_capacity(3);items.push(42.0);items[0] as i64}",
+        "fn main()->i64{let mut items=alloc::vec::Vec::<_>::with_capacity(3);items.push(true);if items[0]{42}else{0}}",
+        "fn source()->Vec<i64>{Vec::with_capacity(10)} fn main()->i64{let mut items=source();items.push(42);if items.capacity()>=10{items[0]}else{0}}",
+        "fn take(items:Vec<i64>)->i64{if items.len()==0 && items.capacity()>=10{42}else{0}} fn main()->i64{take(Vec::with_capacity(10))}",
+        "struct Bag{items:Vec<i64>} fn main()->i64{let mut bag=Bag{items:Vec::with_capacity(10)};bag.items.push(42);if bag.items.capacity()>=10{bag.items[0]}else{0}}",
+        "fn main()->i64{let make=||->Vec<i64>{Vec::with_capacity(10)};let mut items=make();items.push(42);if items.capacity()>=10{items[0]}else{0}}",
+        "static mut CALLS:i64=0;fn count()->i64{unsafe{CALLS+=1;}10} fn main()->i64{let mut items=Vec::<i64>::with_capacity(count());items.push(41);unsafe{items[0]+CALLS}}",
+        "fn main()->i64{let mut items=Vec::<i64>::with_capacity(0);if items.capacity()!=0{return 0;}items.push(20);items.push(22);items[0]+items[1]}",
         "fn main()->i64{let mut items=Vec::new();items.push(42);if items.capacity()>items.len(){42}else{0}}",
         "fn main()->i64{let mut items:Vec<i64>=Vec::new();let before=items.capacity();items.extend(vec![1,2,3,4,5,6,7,8,9,10]);if before==0 && items.capacity()>=items.len(){42}else{0}}",
         "struct Bag{items:Vec<i64>} fn main()->i64{let bag=Bag{items:vec![20,22]};if bag.items.capacity()>=2{42}else{0}}",
@@ -1814,6 +1842,37 @@ fn native_vector_clones_preserve_independent_storage_and_returns() {
             fs::remove_file(source).unwrap();
             fs::remove_file(binary).unwrap();
         }
+    }
+}
+
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_vector_allocation_refuses_overflow_and_failed_mapping() {
+    for capacity in ["-1", "576460752303423488", "1125899906842624"] {
+        let source = temp_path("vector-allocation-invalid.rs");
+        let binary = temp_path("vector-allocation-invalid");
+        fs::write(
+            &source,
+            format!(
+                "fn main()->i64{{let items=Vec::<i64>::with_capacity({capacity});items.len()}}"
+            ),
+        )
+        .unwrap();
+        let report = compile_owned(&default_request(
+            source.clone(),
+            CompileTarget::Native,
+            Some("main"),
+            Some(binary.clone()),
+        ));
+        assert!(report.success, "{capacity}: {report:?}");
+        let output = std::process::Command::new(&binary).output().unwrap();
+        assert_eq!(output.status.code(), Some(70), "{capacity}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("invalid vector header or allocation failure")
+        );
+        fs::remove_file(source).unwrap();
+        fs::remove_file(binary).unwrap();
     }
 }
 

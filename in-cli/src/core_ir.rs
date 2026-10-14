@@ -2,10 +2,14 @@
 
 pub(crate) mod tuples;
 
+pub(crate) const VECTOR_ALLOCATION: &str = "#vector-with-capacity";
 pub(crate) const BORROW: &str = "#rust-borrow";
 pub(crate) const METHOD_PREFIX: &str = "#receiver-method:";
 pub(crate) fn is_compiler_callee(name: &str) -> bool {
-    tuples::is_marker(name) || name == BORROW || name.starts_with(METHOD_PREFIX)
+    tuples::is_marker(name)
+        || name == BORROW
+        || name == VECTOR_ALLOCATION
+        || name.starts_with(METHOD_PREFIX)
 }
 
 use serde::{Deserialize, Serialize};
@@ -109,6 +113,18 @@ impl Typ {
 
     pub fn is_any(&self) -> bool {
         matches!(self, Typ::Named(name) if name == "Any")
+    }
+
+    pub(crate) fn vector_allocation_intrinsic(&self) -> Option<&'static str> {
+        match self.canonical() {
+            Typ::Vector(item) => match item.canonical() {
+                Typ::Int => Some("vector-with-capacity-int"),
+                Typ::Float => Some("vector-with-capacity-float"),
+                Typ::Bool => Some("vector-with-capacity-bool"),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     pub(crate) fn accepts_vector_source(&self, expr: &Expr, actual: &Typ) -> bool {

@@ -146,6 +146,43 @@ pub(crate) unsafe extern "C" fn extend_array(
     unsafe { extend_array_words(error_page, destination, source) }
 }
 
+#[cfg(target_arch = "x86_64")]
+pub(crate) unsafe extern "sysv64" fn reserve_array(error_page: *mut u8, capacity: u64) -> *mut u64 {
+    unsafe { reserve_array_words(error_page, capacity) }
+}
+#[cfg(not(target_arch = "x86_64"))]
+pub(crate) unsafe extern "C" fn reserve_array(error_page: *mut u8, capacity: u64) -> *mut u64 {
+    unsafe { reserve_array_words(error_page, capacity) }
+}
+unsafe fn reserve_array_words(error_page: *mut u8, capacity: u64) -> *mut u64 {
+    if capacity >= 1u64 << 59 {
+        return std::ptr::null_mut();
+    }
+    let Some(words) = usize::try_from(capacity)
+        .ok()
+        .and_then(|cap| cap.checked_add(2))
+        .filter(|words| {
+            words
+                .checked_mul(8)
+                .is_some_and(|bytes| bytes <= isize::MAX as usize)
+        })
+    else {
+        return std::ptr::null_mut();
+    };
+    let mut payload = Vec::new();
+    if payload.try_reserve_exact(words).is_err() {
+        return std::ptr::null_mut();
+    }
+    payload.resize(words, 0u64);
+    payload[1] = capacity;
+    let mut payload = payload.into_boxed_slice();
+    let pointer = payload.as_mut_ptr();
+    let arena =
+        unsafe { error_page.add(24).cast::<usize>().read() as *const Mutex<Vec<Box<[u64]>>> };
+    unsafe { &*arena }.lock().unwrap().push(payload);
+    pointer
+}
+
 unsafe fn extend_array_words(
     error_page: *mut u8,
     mut destination: *mut u64,
@@ -682,6 +719,27 @@ mod tests {
             let capacity = *array.add(1);
             *array = capacity + 1;
             assert!(push_array(context, array, 42).is_null());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owned_array_reservation_keeps_length_zero_and_checks_capacity() {
+        let runtime = JitRuntime::new();
+        let context = runtime.error_page.as_ref().unwrap().ptr;
+        unsafe {
+            let array = reserve_array(context, 10);
+            assert!(!array.is_null());
+            assert_eq!(*array, 0);
+            assert_eq!(*array.add(1), 10);
+            assert_eq!(push_array(context, array, 42), array);
+            assert_eq!(*array, 1);
+            assert_eq!(*array.add(2), 42);
+            let empty = reserve_array(context, 0);
+            assert!(!empty.is_null());
+            assert_eq!(*empty, 0);
+            assert!(reserve_array(context, u64::MAX).is_null());
+            assert!(reserve_array(context, 1u64 << 59).is_null());
         }
     }
 
@@ -3546,6 +3604,44 @@ mod tests {
     }
 
     #[test]
+    fn vector_allocation_emitters_reject_non_integer_capacity() {
+        use crate::core_ir::{Decl, Expr, Stmt};
+        for value in [
+            Expr::BoolLit(true),
+            Expr::FloatLit(crate::core_ir::FloatVal(1.0)),
+        ] {
+            let mut module =
+                crate::compiler::rust_front::parse_rust_source("fn main()->i64{42}").unwrap();
+            let Decl::Function { body, .. } = &mut module.decls[0] else {
+                panic!("missing main")
+            };
+            body.insert(
+                0,
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("vector-with-capacity-int".into())),
+                    args: vec![value],
+                }),
+            );
+            assert!(
+                crate::native_emit::lower::lower_module(
+                    &module,
+                    "main",
+                    crate::native_emit::NativeLinkage::Executable
+                )
+                .err()
+                .unwrap()
+                .contains("capacity must be an integer")
+            );
+            assert!(
+                crate::native_emit::x86_64_lower::lower_module(&module, "main")
+                    .err()
+                    .unwrap()
+                    .contains("capacity must be an integer")
+            );
+        }
+    }
+
+    #[test]
     fn scalar_vector_clone_rejects_unsupported_operands_and_c_projection() {
         use crate::core_ir::{Decl, Expr, Stmt};
         let parsed = crate::compiler::rust_front::parse_rust_source("fn main() -> i64 { let items: Vec<i64> = vec![20,22]; let copied: Vec<i64> = items.clone(); return copied[0]+copied[1]; }").unwrap();
@@ -4570,6 +4666,20 @@ mod tests {
     fn typed_tuples_preserve_fields_calls_returns_and_order() {
         for source in [
             "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
+            "mod Vec{pub fn with_capacity(value:i64)->i64{value}} fn main()->i64{Vec::with_capacity(42)}",
+            "struct Reader{value:i64} impl Reader{fn take(&self,items:Vec<i64>)->i64{if items.capacity()>=10{self.value}else{0}}} fn main()->i64{let reader=Reader{value:42};reader.take(Vec::with_capacity(10))}",
+            "struct Bag{items:Vec<i64>} fn main()->i64{let mut bag=Bag{items:Vec::new()};bag.items=Vec::with_capacity(10);if bag.items.capacity()>=10{42}else{0}}",
+            "fn main()->i64{let items:Vec<i64>=Vec::with_capacity(10).clone();if items.capacity()==0 && items.len()==0{42}else{0}}",
+            "fn main()->i64{let mut items:Vec<i64>=Vec::with_capacity(10);let before=items.len();items.push(42);if before==0 && items.capacity()>=10{items[0]}else{0}}",
+            "fn main()->i64{let mut items=Vec::with_capacity(2);items.push(20);items.push(22);if items.capacity()>=2{items[0]+items[1]}else{0}}",
+            "fn main()->i64{let mut items=std::vec::Vec::<f64>::with_capacity(3);items.push(42.0);items[0] as i64}",
+            "fn main()->i64{let mut items=alloc::vec::Vec::<_>::with_capacity(3);items.push(true);if items[0]{42}else{0}}",
+            "fn source()->Vec<i64>{Vec::with_capacity(10)} fn main()->i64{let mut items=source();items.push(42);if items.capacity()>=10{items[0]}else{0}}",
+            "fn take(items:Vec<i64>)->i64{if items.len()==0 && items.capacity()>=10{42}else{0}} fn main()->i64{take(Vec::with_capacity(10))}",
+            "struct Bag{items:Vec<i64>} fn main()->i64{let mut bag=Bag{items:Vec::with_capacity(10)};bag.items.push(42);if bag.items.capacity()>=10{bag.items[0]}else{0}}",
+            "fn main()->i64{let make=||->Vec<i64>{Vec::with_capacity(10)};let mut items=make();items.push(42);if items.capacity()>=10{items[0]}else{0}}",
+            "static mut CALLS:i64=0;fn count()->i64{unsafe{CALLS+=1;}10} fn main()->i64{let mut items=Vec::<i64>::with_capacity(count());items.push(41);unsafe{items[0]+CALLS}}",
+            "fn main()->i64{let mut items=Vec::<i64>::with_capacity(0);if items.capacity()!=0{return 0;}items.push(20);items.push(22);items[0]+items[1]}",
             "fn main()->i64{let mut items=Vec::new();items.push(42);if items.capacity()>items.len(){42}else{0}}",
             "fn main()->i64{let mut items:Vec<i64>=Vec::new();let before=items.capacity();items.extend(vec![1,2,3,4,5,6,7,8,9,10]);if before==0 && items.capacity()>=items.len(){42}else{0}}",
             "struct Bag{items:Vec<i64>} fn main()->i64{let bag=Bag{items:vec![20,22]};if bag.items.capacity()>=2{42}else{0}}",

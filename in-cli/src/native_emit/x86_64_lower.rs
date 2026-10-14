@@ -2720,6 +2720,40 @@ fn lower_builtin_call(
             emitter.patch_u32(empty + 2, (emitter.len() as i32 - empty as i32 - 6) as u32);
             Ok(true)
         }
+        "vector-with-capacity-int" | "vector-with-capacity-float" | "vector-with-capacity-bool"
+            if args.len() == 1 =>
+        {
+            if scalar_expr_type(&args[0], ctx).map(|typ| typ.canonical()) != Some(Typ::Int) {
+                return Err("x86_64-lower: vector allocation capacity must be an integer".into());
+            }
+            if !ctx.runtime_error_slot || x86_64::is_32bit() || ctx.is_interrupt {
+                return Err(
+                    "x86_64-lower: vector allocation requires the 64-bit JIT runtime".into(),
+                );
+            }
+            lower_expr_into(emitter, ctx, &args[0], RSI, pending_calls)?;
+            emitter.emit_insns(&x86_64::mov_rr(RDI, 15));
+            emitter.emit_insns(&x86_64::load_i64(
+                RAX,
+                crate::jit_runtime::reserve_array as *const () as i64,
+            ));
+            emitter.emit_insns(&x86_64::mov_rr(11, x86_64::REG_SP));
+            emitter.emit_insns(&x86_64::load_i64(10, -16));
+            emitter.emit_insns(&x86_64::and_rr(x86_64::REG_SP, 10));
+            emitter.emit_insns(&x86_64::sub_rsp_i8(16));
+            emitter.emit_insns(&x86_64::mov_m_r(x86_64::REG_SP, 0, 11));
+            emitter.emit_insns(&[0xFF, 0xD0]);
+            emitter.emit_insns(&x86_64::mov_r_m(x86_64::REG_SP, x86_64::REG_SP, 0));
+            emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+            let valid = emitter.len();
+            emitter.emit_insns(&x86_64::jcc_near(0x05, 0));
+            emit_failure_return(emitter, ctx)?;
+            emitter.patch_u32(valid + 2, emitter.len() - valid - 6);
+            if target_reg != RAX {
+                emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+            }
+            return Ok(true);
+        }
         "vector-capacity" if args.len() == 1 => {
             if !matches!(scalar_expr_type(&args[0], ctx), Some(Typ::Vector(_))) {
                 return Err("x86_64-lower: vector capacity requires vector storage".into());

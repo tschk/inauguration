@@ -1292,7 +1292,7 @@ fn collect_expr_reads(e: &Expr, reads: &mut HashSet<String>) {
             collect_expr_reads(index, reads);
         }
         Expr::Call { callee, args, .. } => {
-            if !matches!(callee.as_ref(), Expr::Ident(name) if crate::core_ir::is_compiler_callee(name))
+            if !matches!(callee.as_ref(), Expr::Ident(name) if crate::core_ir::is_compiler_callee(name) || matches!(name.as_str(), "vector-with-capacity-int" | "vector-with-capacity-float" | "vector-with-capacity-bool"))
             {
                 collect_expr_reads(callee, reads);
             }

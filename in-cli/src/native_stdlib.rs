@@ -704,6 +704,25 @@ pub unsafe extern "C" fn in_vec_extend(
 
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn in_vec_alloc(capacity: u64) -> *mut u64 {
+    if capacity == 0 || capacity >= (1u64 << 59) {
+        return std::ptr::null_mut();
+    }
+    let Some(bytes) = usize::try_from(capacity)
+        .ok()
+        .and_then(|cap| cap.checked_mul(8))
+    else {
+        return std::ptr::null_mut();
+    };
+    let Ok(layout) = std::alloc::Layout::from_size_align(bytes, 8) else {
+        return std::ptr::null_mut();
+    };
+    // shortcut: vector payloads live until process exit, release them when Core IR models drop ownership.
+    unsafe { std::alloc::alloc(layout).cast() }
+}
+
+#[allow(clippy::missing_safety_doc)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn in_vec_push(dst_header: *mut u64, value: u64) -> i64 {
     unsafe { in_vec_extend(dst_header, (&raw const value) as u64, 1, 1) }
 }
@@ -1202,6 +1221,23 @@ mod tests {
 
             let layout = std::alloc::Layout::array::<u64>(dst_header[2] as usize).unwrap();
             std::alloc::dealloc(dst_header[0] as *mut u8, layout);
+        }
+    }
+
+    #[test]
+    fn vector_allocation_checks_capacity_without_initializing_elements() {
+        unsafe {
+            assert!(in_vec_alloc(0).is_null());
+            assert!(in_vec_alloc(u64::MAX).is_null());
+            assert!(in_vec_alloc(1u64 << 59).is_null());
+            let pointer = in_vec_alloc(10);
+            assert!(!pointer.is_null());
+            pointer.write(42);
+            assert_eq!(pointer.read(), 42);
+            std::alloc::dealloc(
+                pointer.cast(),
+                std::alloc::Layout::from_size_align(80, 8).unwrap(),
+            );
         }
     }
 

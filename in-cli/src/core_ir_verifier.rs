@@ -162,6 +162,9 @@ enum IntrinsicRet {
     Bool,
     String,
     StringArray,
+    IntVector,
+    FloatVector,
+    BoolVector,
 }
 
 /// Every intrinsic the codegen resolves without a module-level declaration.
@@ -236,6 +239,9 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("vector-push", IntrinsicRet::Void),
     ("vector-extend", IntrinsicRet::Void),
     ("vector-capacity", IntrinsicRet::Int),
+    ("vector-with-capacity-int", IntrinsicRet::IntVector),
+    ("vector-with-capacity-float", IntrinsicRet::FloatVector),
+    ("vector-with-capacity-bool", IntrinsicRet::BoolVector),
     ("json-stringify", IntrinsicRet::String),
 ];
 
@@ -290,12 +296,21 @@ pub(crate) fn intrinsic_return_type(name: &str) -> Option<&'static Typ> {
     static BOOL_RET: Typ = Typ::Bool;
     static STRING_ARRAY_RET: std::sync::LazyLock<Typ> =
         std::sync::LazyLock::new(|| Typ::Array(Box::new(Typ::String)));
+    static INT_VECTOR_RET: std::sync::LazyLock<Typ> =
+        std::sync::LazyLock::new(|| Typ::Vector(Box::new(Typ::Int)));
+    static FLOAT_VECTOR_RET: std::sync::LazyLock<Typ> =
+        std::sync::LazyLock::new(|| Typ::Vector(Box::new(Typ::Float)));
+    static BOOL_VECTOR_RET: std::sync::LazyLock<Typ> =
+        std::sync::LazyLock::new(|| Typ::Vector(Box::new(Typ::Bool)));
     Some(match intrinsic_ret(name)? {
         IntrinsicRet::Void => &VOID_RET,
         IntrinsicRet::Int => &INT_RET,
         IntrinsicRet::String => &STRING_RET,
         IntrinsicRet::Bool => &BOOL_RET,
         IntrinsicRet::StringArray => &STRING_ARRAY_RET,
+        IntrinsicRet::IntVector => &INT_VECTOR_RET,
+        IntrinsicRet::FloatVector => &FLOAT_VECTOR_RET,
+        IntrinsicRet::BoolVector => &BOOL_VECTOR_RET,
     })
 }
 
@@ -316,7 +331,12 @@ fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
         | "path-basename" | "path-extname" | "path-normalize" | "json-stringify" => &[Typ::String],
         "env-temp-dir" | "env-current-dir" => &[],
         "str-slice" | "str-substr" => &[Typ::String, Typ::Int, Typ::Int],
-        "print-int" | "to-string" => &[Typ::Int],
+        "print-int"
+        | "to-string"
+        | "vector-with-capacity-int"
+        | "vector-with-capacity-float"
+        | "vector-with-capacity-bool"
+        | "vector-alloc" => &[Typ::Int],
         _ => return None,
     })
 }
@@ -2496,6 +2516,10 @@ mod tests {
             ("vector-push()", Some("call-arity-mismatch")),
             ("vector-extend()", Some("call-arity-mismatch")),
             ("vector-capacity()", Some("call-arity-mismatch")),
+            ("vector-with-capacity-int()", Some("call-arity-mismatch")),
+            ("__inrt_vector_alloc()", Some("call-arity-mismatch")),
+            ("__inrt_vector_alloc(true)", Some("type-mismatch")),
+            ("vector-with-capacity-float(true)", Some("type-mismatch")),
             ("vector-capacity(42)", Some("type-mismatch")),
             ("vector-capacity([1])", Some("type-mismatch")),
             ("vector-extend(42, [1])", Some("type-mismatch")),

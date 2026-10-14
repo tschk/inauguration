@@ -462,6 +462,42 @@ impl TypeChecker {
         }
     }
 
+    fn resolve_vector_allocation(&self, expr: &mut Expr, expected: &Typ, facts: &Facts) -> bool {
+        let Expr::Call { callee, args } = expr else {
+            return false;
+        };
+        let Expr::Ident(name) = callee.as_ref() else {
+            return false;
+        };
+        if name == "#receiver-method:clone"
+            && let [source] = args.as_mut_slice()
+        {
+            return self.resolve_vector_allocation(source, expected, facts);
+        }
+        if args.len() != 1
+            || facts.functions.contains_key(name)
+            || (name != crate::core_ir::VECTOR_ALLOCATION
+                && !matches!(
+                    name.as_str(),
+                    "Vec::with_capacity"
+                        | "std::vec::Vec::with_capacity"
+                        | "alloc::vec::Vec::with_capacity"
+                ))
+            || (name == "Vec::with_capacity"
+                && facts
+                    .structs
+                    .keys()
+                    .any(|owner| owner == "Vec" || owner.ends_with("::Vec")))
+        {
+            return false;
+        }
+        let Some(intrinsic) = expected.vector_allocation_intrinsic() else {
+            return false;
+        };
+        *callee = Box::new(Expr::Ident(intrinsic.into()));
+        true
+    }
+
     fn resolve_typed_expr(
         &self,
         expr: &mut Expr,
@@ -469,6 +505,23 @@ impl TypeChecker {
         env: &HashMap<String, Typ>,
         promote_c_bool: bool,
     ) {
+        if let Expr::StructInit { name, fields } = expr
+            && let Some(schema) = facts.structs.get(name)
+        {
+            for (name, value) in fields {
+                if let Some((_, expected)) = schema.iter().find(|(field, _)| field == name) {
+                    self.resolve_vector_allocation(value, expected, facts);
+                }
+            }
+        }
+        if let Expr::Call { callee, args } = expr
+            && let Expr::Ident(name) = callee.as_ref()
+            && let Some((params, _)) = facts.functions.get(name)
+        {
+            for (arg, (_, expected)) in args.iter_mut().zip(params) {
+                self.resolve_vector_allocation(arg, expected, facts);
+            }
+        }
         if let Expr::Closure {
             params, ret, body, ..
         } = expr
@@ -851,6 +904,16 @@ impl TypeChecker {
                 _ => {}
             }
         }
+        if let Expr::Call { callee, args } = expr
+            && let Expr::Ident(name) = callee.as_ref()
+            && let Some((params, _)) = facts.functions.get(name)
+        {
+            for (arg, (_, expected)) in args.iter_mut().zip(params) {
+                if self.resolve_vector_allocation(arg, expected, facts) {
+                    self.resolve_typed_expr(arg, facts, env, promote_c_bool);
+                }
+            }
+        }
         if let Expr::Unary { op, expr } = expr
             && op == "complement"
         {
@@ -874,6 +937,9 @@ impl TypeChecker {
         for stmt in body {
             match stmt {
                 Stmt::Let(name, typ, expr) => {
+                    if let Some(expected) = typ.as_ref() {
+                        self.resolve_vector_allocation(expr, expected, facts);
+                    }
                     self.resolve_typed_expr(expr, facts, env, promote_c_bool);
                     if let Some(Typ::Vector(item)) = typ.as_mut()
                         && matches!(item.as_ref(), Typ::Generic(name) if name == "_")
@@ -895,12 +961,18 @@ impl TypeChecker {
                     }
                 }
                 Stmt::Assign(name, expr) => {
+                    if let Some(expected) = env.get(name) {
+                        self.resolve_vector_allocation(expr, expected, facts);
+                    }
                     self.resolve_typed_expr(expr, facts, env, promote_c_bool);
                     if promote_c_bool && let Some(typ) = env.get(name) {
                         self.resolve_c_value(expr, typ, facts, env);
                     }
                 }
                 Stmt::Return(Some(expr)) => {
+                    if let Some(expected) = return_type {
+                        self.resolve_vector_allocation(expr, expected, facts);
+                    }
                     self.resolve_typed_expr(expr, facts, env, promote_c_bool);
                     if promote_c_bool && let Some(typ) = return_type {
                         self.resolve_c_value(expr, typ, facts, env);
@@ -927,6 +999,16 @@ impl TypeChecker {
                     }
                 }
                 Stmt::FieldAssign { base, name, value } => {
+                    if let Some(expected) = self.expr_type(
+                        &Expr::Field {
+                            base: Box::new(base.clone()),
+                            name: name.clone(),
+                        },
+                        facts,
+                        env,
+                    ) {
+                        self.resolve_vector_allocation(value, &expected, facts);
+                    }
                     for expr in [&mut *base, &mut *value] {
                         self.resolve_typed_expr(expr, facts, env, promote_c_bool);
                     }
@@ -2047,6 +2129,7 @@ fn is_builtin_fn(name: &str) -> bool {
             | "vector-push"
             | "vector-extend"
             | "vector-capacity"
+            | "vector-with-capacity-int" | "vector-with-capacity-float" | "vector-with-capacity-bool"
             | "array-pop"
             | "array-len" | "array_len"
             | "bool-to-int"
@@ -2073,7 +2156,9 @@ fn builtin_return_type(name: &str) -> Typ {
         "str-eq" | "str-contains" | "str-starts-with" | "str-is-int" | "str-table-has"
         | "int-to-bool" => Typ::Bool,
         "str-concat" | "str-trim" | "str-slice" | "to-string" => Typ::String,
-        _ => Typ::Void,
+        _ => crate::core_ir_verifier::intrinsic_return_type(name)
+            .cloned()
+            .unwrap_or(Typ::Void),
     }
 }
 

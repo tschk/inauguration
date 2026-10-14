@@ -57,6 +57,7 @@ fn emit_stdlib_wrapper_call(
 /// linker cannot resolve.
 fn native_inrt_builtin(wrapper: &str) -> Option<&'static str> {
     match wrapper {
+        "in_vec_alloc" => Some(crate::inrt::INRT_VECTOR_ALLOC),
         "in_vec_push" => Some(crate::inrt::INRT_VECTOR_PUSH),
         "in_vec_extend" => Some(crate::inrt::INRT_VECTOR_EXTEND),
         "in_str_concat" => Some(crate::inrt::INRT_STR_CONCAT),
@@ -1690,6 +1691,37 @@ pub(crate) fn lower_stdlib_call(
             )?;
             return Ok(true);
         }
+        "vector-with-capacity-int" | "vector-with-capacity-float" | "vector-with-capacity-bool"
+            if args.len() == 1 =>
+        {
+            if super::lower_expr::native_expr_type(&args[0], ctx, functions)
+                .map(|typ| typ.canonical())
+                != Some(Typ::Int)
+            {
+                return Err("native-lower: vector allocation capacity must be an integer".into());
+            }
+            let saved = ctx.acquire_binop_temp(fn_name)?;
+            lower_expr_into(emitter, ctx, &args[0], 0, functions, pending_calls, fn_name)?;
+            emitter.emit_u32(aarch64::str64(0, REG_SP, saved));
+            emit_stdlib_wrapper_register_call(emitter, ctx, "in_vec_alloc", 0)?;
+            emitter.emit_u32(aarch64::ldr64(2, REG_SP, saved));
+            ctx.release_binop_temp();
+            emitter.emit_u32(aarch64::cmp_reg64(2, REG_XZR));
+            let empty = emitter.emit_insn(aarch64::b_cond(0, 0));
+            emitter.emit_u32(aarch64::cmp_reg64(0, REG_XZR));
+            let valid = emitter.emit_insn(aarch64::b_cond(1, 0));
+            super::emit_failure_return(emitter, ctx, fn_name)?;
+            let end = emitter.len();
+            emitter.patch_u32(empty, aarch64::b_cond(0, end as i32 - empty as i32));
+            emitter.patch_u32(valid, aarch64::b_cond(1, end as i32 - valid as i32));
+            emitter.emit_u32(aarch64::mov_zero64(1));
+            if rd != 0 {
+                for index in (0..3).rev() {
+                    emitter.emit_u32(aarch64::mov_reg64(rd + index, index));
+                }
+            }
+            return Ok(true);
+        }
         "vector-capacity" if args.len() == 1 => {
             let Some(Typ::Vector(elem)) =
                 super::lower_expr::native_expr_type(&args[0], ctx, functions)
@@ -2042,15 +2074,6 @@ pub(crate) fn lower_stdlib_call(
         }
         "extend" if args.len() == 2 && target.contains("Vec") => {
             lower_vec_extend(emitter, ctx, args, rd, functions, pending_calls, fn_name)?;
-            Ok(true)
-        }
-        // Vec::with_capacity(n) → return empty vec like Vec::new (push handles allocation)
-        "with-capacity"
-            if args.len() == 1 && (target.contains("Vec") || target.contains("vec")) =>
-        {
-            emitter.emit_insns(&aarch64::load_i64(0, 0));
-            emitter.emit_insns(&aarch64::load_i64(1, 0));
-            emitter.emit_insns(&aarch64::load_i64(2, 0));
             Ok(true)
         }
         // Vec::push → store value at [vec + 2 + len]

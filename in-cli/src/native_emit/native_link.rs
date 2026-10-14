@@ -293,6 +293,10 @@ fn register_vec_funcs<S: std::hash::BuildHasher>(
         NativePtr(crate::native_stdlib::in_vec_join as *const u8),
     );
     c.insert(
+        "in_vec_alloc".into(),
+        NativePtr(crate::native_stdlib::in_vec_alloc as *const u8),
+    );
+    c.insert(
         "in_vec_push".to_string(),
         NativePtr(crate::native_stdlib::in_vec_push as *const u8),
     );
