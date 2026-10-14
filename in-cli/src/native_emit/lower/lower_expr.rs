@@ -280,38 +280,22 @@ pub(crate) fn lower_index(
                 }
             }
         }
-        Expr::Field {
-            base: field_base,
-            name: field_name,
-        } => {
-            // self.buf[i] — resolve field ptr/len from struct slot map
-            let local = match field_base.as_ref() {
-                Expr::Ident(n) => n,
-                _ => {
-                    // Complex field base: emit 0
-                    emitter.emit_insns(&aarch64::load_i64(rd, 0));
-                    return Ok(());
-                }
+        Expr::Field { .. } => {
+            let (local, path) = super::lower_util::field_path(base).ok_or_else(|| {
+                format!("native-lower: indexed field is not addressable in `{fn_name}`")
+            })?;
+            let Some(LocalSlot::Struct { fields, .. }) = ctx.locals.get(local) else {
+                return Err(format!(
+                    "native-lower: indexed field root `{local}` is not a struct in `{fn_name}`"
+                ));
             };
-            match ctx.locals.get(local) {
-                Some(LocalSlot::Struct { fields, .. }) => {
-                    let fptr = format!("{}.ptr", field_name);
-                    let flen = format!("{}.len", field_name);
-                    match (fields.get(&fptr), fields.get(&flen)) {
-                        (Some(&p), Some(&l)) => (LocalSlot::Scalar(0), Some(p), Some(l)),
-                        _ => {
-                            // Field ptr/len not found: emit 0
-                            emitter.emit_insns(&aarch64::load_i64(rd, 0));
-                            return Ok(());
-                        }
-                    }
-                }
-                _ => {
-                    // Local not found: emit 0
-                    emitter.emit_insns(&aarch64::load_i64(rd, 0));
-                    return Ok(());
-                }
-            }
+            let ptr = fields.get(&format!("{path}.ptr")).ok_or_else(|| {
+                format!("native-lower: indexed field `{path}` missing pointer in `{fn_name}`")
+            })?;
+            let len = fields.get(&format!("{path}.len")).ok_or_else(|| {
+                format!("native-lower: indexed field `{path}` missing length in `{fn_name}`")
+            })?;
+            (LocalSlot::Scalar(0), Some(*ptr), Some(*len))
         }
         _ => {
             // Unknown base expression: try lowering it, then emit 0

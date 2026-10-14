@@ -619,7 +619,12 @@ pub(crate) fn lower_field_assign(
     };
     let qualified = (!prefix.is_empty()).then(|| format!("{prefix}.{name}"));
     let name = qualified.as_deref().unwrap_or(name);
-    if let Some(Typ::Named(typ)) = &field_type
+    let aggregate = match &field_type {
+        Some(Typ::Named(name)) => Some(name.clone()),
+        Some(Typ::Vector(_)) => Some("Vec".to_string()),
+        _ => None,
+    };
+    if let Some(typ) = aggregate.as_ref()
         && ctx
             .structs
             .contains_key(super::lower_util::base_struct_name(typ))

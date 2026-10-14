@@ -3,7 +3,7 @@
 //! Save the value once, then reuse it in an ordinary array literal. Expression
 //! spills preserve left-to-right evaluation and remain inside conditional paths.
 
-use crate::core_ir::{Decl, Expr, LoopKind, Stmt, Typ};
+use crate::core_ir::{Decl, Expr, LoopKind, Stmt, Typ, expr_contains_call};
 use std::collections::{HashMap, HashSet};
 
 const MAX_EXPANDED_ITEMS: usize = 4096;
@@ -67,9 +67,12 @@ fn stmt_needs_spills(stmt: &Stmt, facts: &crate::typecheck::Facts) -> bool {
         | Stmt::Expr(expr)
         | Stmt::Throw(expr)
         | Stmt::Return(Some(expr)) => expr_needs_spills(expr, facts),
-        Stmt::IndexAssign { base, index, value } => [base, index, value]
-            .into_iter()
-            .any(|expr| expr_needs_spills(expr, facts)),
+        Stmt::IndexAssign { base, index, value } => {
+            matches!(base, Expr::Field { .. })
+                || [base, index, value]
+                    .into_iter()
+                    .any(|expr| expr_contains_call(expr) || expr_needs_spills(expr, facts))
+        }
         Stmt::FieldAssign { base, value, .. } => [base, value]
             .into_iter()
             .any(|expr| expr_needs_spills(expr, facts)),
@@ -506,9 +509,15 @@ impl Lower {
                 | Stmt::Return(Some(expr))
                 | Stmt::Throw(expr) => self.expr(expr, &mut prefix),
                 Stmt::IndexAssign { base, index, value } => {
-                    if [&*base, &*index, &*value]
-                        .into_iter()
-                        .any(|expr| expr_needs_spills(expr, &self.facts))
+                    let field_header = matches!(base, Expr::Field { .. })
+                        && matches!(
+                            self.expr_type(base).map(|typ| typ.canonical()),
+                            Some(Typ::Vector(_) | Typ::Int)
+                        );
+                    if field_header
+                        || [&*base, &*index, &*value].into_iter().any(|expr| {
+                            expr_contains_call(expr) || expr_needs_spills(expr, &self.facts)
+                        })
                     {
                         for expr in [base, index, value] {
                             self.expr(expr, &mut prefix);

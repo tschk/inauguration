@@ -895,7 +895,27 @@ impl TypeChecker {
                     self.check_stmts(fn_name, fn_ret, &arm.body, facts, &mut env_arm, errors);
                 }
             }
-            Stmt::Throw(_) | Stmt::Try { .. } | Stmt::Propagate | Stmt::FieldAssign { .. } => {}
+            Stmt::FieldAssign { base, name, value } => {
+                self.check_expr(fn_name, base, facts, env, errors);
+                self.check_expr(fn_name, value, facts, env, errors);
+                let destination = Expr::Field {
+                    base: Box::new(base.clone()),
+                    name: name.clone(),
+                };
+                if let (Some(expected), Some(actual)) = (
+                    self.expr_type(&destination, facts, env),
+                    self.expr_type(value, facts, env),
+                ) && !is_compatible(&expected, &actual)
+                    && !expected.accepts_sequence_literal(value, &actual)
+                {
+                    errors.push(TypeError::TypeMismatch {
+                        context: format!("field assignment `{name}` in `{fn_name}`"),
+                        expected,
+                        got: actual,
+                    });
+                }
+            }
+            Stmt::Throw(_) | Stmt::Try { .. } | Stmt::Propagate => {}
         }
     }
 

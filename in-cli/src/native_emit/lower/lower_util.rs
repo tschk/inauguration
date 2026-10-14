@@ -324,23 +324,7 @@ pub(crate) fn expr_type(expr: &Expr) -> Option<Typ> {
     }
 }
 
-pub(crate) fn expr_contains_call(expr: &Expr) -> bool {
-    match expr {
-        Expr::Call { .. } => true,
-        Expr::Unary { expr, .. } => expr_contains_call(expr),
-        Expr::Binary { lhs, rhs, .. } => expr_contains_call(lhs) || expr_contains_call(rhs),
-        Expr::StructInit { fields, .. } => fields.iter().any(|(_, expr)| expr_contains_call(expr)),
-        Expr::Field { base, .. } => expr_contains_call(base),
-        Expr::ArrayLit(items) => items.iter().any(expr_contains_call),
-        Expr::Index { base, index, .. } => expr_contains_call(base) || expr_contains_call(index),
-        Expr::IntLit(_)
-        | Expr::FloatLit(_)
-        | Expr::StringLit(_)
-        | Expr::BoolLit(_)
-        | Expr::Ident(_)
-        | Expr::Closure { .. } => false,
-    }
-}
+pub(crate) use crate::core_ir::expr_contains_call;
 
 #[cfg(test)]
 mod tests {

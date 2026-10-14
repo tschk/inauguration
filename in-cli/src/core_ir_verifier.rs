@@ -490,9 +490,28 @@ fn check_stmt(
             }
             Ok(())
         }
-        Stmt::FieldAssign { base, value, .. } => {
+        Stmt::FieldAssign { base, name, value } => {
             check_expr(fn_name, base, facts, env, call_edges)?;
             check_expr(fn_name, value, facts, env, call_edges)?;
+            let destination = Expr::Field {
+                base: Box::new(base.clone()),
+                name: name.clone(),
+            };
+            if let (Some(expected), Some(actual)) = (
+                expr_type(&destination, facts, env),
+                expr_type(value, facts, env),
+            ) && !expected.compatible_with(&actual)
+                && !expected.accepts_sequence_literal(value, &actual)
+            {
+                return Err((
+                    "type-mismatch".into(),
+                    format!(
+                        "field assignment `{name}` in `{fn_name}` expected {}, got {}",
+                        type_name(&expected),
+                        type_name(&actual)
+                    ),
+                ));
+            }
             Ok(())
         }
         Stmt::IndexAssign {
@@ -1268,6 +1287,45 @@ mod tests {
         VerifyOptions {
             entry: None,
             require_entry: false,
+        }
+    }
+
+    #[test]
+    fn vector_field_replacement_checks_destination_elements() {
+        for (source, expected) in [
+            (
+                "struct Bag { items: Vec<i64> } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; bag.items = vec![20, 22]; return 0; }",
+                true,
+            ),
+            (
+                "struct Bag { items: Vec<i64> } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; bag.items = vec![]; return 0; }",
+                true,
+            ),
+            (
+                "struct Bag { items: Vec<i64> } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; bag.items = vec![true]; return 0; }",
+                false,
+            ),
+            (
+                "struct Bag { items: Vec<i64> } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; let other: Vec<f64> = vec![20.0]; bag.items = other; return 0; }",
+                false,
+            ),
+            (
+                "struct Bag { items: Vec<i64> } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; let other: [i64; 1] = [20]; bag.items = other; return 0; }",
+                false,
+            ),
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            let report = verify_for_entry(&module, "main");
+            assert_eq!(report.ok, expected, "{report:?}: {source}");
+            assert_eq!(
+                crate::typecheck::TypeChecker::new()
+                    .check_module(&module)
+                    .is_ok(),
+                expected,
+                "{source}"
+            );
         }
     }
 

@@ -3065,6 +3065,174 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn raw_vector_identifier_store_spills_call_operands() {
+        use crate::core_ir::{Decl, Expr, Stmt};
+        let parsed = crate::compiler::rust_front::parse_rust_source("fn mutate(mut items: Vec<i64>) -> i64 { items[0] = 20; return 1; } fn main() -> i64 { let mut items: Vec<i64> = vec![0, 0]; return items[0] + items[1]; }").unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        for decl in &mut module.decls {
+            if let Decl::Function { name, body, .. } = decl
+                && name == "main"
+            {
+                body.insert(
+                    1,
+                    Stmt::IndexAssign {
+                        base: Expr::Ident("items".into()),
+                        index: Expr::Call {
+                            callee: Box::new(Expr::Ident("mutate".into())),
+                            args: vec![Expr::Ident("items".into())],
+                        },
+                        value: Expr::IntLit(22),
+                    },
+                );
+            }
+        }
+        crate::lower_core::desugar_module(&mut module);
+        let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+        assert!(report.ok, "{report:?}");
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(
+                invoke_module(&module, profile, &[]),
+                Some(42),
+                "{profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, target_arch = "aarch64"))]
+    fn raw_vector_field_index_store_uses_shared_preparation() {
+        use crate::core_ir::{Decl, Expr, Stmt};
+        for (source, effectful) in [
+            (
+                "struct Bag { items: Vec<i64> } struct Wrapper { bag: Bag } fn main() -> i64 { let mut wrapper: Wrapper = Wrapper { bag: Bag { items: vec![0, 22] } }; return wrapper.bag.items[0] + wrapper.bag.items[1]; }",
+                false,
+            ),
+            (
+                "struct Bag { items: Vec<i64> } struct Wrapper { bag: Bag } impl Wrapper { fn replace(&mut self) -> i64 { self.bag.items = vec![20, 22]; return 0; } } fn main() -> i64 { let mut wrapper: Wrapper = Wrapper { bag: Bag { items: vec![0, 0] } }; return wrapper.bag.items[0] + wrapper.bag.items[1]; }",
+                true,
+            ),
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            for decl in &mut module.decls {
+                if let Decl::Function { name, body, .. } = decl
+                    && name == "main"
+                {
+                    let index = if effectful {
+                        Expr::Call {
+                            callee: Box::new(Expr::Ident("Wrapper::replace".into())),
+                            args: vec![Expr::Ident("wrapper".into())],
+                        }
+                    } else {
+                        Expr::IntLit(0)
+                    };
+                    body.insert(
+                        1,
+                        Stmt::IndexAssign {
+                            base: Expr::Field {
+                                base: Box::new(Expr::Field {
+                                    base: Box::new(Expr::Ident("wrapper".into())),
+                                    name: "bag".into(),
+                                }),
+                                name: "items".into(),
+                            },
+                            index,
+                            value: Expr::IntLit(if effectful { 1 } else { 20 }),
+                        },
+                    );
+                }
+            }
+            assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, target_arch = "aarch64"))]
+    fn failed_vector_field_replacement_preserves_caller_header() {
+        use crate::core_ir::{CatchArm, Decl, Expr, Stmt};
+        let parsed = crate::compiler::rust_front::parse_rust_source("struct Bag { items: Vec<i64> } fn fail() -> i64 { return 0; } impl Bag { fn replace(&mut self) -> i64 { self.items = vec![0, fail()]; return 0; } } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![20, 22] }; Bag::replace(&mut bag); return bag.items[0] + bag.items[1]; }").unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        crate::lower_core::desugar_module(&mut module);
+        for decl in &mut module.decls {
+            if let Decl::Function { name, body, .. } = decl {
+                if name == "fail" {
+                    *body = vec![Stmt::Throw(Expr::IntLit(9))];
+                }
+                if name == "main" {
+                    body[1] = Stmt::Try {
+                        body: vec![body[1].clone()],
+                        catches: vec![CatchArm {
+                            pattern: "9".into(),
+                            body: vec![body[2].clone()],
+                        }],
+                    };
+                }
+            }
+        }
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(
+                invoke_module(&module, profile, &[]),
+                Some(42),
+                "{profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, target_arch = "aarch64"))]
+    fn vector_field_index_writes_mutate_receiver_storage() {
+        for source in [
+            "struct Bag { items: Vec<i64> } impl Bag { fn set(&mut self) -> i64 { self.items[0] = 20; return self.items[0] + self.items[1]; } } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0, 22] }; return Bag::set(&mut bag); }",
+            "struct Bag { items: Vec<i64> } struct Wrapper { tag: i64, bag: Bag } fn main() -> i64 { let mut wrapper: Wrapper = Wrapper { tag: 0, bag: Bag { items: vec![0, 22] } }; wrapper.bag.items[0] = 20; return wrapper.bag.items[0] + wrapper.bag.items[1]; }",
+            "struct Bag { items: Vec<i64> } impl Bag { fn replace(&mut self) -> i64 { self.items = vec![20, 22]; return 0; } } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; Bag::replace(&mut bag); return bag.items[0] + bag.items[1]; }",
+            "struct Bag { items: Vec<i64> } struct Wrapper { tag: i64, bag: Bag } impl Wrapper { fn replace(&mut self) -> i64 { self.bag.items = vec![20, 22]; return self.bag.items[0] + self.bag.items[1]; } } fn main() -> i64 { let mut wrapper: Wrapper = Wrapper { tag: 0, bag: Bag { items: vec![0] } }; return Wrapper::replace(&mut wrapper); }",
+            "struct Bag { items: Vec<i64> } impl Bag { fn replace(&mut self, values: Vec<i64>) -> i64 { self.items = values; return self.items[0] + self.items[1]; } } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; return Bag::replace(&mut bag, vec![20, 22]); }",
+            "struct Bag { items: Vec<i64> } impl Bag { fn replace(&mut self, other: Bag) -> i64 { self.items = other.items; return self.items[0] + self.items[1]; } } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; let other: Bag = Bag { items: vec![20, 22] }; return Bag::replace(&mut bag, other); }",
+            "struct Bag { items: Vec<i64> } struct Wrapper { tag: i64, bag: Bag } fn main() -> i64 { let mut wrapper: Wrapper = Wrapper { tag: 0, bag: Bag { items: vec![0] } }; wrapper.bag.items = vec![20, 22]; return wrapper.bag.items[0] + wrapper.bag.items[1]; }",
+            "struct Bag { items: Vec<f64> } impl Bag { fn replace(&mut self) -> i64 { self.items = vec![20.0, 22.0]; return 0; } } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0.0] }; Bag::replace(&mut bag); return (bag.items[0] + bag.items[1]) as i64; }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn saturating_cast_operand_effects_run_once() {
         use crate::core_ir::{Decl, Expr, Stmt};
         let mut module = crate::in_lang_parse::parse_in_source("var count: Int = 0;\nfn value() -> Float { count = count + 1; return 42.9; }\nfn main() -> Int { return 0; }").unwrap();

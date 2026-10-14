@@ -136,6 +136,24 @@ pub(crate) fn bitwise_result_type(lhs: Option<Typ>, rhs: Option<Typ>) -> Option<
     }
 }
 
+pub(crate) fn expr_contains_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { .. } => true,
+        Expr::Unary { expr, .. } => expr_contains_call(expr),
+        Expr::Binary { lhs, rhs, .. } => expr_contains_call(lhs) || expr_contains_call(rhs),
+        Expr::StructInit { fields, .. } => fields.iter().any(|(_, expr)| expr_contains_call(expr)),
+        Expr::Field { base, .. } => expr_contains_call(base),
+        Expr::ArrayLit(items) => items.iter().any(expr_contains_call),
+        Expr::Index { base, index, .. } => expr_contains_call(base) || expr_contains_call(index),
+        Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::StringLit(_)
+        | Expr::BoolLit(_)
+        | Expr::Ident(_)
+        | Expr::Closure { .. } => false,
+    }
+}
+
 pub(crate) fn saturating_float_cast_spec(op: &str) -> Option<(u8, bool)> {
     integer_cast_spec(&format!("int-cast-{}", op.strip_prefix("float-saturate-")?))
 }
