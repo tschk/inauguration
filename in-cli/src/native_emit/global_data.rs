@@ -12,11 +12,20 @@ pub(crate) fn collect_globals(
         if let Decl::Global {
             name,
             typ,
+            init,
             constant_value: false,
             ..
         } = decl
         {
             globals.insert(name.clone(), offset);
+            if matches!(typ.canonical(), Typ::Array(_)) {
+                let len = match init.as_deref() {
+                    Some(Expr::ArrayLit(items)) => items.len(),
+                    _ => 0,
+                };
+                offset += (len as u64 + 2) * 8;
+                continue;
+            }
             // Struct-typed globals reserve one word per known field so that
             // `{name}.{field}` sites lower to direct data-section slots.
             if let Typ::Named(struct_name) = typ {
@@ -46,11 +55,47 @@ pub(crate) fn build_data_section(
         if let Decl::Global {
             name,
             init,
+            typ,
             constant_value: false,
             ..
         } = decl
         {
             let offset = *globals.get(name).unwrap_or(&0);
+            if let Typ::Array(elem) = typ.canonical() {
+                if !matches!(elem.canonical(), Typ::Int | Typ::Float | Typ::Bool) {
+                    return Err(format!(
+                        "unsupported native initializer for global `{name}`; expected numeric or boolean array elements"
+                    ));
+                }
+                let items = match init.as_deref() {
+                    Some(Expr::ArrayLit(items)) => items.as_slice(),
+                    None => &[],
+                    _ => {
+                        return Err(format!(
+                            "unsupported native initializer for global `{name}`; expected a scalar array literal"
+                        ));
+                    }
+                };
+                let mut words = vec![items.len() as i64, items.len() as i64];
+                for item in items {
+                    let word = match (elem.canonical(), item) {
+                        (Typ::Int, Expr::IntLit(value)) => *value,
+                        (Typ::Float, Expr::FloatLit(value)) => value.0.to_bits() as i64,
+                        (Typ::Bool, Expr::BoolLit(value)) => i64::from(*value),
+                        _ => {
+                            return Err(format!(
+                                "unsupported native initializer for global `{name}`; expected scalar array elements"
+                            ));
+                        }
+                    };
+                    words.push(word);
+                }
+                data.resize(offset as usize, 0);
+                for word in words {
+                    data.extend_from_slice(&word.to_le_bytes());
+                }
+                continue;
+            }
             let val: i64 = match init.as_deref() {
                 Some(Expr::IntLit(v)) => *v,
                 Some(Expr::BoolLit(b)) => *b as i64,
@@ -81,6 +126,21 @@ pub(crate) fn build_data_section(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn literal_array_headers_do_not_overlap_neighboring_globals() {
+        let module = crate::in_lang_parse::parse_in_source("var before: Int = 7;\nvar items: [Int] = [20,22];\nvar after: Int = 9;\nfn main() -> Int { return 42; }").unwrap();
+        let globals = collect_globals(&module, &HashMap::new());
+        assert_eq!(globals["before"], 0);
+        assert_eq!(globals["items"], 8);
+        assert_eq!(globals["after"], 40);
+        let data = build_data_section(&module, &globals).unwrap();
+        let words: Vec<_> = data
+            .chunks_exact(8)
+            .map(|bytes| i64::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert_eq!(words, vec![7, 2, 2, 20, 22, 9]);
+    }
 
     #[test]
     fn unsupported_global_initializers_are_refused_by_both_backends() {

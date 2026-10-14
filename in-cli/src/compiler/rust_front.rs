@@ -86,7 +86,147 @@ fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<UnifiedModul
         })
         .collect();
     rewrite_global_references(&mut module.decls, &references, file);
+    refuse_static_array_value_uses(&mut module);
     Ok(module)
+}
+
+fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
+    let arrays: HashMap<_, _> = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global {
+                name,
+                typ: Typ::Array(_),
+                mutable,
+                constant_value: false,
+                ..
+            } => Some((name.clone(), *mutable)),
+            _ => None,
+        })
+        .collect();
+    if arrays.is_empty() {
+        return;
+    }
+    let functions: HashSet<_> = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Function { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    fn expr_uses_value(
+        expr: &Expr,
+        arrays: &HashMap<String, bool>,
+        functions: &HashSet<String>,
+        borrow: bool,
+    ) -> bool {
+        match expr {
+            Expr::Ident(name) => !borrow && arrays.contains_key(name),
+            Expr::Index { base, index } => {
+                expr_uses_value(base, arrays, functions, true)
+                    || expr_uses_value(index, arrays, functions, false)
+            }
+            Expr::Call { callee, args } => {
+                let name = match callee.as_ref() {
+                    Expr::Ident(name) => name.as_str(),
+                    _ => "",
+                };
+                let read = !functions.contains(name)
+                    && !functions.contains(name.rsplit("::").next().unwrap_or(name))
+                    && (matches!(
+                        name,
+                        "len"
+                            | "array-len"
+                            | "array_len"
+                            | "is_empty"
+                            | "__method__len"
+                            | "__method__is_empty"
+                    ) || name.ends_with("::is_empty"));
+                let store = name.starts_with("index-assign-") || name.starts_with("index-modify-");
+                if store
+                    && matches!(args.first(), Some(Expr::Ident(name)) if arrays.get(name) == Some(&false))
+                {
+                    return true;
+                }
+                args.iter().enumerate().any(|(index, arg)| {
+                    expr_uses_value(arg, arrays, functions, index == 0 && (read || store))
+                })
+            }
+            Expr::Closure { body, .. } => body_uses_value(body, arrays, functions),
+            _ => {
+                let mut value = false;
+                crate::core_ir::for_each_expr_child(expr, &mut |child| {
+                    value |= expr_uses_value(child, arrays, functions, false)
+                });
+                value
+            }
+        }
+    }
+    fn body_uses_value(
+        body: &[Stmt],
+        arrays: &HashMap<String, bool>,
+        functions: &HashSet<String>,
+    ) -> bool {
+        body.iter().any(|stmt| match stmt {
+            Stmt::Let(_, _, expr)
+            | Stmt::Assign(_, expr)
+            | Stmt::Return(Some(expr))
+            | Stmt::Throw(expr)
+            | Stmt::Expr(expr) => expr_uses_value(expr, arrays, functions, false),
+            Stmt::IndexAssign { base, index, value } => {
+                expr_uses_value(base, arrays, functions, true)
+                    || expr_uses_value(index, arrays, functions, false)
+                    || expr_uses_value(value, arrays, functions, false)
+            }
+            Stmt::FieldAssign { base, value, .. } => {
+                expr_uses_value(base, arrays, functions, false)
+                    || expr_uses_value(value, arrays, functions, false)
+            }
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                expr_uses_value(cond, arrays, functions, false)
+                    || body_uses_value(then_body, arrays, functions)
+                    || body_uses_value(else_body, arrays, functions)
+            }
+            Stmt::Loop { cond, body, .. } => {
+                cond.as_ref()
+                    .is_some_and(|cond| expr_uses_value(cond, arrays, functions, false))
+                    || body_uses_value(body, arrays, functions)
+            }
+            Stmt::Match { scrutinee, arms } => {
+                expr_uses_value(scrutinee, arrays, functions, false)
+                    || arms.iter().any(|arm| {
+                        arm.guard
+                            .as_ref()
+                            .is_some_and(|guard| expr_uses_value(guard, arrays, functions, false))
+                            || body_uses_value(&arm.body, arrays, functions)
+                    })
+            }
+            Stmt::Try { body, catches } => {
+                body_uses_value(body, arrays, functions)
+                    || catches
+                        .iter()
+                        .any(|catch| body_uses_value(&catch.body, arrays, functions))
+            }
+            _ => false,
+        })
+    }
+    for decl in &mut module.decls {
+        if let Decl::Function { body, .. } = decl
+            && body_uses_value(body, &arrays, &functions)
+        {
+            // shortcut: preserve refusal until Rust array copy and borrow types survive lowering.
+            *body = vec![Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident("__unsupported_rust_static_array_value".into())),
+                args: vec![],
+            })];
+        }
+    }
 }
 
 fn lower_file_items_at_visited(

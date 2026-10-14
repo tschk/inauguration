@@ -748,6 +748,16 @@ pub(crate) fn lower_array_call_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
+    if let Expr::Ident(name) = arg
+        && !ctx.locals.contains_key(name)
+        && matches!(
+            ctx.global_types.get(name).map(Typ::canonical),
+            Some(Typ::Array(_))
+        )
+    {
+        lower_expr_into(emitter, ctx, arg, reg, functions, pending_calls, fn_name)?;
+        return Ok(reg + 2);
+    }
     if !is_native_scalar_type(elem) {
         return Err(format!(
             "native-lower: array argument must have scalar element type, got `{elem:?}` in `{fn_name}`"

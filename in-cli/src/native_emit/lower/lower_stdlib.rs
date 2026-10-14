@@ -751,6 +751,18 @@ fn lower_array_len(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Expr::Ident(name) = source
+        && !ctx.locals.contains_key(name)
+        && matches!(
+            ctx.global_types.get(name).map(Typ::canonical),
+            Some(Typ::Array(_))
+        )
+        && let Some(&offset) = ctx.globals.get(name)
+    {
+        ctx.emit_global_address(emitter, rd, offset);
+        emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
+        return Ok(());
+    }
     if let Some(Typ::Vector(elem)) = super::lower_expr::native_expr_type(source, ctx, functions) {
         super::lower_call::lower_vector_call_arg(
             emitter,

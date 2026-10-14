@@ -70,7 +70,15 @@ pub(crate) fn lower_expr_into(
                 }
             } else if let Some(offset) = ctx.globals.get(name).copied() {
                 ctx.emit_global_address(emitter, rd, offset);
-                emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
+                if matches!(
+                    ctx.global_types.get(name).map(Typ::canonical),
+                    Some(Typ::Array(_))
+                ) {
+                    emitter.emit_u32(aarch64::ldr64(rd + 1, rd, 0));
+                    emitter.emit_u32(aarch64::add_imm64(rd, rd, 16));
+                } else {
+                    emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
+                }
             } else {
                 // Unknown identifier — enum variant, constant, or ZST used as value.
                 // Emit 0 so the function can lower; correct at runtime for None/NULL-like values.
@@ -203,7 +211,9 @@ pub(crate) fn lower_index(
         ctx.release_binop_temp();
         return Ok(());
     }
-    if matches!(base, Expr::Call { .. } | Expr::ArrayLit(_)) {
+    if matches!(base, Expr::Call { .. } | Expr::ArrayLit(_))
+        || matches!(base, Expr::Ident(name) if !ctx.locals.contains_key(name) && matches!(ctx.global_types.get(name).map(Typ::canonical), Some(Typ::Array(_))))
+    {
         let ptr_slot = ctx.acquire_binop_temp(fn_name)?;
         let len_slot = ctx.acquire_binop_temp(fn_name)?;
         if let Expr::Call { callee, args } = base {

@@ -517,6 +517,18 @@ fn check_stmt(
         Stmt::IndexAssign {
             base, index, value, ..
         } => {
+            if let Expr::Ident(name) = base
+                && !env.contains_key(name)
+                && facts
+                    .globals
+                    .get(name.as_str())
+                    .is_some_and(|global| !global.mutable)
+            {
+                return Err((
+                    "immutable-global".into(),
+                    format!("cannot mutate constant global array `{name}` in `{fn_name}`"),
+                ));
+            }
             check_expr(fn_name, base, facts, env, call_edges)?;
             check_expr(fn_name, index, facts, env, call_edges)?;
             check_expr(fn_name, value, facts, env, call_edges)?;
@@ -700,10 +712,35 @@ fn check_expr(
     env: &HashMap<String, Typ>,
     call_edges: &mut Vec<(String, String)>,
 ) -> Result<(), (String, String)> {
+    check_expr_with_array_borrow(fn_name, expr, facts, env, call_edges, false)
+}
+
+fn check_expr_with_array_borrow(
+    fn_name: &str,
+    expr: &Expr,
+    facts: &ModuleFacts<'_>,
+    env: &HashMap<String, Typ>,
+    call_edges: &mut Vec<(String, String)>,
+    array_borrow: bool,
+) -> Result<(), (String, String)> {
     match expr {
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => Ok(()),
         Expr::Closure { .. } => Ok(()),
         Expr::Ident(name) => {
+            if !array_borrow
+                && !env.contains_key(name)
+                && facts.globals.get(name.as_str()).is_some_and(|global| {
+                    !global.mutable && matches!(global.typ.canonical(), Typ::Array(_))
+                })
+            {
+                return Err((
+                    "immutable-global-reference".into(),
+                    format!(
+                        "constant global array `{name}` cannot escape as a mutable reference in `{fn_name}`"
+                    ),
+                ));
+            }
+
             if env.contains_key(name)
                 || function_sig(facts, name).is_some()
                 || facts.globals.contains_key(name.as_str())
@@ -867,7 +904,7 @@ fn check_expr(
             if let Some(typ) = expr_type(base, facts, env)
                 && matches!(
                     typ.canonical(),
-                    Typ::Int | Typ::Float | Typ::Bool | Typ::String | Typ::Void
+                    Typ::Int | Typ::Float | Typ::Bool | Typ::String | Typ::Void | Typ::Array(_)
                 )
             {
                 return Err((
@@ -913,7 +950,7 @@ fn check_expr(
             Ok(())
         }
         Expr::Index { base, index, .. } => {
-            check_expr(fn_name, base, facts, env, call_edges)?;
+            check_expr_with_array_borrow(fn_name, base, facts, env, call_edges, true)?;
             check_expr(fn_name, index, facts, env, call_edges)?;
             require_type(fn_name, "array index", &Typ::Int, index, facts, env)?;
             if let Some(base_typ) = expr_type(base, facts, env)
@@ -975,8 +1012,15 @@ fn check_expr(
                         }
                     }
                 } else {
-                    for arg in args {
-                        check_expr(fn_name, arg, facts, env, call_edges)?;
+                    for (index, arg) in args.iter().enumerate() {
+                        check_expr_with_array_borrow(
+                            fn_name,
+                            arg,
+                            facts,
+                            env,
+                            call_edges,
+                            index == 0 && matches!(name.as_str(), "array-len" | "array_len"),
+                        )?;
                     }
                     if matches!(name.as_str(), "array-len" | "array_len") {
                         if args.len() != 1 {

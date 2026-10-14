@@ -1251,7 +1251,7 @@ impl TypeChecker {
                 if let Some(typ) = self.expr_type(base, facts, env)
                     && matches!(
                         typ.canonical(),
-                        Typ::Int | Typ::Float | Typ::Bool | Typ::String | Typ::Void
+                        Typ::Int | Typ::Float | Typ::Bool | Typ::String | Typ::Void | Typ::Array(_)
                     )
                 {
                     errors.push(TypeError::TypeMismatch {

@@ -2004,6 +2004,7 @@ fn owned_rust_jit_retains_compile_only_for_uninvocable_entries() {
         return;
     }
     for source in [
+        "struct Point { x: i64 } static VALUES: [i64;2]=[20,22]; fn main() -> Point { return Point { x: 42 }; }",
         "struct Point { x: i64 } fn main() -> Point { return Point { x: 42 }; }",
         "fn main(value: i64) -> i64 { return value; }",
         "fn helper() -> i64 { return 42; }",
@@ -2031,7 +2032,7 @@ fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
         return;
     }
     let path = temp_path("rust-static-ir-only.rs");
-    fs::write(&path, "struct Bag { value: i64 } static VALUES: [i64;2]=[20,22]; fn main() -> Bag { return Bag { value: 42 }; }").unwrap();
+    fs::write(&path, "struct Bag { value: i64 } static VALUES: &str=\"hi\"; fn main() -> Bag { return Bag { value: 42 }; }").unwrap();
     let report = compile_owned(&default_request(
         path.clone(),
         CompileTarget::Jit,
@@ -2055,7 +2056,7 @@ fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
     let path = temp_path("rust-static-executable.rs");
     fs::write(
         &path,
-        "static VALUES: [i64;2]=[20,22]; fn main() -> i64 { return 42; }",
+        "static VALUES: &str=\"hi\"; fn main() -> i64 { return 42; }",
     )
     .unwrap();
     let report = compile_owned(&default_request(

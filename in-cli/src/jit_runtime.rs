@@ -3892,6 +3892,167 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn literal_global_arrays_preserve_storage_bounds_and_scalar_types() {
+        for (source, expected) in [
+            (
+                "var calls: Int = 0;\nvar items: [Int] = [0,22];\nfn index() -> Int { calls += 1; return 0; }\nfn value() -> Int { calls += 10; return 20; }\nfn main() -> Int { items[index()] = value(); return items[0]+items[1]+calls - 11; }",
+                42,
+            ),
+            (
+                "var before: Int = 1;\nvar items: [Int] = [20,22];\nvar after: Int = 2;\nfn main() -> Int { return items[0]+items[1]+before+after - 3; }",
+                42,
+            ),
+            (
+                "var items: [Int] = [0,22];\nfn main() -> Int { items[0]=20; return items[0]+items[1]; }",
+                42,
+            ),
+            (
+                "var items: [Int] = [20,22];\nfn main() -> Int { return array_len(items)+40; }",
+                42,
+            ),
+            (
+                "var items: [Int] = [];\nfn main() -> Int { return array_len(items)+42; }",
+                42,
+            ),
+            (
+                "var items: [Int] = [20,22];\nfn main() -> Int { return items[2]; }",
+                1,
+            ),
+            (
+                "var items: [Int] = [20,22];\nfn main() -> Int { items[-1]=0; return 42; }",
+                1,
+            ),
+            (
+                "var items: [Float] = [20.0,22.0];\nfn main() -> Float { return items[0]+items[1]; }",
+                42_f64.to_bits() as i64,
+            ),
+            (
+                "var items: [Bool] = [true,false];\nfn main() -> Int { if items[0] && !items[1] { return 42; } return 0; }",
+                42,
+            ),
+            (
+                "var items: [Int] = [20,22];\nfn accept(values: [Int]) -> Int { return values[0]+values[1]; }\nfn main() -> Int { return accept(items); }",
+                42,
+            ),
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{verified:?}: {source}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn rust_static_arrays_execute_reads_lengths_and_mutable_elements() {
+        for source in [
+            "static ITEMS: [i64;2]=[20,22]; fn main() -> i64 { return ITEMS[0]+ITEMS[1]; }",
+            "static ITEMS: [i64;2]=[20,22]; fn main() -> i64 { return ITEMS.len()+40; }",
+            "static mut ITEMS: [i64;2]=[0,22]; fn main() -> i64 { unsafe { ITEMS[0]=20; } return unsafe { ITEMS[0]+ITEMS[1] }; }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{verified:?}: {source}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+        for source in [
+            "static mut ITEMS: [i64;2]=[20,22]; fn len(mut values: [i64;2]) -> i64 { values[0]=0; return 0; } fn main() -> i64 { unsafe { len(ITEMS); return ITEMS[0]+ITEMS[1]; } }",
+            "static ITEMS: [i64;2]=[20,22]; fn main() -> i64 { let mut copy: [i64;2]=ITEMS; copy[0]=0; return ITEMS[0]+ITEMS[1]; }",
+            "static ITEMS: [i64;2]=[20,22]; fn value() -> i64 { return 0; } fn main() -> i64 { unsafe { ITEMS[0]=value(); } return 42; }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            assert!(!crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        }
+    }
+
+    #[test]
+    fn global_array_unsupported_uses_refuse_instead_of_corrupting_headers() {
+        for body in [
+            "let alias = items; alias[0]=0; return 42;",
+            "items[step()]=0; return 42;",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(&format!("var items: [Int] = [20,22];\nfn step() -> Int {{ return 0; }}\nfn main() -> Int {{ {body} }}")).unwrap();
+            let mut module = module;
+            crate::lower_core::desugar_module(&mut module);
+            for decl in &mut module.decls {
+                if let crate::core_ir::Decl::Global { mutable, .. } = decl {
+                    *mutable = false;
+                }
+            }
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{body}: {module:?}"
+            );
+        }
+        let module = crate::in_lang_parse::parse_in_source(
+            "var items: [Int] = [20,22];\nfn main() -> Int { items=[1,2]; return items[0]; }",
+        )
+        .unwrap();
+        assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        assert!(
+            crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .err()
+            .unwrap()
+            .contains("whole global array assignment")
+        );
+        assert!(
+            crate::native_emit::x86_64_lower::lower_module(&module, "main")
+                .err()
+                .unwrap()
+                .contains("whole global array assignment")
+        );
+        for body in ["return items.missing;", "items.missing=42; return 42;"] {
+            let module = crate::in_lang_parse::parse_in_source(&format!(
+                "var items: [Int] = [20,22];\nfn main() -> Int {{ {body} }}"
+            ))
+            .unwrap();
+            assert_eq!(
+                crate::core_ir_verifier::verify_for_entry(&module, "main")
+                    .reason_code
+                    .as_deref(),
+                Some("invalid-field-base")
+            );
+            assert!(
+                crate::typecheck::TypeChecker::new()
+                    .check_module(&module)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn scalar_vector_literals_preserve_call_and_return_values() {
         for source in [
             "fn values() -> Vec<i64> { return vec![20, 22]; } fn main() -> i64 { let items: Vec<i64> = values(); let mut sum = 0; for value in items { sum += value; } return sum; }",

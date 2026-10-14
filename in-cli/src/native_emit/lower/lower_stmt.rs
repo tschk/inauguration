@@ -183,6 +183,14 @@ pub(crate) fn lower_stmt(
         Stmt::Assign(name, expr) => {
             if !ctx.locals.contains_key(name) && !ctx.params.contains_key(name) {
                 if let Some(offset) = ctx.globals.get(name).copied() {
+                    if matches!(
+                        ctx.global_types.get(name).map(Typ::canonical),
+                        Some(Typ::Array(_))
+                    ) {
+                        return Err(
+                            "native-lower: whole global array assignment is unsupported".into()
+                        );
+                    }
                     if let Some(Typ::Named(typ)) = ctx.global_types.get(name).map(Typ::canonical) {
                         ctx.validate_global_struct(name)?;
                         let schema = native_struct_fields(ctx.structs, &typ, fn_name)?;
@@ -747,7 +755,29 @@ pub(crate) fn lower_index_assign(
             "native-lower: unsupported array assignment call operand in `{fn_name}`"
         ));
     }
-    let Some(slot) = ctx.locals.get(name).cloned() else {
+    let mut global_temps = false;
+    let slot = if let Some(slot) = ctx.locals.get(name).cloned() {
+        slot
+    } else if let Some(Typ::Array(elem)) = ctx.global_types.get(name).map(Typ::canonical) {
+        let offset = ctx
+            .globals
+            .get(name)
+            .copied()
+            .ok_or("native-lower: missing global array storage")?;
+        let ptr_offset = ctx.acquire_binop_temp(fn_name)?;
+        let len_offset = ctx.acquire_binop_temp(fn_name)?;
+        ctx.emit_global_address(emitter, 0, offset);
+        emitter.emit_u32(aarch64::ldr64(1, 0, 0));
+        emitter.emit_u32(aarch64::add_imm64(0, 0, 16));
+        emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, ptr_offset));
+        emitter.emit_u32(aarch64::str64(1, aarch64::REG_SP, len_offset));
+        global_temps = true;
+        LocalSlot::ArrayParam {
+            elem: *elem,
+            ptr_offset,
+            len_offset,
+        }
+    } else {
         return Err(format!(
             "native-lower: unsupported array assignment base in `{fn_name}`"
         ));
@@ -837,6 +867,10 @@ pub(crate) fn lower_index_assign(
     emit_failure_return(emitter, ctx.prologue_stack_reserve);
     let end_offset = emitter.len() as i32 - end_branch as i32;
     emitter.patch_u32(end_branch, aarch64::b(end_offset));
+    if global_temps {
+        ctx.release_binop_temp();
+        ctx.release_binop_temp();
+    }
     Ok(())
 }
 
@@ -1302,6 +1336,23 @@ pub(crate) fn lower_array_expr_into_regs(
         return Err(format!(
             "native-lower: unsupported array element type `{elem:?}` in `{fn_name}`"
         ));
+    }
+    if let Expr::Ident(name) = expr
+        && !ctx.locals.contains_key(name)
+        && matches!(
+            ctx.global_types.get(name).map(Typ::canonical),
+            Some(Typ::Array(_))
+        )
+    {
+        return lower_expr::lower_expr_into(
+            emitter,
+            ctx,
+            expr,
+            0,
+            functions,
+            pending_calls,
+            fn_name,
+        );
     }
     match expr {
         Expr::Ident(local) => {

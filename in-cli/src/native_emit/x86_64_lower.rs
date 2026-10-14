@@ -1352,6 +1352,12 @@ fn lower_stmt(
             if !ctx.locals.contains_key(name)
                 && let Some(&offset) = ctx.globals.get(name)
             {
+                if matches!(
+                    ctx.scalar_types.get(name).map(Typ::canonical),
+                    Some(Typ::Array(_))
+                ) {
+                    return Err("x86_64-lower: whole global array assignment is unsupported".into());
+                }
                 if let Some(Typ::Named(typ)) = ctx.scalar_types.get(name).map(Typ::canonical) {
                     let schema = ctx.structs.get(&typ).cloned().ok_or_else(||
                         "x86_64-lower: global struct assignment needs a known scalar-field layout".to_string())?;
@@ -2119,6 +2125,25 @@ fn lower_ident_ref(
             .ok_or("x86_64-lower: struct has no addressable storage")?;
         emitter.emit_insns(&x86_64::mov_rr(target_reg, RBP));
         emitter.emit_insns(&x86_64::sub_rmi32(target_reg, base as i32 + 8));
+        return Ok(());
+    }
+    if !ctx.locals.contains_key(name)
+        && matches!(
+            ctx.scalar_types.get(name).map(Typ::canonical),
+            Some(Typ::Array(_))
+        )
+        && let Some(&offset) = ctx.globals.get(name)
+    {
+        if x86_64::is_32bit() {
+            return Err("x86_64-lower: global arrays require the 64-bit ABI".into());
+        }
+        let site = emitter.len() + 2;
+        emitter.emit_insns(&x86_64::mov_ri64(target_reg, 0));
+        ctx.pending_globals.push(PendingGlobal {
+            site,
+            width: 8,
+            offset,
+        });
         return Ok(());
     }
     if !ctx.locals.contains_key(name)
