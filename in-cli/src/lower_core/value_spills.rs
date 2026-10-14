@@ -24,7 +24,15 @@ fn is_variable_modify(expr: &Expr) -> bool {
     matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "modify-value-first"))
 }
 
-fn expr_needs_spills(expr: &Expr) -> bool {
+fn is_addressable(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(_) => true,
+        Expr::Field { base, .. } => is_addressable(base),
+        _ => false,
+    }
+}
+
+fn expr_needs_spills(expr: &Expr, facts: &crate::typecheck::Facts) -> bool {
     if is_repeat(expr) || is_index_store(expr) || is_field_modify(expr) || is_variable_modify(expr)
     {
         return true;
@@ -33,63 +41,92 @@ fn expr_needs_spills(expr: &Expr) -> bool {
     {
         return true;
     }
+    if let Expr::Call { callee, args } = expr
+        && let Expr::Ident(name) = callee.as_ref()
+        && let Some(index) = facts.value_receiver_index(name)
+        && args
+            .get(index)
+            .is_some_and(|arg| matches!(arg, Expr::Call { .. } | Expr::StructInit { .. }))
+    {
+        return true;
+    }
     if let Expr::Closure { body, .. } = expr {
-        return body.iter().any(stmt_needs_spills);
+        return body.iter().any(|stmt| stmt_needs_spills(stmt, facts));
     }
     let mut found = false;
-    crate::core_ir::for_each_expr_child(expr, &mut |child| found |= expr_needs_spills(child));
+    crate::core_ir::for_each_expr_child(expr, &mut |child| {
+        found |= expr_needs_spills(child, facts)
+    });
     found
 }
 
-fn stmt_needs_spills(stmt: &Stmt) -> bool {
+fn stmt_needs_spills(stmt: &Stmt, facts: &crate::typecheck::Facts) -> bool {
     match stmt {
         Stmt::Let(_, _, expr)
         | Stmt::Assign(_, expr)
         | Stmt::Expr(expr)
         | Stmt::Throw(expr)
-        | Stmt::Return(Some(expr)) => expr_needs_spills(expr),
-        Stmt::IndexAssign { base, index, value } => {
-            [base, index, value].into_iter().any(expr_needs_spills)
-        }
-        Stmt::FieldAssign { base, value, .. } => [base, value].into_iter().any(expr_needs_spills),
+        | Stmt::Return(Some(expr)) => expr_needs_spills(expr, facts),
+        Stmt::IndexAssign { base, index, value } => [base, index, value]
+            .into_iter()
+            .any(|expr| expr_needs_spills(expr, facts)),
+        Stmt::FieldAssign { base, value, .. } => [base, value]
+            .into_iter()
+            .any(|expr| expr_needs_spills(expr, facts)),
         Stmt::If {
             cond,
             then_body,
             else_body,
-        } => expr_needs_spills(cond) || then_body.iter().chain(else_body).any(stmt_needs_spills),
+        } => {
+            expr_needs_spills(cond, facts)
+                || then_body
+                    .iter()
+                    .chain(else_body)
+                    .any(|stmt| stmt_needs_spills(stmt, facts))
+        }
         Stmt::Loop { cond, body, .. } => {
-            cond.as_ref().is_some_and(expr_needs_spills) || body.iter().any(stmt_needs_spills)
+            cond.as_ref()
+                .is_some_and(|expr| expr_needs_spills(expr, facts))
+                || body.iter().any(|stmt| stmt_needs_spills(stmt, facts))
         }
         Stmt::Match { scrutinee, arms } => {
-            expr_needs_spills(scrutinee)
+            expr_needs_spills(scrutinee, facts)
                 || arms.iter().any(|arm| {
-                    arm.guard.as_ref().is_some_and(expr_needs_spills)
-                        || arm.body.iter().any(stmt_needs_spills)
+                    arm.guard
+                        .as_ref()
+                        .is_some_and(|expr| expr_needs_spills(expr, facts))
+                        || arm.body.iter().any(|stmt| stmt_needs_spills(stmt, facts))
                 })
         }
         Stmt::Try { body, catches } => {
-            body.iter().any(stmt_needs_spills)
+            body.iter().any(|stmt| stmt_needs_spills(stmt, facts))
                 || catches
                     .iter()
-                    .any(|catch| catch.body.iter().any(stmt_needs_spills))
+                    .any(|catch| catch.body.iter().any(|stmt| stmt_needs_spills(stmt, facts)))
         }
         _ => false,
     }
 }
 
 pub(super) fn has_value_spills(decls: &[Decl]) -> bool {
+    let facts = crate::typecheck::TypeChecker::new().collect_decl_facts(decls);
+    has_value_spills_with_facts(decls, &facts)
+}
+
+fn has_value_spills_with_facts(decls: &[Decl], facts: &crate::typecheck::Facts) -> bool {
     decls.iter().any(|decl| match decl {
-        Decl::Function { body, .. } => body.iter().any(stmt_needs_spills),
-        Decl::Class { methods, .. } => has_value_spills(methods),
+        Decl::Function { body, .. } => body.iter().any(|stmt| stmt_needs_spills(stmt, facts)),
+        Decl::Class { methods, .. } => has_value_spills_with_facts(methods, facts),
         Decl::Global {
             init: Some(expr), ..
-        } => expr_needs_spills(expr),
+        } => expr_needs_spills(expr, facts),
         _ => false,
     })
 }
 
 pub(crate) fn lower_value_spills(decls: &mut [Decl]) {
-    if !has_value_spills(decls) {
+    let facts = crate::typecheck::TypeChecker::new().collect_decl_facts(decls);
+    if !has_value_spills_with_facts(decls, &facts) {
         return;
     }
     let mut names = crate::core_bindings::module_names(decls);
@@ -129,7 +166,6 @@ pub(crate) fn lower_value_spills(decls: &mut [Decl]) {
             break;
         }
     }
-    let facts = crate::typecheck::TypeChecker::new().collect_decl_facts(decls);
     let types = decls
         .iter()
         .filter_map(|decl| match decl {
@@ -283,7 +319,7 @@ impl Lower {
             self.types = types;
             return;
         }
-        if !expr_needs_spills(expr) || is_variable_modify(expr) {
+        if !expr_needs_spills(expr, &self.facts) || is_variable_modify(expr) {
             return;
         }
         if is_repeat(expr) {
@@ -345,9 +381,16 @@ impl Lower {
             if !matches!(callee.as_ref(), Expr::Ident(_)) {
                 self.expr(callee, out);
             }
-            for arg in args {
+            let receiver = if let Expr::Ident(name) = callee.as_ref() {
+                self.facts.value_receiver_index(name)
+            } else {
+                None
+            };
+            for (index, arg) in args.iter_mut().enumerate() {
                 self.expr(arg, out);
-                *arg = self.save(arg.clone(), out);
+                if receiver != Some(index) || !is_addressable(arg) {
+                    *arg = self.save(arg.clone(), out);
+                }
             }
         } else {
             crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
@@ -465,7 +508,7 @@ impl Lower {
                 Stmt::IndexAssign { base, index, value } => {
                     if [&*base, &*index, &*value]
                         .into_iter()
-                        .any(expr_needs_spills)
+                        .any(|expr| expr_needs_spills(expr, &self.facts))
                     {
                         for expr in [base, index, value] {
                             self.expr(expr, &mut prefix);
@@ -474,11 +517,14 @@ impl Lower {
                     }
                 }
                 Stmt::FieldAssign { base, value, .. } => {
-                    if expr_needs_spills(base) || expr_needs_spills(value) {
-                        for expr in [base, value] {
-                            self.expr(expr, &mut prefix);
-                            *expr = self.save(expr.clone(), &mut prefix);
+                    if expr_needs_spills(base, &self.facts) || expr_needs_spills(value, &self.facts)
+                    {
+                        self.expr(base, &mut prefix);
+                        if !is_addressable(base) {
+                            *base = self.save(base.clone(), &mut prefix);
                         }
+                        self.expr(value, &mut prefix);
+                        *value = self.save(value.clone(), &mut prefix);
                     }
                 }
                 Stmt::If {

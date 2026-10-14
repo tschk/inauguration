@@ -1,0 +1,18 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var trace: Int = 0;
+class Point {
+    x: Int;
+    y: Int;
+    fn get(after: Int) -> Int { return x + y + after; }
+}
+fn make() -> Point { trace = trace * 10 + 1; return Point { x: 20, y: 22 }; }
+fn later() -> Int { trace = trace * 10 + 2; return 0; }
+fn main() -> Int {
+    var result: Int = make().get(later());
+    if trace == 12 { return result; }
+    return trace;
+}

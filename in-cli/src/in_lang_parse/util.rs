@@ -450,6 +450,8 @@ pub(crate) fn find_struct_init_open_brace(s: &str) -> Option<usize> {
 pub(crate) fn find_call_open_paren(s: &str) -> Option<usize> {
     let mut in_string = false;
     let mut escape = false;
+    let mut depth = 0i32;
+    let mut last = None;
     for (i, c) in s.char_indices() {
         if escape {
             escape = false;
@@ -465,11 +467,18 @@ pub(crate) fn find_call_open_paren(s: &str) -> Option<usize> {
         }
         match c {
             '"' => in_string = true,
-            '(' => return Some(i),
+            '(' => {
+                if depth == 0 {
+                    last = Some(i);
+                }
+                depth += 1;
+            }
+            '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
             _ => {}
         }
     }
-    None
+    (depth == 0).then_some(last).flatten()
 }
 
 pub(crate) fn split_call_args(inner: &str) -> Vec<String> {

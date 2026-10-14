@@ -75,6 +75,18 @@ pub(crate) struct Facts {
     structs: HashMap<String, Vec<(String, Typ)>>,
 }
 
+impl Facts {
+    pub(crate) fn value_receiver_index(&self, function: &str) -> Option<usize> {
+        self.functions
+            .get(function)?
+            .0
+            .iter()
+            .position(|(name, typ)| {
+                name == "self" && matches!(typ, Typ::Named(name) if self.structs.contains_key(name))
+            })
+    }
+}
+
 impl TypeChecker {
     pub fn new() -> Self {
         Self

@@ -1,0 +1,14 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+var calls: Int = 0;
+class Point {
+    x: Int;
+    y: Int;
+    fn set(value: Int) -> Point { x = value; return self; }
+    fn get() -> Int { return x + y; }
+}
+fn make() -> Point { calls += 1; return Point { x: 0, y: 22 }; }
+fn main() -> Int { return make().set(20).get() + calls - 1; }

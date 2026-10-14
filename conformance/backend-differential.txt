@@ -85,3 +85,6 @@ agree conformance/control-flow/class-receiver-arguments.in
 agree conformance/control-flow/receiver-mutation.in
 agree conformance/control-flow/receiver-snapshot-after-mutation.in
 agree conformance/control-flow/receiver-replacement-effects.in
+agree conformance/control-flow/temporary-receiver-order.in
+agree conformance/control-flow/temporary-receiver-chain.in
+agree conformance/control-flow/receiver-identity-through-spills.in

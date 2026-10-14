@@ -1,0 +1,16 @@
+// @expect parse: ok
+// @expect has-function: main
+// @expect bytecode: executes
+// @expect result: 42
+
+class Counter {
+    value: Int;
+    fn add(delta: Int) -> Int { value += delta; return value; }
+}
+class Point { value: Int; }
+fn make() -> Point { return Point { value: 42 }; }
+fn main() -> Int {
+    var counter: Counter = Counter { value: 0 };
+    counter.add(make().value);
+    return counter.value;
+}

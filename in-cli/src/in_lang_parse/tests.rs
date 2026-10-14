@@ -2195,3 +2195,31 @@ fn method_receiver_inference_preserves_arithmetic_value_kinds() {
         );
     }
 }
+
+#[test]
+fn chained_calls_keep_the_terminal_method_and_nested_arguments() {
+    let expr = super::expr::parse_expr("make(20).set(22).get(later(\"(x)\"))");
+    let crate::core_ir::Expr::Call { callee, args } = expr else {
+        panic!("terminal call");
+    };
+    assert_eq!(*callee, crate::core_ir::Expr::Ident("__method__get".into()));
+    assert_eq!(args.len(), 2);
+    let crate::core_ir::Expr::Call {
+        callee,
+        args: receiver,
+    } = &args[0]
+    else {
+        panic!("chained receiver");
+    };
+    assert_eq!(
+        **callee,
+        crate::core_ir::Expr::Ident("__method__set".into())
+    );
+    assert_eq!(receiver.len(), 2);
+    assert!(
+        matches!(&receiver[0], crate::core_ir::Expr::Call { callee, .. } if matches!(callee.as_ref(), crate::core_ir::Expr::Ident(name) if name == "make"))
+    );
+    assert!(
+        matches!(&args[1], crate::core_ir::Expr::Call { callee, args } if matches!(callee.as_ref(), crate::core_ir::Expr::Ident(name) if name == "later") && args == &[crate::core_ir::Expr::StringLit("(x)".into())])
+    );
+}

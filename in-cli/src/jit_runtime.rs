@@ -3133,6 +3133,37 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn temporary_method_receivers_are_materialized_once_in_argument_order() {
+        for source in [
+            "class Counter { value: Int; fn add(delta: Int) -> Int { value += delta; return value; } }\nclass Point { value: Int; }\nfn make() -> Point { return Point { value: 42 }; }\nfn main() -> Int { var counter: Counter = Counter { value: 0 }; counter.add(make().value); return counter.value; }",
+            "class Counter { value: Int; }\nclass Point { value: Int; }\nfn make() -> Point { return Point { value: 42 }; }\nfn main() -> Int { var counter: Counter = Counter { value: 0 }; counter.value = make().value; return counter.value; }",
+            "var calls: Int = 0;\nclass Point { value: Int; fn truth() -> Bool { return value > 0; } }\nfn make() -> Point { calls += 1; return Point { value: 1 }; }\nfn main() -> Int { if false && make().truth() { return 0; } if true || make().truth() { return calls + 42; } return 0; }",
+            "var calls: Int = 0;\nclass Point { value: Int; fn below() -> Bool { return value < 4; } }\nfn make() -> Point { calls += 1; return Point { value: calls }; }\nfn main() -> Int { var count: Int = 0; while make().below() { count += 1; continue; } if count == 3 && calls == 4 { return 42; } return calls; }",
+            "var calls: Int = 0;\nclass Point { value: Int; fn get(after: Int) -> Int { return value + after; } }\nfn fail() -> Point { calls += 1; throw 9; }\nfn later() -> Int { calls += 100; return 0; }\nfn main() -> Int { try { fail().get(later()); } catch 9 { return calls + 41; } return 0; }",
+            "var calls: Int = 0;\nclass Empty { fn get(after: Int) -> Int { return calls + after; } }\nfn make() -> Empty { calls += 1; return Empty {}; }\nfn main() -> Int { return make().get(41); }",
+            "class Point { x: Int; y: Int; fn get() -> Int { return x + y; } }\nfn make() -> Point { return Point { x: 20, y: 22 }; }\nfn main() -> Int { return make().get(); }",
+            "class Point { x: Int; y: Int; fn get() -> Int { return x + y; } }\nfn main() -> Int { return Point { x: 20, y: 22 }.get(); }",
+            "var trace: Int = 0;\nclass Point { x: Int; y: Int; fn get(after: Int) -> Int { return x + y + after; } }\nfn make() -> Point { trace = trace * 10 + 1; return Point { x: 20, y: 22 }; }\nfn later() -> Int { trace = trace * 10 + 2; return 0; }\nfn main() -> Int { var result: Int = make().get(later()); if trace == 12 { return result; } return trace; }",
+            "var calls: Int = 0;\nclass Point { x: Int; y: Int; fn set(value: Int) -> Point { x = value; return self; } fn get() -> Int { return x + y; } }\nfn make() -> Point { calls += 1; return Point { x: 0, y: 22 }; }\nfn main() -> Int { return make().set(20).get() + calls - 1; }",
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn receiver_sentinels_return_failure_before_reading_fields() {
         for source in [
             "struct Empty {}\nfn main(self: Empty) -> Int { return 42; }",
