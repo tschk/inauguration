@@ -2,6 +2,11 @@
 
 pub(crate) mod tuples;
 
+pub(crate) const METHOD_PREFIX: &str = "#receiver-method:";
+pub(crate) fn is_compiler_callee(name: &str) -> bool {
+    tuples::is_marker(name) || name.starts_with(METHOD_PREFIX)
+}
+
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashSet;

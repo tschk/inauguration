@@ -529,9 +529,80 @@ impl TypeChecker {
                 };
             }
         }
+        if let Expr::Call { callee, args } = expr
+            && let Expr::Ident(name) = callee.as_ref()
+            && let Some(method) = name.strip_prefix(crate::core_ir::METHOD_PREFIX)
+            && let Some(receiver) = args.first().and_then(|arg| self.expr_type(arg, facts, env))
+        {
+            let target = if let Typ::Named(owner) = &receiver {
+                [format!("{owner}::{method}"), format!("{owner}_{method}")]
+                    .into_iter()
+                    .find(|name| facts.value_receiver_index(name) == Some(0))
+            } else {
+                None
+            };
+            if let Some(target) = target {
+                *callee = Box::new(Expr::Ident(target));
+            } else if matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
+                && facts.functions.contains_key(method)
+            {
+                *callee = Box::new(Expr::Ident(method.into()));
+            } else if method == "len"
+                && matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
+            {
+                *callee = Box::new(Expr::Ident(
+                    if receiver == Typ::String {
+                        "str-len"
+                    } else {
+                        "array-len"
+                    }
+                    .into(),
+                ));
+            } else if method == "is_empty"
+                && matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
+            {
+                *expr = Expr::Binary {
+                    op: "==".into(),
+                    lhs: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Ident(
+                            if receiver == Typ::String {
+                                "str-len"
+                            } else {
+                                "array-len"
+                            }
+                            .into(),
+                        )),
+                        args: vec![args[0].clone()],
+                    }),
+                    rhs: Box::new(Expr::IntLit(0)),
+                };
+            } else if method == "clone"
+                && matches!(&receiver, Typ::Vector(item) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
+            {
+                *expr = Expr::Unary {
+                    op: "vector-clone".into(),
+                    expr: Box::new(args[0].clone()),
+                };
+            } else if matches!(
+                method,
+                "iter" | "into_iter" | "cloned" | "copied" | "collect" | "to_vec" | "to_string"
+            ) && matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
+            {
+                // shortcut: owned iterator adapters keep their receiver until iterator values are modeled.
+                *expr = args[0].clone();
+            } else if crate::core_atomic::Kind::from_type(&receiver).is_some()
+                || matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
+            {
+                *callee = Box::new(Expr::Ident(if matches!(receiver, Typ::Vector(_)) {
+                    format!("Vec::{method}")
+                } else {
+                    format!("__method__{method}")
+                }));
+            }
+        }
         if let Expr::Call { callee, args } = expr {
             let captures = match callee.as_ref() {
-                Expr::Ident(local) if !crate::core_ir::tuples::is_marker(local) => {
+                Expr::Ident(local) if !crate::core_ir::is_compiler_callee(local) => {
                     match env.get(local) {
                         Some(Typ::Named(name)) => Some(name.as_str()),
                         _ => None,

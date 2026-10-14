@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn private_intrinsic_declarations_are_rejected() {
-        for name in [VALUE, LET_CHECK, LET_FIELD] {
+        for name in [VALUE, LET_CHECK, LET_FIELD, "#receiver-method:answer"] {
             let module = UnifiedModule::new(vec![Decl::Function {
                 name: name.into(),
                 params: vec![],

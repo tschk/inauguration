@@ -335,7 +335,7 @@ fn check_and_insert_top_level<'a>(
     top_level: &mut HashSet<&'a str>,
     name: &'a str,
 ) -> Result<(), (String, String)> {
-    if crate::core_ir::tuples::is_marker(name) {
+    if crate::core_ir::is_compiler_callee(name) {
         return Err((
             "reserved-intrinsic-name".into(),
             format!("private compiler intrinsic `{name}` cannot be declared"),

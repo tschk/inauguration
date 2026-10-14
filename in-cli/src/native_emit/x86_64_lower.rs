@@ -3168,6 +3168,37 @@ fn lower_call_args(
                 .unwrap_or_else(|| ctx.alloc_slot());
             emitter.emit_insns(&x86_64::mov_rr(RAX, RBP));
             emitter.emit_insns(&x86_64::sub_rmi32(RAX, base as i32 + 8));
+        } else if matches!(params.as_ref().and_then(|params| params.get(index)), Some((name, Typ::Named(_))) if name == "self")
+            && matches!(arg, Expr::Field { .. })
+        {
+            let mut base = arg;
+            let mut path = Vec::new();
+            while let Expr::Field { base: parent, name } = base {
+                path.push(name.as_str());
+                base = parent;
+            }
+            path.reverse();
+            let Expr::Ident(local) = base else {
+                return Err("x86_64-lower: receiver field needs addressable storage".into());
+            };
+            let prefix = format!("{}.", path.join("."));
+            let Some(StackSlot::Struct { fields }) = ctx.locals.get(local) else {
+                return Err("x86_64-lower: receiver field needs a known local layout".into());
+            };
+            let offset = fields
+                .iter()
+                .filter(|(name, _)| name.starts_with(&prefix))
+                .map(|(_, offset)| *offset)
+                .max()
+                .ok_or("x86_64-lower: receiver field has no addressable storage")?;
+            if let Some(&pointer) = ctx.receiver_pointers.get(local) {
+                let root = *fields.values().max().unwrap();
+                emitter.emit_insns(&x86_64::ldr64(RAX, pointer as u16));
+                emitter.emit_insns(&x86_64::sub_rmi32(RAX, -((root - offset) as i32)));
+            } else {
+                emitter.emit_insns(&x86_64::mov_rr(RAX, RBP));
+                emitter.emit_insns(&x86_64::sub_rmi32(RAX, offset as i32 + 8));
+            }
         } else {
             lower_call_argument(emitter, ctx, arg, RAX, pending_calls)?;
         }

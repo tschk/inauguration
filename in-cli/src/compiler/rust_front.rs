@@ -157,6 +157,8 @@ fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
                             | "is_empty"
                             | "__method__len"
                             | "__method__is_empty"
+                            | "#receiver-method:len"
+                            | "#receiver-method:is_empty"
                     ) || name.ends_with("::is_empty"));
                 let store = name.starts_with("index-assign-") || name.starts_with("index-modify-");
                 if store
@@ -2198,39 +2200,7 @@ fn lower_expr_with_types_inner(
             let mut args = Vec::with_capacity(m.args.len() + 1);
             args.push(lower_expr_with_types(&m.receiver, local_types));
             args.extend(m.args.iter().map(|a| lower_expr_with_types(a, local_types)));
-            // ponytail: qualify method name with receiver type when known
-            let method = m.method.to_string();
-            if matches!(method.as_str(), "load" | "store" | "fetch_add")
-                && !matches!(args.first(),Some(Expr::Ident(name)) if local_types.contains_key(name))
-            {
-                return Expr::Call {
-                    callee: Box::new(Expr::Ident(format!("__method__{method}"))),
-                    args,
-                };
-            }
-            // Iterator adapters: `.iter()` / `.cloned()` / `.copied()` are identity
-            // in the owned subset. `.collect()` yields the receiver.
-            if matches!(
-                method.as_str(),
-                "iter" | "into_iter" | "cloned" | "copied" | "collect" | "to_vec" | "to_string"
-            ) {
-                return args.into_iter().next().unwrap_or(Expr::IntLit(0));
-            }
-            if method == "len" {
-                return Expr::Call {
-                    callee: Box::new(Expr::Ident("len".into())),
-                    args,
-                };
-            }
-            let method_name = if let Some(Expr::Ident(receiver_name)) = args.first() {
-                if let Some(ty) = local_types.get(receiver_name) {
-                    format!("{ty}::{method}")
-                } else {
-                    method
-                }
-            } else {
-                method
-            };
+            let method_name = format!("{}{}", crate::core_ir::METHOD_PREFIX, m.method);
             Expr::Call {
                 callee: Box::new(Expr::Ident(method_name)),
                 args,
@@ -2951,6 +2921,24 @@ fn main() {
     }
 
     #[test]
+    fn receiver_methods_do_not_guess_free_functions_or_static_receivers() {
+        for source in [
+            "fn answer(_value:i64)->i64 {42} fn main()->i64 {let value=1;value.answer()}",
+            "struct Point {x:i64} fn main()->i64 {let point=Point{x:42};let lost=point.iter();point.x}",
+            "struct Bucket {value:i64} impl Bucket {fn answer(bucket:Bucket)->i64 {bucket.value}} fn main()->i64 {let bucket=Bucket{value:42};bucket.answer()}",
+        ] {
+            let parsed = parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}: {module:?}"
+            );
+        }
+    }
+
+    #[test]
     fn tuple_match_return_proof_preserves_guarded_and_literal_paths() {
         for pattern in ["(1,b)", "(a,b) if a>0"] {
             let source =
@@ -3047,7 +3035,7 @@ fn main() {
         assert!(matches!(
             body.get(1),
             Some(Stmt::Expr(Expr::Call { callee, args }))
-                if matches!(callee.as_ref(), Expr::Ident(name) if name == "Vec::extend")
+                if matches!(callee.as_ref(), Expr::Ident(name) if name == "#receiver-method:extend")
                     && matches!(args.as_slice(), [Expr::Ident(receiver), Expr::Call { callee, .. }]
                         if receiver == "values"
                             && matches!(callee.as_ref(), Expr::Ident(name) if name == "produced"))
