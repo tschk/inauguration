@@ -3468,8 +3468,7 @@ fn lower_field_access(
         );
     }
     let Expr::Ident(base_name) = base else {
-        emitter.emit_insns(&x86_64::load_i64(target_reg, 0));
-        return Ok(());
+        return Err(format!("x86_64-lower: unsupported field base for `{name}`"));
     };
     if let Some((pointer, offset)) = ctx.receiver_field(base_name, name) {
         emitter.emit_insns(&x86_64::ldr64(target_reg, pointer as u16));

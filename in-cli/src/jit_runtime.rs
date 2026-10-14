@@ -732,6 +732,9 @@ mod tests {
                 for body in [
                     format!("match value {{ {pattern:?} {{ return 42; }} _ {{ return 7; }} }}"),
                     format!(
+                        "let values=[value]; match values {{ [{pattern:?}] {{ return 42; }} _ {{ return 7; }} }}"
+                    ),
+                    format!(
                         "match value {{ captured {{ match captured {{ {pattern:?} {{ return 42; }} _ {{ return 7; }} }} }} }}"
                     ),
                     format!(
@@ -4361,6 +4364,11 @@ mod tests {
     fn native_destructuring_preserves_shapes_bindings_and_guards() {
         for source in [
             "fn main()->i64 { let values=[20,22]; match values { [a,b]=>a+b, _=>0 } }",
+            "fn main()->i64 { let pair=(20,22); match pair { (a,b)=>{return a+b;} } return 0; }",
+            "fn main()->i64 { let pair=(20.5,21.5); match pair { (a,b)=>{return (a+b) as i64;} } return 0; }",
+            "fn main()->i64 { let pair=(1,42); match pair { (2,a)=>{return 0;}, (1,a)=>{return a;}, _=>{return 0;} } }",
+            "fn main()->i64 { let pair=(20,1,22); match pair { (a,..,b)=>{return a+b;} } return 0; }",
+            "fn main()->i64 { let pair=(20,22); match pair { (a,b) if a==0=>{return 0;}, (a,b)=>{return a+b;} } return 0; }",
             "fn main()->i64 { let values: [i64;0]=[]; match values { [a]=>a, []=>42, _=>0 } }",
             "fn main()->i64 { let values=[true,false]; match values { [a,b]=>if a && !b {42} else {0}, _=>0 } }",
             "fn main()->i64 { let values=[20.5,21.5]; match values { [a,b]=>(a+b) as i64, _=>0 } }",

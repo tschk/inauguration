@@ -189,6 +189,19 @@ fn count_stmt(s: &Stmt, depth: u32, nodes: &mut usize) -> Result<(), String> {
         Stmt::Match { scrutinee, arms } => {
             count_expr(scrutinee, depth + 1, nodes)?;
             for a in arms {
+                if !matches!(
+                    crate::core_ir::MatchPattern::parse(&a.pattern),
+                    Ok(crate::core_ir::MatchPattern::IntPat(_)
+                        | crate::core_ir::MatchPattern::BoolPat(_)
+                        | crate::core_ir::MatchPattern::StringPat(_)
+                        | crate::core_ir::MatchPattern::WildPat
+                        | crate::core_ir::MatchPattern::IdentPat(_))
+                ) {
+                    return Err(format!(
+                        "c-backend: unsupported match pattern `{}`",
+                        a.pattern
+                    ));
+                }
                 count_stmts(&a.body, depth + 1, nodes)?;
             }
             Ok(())

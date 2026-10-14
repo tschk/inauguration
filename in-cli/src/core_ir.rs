@@ -525,7 +525,18 @@ impl MatchPattern {
                 }
             }
             Self::TuplePat(items) | Self::ArrayPat(items) => {
+                if items
+                    .iter()
+                    .filter(|pattern| matches!(pattern, Self::RestPat))
+                    .count()
+                    > 1
+                {
+                    return Err("sequence pattern has multiple rests".into());
+                }
                 for (index, pattern) in items.iter().enumerate() {
+                    if matches!(pattern, Self::RestPat) {
+                        continue;
+                    }
                     let item_type = match typ {
                         Typ::Array(item) | Typ::Vector(item) => item.as_ref(),
                         Typ::Named(name) if matches!(self, Self::TuplePat(_)) => schema(name)
@@ -539,6 +550,7 @@ impl MatchPattern {
                     bindings.extend(pattern.typed_bindings(item_type, schema)?);
                 }
             }
+            Self::RestPat => return Err("rest pattern requires a sequence".into()),
             Self::IntPat(_) | Self::StringPat(_) | Self::BoolPat(_) => {
                 let expected = match self {
                     Self::IntPat(_) => Typ::Int,
@@ -845,6 +857,18 @@ mod tests {
         );
         assert!(!array.irrefutable(&Typ::Array(Box::new(Typ::Bool)), &schema));
         assert!(array.typed_bindings(&Typ::Int, &schema).is_err());
+        assert!(
+            MatchPattern::parse("[a, .., ..]")
+                .unwrap()
+                .typed_bindings(&Typ::Array(Box::new(Typ::Int)), &schema)
+                .is_err()
+        );
+        assert!(
+            MatchPattern::parse("Point { value: .. }")
+                .unwrap()
+                .typed_bindings(&Typ::Named("Point".into()), &schema)
+                .is_err()
+        );
         for (pattern, typ) in [("1", Typ::String), ("true", Typ::Int), ("\"x\"", Typ::Bool)] {
             assert!(
                 MatchPattern::parse(pattern)

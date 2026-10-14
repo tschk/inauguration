@@ -305,7 +305,7 @@ fn expand_match(
 fn complex_pattern(pattern: &str) -> bool {
     matches!(
         MatchPattern::parse(pattern),
-        Ok(MatchPattern::ArrayPat(_) | MatchPattern::StructPat { .. })
+        Ok(MatchPattern::ArrayPat(_) | MatchPattern::TuplePat(_) | MatchPattern::StructPat { .. })
     )
 }
 
@@ -327,7 +327,10 @@ fn pattern_test(pattern: &MatchPattern, value: Expr) -> Option<(Expr, Vec<Stmt>)
         }
         MatchPattern::IntPat(n) => binary("==", value, Expr::IntLit(*n)),
         MatchPattern::BoolPat(b) => binary("==", value, Expr::BoolLit(*b)),
-        MatchPattern::StringPat(s) => binary("==", value, Expr::StringLit(s.clone())),
+        MatchPattern::StringPat(s) => Expr::Call {
+            callee: Box::new(Expr::Ident("str-eq".into())),
+            args: vec![value, Expr::StringLit(s.clone())],
+        },
         MatchPattern::StructPat { fields, .. } => {
             let mut cond = Expr::BoolLit(true);
             for (name, pattern) in fields {
@@ -343,7 +346,8 @@ fn pattern_test(pattern: &MatchPattern, value: Expr) -> Option<(Expr, Vec<Stmt>)
             }
             cond
         }
-        MatchPattern::ArrayPat(items) => {
+        // shortcut: tuple values currently use array storage; named heterogeneous tuples need field-aware lowering.
+        MatchPattern::ArrayPat(items) | MatchPattern::TuplePat(items) => {
             let rests: Vec<_> = items
                 .iter()
                 .enumerate()
@@ -384,7 +388,6 @@ fn pattern_test(pattern: &MatchPattern, value: Expr) -> Option<(Expr, Vec<Stmt>)
             }
             cond
         }
-        MatchPattern::TuplePat(_) => return None,
     };
     Some((cond, bindings))
 }

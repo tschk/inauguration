@@ -1413,6 +1413,48 @@ fn native_matches_reject_unsupported_and_incompatible_patterns() {
 }
 
 #[test]
+fn nested_struct_patterns_refuse_unsupported_indexed_fields() {
+    let parsed = crate::compiler::rust_front::parse_rust_source("struct Point {x:i64,y:i64} fn main()->i64 { let values=[Point{x:20,y:22}]; match values {[Point{x:20,y:22}]=>42,_=>0} }").unwrap();
+    let mut module =
+        crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+    crate::lower_core::desugar_module(&mut module);
+    assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+    for result in [
+        crate::native_emit::lower::lower_module(&module, "main", NativeLinkage::Executable)
+            .map(|_| ()),
+        crate::native_emit::x86_64_lower::lower_module(&module, "main").map(|_| ()),
+    ] {
+        assert!(result.unwrap_err().contains("unsupported field base"));
+    }
+}
+
+#[test]
+fn inisa_refuses_matches_without_selection_semantics() {
+    for source in [
+        "fn main()->Int {match 1 {1 {return 42;} _ {return 0;}} return 0;}",
+        "fn main()->Int {let values=[1]; match values {[1] {return 42;} _ {return 0;}} return 0;}",
+    ] {
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        assert!(
+            crate::native_emit::inisa::compile_program(&module, "main")
+                .err()
+                .unwrap()
+                .contains("match execution is unsupported")
+        );
+    }
+}
+
+#[test]
+fn c_patterns_refuse_multiple_rests() {
+    let module = crate::in_lang_parse::parse_in_source("fn main()->Int {let values=[1,2]; match values {[1,..,..] {return 1;} _ {return 2;}} return 0;}").unwrap();
+    assert!(
+        crate::native_emit::c_backend::emit_c_module(&module)
+            .unwrap_err()
+            .contains("unsupported match pattern")
+    );
+}
+
+#[test]
 fn native_string_patterns_reject_non_string_scrutinees() {
     let module = crate::in_lang_parse::parse_in_source(
         "fn main() -> Int { match 123 { \"text\" { return 1; } _ { return 2; } } return 3; }",

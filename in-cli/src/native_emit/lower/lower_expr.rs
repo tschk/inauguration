@@ -573,10 +573,9 @@ pub(crate) fn lower_field(
             };
             lower_expr_into(emitter, ctx, value, rd, functions, pending_calls, fn_name)
         }
-        _ => {
-            emitter.emit_insns(&aarch64::load_i64(rd, 0));
-            Ok(())
-        }
+        _ => Err(format!(
+            "native-lower: unsupported field base for `{name}` in `{fn_name}`"
+        )),
     }
 }
 

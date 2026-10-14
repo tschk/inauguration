@@ -101,6 +101,36 @@ pub(crate) fn serialize_program(prog: &Program) -> Vec<u8> {
 }
 
 fn compile(module: &UnifiedModule, entry: &str) -> Result<Program, String> {
+    fn check_matches(body: &[Stmt]) -> Result<(), String> {
+        for stmt in body {
+            match stmt {
+                Stmt::Match { .. } => return Err("inisa: match execution is unsupported".into()),
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    check_matches(then_body)?;
+                    check_matches(else_body)?;
+                }
+                Stmt::Loop { body, .. } => check_matches(body)?,
+                Stmt::Try { body, catches } => {
+                    check_matches(body)?;
+                    for catch in catches {
+                        check_matches(&catch.body)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    // This evaluator has no match selection or aggregate loads; native expansion cannot supply them.
+    for decl in &module.decls {
+        if let Decl::Function { body, .. } = decl {
+            check_matches(body)?;
+        }
+    }
     let prepared = crate::lower_core::prepared_native_module(module);
     let module = prepared.as_ref();
     let mut fn_index = std::collections::HashMap::new();
