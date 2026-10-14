@@ -252,6 +252,16 @@ impl TypeChecker {
                 self.resolve_typed_expr(child, facts, env, promote_c_bool)
             });
         }
+        if let Expr::Call { callee, args } = expr
+            && matches!(callee.as_ref(), Expr::Ident(name) if (name == "clone" || name == "Vec::clone") && !facts.functions.contains_key(name) && !facts.functions.contains_key("clone"))
+            && let [source] = args.as_slice()
+            && matches!(self.expr_type(source, facts, env), Some(Typ::Vector(item)) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
+        {
+            *expr = Expr::Unary {
+                op: "vector-clone".into(),
+                expr: Box::new(source.clone()),
+            };
+        }
         if let Expr::Unary { op, expr: value } = expr
             && let Some(target) = op.strip_prefix("numeric-cast-")
         {
@@ -943,6 +953,15 @@ impl TypeChecker {
             }
             Expr::Unary { op, expr: inner } => {
                 self.check_expr(fn_name, inner, facts, env, errors);
+                if op == "vector-clone"
+                    && !matches!(self.expr_type(inner, facts, env), Some(Typ::Vector(item)) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
+                {
+                    errors.push(TypeError::TypeMismatch {
+                        context: format!("vector clone in `{fn_name}`"),
+                        expected: Typ::Named("scalar vector".into()),
+                        got: self.expr_type(inner, facts, env).unwrap_or(Typ::Void),
+                    });
+                }
                 if crate::core_ir::integer_cast_spec(op).is_some()
                     && let Some(actual) = self.expr_type(inner, facts, env)
                     && !matches!(actual.canonical(), Typ::Int | Typ::Bool)

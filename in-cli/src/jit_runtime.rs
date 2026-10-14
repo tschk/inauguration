@@ -84,6 +84,32 @@ unsafe fn allocate_array_words(error_page: *mut u8, len: usize) -> *mut u64 {
     ptr
 }
 
+#[cfg(target_arch = "x86_64")]
+pub(crate) unsafe extern "sysv64" fn clone_array(
+    error_page: *mut u8,
+    source: *const u64,
+    len: usize,
+) -> *mut u64 {
+    unsafe { clone_array_words(error_page, source, len) }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub(crate) unsafe extern "C" fn clone_array(
+    error_page: *mut u8,
+    source: *const u64,
+    len: usize,
+) -> *mut u64 {
+    unsafe { clone_array_words(error_page, source, len) }
+}
+
+unsafe fn clone_array_words(error_page: *mut u8, source: *const u64, len: usize) -> *mut u64 {
+    let destination = unsafe { allocate_array_words(error_page, len) };
+    if len != 0 {
+        unsafe { std::ptr::copy_nonoverlapping(source, destination.add(2), len) };
+    }
+    destination
+}
+
 struct MappedPage {
     ptr: *mut u8,
     size: usize,
@@ -3321,6 +3347,151 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn scalar_vector_clone_owns_independent_storage() {
+        let mut sources = vec![
+            "fn main() -> i64 { let items: Vec<i64> = vec![20,22]; let mut copied: Vec<i64> = items.clone(); copied[0] = 0; return items[0] + items[1]; }",
+            "fn main() -> i64 { let items: Vec<f64> = vec![20.0,22.0]; let mut copied: Vec<f64> = items.clone(); copied[0]=0.0; return (items[0]+items[1]) as i64; }",
+            "fn main() -> i64 { let items: Vec<bool> = vec![true]; let mut copied: Vec<bool> = items.clone(); copied[0]=false; if items[0] { return 42; } return 0; }",
+            "fn values() -> Vec<i64> { return vec![20,22]; } fn main() -> i64 { let copied: Vec<i64> = values().clone(); return copied[0] + copied[1]; }",
+            "fn accept(prefix: i64, items: Vec<i64>) -> i64 { return prefix+items[0]+items[1]; } fn main() -> i64 { let items: Vec<i64> = vec![20,22]; return accept(0,items.clone()); }",
+            "fn accept(items: Vec<i64>) -> i64 { return items[0]+items[1]; } fn main() -> i64 { let items: Vec<i64> = vec![20,22]; return accept(items.clone()); }",
+            "fn values(items: Vec<i64>) -> Vec<i64> { return items.clone(); } fn main() -> i64 { let items: Vec<i64> = vec![20,22]; let copied: Vec<i64> = values(items); return copied[0]+copied[1]; }",
+            "fn main() -> i64 { let items: Vec<i64> = vec![]; let copied: Vec<i64> = items.clone(); return copied.len + 42; }",
+        ];
+        if cfg!(target_arch = "aarch64") {
+            sources.push("struct Bag { items: Vec<i64> } impl Bag { fn answer(&mut self) -> i64 { self.items = vec![20,22]; let mut copied: Vec<i64> = self.items.clone(); copied[0]=0; return self.items[0]+self.items[1]; } } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; return Bag::answer(&mut bag); }");
+        }
+        for source in sources {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            assert!(
+                crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}: {:?}",
+                crate::core_ir_verifier::verify_for_entry(&module, "main")
+            );
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_vector_clone_rejects_unsupported_operands_and_c_projection() {
+        use crate::core_ir::{Decl, Expr, Stmt};
+        let parsed = crate::compiler::rust_front::parse_rust_source("fn main() -> i64 { let items: Vec<i64> = vec![20,22]; let copied: Vec<i64> = items.clone(); return copied[0]+copied[1]; }").unwrap();
+        let module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        assert!(
+            crate::native_emit::c_backend::emit_c_module(&module)
+                .unwrap_err()
+                .contains("vector clone requires the JIT runtime")
+        );
+        let native = crate::compiler::rust_front::parse_rust_source(
+            "fn main(items: Vec<i64>) -> Vec<i64> { return items.clone(); }",
+        )
+        .unwrap();
+        let native =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &native);
+        #[cfg(target_arch = "aarch64")]
+        assert!(
+            crate::native_emit::lower::lower_native_module(
+                &native,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .err()
+            .unwrap()
+            .contains("vector clone requires the JIT runtime")
+        );
+        #[cfg(target_arch = "x86_64")]
+        assert!(
+            crate::native_emit::x86_64_lower::lower_native_module(&native, "main")
+                .err()
+                .unwrap()
+                .contains("vector clone requires the 64-bit JIT runtime")
+        );
+        let declared = crate::compiler::rust_front::parse_rust_source("fn clone(items: Vec<i64>) -> Vec<i64> { return items; } fn main() -> i64 { let items: Vec<i64> = vec![42]; let copied: Vec<i64> = items.clone(); return copied[0]; }").unwrap();
+        let declared =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &declared);
+        assert!(!format!("{declared:?}").contains("vector-clone"));
+        for operand in [Expr::IntLit(42), Expr::ArrayLit(vec![Expr::IntLit(42)])] {
+            let mut invalid = module.clone();
+            for decl in &mut invalid.decls {
+                if let Decl::Function { body, .. } = decl {
+                    *body = vec![Stmt::Return(Some(Expr::Unary {
+                        op: "vector-clone".into(),
+                        expr: Box::new(operand.clone()),
+                    }))];
+                }
+            }
+            assert!(!crate::core_ir_verifier::verify_for_entry(&invalid, "main").ok);
+            assert!(
+                crate::typecheck::TypeChecker::new()
+                    .check_module(&invalid)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn scalar_vector_clone_evaluates_producer_once() {
+        use crate::core_ir::{Decl, Expr, Stmt, Typ};
+        let parsed = crate::compiler::rust_front::parse_rust_source("fn values() -> Vec<i64> { return vec![20,22]; } fn main() -> i64 { let copied: Vec<i64> = values().clone(); return copied[0]+copied[1]; }").unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        module.decls.insert(
+            0,
+            Decl::Global {
+                name: "calls".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(Expr::IntLit(0))),
+                mutable: true,
+                constant_value: false,
+            },
+        );
+        for decl in &mut module.decls {
+            if let Decl::Function { name, body, .. } = decl {
+                if name == "values" {
+                    body.insert(
+                        0,
+                        Stmt::Assign(
+                            "calls".into(),
+                            Expr::Binary {
+                                op: "+".into(),
+                                lhs: Box::new(Expr::Ident("calls".into())),
+                                rhs: Box::new(Expr::IntLit(1)),
+                            },
+                        ),
+                    );
+                } else if name == "main" {
+                    *body.last_mut().unwrap() = Stmt::Return(Some(Expr::Ident("calls".into())));
+                }
+            }
+        }
+        crate::lower_core::desugar_module(&mut module);
+        assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(invoke_module(&module, profile, &[]), Some(1));
         }
     }
 

@@ -568,6 +568,38 @@ pub(crate) fn lower_unary(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if op == "vector-clone" {
+        if super::TL_NATIVE_MODE.with(|mode| *mode.borrow()) {
+            return Err("native-lower: vector clone requires the JIT runtime".into());
+        }
+        let Some(Typ::Vector(elem)) = native_expr_type(expr, ctx, functions) else {
+            return Err("native-lower: vector clone requires a vector".into());
+        };
+        super::lower_call::lower_vector_call_arg(
+            emitter,
+            ctx,
+            expr,
+            &elem,
+            0,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        emitter.emit_u32(aarch64::mov_reg64(2, 1));
+        emitter.emit_u32(aarch64::mov_reg64(1, 0));
+        emitter.emit_u32(aarch64::mov_reg64(0, 27));
+        emitter.emit_insns(&aarch64::load_i64(
+            15,
+            crate::jit_runtime::clone_array as *const () as i64,
+        ));
+        emitter.emit_u32(0xD63F_0000 | (15 << 5));
+        let header = pick_scratch(&[rd, rd + 1, rd + 2]);
+        emitter.emit_u32(aarch64::mov_reg64(header, 0));
+        emitter.emit_u32(aarch64::ldr64(rd + 1, header, 0));
+        emitter.emit_u32(aarch64::ldr64(rd + 2, header, 8));
+        emitter.emit_u32(aarch64::add_imm64(rd, header, 16));
+        return Ok(());
+    }
     if crate::core_ir::integer_cast_spec(op).is_some() {
         let value = match native_expr_type(expr, ctx, functions) {
             Some(Typ::Int) => expr.clone(),
@@ -983,7 +1015,9 @@ pub(crate) fn native_expr_type(
                 .or_else(|| crate::core_ir_verifier::intrinsic_return_type(name).cloned()),
             _ => None,
         },
-        Expr::Unary { op, expr } if op == "-" => native_expr_type(expr, ctx, functions),
+        Expr::Unary { op, expr } if op == "-" || op == "vector-clone" => {
+            native_expr_type(expr, ctx, functions)
+        }
         Expr::Unary { op, .. } if op == "!" => Some(Typ::Bool),
         Expr::Unary { op, .. }
             if op == "~"

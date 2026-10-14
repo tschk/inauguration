@@ -2291,7 +2291,9 @@ fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
                 .or_else(|| crate::core_ir_verifier::intrinsic_return_type(name).cloned()),
             _ => None,
         },
-        Expr::Unary { op, expr } if op == "-" => scalar_expr_type(expr, ctx),
+        Expr::Unary { op, expr } if op == "-" || op == "vector-clone" => {
+            scalar_expr_type(expr, ctx)
+        }
         Expr::Unary { op, .. } if op == "!" => Some(Typ::Bool),
         Expr::Unary { op, .. }
             if op == "~"
@@ -3429,6 +3431,26 @@ fn lower_unary_expr(
     }
     lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
     match op {
+        "vector-clone" => {
+            if !ctx.runtime_error_slot || x86_64::is_32bit() || ctx.is_interrupt {
+                return Err("x86_64-lower: vector clone requires the 64-bit JIT runtime".into());
+            }
+            emitter.emit_insns(&x86_64::mov_r_m(RDX, RAX, 0));
+            emitter.emit_insns(&x86_64::mov_rr(RSI, RAX));
+            emitter.emit_insns(&x86_64::add_rmi8(RSI, 16));
+            emitter.emit_insns(&x86_64::mov_rr(RDI, 15));
+            emitter.emit_insns(&x86_64::load_i64(
+                RAX,
+                crate::jit_runtime::clone_array as *const () as i64,
+            ));
+            emitter.emit_insns(&x86_64::mov_rr(11, x86_64::REG_SP));
+            emitter.emit_insns(&x86_64::load_i64(10, -16));
+            emitter.emit_insns(&x86_64::and_rr(x86_64::REG_SP, 10));
+            emitter.emit_insns(&x86_64::sub_rsp_i8(16));
+            emitter.emit_insns(&x86_64::mov_m_r(x86_64::REG_SP, 0, 11));
+            emitter.emit_insns(&[0xFF, 0xD0]);
+            emitter.emit_insns(&x86_64::mov_r_m(x86_64::REG_SP, x86_64::REG_SP, 0));
+        }
         "float-cast-f32" | "float-cast-f64" => {
             if scalar_expr_type(expr, ctx) != Some(Typ::Float) {
                 return Err("x86_64-lower: floating width cast needs Float".into());

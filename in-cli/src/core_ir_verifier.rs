@@ -718,6 +718,14 @@ fn check_expr(
         }
         Expr::Unary { op, expr } => {
             check_expr(fn_name, expr, facts, env, call_edges)?;
+            if op == "vector-clone"
+                && !matches!(expr_type(expr, facts, env), Some(Typ::Vector(item)) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
+            {
+                return Err((
+                    "type-mismatch".into(),
+                    format!("vector clone in `{fn_name}` requires scalar elements"),
+                ));
+            }
             if op == "complement" {
                 return Err((
                     "unsupported-complement".into(),

@@ -871,6 +871,10 @@ pub(crate) fn lower_struct_call_arg(
         return Ok(reg + 1);
     };
     match arg {
+        Expr::Unary { op, .. } if resolved_struct == "Vec" && op == "vector-clone" => {
+            lower_expr_into(emitter, ctx, arg, reg, functions, pending_calls, fn_name)?;
+            Ok(reg + 3)
+        }
         Expr::Ident(local) => {
             if !ctx.locals.contains_key(local)
                 && !ctx.params.contains_key(local)

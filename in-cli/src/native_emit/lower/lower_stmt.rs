@@ -851,6 +851,15 @@ pub(crate) fn lower_struct_expr_into_slots(
     fn_name: &str,
 ) -> Result<(), String> {
     match expr {
+        Expr::Unary { op, .. } if typ == "Vec" && op == "vector-clone" => {
+            lower_expr::lower_expr_into(emitter, ctx, expr, 0, functions, pending_calls, fn_name)?;
+            for (reg, field) in ["ptr", "len", "cap"].into_iter().enumerate() {
+                let offset = find_field_offset(fields, field)
+                    .ok_or("native-lower: missing vector header field")?;
+                emitter.emit_u32(aarch64::str64(reg as u8, aarch64::REG_SP, *offset));
+            }
+            Ok(())
+        }
         Expr::ArrayLit(items) if typ == "Vec" => {
             let Some(&ptr_offset) = find_field_offset(fields, "ptr") else {
                 return Err(format!(
@@ -1093,6 +1102,9 @@ pub(crate) fn lower_struct_expr_into_regs(
     fn_name: &str,
 ) -> Result<(), String> {
     match expr {
+        Expr::Unary { op, .. } if typ == "Vec" && op == "vector-clone" => {
+            lower_expr::lower_expr_into(emitter, ctx, expr, 0, functions, pending_calls, fn_name)
+        }
         Expr::StructInit {
             name: _init,
             fields: values,
