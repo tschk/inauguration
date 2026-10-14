@@ -397,7 +397,7 @@ impl Lower {
                 self.expr(callee, out);
             }
             let receiver = if let Expr::Ident(name) = callee.as_ref() {
-                if name == "vector-push" {
+                if matches!(name.as_str(), "vector-push" | "vector-extend") {
                     Some(0)
                 } else {
                     self.facts.value_receiver_index(name)
@@ -405,10 +405,24 @@ impl Lower {
             } else {
                 None
             };
+            let vector_source = if matches!(callee.as_ref(), Expr::Ident(name) if name == "vector-extend")
+            {
+                args.first().and_then(|arg| self.expr_type(arg))
+            } else {
+                None
+            };
             for (index, arg) in args.iter_mut().enumerate() {
                 self.expr(arg, out);
                 if receiver != Some(index) || !is_addressable(arg) {
+                    let literal_vector = index == 1 && matches!(arg, Expr::ArrayLit(_));
                     *arg = self.save(arg.clone(), out);
+                    if literal_vector
+                        && let Some(expected) = vector_source.as_ref()
+                        && let Some(Stmt::Let(name, typ, _)) = out.last_mut()
+                    {
+                        *typ = Some(expected.clone());
+                        self.types.insert(name.clone(), expected.clone());
+                    }
                 }
             }
         } else {

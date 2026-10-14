@@ -128,6 +128,58 @@ pub(crate) unsafe extern "C" fn push_array(
     unsafe { push_array_words(error_page, source, value) }
 }
 
+#[cfg(target_arch = "x86_64")]
+pub(crate) unsafe extern "sysv64" fn extend_array(
+    error_page: *mut u8,
+    destination: *mut u64,
+    source: *mut u64,
+) -> *mut u64 {
+    unsafe { extend_array_words(error_page, destination, source) }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub(crate) unsafe extern "C" fn extend_array(
+    error_page: *mut u8,
+    destination: *mut u64,
+    source: *mut u64,
+) -> *mut u64 {
+    unsafe { extend_array_words(error_page, destination, source) }
+}
+
+unsafe fn extend_array_words(
+    error_page: *mut u8,
+    mut destination: *mut u64,
+    source: *mut u64,
+) -> *mut u64 {
+    let arena =
+        unsafe { error_page.add(24).cast::<usize>().read() as *const Mutex<Vec<Box<[u64]>>> };
+    let len = {
+        let arrays = unsafe { &*arena }.lock().unwrap();
+        let Some(words) = arrays.iter().find(|words| words.as_ptr() == source) else {
+            return std::ptr::null_mut();
+        };
+        let Ok(len) = usize::try_from(words[0]) else {
+            return std::ptr::null_mut();
+        };
+        if len > words.len() - 2
+            || !arrays
+                .iter()
+                .any(|words| words.as_ptr() == destination && words[0] <= (words.len() - 2) as u64)
+        {
+            return std::ptr::null_mut();
+        }
+        len
+    };
+    for index in 0..len {
+        let value = unsafe { source.add(index + 2).read() };
+        destination = unsafe { push_array_words(error_page, destination, value) };
+        if destination.is_null() {
+            return destination;
+        }
+    }
+    destination
+}
+
 unsafe fn push_array_words(error_page: *mut u8, source: *mut u64, value: u64) -> *mut u64 {
     let arena =
         unsafe { error_page.add(24).cast::<usize>().read() as *const Mutex<Vec<Box<[u64]>>> };
@@ -630,6 +682,29 @@ mod tests {
             let capacity = *array.add(1);
             *array = capacity + 1;
             assert!(push_array(context, array, 42).is_null());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owned_array_extend_checks_sources_and_snapshots_alias_length() {
+        let runtime = JitRuntime::new();
+        let context = runtime.error_page.as_ref().unwrap().ptr;
+        unsafe {
+            let array = allocate_array(context, 2);
+            *array.add(2) = 20;
+            *array.add(3) = 22;
+            let grown = extend_array(context, array, array);
+            assert!(!grown.is_null());
+            assert_eq!(*grown, 4);
+            assert_eq!(
+                std::slice::from_raw_parts(grown.add(2), 4),
+                &[20, 22, 20, 22]
+            );
+            assert!(extend_array(context, grown, std::ptr::null_mut()).is_null());
+            assert!(extend_array(context, std::ptr::null_mut(), grown).is_null());
+            *array = 99;
+            assert!(extend_array(context, grown, array).is_null());
         }
     }
 
@@ -4494,6 +4569,13 @@ mod tests {
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn typed_tuples_preserve_fields_calls_returns_and_order() {
         for source in [
+            "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
+            "fn main()->i64{let mut items=vec![20];let source=[22];items.extend(source);items[0]+items[1]}",
+            "fn source()->Vec<i64>{vec![20,22]} fn main()->i64{let mut items:Vec<i64>=Vec::new();items.extend(source());items[0]+items[1]}",
+            "struct Bag{items:Vec<i64>} fn main()->i64{let mut bag=Bag{items:vec![20]};bag.items.extend(vec![22]);bag.items[0]+bag.items[1]}",
+            "fn main()->i64{let mut items=Vec::new();items.extend(vec![20,22]);items[0]+items[1]}",
+            "fn main()->i64{let mut items=vec![true];items.extend(vec![false]);if items[0] && !items[1]{42}else{0}}",
+            "fn main()->i64{let mut items=vec![20.0];items.extend(vec![22.0]);(items[0]+items[1]) as i64}",
             "fn main()->i64 { let pair=(20,22.0); pair.0+pair.1 as i64 }",
             "fn main()->i64 { let pair=(42,true); if pair.1 {pair.0} else {0} }",
             "fn make()->(i64,f64) { (20,22.0) } fn main()->i64 { let pair=make(); pair.0+pair.1 as i64 }",

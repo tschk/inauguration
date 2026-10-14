@@ -95,6 +95,34 @@ fn expression(
     }
     if matches!(
         callee.as_str(),
+        "#receiver-method:extend" | "Vec::extend" | "vector-extend"
+    ) && let [destination, source] = args.as_slice()
+    {
+        let source_type = closure_inference::argument_type(checker, source, facts, env);
+        let destination_type = closure_inference::argument_type(checker, destination, facts, env);
+        if let Some((params, _)) = facts.functions.get("extend")
+            && let [(_, Typ::Vector(item)), (_, expected)] = params.as_slice()
+            && source_type.as_ref().is_some_and(|actual| {
+                super::is_compatible(expected, actual)
+                    || expected.accepts_sequence_literal(source, actual)
+            })
+        {
+            if let Expr::Ident(name) = destination {
+                constrain(name, (**item).clone(), candidates, constraints);
+            }
+            return;
+        }
+        if let (Expr::Ident(name), Some(Typ::Vector(item) | Typ::Array(item))) =
+            (destination, source_type)
+        {
+            constrain(name, *item, candidates, constraints);
+        }
+        if let (Expr::Ident(name), Some(Typ::Vector(item))) = (source, destination_type) {
+            constrain(name, *item, candidates, constraints);
+        }
+    }
+    if matches!(
+        callee.as_str(),
         "#receiver-method:push" | "Vec::push" | "vector-push"
     ) && let [Expr::Ident(name), value] = args.as_slice()
         && matches!(env.get(name), Some(Typ::Vector(_)))

@@ -234,6 +234,7 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("array-len", IntrinsicRet::Int),
     ("array-push", IntrinsicRet::Void),
     ("vector-push", IntrinsicRet::Void),
+    ("vector-extend", IntrinsicRet::Void),
     ("json-stringify", IntrinsicRet::String),
 ];
 
@@ -1094,7 +1095,7 @@ fn check_expr_with_array_borrow(
                             index == 0 && matches!(name.as_str(), "array-len" | "array_len"),
                         )?;
                     }
-                    if name == "vector-push" {
+                    if matches!(name.as_str(), "vector-push" | "vector-extend") {
                         if args.len() != 2 {
                             return Err((
                                 "call-arity-mismatch".into(),
@@ -1108,8 +1109,15 @@ fn check_expr_with_array_borrow(
                             ));
                         };
                         if !matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
-                            || expr_type(&args[1], facts, env).map(|typ| typ.canonical())
-                                != Some(item.canonical())
+                            || expr_type(&args[1], facts, env).map(|typ| match typ {
+                                Typ::Vector(source) | Typ::Array(source)
+                                    if name == "vector-extend" =>
+                                {
+                                    source.canonical()
+                                }
+                                _ if name == "vector-extend" => Typ::Void,
+                                typ => typ.canonical(),
+                            }) != Some(item.canonical())
                         {
                             return Err((
                                 "type-mismatch".into(),
@@ -2479,6 +2487,9 @@ mod tests {
         for (expression, reason) in [
             ("str-eq(42, 0)", Some("type-mismatch")),
             ("vector-push()", Some("call-arity-mismatch")),
+            ("vector-extend()", Some("call-arity-mismatch")),
+            ("vector-extend(42, [1])", Some("type-mismatch")),
+            ("vector-extend([1], [2])", Some("type-mismatch")),
             ("vector-push(42, 1)", Some("type-mismatch")),
             ("vector-push([1], 2)", Some("type-mismatch")),
             ("array-len(\"abc\")", Some("type-mismatch")),

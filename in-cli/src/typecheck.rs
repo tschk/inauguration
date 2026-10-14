@@ -580,6 +580,12 @@ impl TypeChecker {
                     && self.expr_type(&args[1], facts, env).is_some_and(|actual| is_compatible(item, &actual)))
             {
                 *callee = Box::new(Expr::Ident("vector-push".into()));
+            } else if method == "extend"
+                && args.len() == 2
+                && matches!(&receiver, Typ::Vector(item) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
+                    && self.expr_type(&args[1], facts, env).is_some_and(|actual| matches!(actual, Typ::Vector(ref source) | Typ::Array(ref source) if is_compatible(item, source))))
+            {
+                *callee = Box::new(Expr::Ident("vector-extend".into()));
             } else if method == "len"
                 && matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
             {
@@ -2036,6 +2042,7 @@ fn is_builtin_fn(name: &str) -> bool {
             | "str-table-get-int"
             | "array-push"
             | "vector-push"
+            | "vector-extend"
             | "array-pop"
             | "array-len" | "array_len"
             | "bool-to-int"

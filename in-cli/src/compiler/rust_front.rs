@@ -3039,6 +3039,8 @@ fn main() {
             "fn main()->i64 {let mut items=std::vec::Vec::new();items.push(42);items.push(false);42}",
             "fn main()->i64 {let items=alloc::vec::Vec::new();items.len()+42}",
             "fn main()->i64 {let items=Vec::<_>::new();items.len()+42}",
+            "fn main()->i64 {let mut items=vec![42];items.extend(vec![false]);42}",
+            "fn main()->i64 {let mut items=vec![42];items.extend(42);42}",
             "fn main()->i64 {let mut items=std::vec::Vec::<_>::new();items.push(42);items.push(false);42}",
             "fn main()->i64 {let mut items=Vec::new();items.push(missing());42}",
             "fn main()->i64 {let items=Vec::new();items.len()+42}",

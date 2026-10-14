@@ -10,6 +10,7 @@ pub const INRT_ENTRY_SYMBOL: &str = "_inrt_start";
 /// need the Rust-side `in_str_concat` helper the JIT resolves by dlsym.
 pub const INRT_STR_CONCAT: &str = "__inrt_str_concat";
 pub const INRT_VECTOR_PUSH: &str = "__inrt_vector_push";
+pub const INRT_VECTOR_EXTEND: &str = "__inrt_vector_extend";
 pub const INRT_VECTOR_CLONE: &str = "__inrt_vector_clone";
 
 /// String equality and substring search, embedded for the same reason as
@@ -37,6 +38,7 @@ pub const INRT_BUILTINS: &[&str] = &[
     "__inrt_str_len",
     INRT_STR_CONCAT,
     INRT_VECTOR_PUSH,
+    INRT_VECTOR_EXTEND,
     INRT_VECTOR_CLONE,
     INRT_STR_EQ,
     INRT_STR_CONTAINS,
@@ -60,6 +62,7 @@ pub fn inrt_builtin_param_slots(name: &str) -> Option<usize> {
         "__inrt_array_load" => Some(2),
         "__inrt_array_store" | INRT_VECTOR_CLONE => Some(3),
         "__inrt_array_push" | INRT_VECTOR_PUSH => Some(2),
+        INRT_VECTOR_EXTEND => Some(4),
         INRT_STR_CONCAT | INRT_STR_EQ | INRT_STR_CONTAINS => Some(2),
         INRT_PRINT | INRT_PRINT_INT => Some(1),
         "__inrt_str_substr" => Some(3),
@@ -733,6 +736,59 @@ fn build_inrt_vector_push() -> Vec<u8> {
     e.bytes
 }
 
+fn build_inrt_vector_extend() -> Vec<u8> {
+    let mut e = aarch64::CodeEmitter::new();
+    let mut failures = Vec::new();
+    e.emit_u32(aarch64::cmp_reg64(X0, XZR));
+    failures.push((e.emit_insn(aarch64::b_cond(0, 0)), 0));
+    e.emit_insns(&aarch64::load_i64(X9, 7));
+    e.emit_u32(aarch64::and_reg64(X4, X0, X9));
+    e.emit_u32(aarch64::cmp_reg64(X4, XZR));
+    failures.push((e.emit_insn(aarch64::b_cond(1, 0)), 1));
+    e.emit_u32(aarch64::cmp_reg64(X2, X3));
+    failures.push((e.emit_insn(aarch64::b_cond(8, 0)), 8));
+    e.emit_insns(&aarch64::load_i64(X9, 1i64 << 60));
+    e.emit_u32(aarch64::cmp_reg64(X3, X9));
+    failures.push((e.emit_insn(aarch64::b_cond(2, 0)), 2));
+    e.emit_u32(aarch64::cmp_reg64(X1, XZR));
+    let present = e.emit_insn(aarch64::b_cond(1, 0));
+    e.emit_u32(aarch64::cmp_reg64(X3, XZR));
+    failures.push((e.emit_insn(aarch64::b_cond(1, 0)), 1));
+    e.patch_u32(present, aarch64::b_cond(1, (e.len() - present) as i32));
+    e.emit_insns(&aarch64::load_i64(X9, 7));
+    e.emit_u32(aarch64::and_reg64(X9, X1, X9));
+    e.emit_u32(aarch64::cmp_reg64(X9, XZR));
+    failures.push((e.emit_insn(aarch64::b_cond(1, 0)), 1));
+    e.emit_u32(aarch64::stp_pre(FP, LR, -64));
+    e.emit_u32(aarch64::add_imm64(FP, SP, 0));
+    for (reg, slot) in [(X0, 16), (X1, 24), (X2, 32)] {
+        e.emit_u32(aarch64::str64(reg, SP, slot));
+    }
+    e.emit_u32(aarch64::str64(XZR, SP, 40));
+    // Snapshot the source length; push preserves old payload mappings during growth.
+    let next = e.len();
+    e.emit_u32(aarch64::ldr64(X4, SP, 40));
+    e.emit_u32(aarch64::ldr64(X2, SP, 32));
+    e.emit_u32(aarch64::cmp_reg64(X4, X2));
+    let done = e.emit_insn(aarch64::b_cond(2, 0));
+    e.emit_u32(aarch64::ldr64(X3, SP, 24));
+    e.emit_u32(aarch64::ldr64_reg_offset(X1, X3, X4));
+    e.emit_u32(aarch64::ldr64(X0, SP, 16));
+    let push = e.emit_insn(aarch64::bl(0));
+    e.emit_u32(aarch64::ldr64(X4, SP, 40));
+    e.emit_u32(aarch64::add_imm64(X4, X4, 1));
+    e.emit_u32(aarch64::str64(X4, SP, 40));
+    e.emit_u32(aarch64::b(next as i32 - e.len() as i32));
+    e.patch_u32(done, aarch64::b_cond(2, (e.len() - done) as i32));
+    e.emit_u32(aarch64::ldr64(X0, SP, 32));
+    e.emit_u32(aarch64::ldp_post(FP, LR, 64));
+    e.emit_u32(aarch64::ret());
+    e.patch_u32(push, aarch64::bl(e.len() as i32 - push as i32));
+    e.bytes.extend_from_slice(&build_inrt_vector_push());
+    emit_vector_failure(&mut e, failures);
+    e.bytes
+}
+
 fn emit_vector_failure(e: &mut aarch64::CodeEmitter, failures: Vec<(u32, u8)>) {
     let failed = e.len();
     for (site, condition) in failures {
@@ -865,6 +921,7 @@ pub fn build_runtime_blob() -> (Vec<u8>, BTreeMap<String, u32>) {
     add_fn!("__inrt_str_len", build_inrt_str_len());
     add_fn!(INRT_STR_CONCAT, build_inrt_str_concat());
     add_fn!(INRT_VECTOR_PUSH, build_inrt_vector_push());
+    add_fn!(INRT_VECTOR_EXTEND, build_inrt_vector_extend());
     add_fn!(INRT_VECTOR_CLONE, build_inrt_vector_clone());
     add_fn!(INRT_STR_EQ, build_inrt_str_eq());
     add_fn!(INRT_STR_CONTAINS, build_inrt_str_contains());
@@ -943,6 +1000,7 @@ mod tests {
                 "__inrt_str_len" => build_inrt_str_len(),
                 INRT_STR_CONCAT => build_inrt_str_concat(),
                 INRT_VECTOR_PUSH => build_inrt_vector_push(),
+                INRT_VECTOR_EXTEND => build_inrt_vector_extend(),
                 INRT_VECTOR_CLONE => build_inrt_vector_clone(),
                 INRT_STR_EQ => build_inrt_str_eq(),
                 INRT_STR_CONTAINS => build_inrt_str_contains(),

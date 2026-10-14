@@ -93,6 +93,18 @@ fn owned_compile_rejects_unknown_field_write_before_execution() {
 ))]
 fn rust_jit_executes_explicit_scalar_vector_constructors() {
     for text in [
+        "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
+        "fn main()->i64{let mut items=vec![20];let source=[22];items.extend(source);items[0]+items[1]}",
+        "fn main()->i64{let mut items:Vec<i64>=Vec::new();items.extend(vec![1,2,3,4,5,6,7,8,9,10]);items.len()+items[9]+22}",
+        "fn main()->i64{let mut items=vec![20,22];let empty:Vec<i64>=vec![];items.extend(empty);items[0]+items[1]}",
+        "static mut CALLS:i64=0;fn source()->Vec<i64>{unsafe{CALLS+=1;}vec![20,21]} fn main()->i64{let mut items:Vec<i64>=Vec::new();items.extend(source());unsafe{items[0]+items[1]+CALLS}}",
+        "fn main()->i64{let mut items=Vec::new();items.extend(vec![20,22]);items[0]+items[1]}",
+        "fn extend(items:Vec<bool>,source:Vec<i64>)->i64{42} fn main()->i64{let items=Vec::new();items.extend(vec![1])}",
+        "fn source()->Vec<i64>{vec![20,22]} fn main()->i64{let mut items:Vec<i64>=Vec::new();items.extend(source());items[0]+items[1]}",
+        "struct Bag{items:Vec<i64>} fn main()->i64{let mut bag=Bag{items:vec![20]};let other=vec![22];bag.items.extend(other);bag.items[0]+bag.items[1]}",
+        "fn main()->i64{let mut items=vec![20,1];let source=items.clone();items.extend(source);items[0]+items[2]+items[1]+items[3]}",
+        "fn main()->i64{let mut items=vec![true];items.extend(vec![false]);if items[0] && !items[1]{42}else{0}}",
+        "fn main()->i64{let mut items=vec![20.0];items.extend(vec![22.0]);(items[0]+items[1]) as i64}",
         "fn main()->i64{let mut items=Vec::<i64>::new();items.push(42);items[0]}",
         "fn main()->i64{let mut items=Vec::<_>::new();items.push(42);items[0]}",
         "fn values()->Vec<i64>{Vec::<_>::new()} fn main()->i64{let mut items=values();items.push(42);items[0]}",
@@ -1727,6 +1739,18 @@ fn native_vector_runtime_refuses_invalid_headers_and_failed_allocations() {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn native_vector_clones_preserve_independent_storage_and_returns() {
     for text in [
+        "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
+        "fn main()->i64{let mut items=vec![20];let source=[22];items.extend(source);items[0]+items[1]}",
+        "fn main()->i64{let mut items:Vec<i64>=Vec::new();items.extend(vec![1,2,3,4,5,6,7,8,9,10]);items.len()+items[9]+22}",
+        "fn main()->i64{let mut items=vec![20,22];let empty:Vec<i64>=vec![];items.extend(empty);items[0]+items[1]}",
+        "static mut CALLS:i64=0;fn source()->Vec<i64>{unsafe{CALLS+=1;}vec![20,21]} fn main()->i64{let mut items:Vec<i64>=Vec::new();items.extend(source());unsafe{items[0]+items[1]+CALLS}}",
+        "fn main()->i64{let mut items=Vec::new();items.extend(vec![20,22]);items[0]+items[1]}",
+        "fn extend(items:Vec<bool>,source:Vec<i64>)->i64{42} fn main()->i64{let items=Vec::new();items.extend(vec![1])}",
+        "fn source()->Vec<i64>{vec![20,22]} fn main()->i64{let mut items:Vec<i64>=Vec::new();items.extend(source());items[0]+items[1]}",
+        "struct Bag{items:Vec<i64>} fn main()->i64{let mut bag=Bag{items:vec![20]};let other=vec![22];bag.items.extend(other);bag.items[0]+bag.items[1]}",
+        "fn main()->i64{let mut items=vec![20,1];let source=items.clone();items.extend(source);items[0]+items[2]+items[1]+items[3]}",
+        "fn main()->i64{let mut items=vec![true];items.extend(vec![false]);if items[0] && !items[1]{42}else{0}}",
+        "fn main()->i64{let mut items=vec![20.0];items.extend(vec![22.0]);(items[0]+items[1]) as i64}",
         "fn main()->i64{let mut items=Vec::<i64>::new();items.push(42);items[0]}",
         "fn main()->i64{let mut items=Vec::<_>::new();items.push(42);items[0]}",
         "fn values()->Vec<i64>{Vec::<_>::new()} fn main()->i64{let mut items=values();items.push(42);items[0]}",
@@ -1770,6 +1794,35 @@ fn native_vector_clones_preserve_independent_storage_and_returns() {
             fs::remove_file(source).unwrap();
             fs::remove_file(binary).unwrap();
         }
+    }
+}
+
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_vector_extend_refuses_invalid_descriptors() {
+    for text in [
+        "fn main()->i64{__inrt_vector_extend(0,0,0,0);0}",
+        "fn main()->i64{__inrt_vector_extend(1,0,0,0);0}",
+        "fn main()->i64{__inrt_vector_extend(8,0,1,1);0}",
+        "fn main()->i64{__inrt_vector_extend(8,1,1,1);0}",
+        "fn main()->i64{__inrt_vector_extend(8,8,2,1);0}",
+        "fn main()->i64{__inrt_vector_extend(8,0,0,1152921504606846976);0}",
+    ] {
+        let source = temp_path("vector-extend-invalid.rs");
+        let binary = temp_path("vector-extend-invalid");
+        fs::write(&source, text).unwrap();
+        let report = compile_owned(&default_request(
+            source.clone(),
+            CompileTarget::Native,
+            Some("main"),
+            Some(binary.clone()),
+        ));
+        assert!(report.success, "{text}: {report:?}");
+        let output = std::process::Command::new(&binary).output().unwrap();
+        assert_eq!(output.status.code(), Some(70), "{text}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid vector header"));
+        fs::remove_file(source).unwrap();
+        fs::remove_file(binary).unwrap();
     }
 }
 

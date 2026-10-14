@@ -3237,7 +3237,7 @@ fn lower_call_expr(
         ));
     }
 
-    if target_name == "vector-push" {
+    if matches!(target_name.as_str(), "vector-push" | "vector-extend") {
         let [vector, value] = args else {
             return Err("x86_64-lower: vector push requires two arguments".into());
         };
@@ -3245,7 +3245,13 @@ fn lower_call_expr(
             return Err("x86_64-lower: vector push requires vector storage".into());
         };
         if !matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
-            || scalar_expr_type(value, ctx).map(|typ| typ.canonical()) != Some(item.canonical())
+            || scalar_expr_type(value, ctx).map(|typ| match typ {
+                Typ::Vector(source) | Typ::Array(source) if target_name == "vector-extend" => {
+                    source.canonical()
+                }
+                _ if target_name == "vector-extend" => Typ::Void,
+                typ => typ.canonical(),
+            }) != Some(item.canonical())
         {
             return Err("x86_64-lower: vector push requires matching scalar elements".into());
         }
@@ -3279,7 +3285,11 @@ fn lower_call_expr(
         emitter.emit_insns(&x86_64::mov_rr(RDI, 15));
         emitter.emit_insns(&x86_64::load_i64(
             RAX,
-            crate::jit_runtime::push_array as *const () as i64,
+            if target_name == "vector-extend" {
+                crate::jit_runtime::extend_array as *const () as i64
+            } else {
+                crate::jit_runtime::push_array as *const () as i64
+            },
         ));
         emitter.emit_insns(&x86_64::mov_rr(11, x86_64::REG_SP));
         emitter.emit_insns(&x86_64::load_i64(10, -16));

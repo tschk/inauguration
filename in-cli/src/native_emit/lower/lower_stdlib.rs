@@ -58,6 +58,7 @@ fn emit_stdlib_wrapper_call(
 fn native_inrt_builtin(wrapper: &str) -> Option<&'static str> {
     match wrapper {
         "in_vec_push" => Some(crate::inrt::INRT_VECTOR_PUSH),
+        "in_vec_extend" => Some(crate::inrt::INRT_VECTOR_EXTEND),
         "in_str_concat" => Some(crate::inrt::INRT_STR_CONCAT),
         "in_str_eq" => Some(crate::inrt::INRT_STR_EQ),
         "in_str_contains" => Some(crate::inrt::INRT_STR_CONTAINS),
@@ -302,26 +303,7 @@ fn lower_vec_extend(
         }
     }
     emitter.emit_u32(aarch64::add_imm64(0, aarch64::REG_SP, offset as u16));
-    let is_native = TL_NATIVE_MODE.with(|m| *m.borrow());
-    if is_native {
-        // No runtime-blob builtin covers `in_vec_extend`, so a native artifact
-        // cannot call it: refuse instead of emitting an unresolvable `bl`.
-        return Err(
-            "native-lower: `in_vec_extend` has no native runtime yet; it is only \
-             available under the JIT"
-                .to_string(),
-        );
-    } else if let Some(native_ptr) =
-        crate::native_emit::native_link::resolve_native_fn("in_vec_extend")
-    {
-        emitter.emit_insns(&aarch64::load_i64(15, native_ptr as usize as i64));
-        emitter.emit_u32(0xD63F_01E0u32 | (15 << 5));
-    } else {
-        return Err("native-lower: missing in_vec_extend runtime".to_string());
-    }
-    if rd != 0 {
-        emitter.emit_u32(aarch64::mov_reg64(rd, 0));
-    }
+    emit_stdlib_wrapper_register_call(emitter, ctx, "in_vec_extend", rd)?;
     Ok(())
 }
 
@@ -1720,16 +1702,22 @@ pub(crate) fn lower_stdlib_call(
             )?;
             return Ok(true);
         }
-        "vector-push" if args.len() == 2 => {
+        "vector-push" | "vector-extend" if args.len() == 2 => {
             let Some(Typ::Vector(item)) =
                 super::lower_expr::native_expr_type(&args[0], ctx, functions)
             else {
                 return Err("native-lower: vector push requires vector storage".into());
             };
             if !matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
-                || super::lower_expr::native_expr_type(&args[1], ctx, functions)
-                    .map(|typ| typ.canonical())
-                    != Some(item.canonical())
+                || super::lower_expr::native_expr_type(&args[1], ctx, functions).map(
+                    |typ| match typ {
+                        Typ::Vector(source) | Typ::Array(source) if target == "vector-extend" => {
+                            source.canonical()
+                        }
+                        _ if target == "vector-extend" => Typ::Void,
+                        typ => typ.canonical(),
+                    },
+                ) != Some(item.canonical())
             {
                 return Err("native-lower: vector push requires matching scalar elements".into());
             }
@@ -1756,10 +1744,49 @@ pub(crate) fn lower_stdlib_call(
             emitter.emit_u32(aarch64::add_imm64(0, base, offset as u16));
             let saved = ctx.acquire_binop_temp(fn_name)?;
             emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, saved));
-            lower_expr_into(emitter, ctx, &args[1], 1, functions, pending_calls, fn_name)?;
+            if target == "vector-extend"
+                && matches!(
+                    super::lower_expr::native_expr_type(&args[1], ctx, functions),
+                    Some(Typ::Array(_))
+                )
+            {
+                super::lower_call::lower_array_call_arg(
+                    emitter,
+                    ctx,
+                    &args[1],
+                    &item,
+                    1,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )?;
+                emitter.emit_u32(aarch64::mov_reg64(3, 2));
+            } else if target == "vector-extend" {
+                super::lower_call::lower_vector_call_arg(
+                    emitter,
+                    ctx,
+                    &args[1],
+                    &item,
+                    1,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )?;
+            } else {
+                lower_expr_into(emitter, ctx, &args[1], 1, functions, pending_calls, fn_name)?;
+            }
             emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, saved));
             ctx.release_binop_temp();
-            emit_stdlib_wrapper_register_call(emitter, ctx, "in_vec_push", rd)?;
+            emit_stdlib_wrapper_register_call(
+                emitter,
+                ctx,
+                if target == "vector-extend" {
+                    "in_vec_extend"
+                } else {
+                    "in_vec_push"
+                },
+                rd,
+            )?;
             return Ok(true);
         }
         "array-push" if args.len() == 2 => {

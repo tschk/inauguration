@@ -1003,6 +1003,12 @@ pub(crate) fn lower_struct_call_arg(
                 fn_name,
             )
             .unwrap_or(1);
+            if reg != 0 {
+                // Copy backward because argument registers can overlap return registers.
+                for index in (0..slot_count as u8).rev() {
+                    emitter.emit_u32(aarch64::mov_reg64(reg + index, index));
+                }
+            }
             Ok(reg + slot_count as u8)
         }
         Expr::Field { base, name } => {
