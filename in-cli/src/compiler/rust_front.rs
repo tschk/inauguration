@@ -1411,7 +1411,11 @@ fn map_type(ty: &syn::Type) -> Typ {
         syn::Type::Infer(_) => Typ::Generic("_".into()),
         syn::Type::Reference(r) => {
             let typ = map_type(&r.elem);
-            if matches!(&typ, Typ::Named(name) if crate::core_ir::tuples::fields(name).is_some()) {
+            if matches!(&typ, Typ::Vector(_)) {
+                // shortcut: vector borrows need an address ABI before header mutations can be shared.
+                Typ::Named("#unsupported-borrowed-vector".into())
+            } else if matches!(&typ, Typ::Named(name) if crate::core_ir::tuples::fields(name).is_some())
+            {
                 // shortcut: tuple borrows need reference types and an address ABI before native execution.
                 Typ::Named("#unsupported-borrowed-tuple".into())
             } else {
@@ -3040,6 +3044,25 @@ fn main() {
             "fn main()->i64 {let &(a,b)=&(20,22);42}",
             "fn main()->i64 {let ()=0;42}",
             "fn main()->i64 {let(a,b):(i64,bool)=(20,22);a}",
+        ] {
+            let parsed = parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}: {module:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn vector_references_do_not_silently_copy_mutable_headers() {
+        for source in [
+            "fn fill(items:&mut Vec<i64>){items.push(22);} fn main()->i64{let mut items=vec![20];fill(&mut items);if items.len()==2{items[0]+items[1]}else{0}}",
+            "fn read(items:&Vec<i64>)->i64{items.len()} fn main()->i64{let items=vec![42];read(&items)}",
+            "fn main()->i64{let mut items=vec![20];let borrowed=&mut items;borrowed.push(22);if items.len()==2{42}else{0}}",
+            "fn main()->i64{let mut items=vec![20];let borrowed=&items;items.push(22);if borrowed.len()==2{42}else{0}}",
         ] {
             let parsed = parse_rust_source(source).unwrap();
             let mut module =

@@ -597,6 +597,7 @@ impl TypeChecker {
             && matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW)
             && let [value] = args.as_slice()
             && let Some(typ) = closure_inference::argument_type(self, value, facts, env)
+            && !matches!(typ, Typ::Vector(_))
             && !matches!(typ, Typ::Named(ref name) if crate::core_ir::tuples::fields(name).is_some())
         {
             *expr = value.clone();
