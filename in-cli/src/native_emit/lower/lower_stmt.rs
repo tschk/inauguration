@@ -1377,7 +1377,7 @@ pub(crate) fn lower_array_expr_into_regs(
             if matches!(
                 callee.as_ref(),
                 Expr::Ident(name)
-                    if matches!(name.as_str(), "str-split-lines" | "str-split-spaces" | "str-tokenize-expr")
+                    if matches!(name.as_str(), "str-split-lines" | "str-split-spaces" | "str-tokenize-expr" | "str_split_lines" | "str_split_spaces" | "str_tokenize_expr")
             ) {
                 emitter.emit_u32(aarch64::ldr64(1, 0, 0));
                 emitter.emit_u32(aarch64::add_imm64(0, 0, 16));

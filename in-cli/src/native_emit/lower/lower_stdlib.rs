@@ -751,6 +751,20 @@ fn lower_array_len(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Some(Typ::Vector(elem)) = super::lower_expr::native_expr_type(source, ctx, functions) {
+        super::lower_call::lower_vector_call_arg(
+            emitter,
+            ctx,
+            source,
+            &elem,
+            0,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        emitter.emit_u32(aarch64::mov_reg64(rd, 1));
+        return Ok(());
+    }
     match source {
         Expr::ArrayLit(items) => {
             for item in items {
@@ -779,16 +793,26 @@ fn lower_array_len(
                 "native-lower: array_len source `{local}` is not an array in `{fn_name}`"
             )),
         },
-        Expr::Call { callee, args } => super::lower_call::lower_call(
-            emitter,
-            ctx,
-            callee,
-            args,
-            rd,
-            functions,
-            pending_calls,
-            fn_name,
-        ),
+        Expr::Call { .. } => {
+            let Some(Typ::Array(elem)) =
+                super::lower_expr::native_expr_type(source, ctx, functions)
+            else {
+                return Err(format!(
+                    "native-lower: array_len call must return an array in `{fn_name}`"
+                ));
+            };
+            super::lower_stmt::lower_array_expr_into_regs(
+                emitter,
+                ctx,
+                source,
+                &elem,
+                functions,
+                pending_calls,
+                fn_name,
+            )?;
+            emitter.emit_u32(aarch64::mov_reg64(rd, 1));
+            Ok(())
+        }
         _ => Err(format!(
             "native-lower: array_len source unsupported in `{fn_name}`"
         )),
@@ -858,6 +882,10 @@ pub(crate) fn lower_stdlib_call(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<bool, String> {
+    if target == "len" && functions.contains_key(target) {
+        return Ok(false);
+    }
+
     // Recognize std::env / std::fs wrappers first, before generic suffix matching.
     let cleaned: String = target.chars().filter(|&c| c != ' ').collect();
     // Inlang uses kebab-case; Rust/polyglot fronts still emit snake_case method

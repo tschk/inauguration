@@ -983,7 +983,7 @@ pub(crate) fn lower_struct_call_arg(
         }
         Expr::Field { base, name } => {
             if let Some((root, _)) = super::lower_util::field_path(arg)
-                && ctx.receiver_pointers.contains_key(root)
+                && matches!(ctx.locals.get(root), Some(LocalSlot::Struct { .. }))
             {
                 let schema = fields.clone();
                 for (field, _) in &schema {

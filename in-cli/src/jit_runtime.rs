@@ -3497,6 +3497,65 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn typed_vector_length_reads_the_live_header() {
+        let mut sources = vec![
+            "fn len(items: Vec<i64>) -> i64 { return 42; } fn main() -> i64 { let items: Vec<i64> = vec![0]; return items.len(); }",
+            "fn main() -> i64 { let items: [i64;2] = [20,22]; return items.len()+40; }",
+            "fn values() -> [i64;2] { return [20,22]; } fn main() -> i64 { return values().len()+40; }",
+            "fn main() -> i64 { let items: Vec<i64> = vec![20,22]; return items.len()+40; }",
+            "fn main() -> i64 { let items: Vec<i64> = vec![]; return items.len()+42; }",
+            "fn values() -> Vec<i64> { return vec![20,22]; } fn main() -> i64 { return values().len()+40; }",
+            "fn main() -> i64 { let items: Vec<i64> = vec![20,22]; return items.clone().len()+40; }",
+            "fn accept(items: Vec<i64>) -> i64 { return items.len()+40; } fn main() -> i64 { return accept(vec![20,22]); }",
+        ];
+        if cfg!(target_arch = "aarch64") {
+            sources.push("struct Bag { items: Vec<i64> } fn main() -> i64 { let bag: Bag = Bag { items: vec![20,22] }; return bag.items.len()+40; }");
+            sources.push("struct Bag { items: Vec<i64> } struct Outer { bag: Bag } fn main() -> i64 { let outer: Outer = Outer { bag: Bag { items: vec![20,22] } }; return outer.bag.items.len()+40; }");
+            sources.push("struct Bag { items: Vec<i64> } fn main() -> i64 { let bag: Bag = Bag { items: vec![20,22] }; let mut copied: Vec<i64> = bag.items.clone(); copied[0]=0; return bag.items[0]+bag.items[1]; }");
+            sources.push("struct Bag { items: Vec<i64> } impl Bag { fn answer(&mut self) -> i64 { self.items=vec![20,22]; return self.items.len()+40; } } fn main() -> i64 { let mut bag: Bag = Bag { items: vec![0] }; return Bag::answer(&mut bag); }");
+        }
+        for source in sources {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{verified:?}: {source}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn array_length_evaluates_producer_once() {
+        let mut module = crate::in_lang_parse::parse_in_source("var calls: Int = 0;\nfn values() -> [Int] { calls += 1; return [20,22]; }\nfn main() -> Int { return array_len(values()) + calls; }").unwrap();
+        crate::lower_core::desugar_module(&mut module);
+        let split = crate::in_lang_parse::parse_in_source(
+            "fn main() -> Int { return array_len(str_split_lines(\"a\\nb\")); }",
+        )
+        .unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(invoke_module(&module, profile, &[]), Some(3));
+            assert_eq!(invoke_module(&split, profile, &[]), Some(2));
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn scalar_vector_literals_preserve_call_and_return_values() {
         for source in [
             "fn values() -> Vec<i64> { return vec![20, 22]; } fn main() -> i64 { let items: Vec<i64> = values(); let mut sum = 0; for value in items { sum += value; } return sum; }",

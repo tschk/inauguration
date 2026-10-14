@@ -253,6 +253,16 @@ impl TypeChecker {
             });
         }
         if let Expr::Call { callee, args } = expr
+            && matches!(callee.as_ref(), Expr::Ident(name) if name == "len" && !facts.functions.contains_key(name))
+            && let [source] = args.as_slice()
+            && matches!(
+                self.expr_type(source, facts, env),
+                Some(Typ::Vector(_) | Typ::Array(_))
+            )
+        {
+            *callee = Box::new(Expr::Ident("array-len".into()));
+        }
+        if let Expr::Call { callee, args } = expr
             && matches!(callee.as_ref(), Expr::Ident(name) if (name == "clone" || name == "Vec::clone") && !facts.functions.contains_key(name) && !facts.functions.contains_key("clone"))
             && let [source] = args.as_slice()
             && matches!(self.expr_type(source, facts, env), Some(Typ::Vector(item)) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
