@@ -3457,6 +3457,16 @@ fn lower_field_access(
     name: &str,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if let Expr::Field { base, name: parent } = base {
+        return lower_field_access(
+            emitter,
+            ctx,
+            target_reg,
+            base,
+            &format!("{parent}.{name}"),
+            pending_calls,
+        );
+    }
     let Expr::Ident(base_name) = base else {
         emitter.emit_insns(&x86_64::load_i64(target_reg, 0));
         return Ok(());
@@ -3479,14 +3489,17 @@ fn lower_field_access(
             } else {
                 // Check for nested struct prefix: "inner" → "inner.val"
                 let prefix = format!("{name}.");
-                if let Some(match_key) = fields.keys().find(|k| k.starts_with(&prefix)) {
+                if let Some(match_key) = fields
+                    .iter()
+                    .filter(|(key, _)| key.starts_with(&prefix))
+                    .min_by_key(|(_, offset)| **offset)
+                    .map(|(key, _)| key)
+                {
                     match_key.clone()
                 } else {
-                    // The merged frontend can retain a partial/opaque view
-                    // of an external struct. Treat an unknown field as the
-                    // scalar fallback rather than stopping module lowering.
-                    emitter.emit_insns(&x86_64::load_i64(target_reg, 0));
-                    return Ok(());
+                    return Err(format!(
+                        "native-lower: field `{name}` not found on `{base_name}`"
+                    ));
                 }
             };
             if let Some(field_offset) = fields.get(&field_key) {

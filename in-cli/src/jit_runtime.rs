@@ -4272,6 +4272,22 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn known_struct_field_reads_execute_actual_values() {
+        let parsed = crate::compiler::rust_front::parse_rust_source("struct Point { first:i64, answer:i64 } fn main()->i64 { let point:Point=Point { first:7, answer:42 }; return point.answer; }").unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        crate::lower_core::desugar_module(&mut module);
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(invoke_module(&module, profile, &[]), Some(42));
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn standard_atomic_static_cells_execute_real_load_store_and_add() {
         for source in [
             "use std::sync::atomic::{AtomicU32,Ordering}; static VALUE:AtomicU32=AtomicU32::new(1); fn main()->i64 { let old=VALUE.fetch_add(41,Ordering::Relaxed); return old+VALUE.load(Ordering::SeqCst)-1; }",

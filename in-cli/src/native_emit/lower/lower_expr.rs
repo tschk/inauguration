@@ -524,14 +524,9 @@ pub(crate) fn lower_field(
                         emitter.emit_u32(aarch64::ldr64(rd, aarch64::REG_SP, *offset));
                         return Ok(());
                     }
-                    // For dotted field names like "inner.field", try just the outer field
-                    if let Some(dot) = name.find('.') {
-                        let outer = &name[..dot];
-                        if let Some(offset) = find_field_offset(fields, outer) {
-                            emitter.emit_u32(aarch64::ldr64(rd, aarch64::REG_SP, *offset));
-                            return Ok(());
-                        }
-                    }
+                    return Err(format!(
+                        "native-lower: field `{name}` not found on `{local}`"
+                    ));
                 }
                 Some(LocalSlot::Scalar(offset)) => {
                     // Opaque struct field: load scalar value
