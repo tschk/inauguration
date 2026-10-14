@@ -1780,12 +1780,12 @@ fn lower_expr_with_types_inner(
             let op = format!("int-cast-{target}");
             if crate::core_ir::integer_cast_spec(&op).is_some() {
                 Expr::Unary {
-                    op,
+                    op: format!("numeric-cast-{target}"),
                     expr: Box::new(value),
                 }
             } else if matches!(target, "f32" | "f64") {
                 Expr::Unary {
-                    op: format!("float-cast-{target}"),
+                    op: format!("numeric-cast-{target}"),
                     expr: Box::new(value),
                 }
             } else {
@@ -2504,7 +2504,10 @@ fn main() {
             ),
             ("fn main() -> i64 { return (42u32 as char) as i64; }", None),
         ] {
-            let module = parse_rust_source(source).unwrap();
+            let module = crate::typecheck::normalize_module(
+                crate::parser_registry::ParserId::Rust,
+                &parse_rust_source(source).unwrap(),
+            );
             let accepted = expected.is_some();
             let typed = crate::typecheck::TypeChecker::new().check_module(&module);
             assert_eq!(typed.is_ok(), accepted, "{source}: {typed:?}");
@@ -2545,7 +2548,10 @@ fn main() {
             ("42f64", 42.0),
         ] {
             let source = format!("fn main() -> f64 {{ return ({literal} as f32) as f64; }}");
-            let mut module = parse_rust_source(&source).unwrap();
+            let mut module = crate::typecheck::normalize_module(
+                crate::parser_registry::ParserId::Rust,
+                &parse_rust_source(&source).unwrap(),
+            );
             crate::typecheck::TypeChecker::new()
                 .check_module(&module)
                 .unwrap();

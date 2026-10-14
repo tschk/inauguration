@@ -85,6 +85,12 @@ Rust `as f32` and `as f64` preserve explicit precision conversion for canonical 
 
 Integer-to-floating casts, unsigned source semantics, and full typed `f32` binding/arithmetic semantics remain pending. The shared width operations require canonical Float operands rather than guessing the representation of named types.
 
+## Saturating floating-to-integer casts
+
+Rust numeric casts retain their target until typed normalization can resolve the source, including fields, indexed vector values, and function results. Canonical floating operands cast to signed or unsigned 8-, 16-, 32-, or 64-bit integers use `float-saturate-*` unary IR operations. They truncate toward zero, clamp to the destination range, and map NaN to zero. Unsigned 64-bit results retain their bits in the existing Int64 word. The operand is evaluated once. Constant folding, C projection, and the AArch64/x86_64 native emitters share these semantics; 32-bit x86 emission remains refused.
+
+Raw integer-width operations still require integral operands. C's existing `float-to-int` operation retains its finite, in-range contract. Rust integer-to-floating casts and full unsigned source arithmetic remain pending.
+
 ## Rust integer casts
 
 Explicit Rust casts to signed and unsigned 8-, 16-, 32-, and 64-bit integers truncate low bits and then sign- or zero-extend into the canonical Int64 word. Boolean operands become zero or one. `isize`/`usize` use the supported 64-bit target word. Shared bit operations implement these conversions for both native backends and C projection, with one evaluation of the operand. General source-width arithmetic and floating-point cast semantics remain separate coverage gaps.

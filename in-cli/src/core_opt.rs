@@ -1195,6 +1195,11 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
             {
                 return Expr::FloatLit(crate::core_ir::FloatVal(*value as f64));
             }
+            if let Some((bits, signed)) = crate::core_ir::saturating_float_cast_spec(op)
+                && let Expr::FloatLit(value) = expr.as_ref()
+            {
+                return Expr::IntLit(crate::core_ir::saturating_float_cast(value.0, bits, signed));
+            }
             if op == "float-to-int"
                 && let Expr::FloatLit(value) = expr.as_ref()
                 && value.0.is_finite()
@@ -3948,6 +3953,35 @@ mod tests {
             assert_eq!(fold_expr(expr.clone()), expr);
         }
     }
+    #[test]
+    fn saturating_float_constants_match_rust_casts() {
+        for (target, bits, signed) in [
+            ("i8", 8, true),
+            ("i64", 64, true),
+            ("u8", 8, false),
+            ("u64", 64, false),
+        ] {
+            for value in [
+                42.9,
+                -42.9,
+                1000.0,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                2.0f64.powi(63),
+                2.0f64.powi(64),
+            ] {
+                assert_eq!(
+                    fold_expr(Expr::Unary {
+                        op: format!("float-saturate-{target}"),
+                        expr: Box::new(Expr::FloatLit(crate::core_ir::FloatVal(value)))
+                    }),
+                    Expr::IntLit(crate::core_ir::saturating_float_cast(value, bits, signed))
+                );
+            }
+        }
+    }
+
     #[test]
     fn integer_cast_constants_match_truncation_and_extension() {
         for (target, value, expected) in [

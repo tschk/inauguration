@@ -2297,7 +2297,8 @@ fn scalar_expr_type(expr: &Expr, ctx: &LowerCtx<'_>) -> Option<Typ> {
             if op == "~"
                 || op == "bool-to-int"
                 || op == "float-to-int"
-                || crate::core_ir::integer_cast_spec(op).is_some() =>
+                || crate::core_ir::integer_cast_spec(op).is_some()
+                || crate::core_ir::saturating_float_cast_spec(op).is_some() =>
         {
             Some(Typ::Int)
         }
@@ -3348,6 +3349,64 @@ fn lower_field_access(
     }
 }
 
+fn emit_saturating_float_cast(emitter: &mut CodeEmitter, bits: u8, signed: bool) {
+    let upper = 2.0f64.powi(i32::from(bits) - i32::from(signed));
+    let lower = if signed { -upper } else { 0.0 };
+    emitter.emit_insns(&x86_64::movq_xmm_gpr(0, RAX, true));
+    emitter.emit_insns(&x86_64::ucomisd(0, 0));
+    let nan = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(10, 0));
+    emitter.emit_insns(&x86_64::load_i64(RDX, upper.to_bits() as i64));
+    emitter.emit_insns(&x86_64::movq_xmm_gpr(1, RDX, true));
+    emitter.emit_insns(&x86_64::ucomisd(0, 1));
+    let high = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(3, 0));
+    emitter.emit_insns(&x86_64::load_i64(RDX, lower.to_bits() as i64));
+    emitter.emit_insns(&x86_64::movq_xmm_gpr(1, RDX, true));
+    emitter.emit_insns(&x86_64::ucomisd(0, 1));
+    let low = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(6, 0));
+    if !signed && bits == 64 {
+        emitter.emit_insns(&x86_64::load_i64(RDX, (2.0f64.powi(63)).to_bits() as i64));
+        emitter.emit_insns(&x86_64::movq_xmm_gpr(1, RDX, true));
+        emitter.emit_insns(&x86_64::ucomisd(0, 1));
+        let small = emitter.len();
+        emitter.emit_insns(&x86_64::jcc_near(2, 0));
+        emitter.emit_insns(&x86_64::scalar_double(0x5c, 0, 1));
+        emitter.emit_insns(&x86_64::cvttsd2si(RAX, 0));
+        emitter.emit_insns(&x86_64::load_i64(RDX, i64::MIN));
+        emitter.emit_insns(&x86_64::xor_rr(RAX, RDX));
+        let converted = emitter.len();
+        emitter.emit_insns(&x86_64::jmp_rel32(0));
+        emitter.patch_u32(small + 2, emitter.len() - small - 6);
+        emitter.emit_insns(&x86_64::cvttsd2si(RAX, 0));
+        emitter.patch_u32(converted + 1, emitter.len() - converted - 5);
+    } else {
+        emitter.emit_insns(&x86_64::cvttsd2si(RAX, 0));
+    }
+    let mut ends = vec![emitter.len()];
+    emitter.emit_insns(&x86_64::jmp_rel32(0));
+    for (site, value) in [
+        (nan, 0),
+        (
+            high,
+            crate::core_ir::saturating_float_cast(f64::INFINITY, bits, signed),
+        ),
+        (
+            low,
+            crate::core_ir::saturating_float_cast(f64::NEG_INFINITY, bits, signed),
+        ),
+    ] {
+        emitter.patch_u32(site + 2, emitter.len() - site - 6);
+        emitter.emit_insns(&x86_64::load_i64(RAX, value));
+        ends.push(emitter.len());
+        emitter.emit_insns(&x86_64::jmp_rel32(0));
+    }
+    for site in ends {
+        emitter.patch_u32(site + 1, emitter.len() - site - 5);
+    }
+}
+
 fn lower_unary_expr(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -3387,6 +3446,13 @@ fn lower_unary_expr(
             }
             emitter.emit_insns(&x86_64::cvtsi2sd(0, RAX));
             emitter.emit_insns(&x86_64::movq_xmm_gpr(0, RAX, false));
+        }
+        op if crate::core_ir::saturating_float_cast_spec(op).is_some() => {
+            if x86_64::is_32bit() || scalar_expr_type(expr, ctx) != Some(Typ::Float) {
+                return Err("x86_64-lower: saturating conversion needs 64-bit Float layout".into());
+            }
+            let (bits, signed) = crate::core_ir::saturating_float_cast_spec(op).unwrap();
+            emit_saturating_float_cast(emitter, bits, signed);
         }
         "float-to-int" => {
             if scalar_expr_type(expr, ctx) != Some(Typ::Float) {

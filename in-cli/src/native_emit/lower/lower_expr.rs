@@ -618,6 +618,14 @@ pub(crate) fn lower_unary(
             emitter.emit_u32(aarch64::fmov_to_gp(rd, rd));
             Ok(())
         }
+        op if crate::core_ir::saturating_float_cast_spec(op).is_some() => {
+            if native_expr_type(expr, ctx, functions) != Some(Typ::Float) {
+                return Err("native-lower: saturating conversion needs Float".into());
+            }
+            let (bits, signed) = crate::core_ir::saturating_float_cast_spec(op).unwrap();
+            emit_saturating_float_cast(emitter, rd, bits, signed);
+            Ok(())
+        }
         "float-to-int" => {
             if native_expr_type(expr, ctx, functions) != Some(Typ::Float) {
                 return Err("native-lower: floating conversion needs Float".into());
@@ -889,6 +897,52 @@ pub(crate) fn lower_binary(
     Ok(())
 }
 
+fn emit_saturating_float_cast(emitter: &mut CodeEmitter, rd: u8, bits: u8, signed: bool) {
+    let scratch = pick_scratch(&[rd]);
+    let upper = 2.0f64.powi(i32::from(bits) - i32::from(signed));
+    let lower = if signed { -upper } else { 0.0 };
+    emitter.emit_u32(aarch64::fmov_from_gp(rd, rd));
+    emitter.emit_u32(aarch64::fcmp_d(rd, rd));
+    let nan = emitter.emit_insn(aarch64::b_cond(6, 0));
+    emitter.emit_insns(&aarch64::load_i64(scratch, upper.to_bits() as i64));
+    emitter.emit_u32(aarch64::fmov_from_gp(scratch, scratch));
+    emitter.emit_u32(aarch64::fcmp_d(rd, scratch));
+    let high = emitter.emit_insn(aarch64::b_cond(10, 0));
+    emitter.emit_insns(&aarch64::load_i64(scratch, lower.to_bits() as i64));
+    emitter.emit_u32(aarch64::fmov_from_gp(scratch, scratch));
+    emitter.emit_u32(aarch64::fcmp_d(rd, scratch));
+    let low = emitter.emit_insn(aarch64::b_cond(13, 0));
+    emitter.emit_u32(if signed {
+        aarch64::fcvtzs_d(rd, rd)
+    } else {
+        aarch64::fcvtzu_d(rd, rd)
+    });
+    let mut ends = vec![emitter.emit_insn(aarch64::b(0))];
+    for (site, condition, value) in [
+        (nan, 6, 0),
+        (
+            high,
+            10,
+            crate::core_ir::saturating_float_cast(f64::INFINITY, bits, signed),
+        ),
+        (
+            low,
+            13,
+            crate::core_ir::saturating_float_cast(f64::NEG_INFINITY, bits, signed),
+        ),
+    ] {
+        emitter.patch_u32(
+            site,
+            aarch64::b_cond(condition, emitter.len() as i32 - site as i32),
+        );
+        emitter.emit_insns(&aarch64::load_i64(rd, value));
+        ends.push(emitter.emit_insn(aarch64::b(0)));
+    }
+    for site in ends {
+        emitter.patch_u32(site, aarch64::b(emitter.len() as i32 - site as i32));
+    }
+}
+
 pub(crate) fn native_expr_type(
     expr: &Expr,
     ctx: &LowerCtx<'_>,
@@ -951,7 +1005,8 @@ pub(crate) fn native_expr_type(
             if op == "~"
                 || op == "bool-to-int"
                 || op == "float-to-int"
-                || crate::core_ir::integer_cast_spec(op).is_some() =>
+                || crate::core_ir::integer_cast_spec(op).is_some()
+                || crate::core_ir::saturating_float_cast_spec(op).is_some() =>
         {
             Some(Typ::Int)
         }

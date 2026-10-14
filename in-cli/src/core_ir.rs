@@ -136,6 +136,24 @@ pub(crate) fn bitwise_result_type(lhs: Option<Typ>, rhs: Option<Typ>) -> Option<
     }
 }
 
+pub(crate) fn saturating_float_cast_spec(op: &str) -> Option<(u8, bool)> {
+    integer_cast_spec(&format!("int-cast-{}", op.strip_prefix("float-saturate-")?))
+}
+
+pub(crate) fn saturating_float_cast(value: f64, bits: u8, signed: bool) -> i64 {
+    match (bits, signed) {
+        (8, true) => value as i8 as i64,
+        (16, true) => value as i16 as i64,
+        (32, true) => value as i32 as i64,
+        (64, true) => value as i64,
+        (8, false) => value as u8 as i64,
+        (16, false) => value as u16 as i64,
+        (32, false) => value as u32 as i64,
+        (64, false) => value as u64 as i64,
+        _ => unreachable!("validated numeric cast width"),
+    }
+}
+
 pub(crate) fn integer_cast_spec(op: &str) -> Option<(u8, bool)> {
     match op.strip_prefix("int-cast-")? {
         "i8" => Some((8, true)),

@@ -3065,6 +3065,99 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn saturating_cast_operand_effects_run_once() {
+        use crate::core_ir::{Decl, Expr, Stmt};
+        let mut module = crate::in_lang_parse::parse_in_source("var count: Int = 0;\nfn value() -> Float { count = count + 1; return 42.9; }\nfn main() -> Int { return 0; }").unwrap();
+        for decl in &mut module.decls {
+            if let Decl::Function { name, body, .. } = decl
+                && name == "main"
+            {
+                *body = vec![Stmt::Return(Some(Expr::Binary {
+                    op: "-".into(),
+                    lhs: Box::new(Expr::Binary {
+                        op: "+".into(),
+                        lhs: Box::new(Expr::Unary {
+                            op: "float-saturate-u8".into(),
+                            expr: Box::new(Expr::Call {
+                                callee: Box::new(Expr::Ident("value".into())),
+                                args: vec![],
+                            }),
+                        }),
+                        rhs: Box::new(Expr::Ident("count".into())),
+                    }),
+                    rhs: Box::new(Expr::IntLit(1)),
+                }))];
+            }
+        }
+        assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(
+                invoke_module(&module, profile, &[]),
+                Some(42),
+                "{profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn saturating_numeric_casts_match_host_rust() {
+        for (target, bits, signed) in [
+            ("i8", 8, true),
+            ("i16", 16, true),
+            ("i32", 32, true),
+            ("i64", 64, true),
+            ("u8", 8, false),
+            ("u16", 16, false),
+            ("u32", 32, false),
+            ("u64", 64, false),
+        ] {
+            let source =
+                format!("fn main(value: f64) -> i64 {{ return (value as {target}) as i64; }}");
+            let parsed = crate::compiler::rust_front::parse_rust_source(&source).unwrap();
+            let module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+            let upper = 2.0f64.powi(i32::from(bits) - i32::from(signed));
+            let lower = if signed { -upper } else { 0.0 };
+            for value in [
+                0.0,
+                -0.0,
+                42.9,
+                -42.9,
+                -1.0,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                lower,
+                upper,
+                f64::from_bits(upper.to_bits() - 1),
+                f64::from_bits(lower.to_bits() + 1),
+                2.0f64.powi(63),
+                2.0f64.powi(63) + 2048.0,
+            ] {
+                let expected = crate::core_ir::saturating_float_cast(value, bits, signed);
+                for profile in [
+                    crate::emit_profile::EmitProfile::Default,
+                    crate::emit_profile::EmitProfile::Lean,
+                    crate::emit_profile::EmitProfile::Harden,
+                ] {
+                    assert_eq!(
+                        invoke_module(&module, profile, &[value.to_bits() as i64]),
+                        Some(expected),
+                        "{target} {value:?} {profile:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn scalar_vector_literals_preserve_call_and_return_values() {
         for source in [
             "fn values() -> Vec<i64> { return vec![20, 22]; } fn main() -> i64 { let items: Vec<i64> = values(); let mut sum = 0; for value in items { sum += value; } return sum; }",

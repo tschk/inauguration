@@ -564,6 +564,76 @@ fn guarded_match_effects_survive_c_emission_and_execution() {
 }
 
 #[test]
+fn saturating_float_projection_clamps_and_evaluates_once() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let mut module = crate::in_lang_parse::parse_in_source("var calls: Int = 0;\nfn next() -> Float { calls += 1; return 41.9; }\nfn main() -> Int { return 0; }").unwrap();
+    if let Decl::Function { name, body, .. } = &mut module.decls[2] {
+        *name = "answer".into();
+        *body = vec![
+            Stmt::Let(
+                "result".into(),
+                Some(Typ::Int),
+                Expr::Unary {
+                    op: "float-saturate-u8".into(),
+                    expr: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Ident("next".into())),
+                        args: vec![],
+                    }),
+                },
+            ),
+            Stmt::Return(Some(Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(Expr::Ident("result".into())),
+                rhs: Box::new(Expr::Ident("calls".into())),
+            })),
+        ];
+    }
+    for target in ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"] {
+        let source =
+            format!("fn cast_{target}(value: f64) -> i64 {{ return (value as {target}) as i64; }}");
+        module.decls.extend(
+            crate::compiler::rust_front::parse_rust_source(&source)
+                .unwrap()
+                .decls,
+        );
+    }
+    let code = format!(
+        "{}\nint main(void) {{ if (cast_i8(1000.0) != 127 || cast_i8(-1000.0) != -128 || cast_u8(-1.0) != 0 || cast_u8(1000.0) != 255 || cast_i16(1e100) != 32767 || cast_u16(1e100) != 65535 || cast_i32(1e100) != INT32_MAX || cast_u32(1e100) != UINT32_MAX || cast_i64(1e100) != INT64_MAX || cast_i64(-1e100) != INT64_MIN || cast_u64(1e100) != -1 || cast_u64(9223372036854775808.0) != INT64_MIN || cast_i64(0.0 / 0.0) != 0) return 99; return (int)answer(); }}\n",
+        emit_c_module(&module).unwrap()
+    );
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-saturating-c-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("cast.c");
+    let binary = dir.join("cast");
+    std::fs::write(&path, code).unwrap();
+    let build = Command::new("clang")
+        .arg("-std=c11")
+        .arg(&path)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let status = Command::new(&binary).status().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(status.code(), Some(42));
+}
+
+#[test]
 fn integer_cast_projection_executes_operand_once() {
     use std::process::Command;
     if Command::new("clang").arg("--version").output().is_err() {

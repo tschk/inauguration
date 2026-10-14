@@ -58,6 +58,10 @@ fn decl_has_guard(decl: &Decl) -> bool {
 }
 
 fn expr_has_guard(expr: &Expr) -> bool {
+    if matches!(expr, Expr::Unary { op, .. } if op.starts_with("numeric-cast-")) {
+        return true;
+    }
+
     if let Expr::Closure { body, .. } = expr {
         return body.iter().any(stmt_has_guard);
     }

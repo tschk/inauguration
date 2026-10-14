@@ -252,6 +252,25 @@ impl TypeChecker {
                 self.resolve_typed_expr(child, facts, env, promote_c_bool)
             });
         }
+        if let Expr::Unary { op, expr: value } = expr
+            && let Some(target) = op.strip_prefix("numeric-cast-")
+        {
+            let integer = format!("int-cast-{target}");
+            match self.expr_type(value, facts, env).map(|typ| typ.canonical()) {
+                Some(Typ::Int | Typ::Bool)
+                    if crate::core_ir::integer_cast_spec(&integer).is_some() =>
+                {
+                    *op = integer
+                }
+                Some(Typ::Float) if crate::core_ir::integer_cast_spec(&integer).is_some() => {
+                    *op = format!("float-saturate-{target}")
+                }
+                Some(Typ::Float) if matches!(target, "f32" | "f64") => {
+                    *op = format!("float-cast-{target}")
+                }
+                _ => {}
+            }
+        }
         if promote_c_bool
             && let Expr::Call { callee, args } = expr
             && matches!(callee.as_ref(), Expr::Ident(name) if name == "c-numeric-cast")
@@ -924,7 +943,8 @@ impl TypeChecker {
                         got: actual,
                     });
                 }
-                if matches!(op.as_str(), "int-to-float" | "float-to-int")
+                if (matches!(op.as_str(), "int-to-float" | "float-to-int")
+                    || crate::core_ir::saturating_float_cast_spec(op).is_some())
                     && let Some(actual) = self.expr_type(inner, facts, env)
                 {
                     let expected = if op == "int-to-float" {
@@ -1283,7 +1303,11 @@ impl TypeChecker {
                 "!" => Some(Typ::Bool),
                 "bool-to-int" | "float-to-int" => Some(Typ::Int),
                 "int-to-float" | "float-cast-f32" | "float-cast-f64" => Some(Typ::Float),
-                op if crate::core_ir::integer_cast_spec(op).is_some() => Some(Typ::Int),
+                op if crate::core_ir::integer_cast_spec(op).is_some()
+                    || crate::core_ir::saturating_float_cast_spec(op).is_some() =>
+                {
+                    Some(Typ::Int)
+                }
                 "-" => self.expr_type(expr, facts, env),
                 _ => self.expr_type(expr, facts, env),
             },
@@ -1665,6 +1689,9 @@ pub fn normalize_module(parser_id: ParserId, module: &UnifiedModule) -> UnifiedM
     ) {
         TypeChecker::new().resolve_c_value_promotions(&mut normalized);
     }
+    if parser_id == ParserId::Rust {
+        TypeChecker::new().resolve_complements(&mut normalized);
+    }
     normalized
 }
 
@@ -1855,6 +1882,25 @@ fn normalize_parser_type(parser_id: ParserId, typ: &Typ) -> Typ {
 mod tests {
     use super::uses_family_typecheck;
     use crate::parser_registry::ParserId;
+
+    #[test]
+    fn numeric_casts_resolve_from_index_fields_calls_and_arithmetic() {
+        for source in [
+            "fn main() -> i64 { let items: Vec<f64> = vec![20.0, 22.0]; return (items[0] + items[1]) as i64; }",
+            "struct Point { x: f64 } fn main() -> i64 { let point = Point { x: 42.9 }; return point.x as i64; }",
+            "fn value() -> f64 { return 42.9; } fn main() -> i64 { return value() as i64; }",
+            "fn main() -> i64 { return (20.5 + 21.5) as i64; }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let module = super::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            assert!(
+                super::TypeChecker::new().check_module(&module).is_ok(),
+                "{source}"
+            );
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{verified:?}: {source}");
+        }
+    }
 
     #[test]
     fn family_typecheck_follows_language_matrix_go() {

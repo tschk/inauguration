@@ -42,6 +42,39 @@ fn default_request(
 
 #[test]
 #[cfg(all(unix, target_arch = "aarch64"))]
+fn jit_executes_typed_saturating_float_casts() {
+    for source in [
+        "fn main() -> i64 { let items: Vec<f64> = vec![20.0, 22.0]; return (items[0] + items[1]) as i64; }",
+        "struct Point { x: f64 } fn main() -> i64 { let point = Point { x: 42.9 }; return point.x as i64; }",
+        "fn value() -> f64 { return 1000.5; } fn main() -> i64 { if value() as i8 == 127 { return 42; } return 0; }",
+        "fn value() -> f64 { return -42.9; } fn main() -> i64 { return (value() as u8) as i64 + 42; }",
+        "fn value() -> f64 { return 9223372036854775808.0; } fn main() -> i64 { let value: i64 = (value() as u64) as i64; if value < 0 { return 42; } return 0; }",
+        "fn value() -> f64 { return 0.0 / 0.0; } fn main() -> i64 { return (value() as i64) + 42; }",
+        "const LIMIT: i8 = 1000.0 as i8; fn main() -> i64 { return LIMIT as i64 - 85; }",
+    ] {
+        let path = temp_path("float-cast.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?}: {report:?}: {source}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{profile:?}: {report:?}: {source}"
+            );
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+#[cfg(all(unix, target_arch = "aarch64"))]
 fn jit_compiles_contextual_vector_literals_through_validation() {
     for source in [
         "fn main() -> i64 { let values: Vec<i64> = vec![20, 22]; let mut sum = 0; for value in values { sum += value; } return sum; }",

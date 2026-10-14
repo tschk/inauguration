@@ -707,6 +707,20 @@ fn check_expr(
                     ),
                 ));
             }
+            if op.starts_with("numeric-cast-") {
+                return Err((
+                    "unresolved-numeric-cast".into(),
+                    format!("numeric cast `{op}` in `{fn_name}` needs a supported source type"),
+                ));
+            }
+            if op.starts_with("float-saturate-")
+                && crate::core_ir::saturating_float_cast_spec(op).is_none()
+            {
+                return Err((
+                    "unsupported-floating-cast".into(),
+                    format!("unsupported saturating cast `{op}` in `{fn_name}`"),
+                ));
+            }
             if op.starts_with("int-cast-") && crate::core_ir::integer_cast_spec(op).is_none() {
                 return Err((
                     "unsupported-integer-cast".into(),
@@ -732,7 +746,9 @@ fn check_expr(
                     ));
                 }
             }
-            if matches!(op.as_str(), "int-to-float" | "float-to-int") {
+            if matches!(op.as_str(), "int-to-float" | "float-to-int")
+                || crate::core_ir::saturating_float_cast_spec(op).is_some()
+            {
                 let expected = if op == "int-to-float" {
                     Typ::Int
                 } else {
@@ -1091,7 +1107,11 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
             "!" => Some(Typ::Bool),
             "bool-to-int" | "float-to-int" => Some(Typ::Int),
             "int-to-float" | "float-cast-f32" | "float-cast-f64" => Some(Typ::Float),
-            op if crate::core_ir::integer_cast_spec(op).is_some() => Some(Typ::Int),
+            op if crate::core_ir::integer_cast_spec(op).is_some()
+                || crate::core_ir::saturating_float_cast_spec(op).is_some() =>
+            {
+                Some(Typ::Int)
+            }
             "-" => {
                 if expr_type(expr, facts, env) == Some(Typ::Float) {
                     Some(Typ::Float)
@@ -1249,6 +1269,39 @@ mod tests {
             entry: None,
             require_entry: false,
         }
+    }
+
+    #[test]
+    fn saturating_casts_require_float_and_known_widths() {
+        for operand in [
+            Expr::IntLit(1),
+            Expr::BoolLit(true),
+            Expr::StringLit("bad".into()),
+        ] {
+            let module = module(vec![function_with_ret(
+                "main",
+                Typ::Int,
+                vec![Stmt::Return(Some(Expr::Unary {
+                    op: "float-saturate-i8".into(),
+                    expr: Box::new(operand),
+                }))],
+            )]);
+            let report = verify_for_entry(&module, "main");
+            assert!(!report.ok);
+            assert_eq!(report.reason_code.as_deref(), Some("type-mismatch"));
+        }
+        let module = module(vec![function_with_ret(
+            "main",
+            Typ::Int,
+            vec![Stmt::Return(Some(Expr::Unary {
+                op: "float-saturate-i128".into(),
+                expr: Box::new(Expr::FloatLit(crate::core_ir::FloatVal(42.0))),
+            }))],
+        )]);
+        assert_eq!(
+            verify_for_entry(&module, "main").reason_code.as_deref(),
+            Some("unsupported-floating-cast")
+        );
     }
 
     #[test]
