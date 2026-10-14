@@ -3823,6 +3823,43 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn rust_blocks_preserve_scoped_bindings_and_control_flow() {
+        for source in [
+            "fn main() -> i64 { let value: i64=42; { let value: i64=0; } return value; }",
+            "fn main() -> i64 { let mut value: i64=20; { value+=22; } return value; }",
+            "fn main() -> i64 { let value: i64=42; { let value: i64=0; { let value: i64=1; } } return value; }",
+            "fn main() -> i64 { { let value: i64=42; value } }",
+            "fn main() -> i64 { return { let value: i64=42; value }; }",
+            "fn main() -> i64 { { return 42; }; }",
+            "fn main() -> i64 { let mut count: i64=0; while count<3 { { count+=1; continue; } } return count+39; }",
+            "fn main() -> i64 { let mut count: i64=0; loop { { count=42; break; } } return count; }",
+            "static VALUE: i64=42; fn main() -> i64 { { let VALUE: i64=0; } return VALUE; }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            crate::typecheck::TypeChecker::new()
+                .check_module(&module)
+                .unwrap();
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{verified:?}: {source}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn scalar_vector_literals_preserve_call_and_return_values() {
         for source in [
             "fn values() -> Vec<i64> { return vec![20, 22]; } fn main() -> i64 { let items: Vec<i64> = values(); let mut sum = 0; for value in items { sum += value; } return sum; }",

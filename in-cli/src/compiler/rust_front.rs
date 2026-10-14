@@ -975,6 +975,23 @@ fn lower_block_no_implicit_return_with_types(
     lower_block_inner_with_types(block, false, local_types)
 }
 
+fn lower_scoped_block(
+    block: &syn::Block,
+    wrap_implicit_return: bool,
+    out: &mut Vec<Stmt>,
+    local_types: &HashMap<String, String>,
+) {
+    out.push(Stmt::If {
+        cond: Expr::BoolLit(true),
+        then_body: lower_block_inner_with_types(
+            block,
+            wrap_implicit_return,
+            &mut local_types.clone(),
+        ),
+        else_body: vec![],
+    });
+}
+
 thread_local! {
     static BLOCK_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
@@ -1153,14 +1170,8 @@ fn lower_tail_expr_with_types(
     match expr {
         syn::Expr::If(value) => lower_if_with_types(value, true, out, local_types),
         syn::Expr::Match(value) => lower_match_with_types(value, true, out, local_types),
-        syn::Expr::Block(value) => out.extend(lower_block_with_types(
-            &value.block,
-            &mut local_types.clone(),
-        )),
-        syn::Expr::Unsafe(value) => out.extend(lower_block_with_types(
-            &value.block,
-            &mut local_types.clone(),
-        )),
+        syn::Expr::Block(value) => lower_scoped_block(&value.block, true, out, local_types),
+        syn::Expr::Unsafe(value) => lower_scoped_block(&value.block, true, out, local_types),
         syn::Expr::Paren(value) => lower_tail_expr_with_types(&value.expr, out, local_types),
         syn::Expr::Group(value) => lower_tail_expr_with_types(&value.expr, out, local_types),
         syn::Expr::Return(value) => lower_return_expr(value.expr.as_deref(), out, local_types),
@@ -1319,18 +1330,8 @@ fn lower_expr_stmt(
             });
         }
         syn::Expr::Match(value) => lower_match_with_types(value, false, out, local_types),
-        syn::Expr::Block(value) => out.extend(lower_block_no_implicit_return_with_types(
-            &value.block,
-            &mut local_types.clone(),
-        )),
-        syn::Expr::Unsafe(value) => out.push(Stmt::If {
-            cond: Expr::BoolLit(true),
-            then_body: lower_block_no_implicit_return_with_types(
-                &value.block,
-                &mut local_types.clone(),
-            ),
-            else_body: vec![],
-        }),
+        syn::Expr::Block(value) => lower_scoped_block(&value.block, false, out, local_types),
+        syn::Expr::Unsafe(value) => lower_scoped_block(&value.block, false, out, local_types),
         syn::Expr::Assign(a) => {
             if let syn::Expr::Index(index) = a.left.as_ref() {
                 out.push(Stmt::Expr(Expr::Call {
