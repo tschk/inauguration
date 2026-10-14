@@ -119,37 +119,17 @@ pub(crate) fn lower_stmt(
                         )?;
                     }
                     Typ::Vector(elem) => {
-                        if let (Typ::Named(struct_name), Expr::ArrayLit(items)) =
-                            (elem.as_ref(), expr)
-                        {
-                            let Some(header_offset) = ctx.vec_literal_header_offset else {
-                                return Err(format!(
-                                    "native-lower: missing Vec return header in `{fn_name}`"
-                                ));
-                            };
-                            super::lower_call::lower_aggregate_vector_literal_into_slots(
+                        if matches!(expr, Expr::ArrayLit(_)) {
+                            super::lower_call::lower_vector_call_arg(
                                 emitter,
                                 ctx,
-                                items,
-                                struct_name,
-                                header_offset,
-                                header_offset + 8,
-                                header_offset + 16,
+                                expr,
+                                elem,
+                                0,
                                 functions,
                                 pending_calls,
                                 fn_name,
                             )?;
-                            for (reg, offset) in
-                                [header_offset, header_offset + 8, header_offset + 16]
-                                    .into_iter()
-                                    .enumerate()
-                            {
-                                emitter.emit_u32(aarch64::ldr64(
-                                    reg as u8,
-                                    aarch64::REG_SP,
-                                    offset,
-                                ));
-                            }
                         } else {
                             lower_struct_expr_into_regs(
                                 emitter,
@@ -765,6 +745,25 @@ pub(crate) fn lower_index_assign(
             "native-lower: unsupported array assignment base in `{fn_name}`"
         ));
     };
+    let slot = match slot {
+        LocalSlot::Struct { typ, fields } if typ == "Vec" => {
+            let Some(Typ::Vector(elem)) = lower_expr::native_expr_type(base, ctx, functions) else {
+                return Err(format!(
+                    "native-lower: Vec assignment needs element type in `{fn_name}`"
+                ));
+            };
+            let ptr_offset = *find_field_offset(&fields, "ptr")
+                .ok_or_else(|| format!("native-lower: Vec missing pointer in `{fn_name}`"))?;
+            let len_offset = *find_field_offset(&fields, "len")
+                .ok_or_else(|| format!("native-lower: Vec missing length in `{fn_name}`"))?;
+            LocalSlot::ArrayParam {
+                elem: *elem,
+                ptr_offset,
+                len_offset,
+            }
+        }
+        slot => slot,
+    };
     let elem = match &slot {
         LocalSlot::Array { elem, .. } | LocalSlot::ArrayParam { elem, .. } => elem,
         _ => {
@@ -939,7 +938,12 @@ pub(crate) fn lower_struct_expr_into_slots(
                     }
                     continue;
                 }
-                if let Typ::Named(inner) = field_typ.canonical()
+                let inner = match field_typ.canonical() {
+                    Typ::Named(name) => Some(name),
+                    Typ::Vector(_) => Some("Vec".to_string()),
+                    _ => None,
+                };
+                if let Some(inner) = inner
                     && ctx
                         .structs
                         .contains_key(super::lower_util::base_struct_name(&inner))

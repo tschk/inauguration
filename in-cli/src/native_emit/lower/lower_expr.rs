@@ -374,6 +374,16 @@ pub(crate) fn lower_index(
                 emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, ptr_offset));
                 scratch
             }
+            LocalSlot::Struct { typ, fields } if typ == "Vec" => {
+                let len = find_field_offset(&fields, "len")
+                    .ok_or_else(|| format!("native-lower: Vec missing length in `{fn_name}`"))?;
+                let ptr = find_field_offset(&fields, "ptr")
+                    .ok_or_else(|| format!("native-lower: Vec missing pointer in `{fn_name}`"))?;
+                emitter.emit_u32(aarch64::ldr64(len_reg, aarch64::REG_SP, *len));
+                let scratch = pick_scratch(&[rd, index_reg, len_reg]);
+                emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, *ptr));
+                scratch
+            }
             LocalSlot::Struct { fields: slots, .. } => {
                 // Struct-backed inline array: fields like _0, _1, _2 are array elements
                 let mut field_offsets: Vec<(u32, u32)> = slots

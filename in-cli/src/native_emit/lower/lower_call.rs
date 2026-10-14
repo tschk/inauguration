@@ -372,7 +372,7 @@ pub(crate) fn lower_call_arg(
     }
 }
 
-fn lower_vector_call_arg(
+pub(crate) fn lower_vector_call_arg(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
     arg: &Expr,
@@ -382,6 +382,28 @@ fn lower_vector_call_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
+    if let Expr::ArrayLit(items) = arg
+        && !matches!(elem, Typ::Named(_))
+    {
+        let temp = ctx.acquire_call_arg_slots(fn_name, 3)?;
+        let header = ctx.call_arg_temps[temp];
+        lower_stdlib::lower_vec_literal_into_slots(
+            emitter,
+            ctx,
+            items,
+            header,
+            header + 8,
+            header + 16,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        for (index, offset) in [header, header + 8, header + 16].into_iter().enumerate() {
+            emitter.emit_u32(aarch64::ldr64(reg + index as u8, aarch64::REG_SP, offset));
+        }
+        ctx.release_call_arg_temps();
+        return Ok(reg + 3);
+    }
     let (Typ::Named(struct_name), Expr::ArrayLit(items)) = (elem, arg) else {
         return lower_struct_call_arg(
             emitter,

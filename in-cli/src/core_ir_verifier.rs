@@ -73,6 +73,7 @@ pub fn verify_module(module: &UnifiedModule, options: &VerifyOptions) -> VerifyR
             if let Some(actual) = expr_type(init, &facts, &env)
                 && !zeroed_struct
                 && canonical_type(typ) != canonical_type(&actual)
+                && !typ.accepts_sequence_literal(init, &actual)
             {
                 return fail_report(
                     parsed_function_count,
@@ -429,8 +430,7 @@ fn check_stmt(
             let expr_typ = expr_type(expr, facts, env);
             if let (Some(expected), Some(actual)) = (typ, expr_typ.as_ref())
                 && !expected.compatible_with(actual)
-                && !(matches!(expected.canonical(), Typ::Array(_))
-                    && matches!(expr, Expr::ArrayLit(items) if items.is_empty()))
+                && !expected.accepts_sequence_literal(expr, actual)
             {
                 return Err((
                     "type-mismatch".to_string(),
@@ -475,7 +475,9 @@ fn check_stmt(
                     .or_else(|| facts.globals.get(name.as_str()).map(|global| global.typ))
                     .expect("assignment target was resolved")
                     .clone();
-                if !expected_typ.compatible_with(&expr_typ) {
+                if !expected_typ.compatible_with(&expr_typ)
+                    && !expected_typ.accepts_sequence_literal(expr, &expr_typ)
+                {
                     return Err((
                         "type-mismatch".to_string(),
                         format!(
@@ -501,7 +503,7 @@ fn check_stmt(
             check_expr(fn_name, value, facts, env, call_edges)?;
             require_type(fn_name, "array index", &Typ::Int, index, facts, env)?;
             match expr_type(base, facts, env) {
-                Some(Typ::Array(item)) => {
+                Some(Typ::Array(item) | Typ::Vector(item)) => {
                     if let Some(value_typ) = expr_type(value, facts, env)
                         && *item != value_typ
                     {
@@ -544,6 +546,7 @@ fn check_stmt(
             }
             if let Some(expr_typ) = expr_type(expr, facts, env)
                 && !ret.compatible_with(&expr_typ)
+                && !ret.accepts_sequence_literal(expr, &expr_typ)
             {
                 return Err((
                     "return-type-mismatch".to_string(),
@@ -857,7 +860,7 @@ fn check_expr(
             check_expr(fn_name, index, facts, env, call_edges)?;
             require_type(fn_name, "array index", &Typ::Int, index, facts, env)?;
             if let Some(base_typ) = expr_type(base, facts, env)
-                && !matches!(base_typ, Typ::Array(_))
+                && !matches!(base_typ, Typ::Array(_) | Typ::Vector(_))
                 && base_typ != Typ::Int
             {
                 return Err((
@@ -895,6 +898,7 @@ fn check_expr(
                         check_expr(fn_name, arg, facts, env, call_edges)?;
                         if let Some(arg_typ) = expr_type(arg, facts, env)
                             && !param_typ.compatible_with(&arg_typ)
+                            && !param_typ.accepts_sequence_literal(arg, &arg_typ)
                         {
                             // Allow String→Int/pointer coercion for string literals
                             let param_is_ptr = matches!(param_typ, Typ::Named(n) if n.ends_with("*") || n == "char" || n == "void");
@@ -1017,6 +1021,7 @@ fn check_struct_init(
             .find(|(schema_field, _)| schema_field == field)
             && let Some(actual) = expr_type(expr, facts, env)
             && !expected.compatible_with(&actual)
+            && !expected.accepts_sequence_literal(expr, &actual)
         {
             return Err((
                 "type-mismatch".to_string(),
@@ -1073,7 +1078,7 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
             Some(Typ::Array(Box::new(item_typ)))
         }
         Expr::Index { base, .. } => {
-            if let Some(Typ::Array(item)) = expr_type(base, facts, env) {
+            if let Some(Typ::Array(item) | Typ::Vector(item)) = expr_type(base, facts, env) {
                 Some(*item)
             } else if expr_type(base, facts, env) == Some(Typ::Int) {
                 // Indexing an Int pointer returns Int
@@ -1154,6 +1159,7 @@ fn require_type(
 ) -> Result<(), (String, String)> {
     if let Some(actual) = expr_type(expr, facts, env)
         && !expected.compatible_with(&actual)
+        && !expected.accepts_sequence_literal(expr, &actual)
     {
         return Err((
             "type-mismatch".to_string(),
@@ -1242,6 +1248,41 @@ mod tests {
         VerifyOptions {
             entry: None,
             require_entry: false,
+        }
+    }
+
+    #[test]
+    fn sequence_literals_use_destination_types_without_coercing_variables() {
+        for source in [
+            "struct Bag { items: Vec<i64> } fn accept(items: Vec<i64>) -> i64 { return 42; } fn make() -> Vec<i64> { return vec![20, 22]; } fn main() -> i64 { let mut items: Vec<i64> = vec![1]; items = vec![20, 22]; let bag = Bag { items: vec![20, 22] }; return accept(vec![20, 22]); }",
+            "fn accept(items: Vec<i64>) -> i64 { return 42; } fn make() -> Vec<i64> { return vec![]; } fn main() -> i64 { let items: Vec<i64> = vec![]; return accept(vec![]); }",
+        ] {
+            let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let report = verify_for_entry(&module, "main");
+            assert!(report.ok, "{report:?}: {source}");
+            assert!(
+                crate::typecheck::TypeChecker::new()
+                    .check_module(&module)
+                    .is_ok(),
+                "{source}"
+            );
+        }
+        for source in [
+            "fn main() -> i64 { let items: Vec<i64> = vec![true]; return 0; }",
+            "fn main() -> i64 { let items: Vec<i64> = vec![1, true]; return 0; }",
+            "fn main() -> i64 { let array: [i64; 1] = [20]; let items: Vec<i64> = array; return 0; }",
+            "fn accept(items: Vec<i64>) -> i64 { return 42; } fn main() -> i64 { let array: [i64; 1] = [20]; return accept(array); }",
+            "fn make() -> Vec<i64> { return vec![false]; } fn main() -> i64 { return 0; }",
+            "struct Bag { items: Vec<i64> } fn main() -> i64 { let bag = Bag { items: vec![false] }; return 0; }",
+        ] {
+            let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            assert!(!verify_for_entry(&module, "main").ok, "{source}");
+            assert!(
+                crate::typecheck::TypeChecker::new()
+                    .check_module(&module)
+                    .is_err(),
+                "{source}"
+            );
         }
     }
 

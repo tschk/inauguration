@@ -605,6 +605,7 @@ impl<'a> LowerCtx<'a> {
                     abi_idx += 2;
                 }
                 Typ::Vector(_) => {
+                    ctx.param_types.insert(name.clone(), typ.clone());
                     let Some(fields) = structs.get("Vec") else {
                         return Err(format!("native-lower: missing Vec ABI type in `{fn_name}`"));
                     };
@@ -704,7 +705,8 @@ impl<'a> LowerCtx<'a> {
                 }
                 Ok(())
             }
-            Some(Typ::Vector(_)) => {
+            Some(vector @ Typ::Vector(_)) => {
+                self.scalar_types.insert(name.to_string(), vector.clone());
                 let Some(fields) = self.structs.get("Vec") else {
                     return Err(format!("native-lower: missing Vec ABI type in `{fn_name}`"));
                 };

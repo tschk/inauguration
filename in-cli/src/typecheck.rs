@@ -706,8 +706,7 @@ impl TypeChecker {
                 let expr_typ = self.expr_type(expr, facts, env);
                 if let (Some(expected), Some(actual)) = (annot, &expr_typ)
                     && !is_compatible(expected, actual)
-                    && !(matches!(expected.canonical(), Typ::Array(_))
-                        && matches!(expr, Expr::ArrayLit(items) if items.is_empty()))
+                    && !expected.accepts_sequence_literal(expr, actual)
                 {
                     errors.push(TypeError::TypeMismatch {
                         context: format!("let binding `{name}` in `{fn_name}`"),
@@ -726,6 +725,7 @@ impl TypeChecker {
                 if let Some(existing_typ) = env.get(name).cloned() {
                     if let Some(actual) = self.expr_type(expr, facts, env)
                         && !is_compatible(&existing_typ, &actual)
+                        && !existing_typ.accepts_sequence_literal(expr, &actual)
                     {
                         errors.push(TypeError::TypeMismatch {
                             context: format!("assignment to `{name}` in `{fn_name}`"),
@@ -748,6 +748,7 @@ impl TypeChecker {
                     });
                 } else if let Some(actual) = self.expr_type(expr, facts, env)
                     && !is_compatible(fn_ret, &actual)
+                    && !fn_ret.accepts_sequence_literal(expr, &actual)
                 {
                     errors.push(TypeError::ReturnTypeMismatch {
                         fn_name: fn_name.to_string(),
@@ -782,7 +783,7 @@ impl TypeChecker {
                     });
                 }
                 match self.expr_type(base, facts, env) {
-                    Some(Typ::Array(item)) => {
+                    Some(Typ::Array(item) | Typ::Vector(item)) => {
                         if let Some(value_typ) = self.expr_type(value, facts, env)
                             && !is_compatible(&item, &value_typ)
                         {
@@ -1095,6 +1096,7 @@ impl TypeChecker {
                             Some(expected) => {
                                 if let Some(actual) = self.expr_type(field_expr, facts, env)
                                     && !is_compatible(expected, &actual)
+                                    && !expected.accepts_sequence_literal(field_expr, &actual)
                                 {
                                     errors.push(TypeError::TypeMismatch {
                                         context: format!("field `{field_name}` in struct `{name}`"),
@@ -1172,7 +1174,10 @@ impl TypeChecker {
                     });
                 }
                 if let Some(base_typ) = self.expr_type(base, facts, env)
-                    && !matches!(base_typ, Typ::Array(_) | Typ::Named(_) | Typ::Generic(_))
+                    && !matches!(
+                        base_typ,
+                        Typ::Array(_) | Typ::Vector(_) | Typ::Named(_) | Typ::Generic(_)
+                    )
                     && is_concrete(&base_typ)
                 {
                     errors.push(TypeError::NotArray {
@@ -1201,6 +1206,7 @@ impl TypeChecker {
                             self.check_expr(fn_name, arg, facts, env, errors);
                             if let Some(arg_typ) = self.expr_type(arg, facts, env)
                                 && !is_compatible(param_typ, &arg_typ)
+                                && !param_typ.accepts_sequence_literal(arg, &arg_typ)
                             {
                                 errors.push(TypeError::TypeMismatch {
                                     context: format!("argument for `{callee_name}` in `{fn_name}`"),
@@ -1266,7 +1272,8 @@ impl TypeChecker {
                 Some(Typ::Array(Box::new(item_typ.unwrap_or(Typ::Void))))
             }
             Expr::Index { base, .. } => {
-                if let Some(Typ::Array(item)) = self.expr_type(base, facts, env) {
+                if let Some(Typ::Array(item) | Typ::Vector(item)) = self.expr_type(base, facts, env)
+                {
                     Some(*item)
                 } else {
                     None

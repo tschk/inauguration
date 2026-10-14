@@ -768,6 +768,13 @@ fn lower_array_len(
                 emitter.emit_u32(aarch64::ldr64(rd, REG_SP, *len_offset));
                 Ok(())
             }
+            Some(LocalSlot::Struct { typ, fields }) if typ == "Vec" => {
+                let len = find_field_offset(fields, "len").ok_or_else(|| {
+                    format!("native-lower: Vec `{local}` missing length in `{fn_name}`")
+                })?;
+                emitter.emit_u32(aarch64::ldr64(rd, REG_SP, *len));
+                Ok(())
+            }
             _ => Err(format!(
                 "native-lower: array_len source `{local}` is not an array in `{fn_name}`"
             )),

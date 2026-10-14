@@ -3064,6 +3064,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn scalar_vector_literals_preserve_call_and_return_values() {
+        for source in [
+            "fn values() -> Vec<i64> { return vec![20, 22]; } fn main() -> i64 { let items: Vec<i64> = values(); let mut sum = 0; for value in items { sum += value; } return sum; }",
+            "fn accept(items: Vec<i64>) -> i64 { return items[0] + items[1]; } fn main() -> i64 { return accept(vec![20, 22]); }",
+            "fn accept(items: Vec<i64>) -> i64 { return items[0] + items[1]; } fn main() -> i64 { return accept(vec![accept(vec![20, 22]), 0]); }",
+        ] {
+            let mut module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
     #[cfg(all(unix, target_arch = "aarch64"))]
     fn vector_receiver_index_uses_live_length() {
         for (body, main_body) in [

@@ -293,15 +293,22 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
     if entry != requested && !entry.ends_with(&format!(".{requested}")) {
         return false;
     }
-    let Some(params) = module.decls.iter().find_map(|decl| match decl {
-        Decl::Function { name, params, .. } if name == entry => Some(params),
+    let Some((params, ret)) = module.decls.iter().find_map(|decl| match decl {
+        Decl::Function {
+            name, params, ret, ..
+        } if name == entry => Some((params, ret)),
         _ => None,
     }) else {
         return false;
     };
-    if !params.is_empty() {
+    if !params.is_empty() || !scalar(ret) {
         return false;
     }
+    let internal_type = |typ: &Typ| {
+        scalar(typ)
+            || matches!(typ.canonical(), Typ::Vector(item)
+            if matches!(item.canonical(), Typ::Int | Typ::Bool | Typ::Float | Typ::String))
+    };
     let reachable = super::native::native_entry_module(module, entry);
     let mut names = std::collections::HashSet::new();
     for decl in &reachable.decls {
@@ -320,7 +327,7 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
     }
     reachable.decls.iter().all(|decl| match decl {
         Decl::Function { params, ret, .. } => {
-            scalar(ret) && params.iter().all(|(_, typ)| scalar(typ))
+            internal_type(ret) && params.iter().all(|(_, typ)| internal_type(typ))
         }
         _ => true,
     })
@@ -348,6 +355,28 @@ fn decode_jit_string(raw: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_execution_keeps_entry_scalar_and_vector_elements_supported() {
+        for (source, expected) in [
+            (
+                "fn work(items: Vec<i64>) -> i64 { items[0] = 20; return items[0]; } fn main() -> i64 { return work(vec![0]); }",
+                true,
+            ),
+            ("fn main() -> Vec<i64> { return vec![20]; }", false),
+            (
+                "struct Item { x: i64 } fn work(items: Vec<Item>) -> i64 { return 20; } fn main() -> i64 { return work(vec![Item { x: 20 }]); }",
+                false,
+            ),
+        ] {
+            let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            assert_eq!(
+                rust_entry_can_execute(&module, "main", "main"),
+                expected,
+                "{source}"
+            );
+        }
+    }
 
     #[test]
     fn jit_string_decode_rejects_invalid_references() {

@@ -103,6 +103,22 @@ impl Typ {
         matches!(self, Typ::Named(name) if name == "Any")
     }
 
+    /// Literals acquire their sequence layout from the typed destination.
+    pub(crate) fn accepts_sequence_literal(&self, expr: &Expr, actual: &Typ) -> bool {
+        let Expr::ArrayLit(items) = expr else {
+            return false;
+        };
+        let Typ::Array(actual_item) = actual.canonical() else {
+            return false;
+        };
+        match self.canonical() {
+            Typ::Array(item) | Typ::Vector(item) => {
+                items.is_empty() || item.compatible_with(&actual_item)
+            }
+            _ => false,
+        }
+    }
+
     /// Two types are compatible if canonical forms are equal or either is Any.
     pub fn compatible_with(&self, other: &Typ) -> bool {
         let a = self.canonical();

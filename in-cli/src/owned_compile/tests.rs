@@ -41,6 +41,48 @@ fn default_request(
 }
 
 #[test]
+#[cfg(all(unix, target_arch = "aarch64"))]
+fn jit_compiles_contextual_vector_literals_through_validation() {
+    for source in [
+        "fn main() -> i64 { let values: Vec<i64> = vec![20, 22]; let mut sum = 0; for value in values { sum += value; } return sum; }",
+        "struct Bag { items: Vec<i64> } fn main() -> i64 { let bag = Bag { items: vec![20, 22] }; return bag.items[0] + bag.items[1]; }",
+        "fn values() -> Vec<i64> { return vec![20, 22]; } fn main() -> i64 { let items: Vec<i64> = values(); let mut sum = 0; for value in items { sum += value; } return sum; }",
+        "fn accept(items: Vec<i64>) -> i64 { return items[0] + items[1]; } fn main() -> i64 { return accept(vec![20, 22]); }",
+        "fn accept(items: Vec<i64>) -> i64 { return items[0] + items[1]; } fn main() -> i64 { return accept(vec![accept(vec![20, 22]), 0]); }",
+        "struct Bag { items: Vec<i64> } fn main() -> i64 { let values: Vec<i64> = vec![20, 22]; let bag = Bag { items: values }; return bag.items[0] + bag.items[1]; }",
+        "fn main() -> i64 { let mut items: Vec<i64> = vec![]; items = vec![20, 22]; return items[0] + items[1]; }",
+        "fn values() -> Vec<i64> { return vec![]; } fn main() -> i64 { let items: Vec<i64> = values(); let mut sum = 42; for value in items { sum += value; } return sum; }",
+        "fn main() -> i64 { let mut items: Vec<i64> = vec![0, 22]; items[0] = 20; return items[0] + items[1]; }",
+        "fn main() -> f64 { let items: Vec<f64> = vec![20.0, 22.0]; return items[0] + items[1]; }",
+        "fn accept(items: Vec<i64>) -> i64 { items[0] = 20; return items[0] + items[1]; } fn main() -> i64 { return accept(vec![0, 22]); }",
+        "fn accept(items: Vec<f64>) -> f64 { items[0] = 20.0; return items[0] + items[1]; } fn main() -> f64 { return accept(vec![0.0, 22.0]); }",
+    ] {
+        let path = temp_path("vector-literal.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?}: {report:?}: {source}");
+            assert_eq!(
+                report.eval_result,
+                Some(if source.contains("fn main() -> f64") {
+                    EvalValue::Float(42.0)
+                } else {
+                    EvalValue::Int(42)
+                }),
+                "{profile:?}: {report:?}: {source}"
+            );
+        }
+        fs::remove_file(&path).unwrap();
+    }
+}
+
+#[test]
 fn native_target_reports_host_status() {
     let source_path = temp_path("native.in");
     fs::write(&source_path, "fn main() -> void { return; }\n").unwrap();
