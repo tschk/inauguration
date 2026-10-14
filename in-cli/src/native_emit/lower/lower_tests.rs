@@ -151,10 +151,7 @@ fn raw_native_lowering_refuses_unknown_struct_field_read() {
 fn raw_native_lowering_checks_nested_struct_field_layout() {
     let module = crate::compiler::rust_front::parse_rust_source("struct Inner { first: i64, answer: i64 } struct Outer { inner: Inner } fn main() -> i64 { let outer: Outer = Outer { inner: Inner { first: 7, answer: 42 } }; return outer.inner.answer; }").unwrap();
     lower_module(&module, "main", NativeLinkage::Executable).expect("AArch64 nested read");
-    let error = crate::native_emit::x86_64_lower::lower_module(&module, "main")
-        .err()
-        .expect("x86 lacks the nested layout and must refuse it");
-    assert!(error.contains("inner.answer"), "{error}");
+    crate::native_emit::x86_64_lower::lower_module(&module, "main").expect("x86 nested read");
 }
 
 #[test]

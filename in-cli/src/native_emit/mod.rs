@@ -53,3 +53,5 @@ pub use target::{
 pub use thumb_lower::{THUMB_TRIPLE, ThumbCompileResult, lower_module as lower_thumb_module};
 pub use uf2::{UF2_FAMILY_RP2350_ARM_S, Uf2Options, encode_uf2, write_uf2};
 pub use wasm::{WASM32_UNKNOWN_TRIPLE, WasmModule, write_scalar_i32_module};
+
+pub(crate) mod struct_layout;

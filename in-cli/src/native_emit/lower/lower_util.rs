@@ -288,7 +288,11 @@ pub(crate) fn native_struct_fields(
         .collect::<Result<Vec<_>, ()>>();
     let cleaned = match cleaned {
         Ok(fields) => fields,
-        Err(_) => return Ok(vec![]),
+        Err(_) => {
+            return Err(format!(
+                "native-lower: unsupported struct field layout `{typ}` in `{fn_name}`"
+            ));
+        }
     };
     if cleaned.len() > 32 {
         return Err(format!(

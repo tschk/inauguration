@@ -1130,7 +1130,8 @@ pub(crate) fn lower_struct_expr_into_slots(
                 pending_calls,
                 fn_name,
             )?;
-            let schema = native_struct_fields(ctx.structs, typ, fn_name)?;
+            let schema = crate::native_emit::struct_layout::scalar_fields(ctx.structs, typ)
+                .or_else(|_| native_struct_fields(ctx.structs, typ, fn_name))?;
             for (reg, (field, _)) in schema.iter().enumerate() {
                 let Some(&offset) = find_field_offset(fields, field) else {
                     return Err(format!(
@@ -1156,6 +1157,40 @@ pub(crate) fn lower_struct_expr_into_regs(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Ok(layout) = crate::native_emit::struct_layout::scalar_fields(ctx.structs, typ) {
+        // shortcut: scalar aggregate returns use eight GPRs; widen with an indirect ABI.
+        if layout.len() > 8 {
+            return Err(format!(
+                "native-lower: aggregate return exceeds eight scalar fields in `{fn_name}`"
+            ));
+        }
+        let base = ctx.acquire_call_arg_slots(fn_name, layout.len().max(1))?;
+        let fields: HashMap<_, _> = layout
+            .iter()
+            .enumerate()
+            .map(|(index, (field, _))| (field.clone(), ctx.call_arg_temps[base + index]))
+            .collect();
+        lower_struct_expr_into_slots(
+            emitter,
+            ctx,
+            expr,
+            typ,
+            &fields,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        for (reg, (field, _)) in layout.iter().enumerate() {
+            emitter.emit_u32(aarch64::ldr64(reg as u8, aarch64::REG_SP, fields[field]));
+        }
+        ctx.release_call_arg_temps();
+        return Ok(());
+    }
+    if crate::core_ir::tuples::fields(typ).is_some() {
+        return Err(format!(
+            "native-lower: tuple return needs a supported scalar-field layout in `{fn_name}`"
+        ));
+    }
     match expr {
         Expr::Unary { op, .. } if typ == "Vec" && op == "vector-clone" => {
             lower_expr::lower_expr_into(emitter, ctx, expr, 0, functions, pending_calls, fn_name)

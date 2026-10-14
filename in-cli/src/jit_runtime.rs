@@ -4404,6 +4404,66 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn tuple_constructor_does_not_shadow_user_functions() {
+        let source = "fn tuple-value(a: Int,b: Int)->Int {return a+b;}\nfn main()->Int {return tuple-value(20,22);}";
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            assert_eq!(invoke_module(&module, profile, &[]), Some(42));
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn typed_tuples_preserve_fields_calls_returns_and_order() {
+        for source in [
+            "fn main()->i64 { let pair=(20,22.0); pair.0+pair.1 as i64 }",
+            "fn main()->i64 { let pair=(42,true); if pair.1 {pair.0} else {0} }",
+            "fn make()->(i64,f64) { (20,22.0) } fn main()->i64 { let pair=make(); pair.0+pair.1 as i64 }",
+            "fn take(pair:(i64,f64))->i64 {pair.0+pair.1 as i64} fn main()->i64 {take((20,22.0))}",
+            "fn main()->i64 { let make=|| (20,22.0); let pair=make(); pair.0+pair.1 as i64 }",
+            "fn main()->i64 { let make=|| ->(i64,f64) {(20,22.0)}; let pair=make(); pair.0+pair.1 as i64 }",
+            "fn main()->i64 { let pair=(20,22.0); match pair {(a,b)=>{return a+b as i64;}} return 0; }",
+            "fn main()->i64 { let pair=(1,20.0,22); match pair {(..,a,b)=>{return a as i64+b;}} return 0; }",
+            "fn main()->i64 { let pair=(42,); pair.0 }",
+            "fn main()->i64 { let f=|x| (x,true); let pair=f(42); if pair.1 {pair.0} else {0} }",
+            "struct Inner { first:i64,answer:i64 } struct Outer { inner:Inner } fn main()->i64 { let outer=Outer{inner:Inner{first:7,answer:42}}; outer.inner.answer }",
+            "struct Inner { x:i64 } struct Outer { inner:Inner } fn main()->i64 { let mut source=Outer{inner:Inner{x:42}}; let copied=source; source=Outer{inner:Inner{x:0}}; copied.inner.x }",
+            "fn take(pair:((i64,i64),bool))->i64 {pair.0.0+pair.0.1} fn main()->i64 {take(((20,22),true))}",
+            "fn main()->i64 { let pair=(1,(20,22)); match pair {(_,(a,b))=>{return a+b;}} return 0; }",
+            "static mut CALLS:i64=0; fn next()->i64 {unsafe{CALLS+=1;CALLS}} fn make()->(i64,i64) {(next(),next())} fn main()->i64 {let pair=make(); unsafe{pair.0*10+pair.1+CALLS+28}}",
+            "fn main()->i64 { let pair=((20,22),true); pair.0.0+pair.0.1 }",
+            "fn make()->((i64,i64),bool) { ((20,22),true) } fn main()->i64 { let pair=make(); pair.0.0+pair.0.1 }",
+            "fn main()->i64 { let pair=(\"abc\",42); pair.1 }",
+            "fn main()->i64 { let pair=(20,22.0); let alias=pair; alias.0+alias.1 as i64 }",
+            "static mut CALLS:i64=0; fn next()->i64 {unsafe{CALLS+=1;CALLS}} fn main()->i64 { let pair=(next(),next()); unsafe {pair.0*10+pair.1+CALLS+28} }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{source}: {report:?}; {module:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn closure_parameters_infer_monomorphic_call_types() {
         for source in [
             "fn main()->i64 { let f=|x|x+2; f(40) }",

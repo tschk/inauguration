@@ -209,6 +209,7 @@ impl TypeChecker {
         promote_c_bool: bool,
         closures: Option<&HashMap<String, String>>,
     ) {
+        crate::core_ir::tuples::register(module);
         let mut facts = self.collect_facts(module);
         if let Some(closures) = closures {
             facts.closures = closures.clone();
@@ -266,6 +267,11 @@ impl TypeChecker {
                     _ => {}
                 }
             }
+        }
+        let old_len = module.decls.len();
+        crate::core_ir::tuples::register(module);
+        if module.decls.len() != old_len {
+            self.resolve_typed_operators(module, promote_c_bool, closures);
         }
     }
 
@@ -479,6 +485,24 @@ impl TypeChecker {
                 self.resolve_typed_expr(child, facts, env, promote_c_bool)
             });
         }
+        if let Expr::Call { callee, args } = expr
+            && matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::tuples::VALUE)
+            && !args.is_empty()
+            && let Some(types) = args
+                .iter()
+                .map(|arg| closure_inference::argument_type(self, arg, facts, env))
+                .collect::<Option<Vec<_>>>()
+            && let Typ::Named(name) = crate::core_ir::tuples::typ(&types)
+        {
+            *expr = Expr::StructInit {
+                name,
+                fields: std::mem::take(args)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, value)| (format!("_{i}"), value))
+                    .collect(),
+            };
+        }
         if let Expr::Call { callee, args } = expr {
             let captures = match callee.as_ref() {
                 Expr::Ident(local) => match env.get(local) {
@@ -585,7 +609,9 @@ impl TypeChecker {
             && let Some(target) = op.strip_prefix("numeric-cast-")
         {
             let integer = format!("int-cast-{target}");
-            match self.expr_type(value, facts, env).map(|typ| typ.canonical()) {
+            match closure_inference::argument_type(self, value, facts, env)
+                .map(|typ| typ.canonical())
+            {
                 Some(Typ::Int | Typ::Bool)
                     if crate::core_ir::integer_cast_spec(&integer).is_some() =>
                 {
@@ -1677,6 +1703,12 @@ impl TypeChecker {
                         .find(|(f, _)| f == name)
                         .map(|(_, t)| t.clone());
                 }
+                if let Some(Typ::Named(shape)) = self.expr_type(base, facts, env) {
+                    return crate::core_ir::tuples::fields(&shape)?
+                        .into_iter()
+                        .find(|(field, _)| field == name)
+                        .map(|(_, typ)| typ);
+                }
                 None
             }
             Expr::ArrayLit(items) => {
@@ -1732,8 +1764,15 @@ impl TypeChecker {
                 "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => Some(Typ::Bool),
                 _ => None,
             },
-            Expr::Call { callee, .. } => {
+            Expr::Call { callee, args } => {
                 if let Expr::Ident(name) = callee.as_ref() {
+                    if name == crate::core_ir::tuples::VALUE && !args.is_empty() {
+                        let types = args
+                            .iter()
+                            .map(|arg| closure_inference::argument_type(self, arg, facts, env))
+                            .collect::<Option<Vec<_>>>()?;
+                        return Some(crate::core_ir::tuples::typ(&types));
+                    }
                     if is_builtin_fn(name) {
                         Some(builtin_return_type(name))
                     } else {

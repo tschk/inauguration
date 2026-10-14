@@ -1,5 +1,7 @@
 //! Cross-frontend core AST (v0). Bodies may be empty until a frontend fills statements.
 
+pub(crate) mod tuples;
+
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashSet;

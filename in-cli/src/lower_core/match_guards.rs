@@ -13,7 +13,7 @@ pub(crate) fn prepared_native_module(module: &UnifiedModule) -> Cow<'_, UnifiedM
     lower_guarded_decls(&mut lowered.decls);
     let mut names = crate::core_bindings::module_names(&lowered.decls);
     reserve_members(&lowered.decls, &mut names);
-    if native_pattern_shapes_valid(&lowered.decls) {
+    if native_pattern_shapes_valid(&mut lowered.decls) {
         lower_members(&mut lowered.decls, &names, &mut 0, true);
     }
     super::lower_named_constants(&mut lowered.decls);
@@ -393,11 +393,11 @@ fn pattern_test(pattern: &MatchPattern, value: Expr) -> Option<(Expr, Vec<Stmt>)
 }
 
 // Direct backend callers also need shape proof before patterns become field/index reads.
-fn native_pattern_shapes_valid(decls: &[Decl]) -> bool {
+fn native_pattern_shapes_valid(decls: &mut [Decl]) -> bool {
     let checker = crate::typecheck::TypeChecker::new();
     let facts = checker.collect_decl_facts(decls);
     fn body_valid(
-        body: &[Stmt],
+        body: &mut [Stmt],
         env: &mut HashMap<String, Typ>,
         checker: &crate::typecheck::TypeChecker,
         facts: &crate::typecheck::Facts,
@@ -421,7 +421,11 @@ fn native_pattern_shapes_valid(decls: &[Decl]) -> bool {
                                 match pattern
                                     .typed_bindings(typ, &|name| facts.pattern_fields(name))
                                 {
-                                    Ok(bindings) => scope.extend(bindings),
+                                    Ok(bindings) => {
+                                        scope.extend(bindings);
+                                        arm.pattern =
+                                            pattern_source(&typed_pattern(&pattern, typ, facts));
+                                    }
                                     Err(_) if complex_pattern(&arm.pattern) => return false,
                                     Err(_) => {}
                                 }
@@ -429,7 +433,7 @@ fn native_pattern_shapes_valid(decls: &[Decl]) -> bool {
                                 return false;
                             }
                         }
-                        if !body_valid(&arm.body, &mut scope, checker, facts) {
+                        if !body_valid(&mut arm.body, &mut scope, checker, facts) {
                             return false;
                         }
                     }
@@ -464,7 +468,7 @@ fn native_pattern_shapes_valid(decls: &[Decl]) -> bool {
                         {
                             scope.extend(bindings);
                         }
-                        if !body_valid(&catch.body, &mut scope, checker, facts) {
+                        if !body_valid(&mut catch.body, &mut scope, checker, facts) {
                             return false;
                         }
                     }
@@ -481,7 +485,7 @@ fn native_pattern_shapes_valid(decls: &[Decl]) -> bool {
             _ => None,
         })
         .collect();
-    decls.iter().all(|decl| match decl {
+    decls.iter_mut().all(|decl| match decl {
         Decl::Function { params, body, .. } => {
             let mut env = globals.clone();
             env.extend(params.iter().cloned());
@@ -494,4 +498,121 @@ fn native_pattern_shapes_valid(decls: &[Decl]) -> bool {
         } if matches!(expr.as_ref(), Expr::Closure { .. }) => false,
         _ => true,
     })
+}
+
+fn pattern_source(pattern: &MatchPattern) -> String {
+    match pattern {
+        MatchPattern::IntPat(value) => value.to_string(),
+        MatchPattern::BoolPat(value) => value.to_string(),
+        MatchPattern::StringPat(value) => format!(
+            "\"{}\"",
+            value
+                .replace('\\', "\\\\")
+                .replace('\"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t")
+        ),
+        MatchPattern::IdentPat(name) => name.clone(),
+        MatchPattern::WildPat => "_".into(),
+        MatchPattern::RestPat => "..".into(),
+        MatchPattern::StructPat { name, fields } => format!(
+            "{name} {{ {} }}",
+            fields
+                .iter()
+                .map(|(name, pattern)| format!("{name}: {}", pattern_source(pattern)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        MatchPattern::TuplePat(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(pattern_source)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        MatchPattern::ArrayPat(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(pattern_source)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn typed_pattern(
+    pattern: &MatchPattern,
+    typ: &Typ,
+    facts: &crate::typecheck::Facts,
+) -> MatchPattern {
+    match (pattern, typ) {
+        (MatchPattern::TuplePat(items), Typ::Named(name)) => {
+            let Some(schema) = facts.pattern_fields(name) else {
+                return pattern.clone();
+            };
+            let rest = items
+                .iter()
+                .position(|item| matches!(item, MatchPattern::RestPat));
+            let fields = items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| !matches!(item, MatchPattern::RestPat))
+                .map(|(index, item)| {
+                    let index = if rest.is_some_and(|rest| index > rest) {
+                        schema.len() - (items.len() - index)
+                    } else {
+                        index
+                    };
+                    let field = format!("_{index}");
+                    let field_typ = &schema
+                        .iter()
+                        .find(|(name, _)| name == &field)
+                        .expect("validated tuple field")
+                        .1;
+                    (field, typed_pattern(item, field_typ, facts))
+                })
+                .collect();
+            MatchPattern::StructPat {
+                name: name.clone(),
+                fields,
+            }
+        }
+        (MatchPattern::StructPat { name, fields }, _) => {
+            let Some(schema) = facts.pattern_fields(name) else {
+                return pattern.clone();
+            };
+            MatchPattern::StructPat {
+                name: name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(field, item)| {
+                        let field_typ = &schema
+                            .iter()
+                            .find(|(name, _)| name == field)
+                            .expect("validated struct field")
+                            .1;
+                        (field.clone(), typed_pattern(item, field_typ, facts))
+                    })
+                    .collect(),
+            }
+        }
+        (
+            MatchPattern::ArrayPat(items) | MatchPattern::TuplePat(items),
+            Typ::Array(item) | Typ::Vector(item),
+        ) => {
+            let items = items
+                .iter()
+                .map(|pattern| typed_pattern(pattern, item, facts))
+                .collect();
+            if matches!(pattern, MatchPattern::ArrayPat(_)) {
+                MatchPattern::ArrayPat(items)
+            } else {
+                MatchPattern::TuplePat(items)
+            }
+        }
+        _ => pattern.clone(),
+    }
 }

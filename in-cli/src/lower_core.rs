@@ -1292,7 +1292,10 @@ fn collect_expr_reads(e: &Expr, reads: &mut HashSet<String>) {
             collect_expr_reads(index, reads);
         }
         Expr::Call { callee, args, .. } => {
-            collect_expr_reads(callee, reads);
+            if !matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::tuples::VALUE)
+            {
+                collect_expr_reads(callee, reads);
+            }
             for arg in args {
                 collect_expr_reads(arg, reads);
             }

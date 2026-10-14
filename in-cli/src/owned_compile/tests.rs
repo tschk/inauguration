@@ -1413,7 +1413,20 @@ fn native_matches_reject_unsupported_and_incompatible_patterns() {
 }
 
 #[test]
-fn nested_struct_patterns_refuse_unsupported_indexed_fields() {
+fn aarch64_aggregate_returns_refuse_register_overflow() {
+    let parsed = crate::compiler::rust_front::parse_rust_source("fn wide()->(i64,i64,i64,i64,i64,i64,i64,i64,i64) {(1,2,3,4,5,6,7,8,9)} fn main()->i64 {wide().0}").unwrap();
+    let mut module =
+        crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+    crate::lower_core::desugar_module(&mut module);
+    assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+    let error = crate::native_emit::lower::lower_module(&module, "wide", NativeLinkage::Executable)
+        .err()
+        .unwrap();
+    assert!(error.contains("exceeds eight scalar fields"), "{error}");
+}
+
+#[test]
+fn nested_struct_arrays_refuse_unsupported_layouts() {
     let parsed = crate::compiler::rust_front::parse_rust_source("struct Point {x:i64,y:i64} fn main()->i64 { let values=[Point{x:20,y:22}]; match values {[Point{x:20,y:22}]=>42,_=>0} }").unwrap();
     let mut module =
         crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
@@ -1424,7 +1437,13 @@ fn nested_struct_patterns_refuse_unsupported_indexed_fields() {
             .map(|_| ()),
         crate::native_emit::x86_64_lower::lower_module(&module, "main").map(|_| ()),
     ] {
-        assert!(result.unwrap_err().contains("unsupported field base"));
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("unsupported field base")
+                || error.contains("incomplete struct initializer")
+                || error.contains("missing struct initializer layout"),
+            "{error}"
+        );
     }
 }
 

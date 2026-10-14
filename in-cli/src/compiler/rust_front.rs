@@ -1276,7 +1276,9 @@ fn map_type(ty: &syn::Type) -> Typ {
         }
         syn::Type::Reference(r) => map_type(&r.elem),
         syn::Type::Array(array) => Typ::Array(Box::new(map_type(&array.elem))),
-        syn::Type::Tuple(t) if t.elems.is_empty() => Typ::Void,
+        syn::Type::Tuple(t) => {
+            crate::core_ir::tuples::typ(&t.elems.iter().map(map_type).collect::<Vec<_>>())
+        }
         _ => Typ::Named(ty.to_token_stream().to_string()),
     }
 }
@@ -2212,12 +2214,14 @@ fn lower_expr_with_types_inner(
                     .collect(),
             }
         }
-        syn::Expr::Tuple(t) => Expr::ArrayLit(
-            t.elems
+        syn::Expr::Tuple(t) => Expr::Call {
+            callee: Box::new(Expr::Ident(crate::core_ir::tuples::VALUE.into())),
+            args: t
+                .elems
                 .iter()
                 .map(|e| lower_expr_with_types(e, local_types))
                 .collect(),
-        ),
+        },
         // shortcut: refuse value-position unsafe blocks until their statements can be spilled.
         syn::Expr::Unsafe(_) => Expr::Call {
             callee: Box::new(Expr::Ident("__unsupported_rust_unsafe_value".into())),
@@ -2774,6 +2778,23 @@ fn main() {
             !src.contains("Ident(\"collect\")"),
             "collect should not remain a call: {src}"
         );
+    }
+
+    #[test]
+    fn typed_tuples_do_not_guess_unknown_elements_or_erase_shape_mismatches() {
+        for source in [
+            "fn main()->i64 {let pair=(missing(),true);42}",
+            "fn pair()->(i64,bool) {(42,7)} fn main()->i64 {pair().0}",
+        ] {
+            let parsed = parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}: {module:?}"
+            );
+        }
     }
 
     #[test]

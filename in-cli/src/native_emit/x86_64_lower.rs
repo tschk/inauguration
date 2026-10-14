@@ -317,6 +317,9 @@ impl<'a> LowerCtx<'a> {
                 }
                 // Frame offsets grow downward; reverse allocation keeps declared
                 // fields in increasing memory order from the struct address.
+                let fields =
+                    crate::native_emit::struct_layout::scalar_fields(self.structs, &struct_name)
+                        .unwrap_or(fields);
                 for (field, _field_ty) in fields.into_iter().rev() {
                     // ponytail: all struct fields map to scalar slots
                     slots.insert(field.clone(), self.alloc_slot());
@@ -1068,12 +1071,8 @@ fn lower_function(
                     unreachable!()
                 };
                 if x86_64::is_32bit()
-                    || ctx.structs[&struct_name].iter().any(|(_, typ)| {
-                        !matches!(
-                            typ.canonical(),
-                            Typ::Int | Typ::Bool | Typ::Float | Typ::String
-                        )
-                    })
+                    || crate::native_emit::struct_layout::scalar_fields(ctx.structs, &struct_name)
+                        .is_err()
                 {
                     return Err("x86_64-lower: struct parameter needs a supported scalar-field 64-bit layout".into());
                 }
@@ -1274,18 +1273,15 @@ fn lower_stmt(
                 if let Typ::Named(name) = &ret_typ
                     && ctx.structs.contains_key(name)
                 {
-                    if ctx.structs[name].iter().any(|(_, typ)| {
-                        !matches!(
-                            typ.canonical(),
-                            Typ::Int | Typ::Bool | Typ::Float | Typ::String
-                        )
-                    }) {
+                    if crate::native_emit::struct_layout::scalar_fields(ctx.structs, name).is_err()
+                    {
                         return Err(
                             "x86_64-lower: struct return needs a supported scalar-field layout"
                                 .into(),
                         );
                     }
-                    let schema = ctx.structs[name].clone();
+                    let schema =
+                        crate::native_emit::struct_layout::scalar_fields(ctx.structs, name)?;
                     let fields: HashMap<_, _> = schema
                         .iter()
                         .rev()
@@ -1336,15 +1332,7 @@ fn lower_stmt(
                     let resolved = typ.clone().unwrap_or_else(|| Typ::Named(ty_name.clone()));
                     ctx.alloc_local(name, &resolved)?;
                 }
-                if let Some(StackSlot::Struct { fields: field_map }) = ctx.locals.get(name).cloned()
-                {
-                    for (field_name, value) in fields {
-                        if let Some(&off) = field_map.get(field_name) {
-                            lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
-                            emitter.emit_insns(&x86_64::str64(RAX, off as u16));
-                        }
-                    }
-                }
+                lower_struct_init(emitter, ctx, name, fields, pending_calls)?;
                 return Ok(());
             }
             if !ctx.locals.contains_key(name) {
@@ -2172,6 +2160,16 @@ fn lower_ident_ref(
         && matches!(ctx.scalar_types.get(name).map(Typ::canonical), Some(Typ::Named(ref typ)) if ctx.structs.contains_key(typ))
         && let Some(&offset) = ctx.globals.get(name)
     {
+        if let Some(Typ::Named(typ)) = ctx.scalar_types.get(name).map(Typ::canonical)
+            && ctx.structs[&typ].iter().any(|(_, typ)| {
+                !matches!(
+                    typ.canonical(),
+                    Typ::Int | Typ::Bool | Typ::Float | Typ::String
+                )
+            })
+        {
+            return Err("x86_64-lower: nested global struct layout is unsupported".into());
+        }
         let site = emitter.len() + if x86_64::is_32bit() { 1 } else { 2 };
         emitter.emit_insns(&x86_64::mov_ri64(target_reg, 0));
         ctx.pending_globals.push(PendingGlobal {
@@ -3094,12 +3092,7 @@ fn lower_call_argument(
 ) -> Result<(), String> {
     if let Expr::StructInit { name, fields } = arg {
         if !ctx.structs.contains_key(name)
-            || ctx.structs[name].iter().any(|(_, typ)| {
-                !matches!(
-                    typ.canonical(),
-                    Typ::Int | Typ::Bool | Typ::Float | Typ::String
-                )
-            })
+            || crate::native_emit::struct_layout::scalar_fields(ctx.structs, name).is_err()
         {
             return Err("x86_64-lower: struct argument needs a known scalar-field layout".into());
         }
@@ -3152,20 +3145,16 @@ fn lower_call_args(
         if let Some((param_name, typ)) = params.as_ref().and_then(|params| params.get(index))
             && param_name != "self"
             && let Typ::Named(name) = typ.canonical()
-            && let Some(schema) = ctx.structs.get(&name).cloned()
+            && ctx.structs.contains_key(&name)
         {
             if x86_64::is_32bit()
-                || schema.iter().any(|(_, typ)| {
-                    !matches!(
-                        typ.canonical(),
-                        Typ::Int | Typ::Bool | Typ::Float | Typ::String
-                    )
-                })
+                || crate::native_emit::struct_layout::scalar_fields(ctx.structs, &name).is_err()
             {
                 return Err(
                     "x86_64-lower: struct argument needs a scalar-field 64-bit layout".into(),
                 );
             }
+            let schema = crate::native_emit::struct_layout::scalar_fields(ctx.structs, &name)?;
             let fields: HashMap<_, _> = schema
                 .iter()
                 .rev()
@@ -3362,14 +3351,7 @@ fn store_struct_value(
     let Some(Typ::Named(name)) = scalar_expr_type(expr, ctx) else {
         return Err("x86_64-lower: struct value needs a known scalar-field layout".into());
     };
-    if !ctx.structs.get(&name).is_some_and(|schema| {
-        schema.iter().all(|(_, typ)| {
-            matches!(
-                typ.canonical(),
-                Typ::Int | Typ::Bool | Typ::Float | Typ::String
-            )
-        })
-    }) {
+    if crate::native_emit::struct_layout::scalar_fields(ctx.structs, &name).is_err() {
         return Err("x86_64-lower: struct value needs a known scalar-field layout".into());
     }
     match expr {
@@ -3420,32 +3402,45 @@ fn lower_struct_init(
     fields: &[(String, Expr)],
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
-    let field_offsets: Vec<(String, u32)> = match ctx.locals.get(name) {
-        Some(StackSlot::Struct { fields: field_map }) => fields
-            .iter()
-            .filter_map(|(fn_, _)| {
-                if let Some(&off) = field_map.get(fn_.as_str()) {
-                    Some((fn_.clone(), off))
-                } else {
-                    let prefix = format!("{fn_}.");
-                    field_map.iter().find_map(|(k, &v)| {
-                        if k.starts_with(&prefix) {
-                            Some((fn_.clone(), v))
-                        } else {
-                            None
-                        }
-                    })
-                }
-            })
-            .collect(),
-        _ => Vec::new(),
+    let Some(StackSlot::Struct { fields: slots }) = ctx.locals.get(name).cloned() else {
+        return Err("x86_64-lower: missing struct initializer layout".into());
     };
-    for (field_name, field_offset) in &field_offsets {
-        if let Some((_, value)) = fields.iter().find(|(fn_, _)| fn_ == field_name) {
-            lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
-            emitter.emit_insns(&x86_64::str64(RAX, *field_offset as u16));
+    fn store(
+        emitter: &mut CodeEmitter,
+        ctx: &mut LowerCtx<'_>,
+        values: &[(String, Expr)],
+        prefix: &str,
+        slots: &HashMap<String, u32>,
+        pending_calls: &mut Vec<PendingCall>,
+    ) -> Result<(), String> {
+        for (field, value) in values {
+            let field = if prefix.is_empty() {
+                field.clone()
+            } else {
+                format!("{prefix}.{field}")
+            };
+            if let Expr::StructInit { fields, .. } = value {
+                store(emitter, ctx, fields, &field, slots, pending_calls)?;
+            } else if let Some(&slot) = slots.get(&field) {
+                lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::str64(RAX, slot as u16));
+            } else {
+                let nested: HashMap<_, _> = slots
+                    .iter()
+                    .filter_map(|(name, &slot)| {
+                        name.strip_prefix(&format!("{field}."))
+                            .map(|name| (name.to_string(), slot))
+                    })
+                    .collect();
+                if nested.is_empty() {
+                    return Err(format!("x86_64-lower: missing struct field `{field}`"));
+                }
+                store_struct_value(emitter, ctx, value, &nested, pending_calls)?;
+            }
         }
+        Ok(())
     }
+    store(emitter, ctx, fields, "", &slots, pending_calls)?;
     Ok(())
 }
 
@@ -4671,10 +4666,7 @@ mod profile_smoke_tests {
 
 #[cfg(test)]
 #[test]
-fn refuses_struct_copies_with_non_scalar_fields() {
-    let module = crate::in_lang_parse::parse_in_source("struct Inner { Int x }\nstruct Outer { Inner inner }\nfn main() -> Int { var source: Outer = Outer { inner: Inner { x: 42 } }; var copied: Outer = source; return 42; }").unwrap();
-    match lower_module(&module, "main") {
-        Err(error) => assert!(error.contains("scalar-field layout"), "{error}"),
-        Ok(_) => panic!("non-scalar struct copy accepted"),
-    }
+fn lowers_nested_scalar_struct_copies() {
+    let module = crate::in_lang_parse::parse_in_source("struct Inner { Int x }\nstruct Outer { Inner inner }\nfn main() -> Int { var source: Outer = Outer { inner: Inner { x: 42 } }; var copied: Outer = source; return copied.inner.x; }").unwrap();
+    lower_module(&module, "main").expect("nested scalar struct copy");
 }
