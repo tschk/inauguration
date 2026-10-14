@@ -2626,6 +2626,91 @@ fn lower_builtin_call(
     args: &[Expr],
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<bool, String> {
+    if crate::core_atomic::signature(target_name).is_some()
+        && ctx.functions.contains_key(target_name)
+    {
+        return Err("canonical atomic intrinsic name is redeclared".into());
+    }
+    if !ctx.functions.contains_key(target_name) {
+        if let Some(order) = crate::core_atomic::ordering(&Expr::Call {
+            callee: Box::new(Expr::Ident(target_name.into())),
+            args: args.to_vec(),
+        }) {
+            emitter.emit_insns(&x86_64::load_i64(target_reg, order));
+            return Ok(true);
+        }
+        if let Some((kind, op)) = crate::core_atomic::operation(target_name) {
+            if ctx.structs.contains_key(kind.type_name()) {
+                return Err(
+                    "atomic intrinsics cannot operate on a user-defined struct layout".into(),
+                );
+            }
+            if op == "new" || x86_64::is_32bit() {
+                return Err(
+                    "x86_64-lower: atomics require static cells and a 64-bit target".into(),
+                );
+            }
+            let expected = if op == "load" { 2 } else { 3 };
+            if args.len() != expected {
+                return Err("x86_64-lower: invalid atomic argument count".into());
+            }
+            if let Expr::Call { callee, .. } = args.last().unwrap() {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    if ctx.functions.contains_key(name) {
+                        return Err(
+                            "atomic ordering constant is shadowed by a declared function".into(),
+                        );
+                    }
+                }
+            }
+            crate::core_atomic::check_order(op, args.last().unwrap())?;
+            let Expr::Ident(name) = &args[0] else {
+                return Err("x86_64-lower: atomic receiver must be a static cell".into());
+            };
+            if ctx.locals.contains_key(name) || ctx.scalar_types.get(name) != Some(&kind.typ()) {
+                return Err("x86_64-lower: atomic receiver must be a matching static cell".into());
+            }
+            let offset = *ctx
+                .globals
+                .get(name)
+                .ok_or("x86_64-lower: atomic receiver has no static storage")?;
+            if op != "load" {
+                lower_expr_into(emitter, ctx, &args[1], RAX, pending_calls)?;
+            }
+            let site = emitter.len() + 2;
+            emitter.emit_insns(&x86_64::mov_ri64(RDI, 0));
+            ctx.pending_globals.push(PendingGlobal {
+                site,
+                width: 8,
+                offset,
+            });
+            match op {
+                "load" => emitter.emit_insns(if kind.wide() {
+                    &[0x48, 0x8b, 0x07]
+                } else {
+                    &[0x8b, 0x07]
+                }),
+                "store" => {
+                    emitter.emit_insns(if kind.wide() {
+                        &[0x48, 0x87, 0x07]
+                    } else {
+                        &[0x87, 0x07]
+                    });
+                    emitter.emit_insns(&x86_64::load_i64(RAX, 0));
+                }
+                "fetch_add" => emitter.emit_insns(if kind.wide() {
+                    &[0xf0, 0x48, 0x0f, 0xc1, 0x07]
+                } else {
+                    &[0xf0, 0x0f, 0xc1, 0x07]
+                }),
+                _ => unreachable!(),
+            }
+            if target_reg != RAX {
+                emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+            }
+            return Ok(true);
+        }
+    }
     match target_name {
         "str-len" | "str_len" | "__inrt_str_len" if args.len() == 1 => {
             if x86_64::is_32bit() {

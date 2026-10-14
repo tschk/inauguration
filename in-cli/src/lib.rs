@@ -38,6 +38,7 @@ pub mod compile_cache;
 pub mod compile_error;
 pub mod compiler;
 pub mod config;
+pub(crate) mod core_atomic;
 mod core_bindings;
 mod core_effects;
 pub mod core_ir;

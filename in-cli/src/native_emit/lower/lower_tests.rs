@@ -1707,6 +1707,20 @@ fn main() -> Int {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
+fn native_atomic_static_cell_executable_uses_real_operations() {
+    let parsed=crate::compiler::rust_front::parse_rust_source("use std::sync::atomic::{AtomicU32,Ordering}; static VALUE:AtomicU32=AtomicU32::new(1); fn main()->i64 {VALUE.fetch_add(41,Ordering::Relaxed);return VALUE.load(Ordering::SeqCst);}").unwrap();
+    let mut module =
+        crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+    crate::lower_core::desugar_module(&mut module);
+    let path = temp_executable("atomic-static-cell-exe");
+    compile_native_executable(&module, "main", &path).unwrap();
+    let output = run_native_exe(&path);
+    assert_eq!(output.status.code(), Some(42), "{output:?}");
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
 fn nested_static_array_executable_preserves_rows_and_neighbors() {
     let module = crate::in_lang_parse::parse_in_source("var before: Int = 7;\nvar items: [[Int]] = [[],[0,22]];\nvar after: Int = 9;\nfn sum(row: [Int]) -> Int { return row[0]+row[1]; }\nfn main() -> Int { items[1][0]=20; return sum(items[1])+array_len(items[0])+before - after+2; }").unwrap();
     let path = temp_executable("nested-static-array-exe");

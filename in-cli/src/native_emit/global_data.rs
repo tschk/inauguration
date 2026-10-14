@@ -130,6 +130,48 @@ pub(crate) fn build_data_section(
                 append_array(&mut data, &elem, init.as_deref(), name)?;
                 continue;
             }
+            if let Some(kind) = crate::core_atomic::Kind::from_type(typ)
+                && !module
+                    .decls
+                    .iter()
+                    .any(|decl| matches!(decl,Decl::Struct{name,..} if name==kind.type_name()))
+            {
+                if module.decls.iter().any(
+                    |decl| matches!(decl,Decl::Function{name,..} if name==&kind.intrinsic("new")),
+                ) {
+                    return Err(format!(
+                        "unsupported native initializer for global `{name}`; atomic constructor is shadowed"
+                    ));
+                }
+                let value = match init.as_deref() {
+                    Some(Expr::Call { callee, args })
+                        if matches!(callee.as_ref(),Expr::Ident(name) if name == &kind.intrinsic("new"))
+                            && args.len() == 1 =>
+                    {
+                        match args[0] {
+                            Expr::IntLit(value) => value,
+                            _ => {
+                                return Err(format!(
+                                    "unsupported native initializer for global `{name}`; atomic value must be a constant integer"
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "unsupported native initializer for global `{name}`; expected an atomic constructor"
+                        ));
+                    }
+                };
+                if !kind.wide() && !(0..=u32::MAX as i64).contains(&value) {
+                    return Err(format!(
+                        "unsupported native initializer for global `{name}`; atomic u32 value is out of range"
+                    ));
+                }
+                data.resize(offset as usize, 0);
+                data.extend_from_slice(&value.to_le_bytes());
+                continue;
+            }
             let val: i64 = match init.as_deref() {
                 Some(Expr::IntLit(v)) => *v,
                 Some(Expr::BoolLit(b)) => *b as i64,

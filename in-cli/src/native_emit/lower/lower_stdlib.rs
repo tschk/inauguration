@@ -907,6 +907,90 @@ pub(crate) fn lower_stdlib_call(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<bool, String> {
+    if crate::core_atomic::signature(target).is_some() && functions.contains_key(target) {
+        return Err("canonical atomic intrinsic name is redeclared".into());
+    }
+    if !functions.contains_key(target) {
+        if let Some(order) = crate::core_atomic::ordering(&Expr::Call {
+            callee: Box::new(Expr::Ident(target.into())),
+            args: args.to_vec(),
+        }) {
+            emitter.emit_insns(&aarch64::load_i64(rd, order));
+            return Ok(true);
+        }
+        if let Some((kind, op)) = crate::core_atomic::operation(target) {
+            if ctx.structs.contains_key(kind.type_name()) {
+                return Err(
+                    "atomic intrinsics cannot operate on a user-defined struct layout".into(),
+                );
+            }
+            if op == "new" {
+                return Err(
+                    "native-lower: atomic constructors currently require static storage".into(),
+                );
+            }
+            let expected = if op == "load" { 2 } else { 3 };
+            if args.len() != expected {
+                return Err("native-lower: invalid atomic argument count".into());
+            }
+            if let Expr::Call { callee, .. } = args.last().unwrap() {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    if functions.contains_key(name) {
+                        return Err(
+                            "atomic ordering constant is shadowed by a declared function".into(),
+                        );
+                    }
+                }
+            }
+            crate::core_atomic::check_order(op, args.last().unwrap())?;
+            let Expr::Ident(name) = &args[0] else {
+                return Err("native-lower: atomic receiver must be a static cell".into());
+            };
+            if ctx.locals.contains_key(name) || ctx.global_types.get(name) != Some(&kind.typ()) {
+                return Err(
+                    "native-lower: atomic receiver must be a static cell of the matching type"
+                        .into(),
+                );
+            }
+            let offset = *ctx
+                .globals
+                .get(name)
+                .ok_or("native-lower: atomic receiver has no static storage")?;
+            if op != "load" {
+                lower_expr_into(
+                    emitter,
+                    ctx,
+                    &args[1],
+                    10,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )?;
+            }
+            ctx.emit_global_address(emitter, 9, offset);
+            // Use the standard SeqCst instruction mapping for every validated ordering.
+            let wide = if kind.wide() { 0x40000000 } else { 0 };
+            match op {
+                "load" => emitter.emit_u32(0x88dffd20 | wide), // ldar w0/x0, [x9]
+                "store" => {
+                    emitter.emit_u32(0x889ffd2a | wide); // stlr w10/x10, [x9]
+                    emitter.emit_insns(&aarch64::load_i64(0, 0));
+                }
+                "fetch_add" => {
+                    let start = emitter.len();
+                    emitter.emit_u32(0x885ffd20 | wide); // ldaxr w0/x0, [x9]
+                    emitter.emit_u32(if kind.wide() { 0x8b0a000c } else { 0x0b0a000c });
+                    emitter.emit_u32(0x880bfd2c | wide); // stlxr w11, w12/x12, [x9]
+                    emitter.emit_u32(aarch64::cbnz_w(11, start as i32 - emitter.len() as i32));
+                }
+                _ => unreachable!(),
+            }
+            if rd != 0 {
+                emitter.emit_u32(aarch64::mov_reg64(rd, 0));
+            }
+            return Ok(true);
+        }
+    }
     let mutation = matches!(
         target.rsplit("::").next().unwrap_or(target),
         "push"

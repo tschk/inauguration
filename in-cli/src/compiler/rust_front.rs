@@ -243,6 +243,9 @@ fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
     }
 }
 
+#[path = "rust_front/atomics.rs"]
+mod atomics;
+
 fn lower_file_items_at_visited(
     file: &syn::File,
     base_dir: &Path,
@@ -475,6 +478,7 @@ fn lower_file_items_at_visited(
     if decls.is_empty() {
         return Err("rust front parsed file but found no top-level structs/functions".to_string());
     }
+    atomics::normalize(&mut decls, file);
     Ok(UnifiedModule::new(decls))
 }
 
@@ -1204,6 +1208,14 @@ fn map_type(ty: &syn::Type) -> Typ {
                 Some("String" | "str") => Typ::String,
                 Some("bool") => Typ::Bool,
                 Some("f64") => Typ::Float,
+                Some("AtomicU32" | "AtomicU64" | "AtomicUsize" | "Ordering") => Typ::Named(
+                    tp.path
+                        .segments
+                        .iter()
+                        .map(|segment| segment.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::"),
+                ),
                 Some("Result") => last_segment
                     .and_then(|segment| match &segment.arguments {
                         syn::PathArguments::AngleBracketed(arguments) => {
@@ -2026,6 +2038,14 @@ fn lower_expr_with_types_inner(
             args.extend(m.args.iter().map(|a| lower_expr_with_types(a, local_types)));
             // ponytail: qualify method name with receiver type when known
             let method = m.method.to_string();
+            if matches!(method.as_str(), "load" | "store" | "fetch_add")
+                && !matches!(args.first(),Some(Expr::Ident(name)) if local_types.contains_key(name))
+            {
+                return Expr::Call {
+                    callee: Box::new(Expr::Ident(format!("__method__{method}"))),
+                    args,
+                };
+            }
             // Iterator adapters: `.iter()` / `.cloned()` / `.copied()` are identity
             // in the owned subset. `.collect()` yields the receiver.
             if matches!(

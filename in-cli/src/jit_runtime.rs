@@ -4272,6 +4272,149 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn standard_atomic_static_cells_execute_real_load_store_and_add() {
+        for source in [
+            "use std::sync::atomic::{AtomicU32,Ordering}; static VALUE:AtomicU32=AtomicU32::new(1); fn main()->i64 { let old=VALUE.fetch_add(41,Ordering::Relaxed); return old+VALUE.load(Ordering::SeqCst)-1; }",
+            "use std::sync::atomic::{AtomicU64,Ordering}; static VALUE:AtomicU64=AtomicU64::new(0); fn main()->i64 { VALUE.store(42,Ordering::Release); return VALUE.load(Ordering::Acquire); }",
+            "use std::sync::atomic::{AtomicUsize as Word,Ordering::SeqCst}; static VALUE:Word=Word::new(20); fn main()->i64 { return VALUE.fetch_add(22,SeqCst)+VALUE.load(SeqCst)-20; }",
+            "use std::sync::atomic::{AtomicU32,Ordering}; static VALUE:AtomicU32=AtomicU32::new(4294967295); fn main()->i64 { let old=VALUE.fetch_add(1,Ordering::SeqCst); if old==4294967295 && VALUE.load(Ordering::Relaxed)==0 {return 42;} return 0; }",
+            "use std::sync::atomic as atom; static VALUE:atom::AtomicU32=atom::AtomicU32::new(20); fn main()->i64 {return atom::AtomicU32::fetch_add(&VALUE,22,atom::Ordering::SeqCst)+VALUE.load(atom::Ordering::Relaxed)-20;}",
+            "struct Bucket { value:i64 } impl Bucket {fn load(&self)->i64{return self.value;}} fn main()->i64{let bucket=Bucket{value:42};return bucket.load();}",
+            "use std::sync::atomic::Ordering::*; static VALUE:std::sync::atomic::AtomicU32=std::sync::atomic::AtomicU32::new(20); fn main()->i64{return VALUE.fetch_add(22,SeqCst)+VALUE.load(Relaxed)-20;}",
+            "use std::sync::atomic::{self,Ordering}; static VALUE:atomic::AtomicU32=atomic::AtomicU32::new(20); fn main()->i64{return VALUE.fetch_add(22,Ordering::SeqCst)+VALUE.load(Ordering::Relaxed)-20;}",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{source}: {verified:?}: {module:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(invoke_module(&module, profile, &[]), Some(42), "{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn atomic_invalid_orders_and_unproven_receivers_are_refused() {
+        for body in [
+            "return VALUE.load(Ordering::Release);",
+            "VALUE.store(42,Ordering::Acquire); return 42;",
+            "let alias=&VALUE; return alias.load(Ordering::Relaxed);",
+        ] {
+            let parsed=crate::compiler::rust_front::parse_rust_source(&format!("use std::sync::atomic::{{AtomicU32,Ordering}}; static VALUE:AtomicU32=AtomicU32::new(1); fn main()->i64 {{{body}}}")).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            assert!(
+                crate::native_emit::lower::lower_module(
+                    &module,
+                    "main",
+                    crate::native_emit::NativeLinkage::Executable
+                )
+                .is_err(),
+                "{body}"
+            );
+            assert!(
+                crate::native_emit::x86_64_lower::lower_module(&module, "main").is_err(),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn atomic_fetch_add_has_no_lost_updates_under_contention() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU32, Ordering},
+        };
+        let parsed=crate::compiler::rust_front::parse_rust_source("use std::sync::atomic::{AtomicU32,Ordering}; static VALUE:AtomicU32=AtomicU32::new(0); fn main()->i64 {return VALUE.fetch_add(1,Ordering::SeqCst);}").unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        crate::lower_core::desugar_module(&mut module);
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let _profile = crate::native_emit::antidecomp::ProfileGuard::new(profile);
+            #[cfg(target_arch = "aarch64")]
+            let lowered = crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable,
+            )
+            .unwrap();
+            #[cfg(target_arch = "x86_64")]
+            let lowered = crate::native_emit::x86_64_lower::lower_module(&module, "main").unwrap();
+            let cell = Arc::new(AtomicU32::new(0));
+            let address = cell.as_ptr() as u64;
+            let mut code = lowered.code.clone();
+            for &(site, offset) in &lowered.global_relocs {
+                assert_eq!(offset, 0);
+                code[site as usize..site as usize + 8].copy_from_slice(&address.to_le_bytes());
+            }
+            #[cfg(target_arch = "aarch64")]
+            let offsets = lowered
+                .function_offsets
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect::<Vec<_>>();
+            #[cfg(target_arch = "x86_64")]
+            let offsets = lowered
+                .exports
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect::<Vec<_>>();
+            #[cfg(target_arch = "aarch64")]
+            let relocations = lowered.relocations;
+            #[cfg(target_arch = "x86_64")]
+            let relocations = lowered
+                .relocations
+                .iter()
+                .filter(|site| {
+                    !lowered
+                        .global_relocs
+                        .iter()
+                        .any(|(global, _)| global == *site)
+                })
+                .map(|site| (*site, lowered.codegen_base))
+                .collect::<Vec<_>>();
+            let workers = (0..4)
+                .map(|_| {
+                    let cell = cell.clone();
+                    let code = code.clone();
+                    let offsets = offsets.clone();
+                    let relocations = relocations.clone();
+                    std::thread::spawn(move || {
+                        let mut rt = JitRuntime::new();
+                        rt.load(&code, &offsets, &relocations).unwrap();
+                        let mut sum = 0;
+                        for _ in 0..1000 {
+                            sum += unsafe { rt.invoke("main", &[]).unwrap() };
+                        }
+                        drop(rt);
+                        drop(cell);
+                        sum
+                    })
+                })
+                .collect::<Vec<_>>();
+            let sum = workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .sum::<i64>();
+            assert_eq!(cell.load(Ordering::SeqCst), 4000);
+            assert_eq!(sum, 3999 * 4000 / 2);
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn reference_return_checked_failure_does_not_escape_as_a_pointer() {
         if std::env::var_os("IN_ARRAY_RETURN_BOUNDS_CHILD").is_some() {
             for (body, consumer) in [

@@ -252,6 +252,28 @@ impl TypeChecker {
                 self.resolve_typed_expr(child, facts, env, promote_c_bool)
             });
         }
+        if let Expr::Call { callee, args } = expr {
+            if let Expr::Ident(name) = callee.as_ref() {
+                if let Some(op) = name
+                    .strip_prefix("__method__")
+                    .filter(|op| matches!(*op, "load" | "store" | "fetch_add"))
+                {
+                    if let Some(kind) = args
+                        .first()
+                        .and_then(|arg| self.expr_type(arg, facts, env))
+                        .as_ref()
+                        .filter(|typ| !matches!(typ, Typ::Named(name) if facts.structs.contains_key(name)))
+                        .and_then(crate::core_atomic::Kind::from_type)
+                    {
+                        *callee = Box::new(Expr::Ident(kind.intrinsic(op)));
+                    } else if let Some(Typ::Named(owner))=args.first().and_then(|arg|self.expr_type(arg,facts,env)) {
+                        for candidate in [format!("{owner}::{op}"),format!("{owner}_{op}")] {
+                            if facts.functions.contains_key(&candidate) {*callee=Box::new(Expr::Ident(candidate));break;}
+                        }
+                    }
+                }
+            }
+        }
         if let Expr::Call { callee, args } = expr
             && let Expr::Ident(name) = callee.as_mut()
             && let Some(short) = name
@@ -1551,6 +1573,9 @@ fn is_compatible(expected: &Typ, actual: &Typ) -> bool {
 }
 
 fn is_builtin_fn(name: &str) -> bool {
+    if crate::core_atomic::signature(name).is_some() {
+        return true;
+    }
     matches!(
         name,
         "print"
@@ -1588,6 +1613,9 @@ fn is_builtin_fn(name: &str) -> bool {
 }
 
 fn builtin_return_type(name: &str) -> Typ {
+    if let Some(sig) = crate::core_atomic::signature(name) {
+        return sig.ret.clone();
+    }
     match name {
         "len" | "str-len" | "array-len" | "array_len" | "bool-to-int" | "to-int" | "str-to-int"
         | "str-index-of" | "str-table-get-int" | "inb" | "inl" | "load8" | "load16" | "load32"

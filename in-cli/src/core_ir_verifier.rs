@@ -248,6 +248,9 @@ pub fn is_intrinsic(name: &str) -> bool {
 /// lowering emits directly (`__inrt_str_eq` and friends): the lowering accepts
 /// those by name, so verification has to accept them too.
 fn intrinsic_ret(name: &str) -> Option<IntrinsicRet> {
+    if crate::core_atomic::signature(name).is_some() {
+        return Some(IntrinsicRet::Int);
+    }
     let public_name = name.replace('_', "-");
     if let Some((_, ret)) = INTRINSICS
         .iter()
@@ -275,6 +278,9 @@ fn function_sig<'a>(facts: &ModuleFacts<'a>, name: &str) -> Option<FunctionSig<'
 }
 
 pub(crate) fn intrinsic_return_type(name: &str) -> Option<&'static Typ> {
+    if let Some(sig) = crate::core_atomic::signature(name) {
+        return Some(&sig.ret);
+    }
     static VOID_RET: Typ = Typ::Void;
     static INT_RET: Typ = Typ::Int;
     static STRING_RET: Typ = Typ::String;
@@ -291,6 +297,9 @@ pub(crate) fn intrinsic_return_type(name: &str) -> Option<&'static Typ> {
 }
 
 fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
+    if let Some(sig) = crate::core_atomic::signature(name) {
+        return Some(&sig.params);
+    }
     let name = name
         .strip_prefix("__inrt_")
         .unwrap_or(name)
@@ -314,6 +323,7 @@ fn add_intrinsics<'a>(functions: &mut HashMap<&'a str, FunctionSig<'a>>) {
         .iter()
         .map(|(name, _)| *name)
         .chain(crate::inrt::INRT_BUILTINS.iter().copied())
+        .chain(crate::core_atomic::names())
     {
         if let Some(ret) = intrinsic_return_type(name) {
             functions.insert(name, FunctionSig { params: &[], ret });
