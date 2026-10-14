@@ -386,12 +386,14 @@ fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: 
         .filter(|(n, d)| {
             matches!(
                 d,
-                Decl::Function { body, .. }
+                Decl::Function { body, ret, .. }
                     // An empty body is an extern binding (asm/zig/rust), not a
                     // function to inline: "inlining" it would delete the call
                     // to the external symbol, silently dropping MMIO writes,
                     // context switches, and other side effects.
                     if !body.is_empty()
+                        // Substitution loses the vector return type and its storage ABI.
+                        && !matches!(ret, Typ::Vector(_))
                         && body.len() <= threshold
                         && !ptr_refs.contains(n)
                         && !has_cf(body)

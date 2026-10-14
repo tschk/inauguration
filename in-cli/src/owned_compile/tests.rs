@@ -87,6 +87,32 @@ fn owned_compile_rejects_unknown_field_write_before_execution() {
 }
 
 #[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn rust_jit_preserves_vector_return_storage_after_optimization() {
+    let path = temp_path("vector-return-storage.rs");
+    fs::write(&path, "fn values()->Vec<i64>{vec![20,22]} fn main()->i64{let mut items=values();items.push(0);items[0]+items[1]}").unwrap();
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(report.success, "{profile:?}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(42)),
+            "{profile:?}: {report:?}"
+        );
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 #[cfg(all(unix, target_arch = "aarch64"))]
 fn rust_jit_executes_known_aggregate_parameters() {
     for source in [
@@ -1659,6 +1685,7 @@ fn native_vector_runtime_refuses_invalid_headers_and_failed_allocations() {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn native_vector_clones_preserve_independent_storage_and_returns() {
     for text in [
+        "fn values()->Vec<i64>{vec![20,22]} fn main()->i64{let mut items=values();items.push(0);items[0]+items[1]}",
         "fn main()->i64 {let mut items=vec![20,22];let copied=items.clone();items[0]=0;copied[0]+copied[1]}",
         "fn main()->i64 {let items=vec![42];items.clone()[0]}",
         "fn main()->i64 {let items:Vec<i64>=Vec::new();let mut copied=items.clone();copied.push(42);items.len()+copied[0]}",
