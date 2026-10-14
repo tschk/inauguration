@@ -1709,15 +1709,15 @@ pub(crate) fn lower_stdlib_call(
                 return Err("native-lower: vector push requires vector storage".into());
             };
             if !matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
-                || super::lower_expr::native_expr_type(&args[1], ctx, functions).map(
-                    |typ| match typ {
-                        Typ::Vector(source) | Typ::Array(source) if target == "vector-extend" => {
-                            source.canonical()
+                || !super::lower_expr::native_expr_type(&args[1], ctx, functions).is_some_and(
+                    |actual| {
+                        if target == "vector-extend" {
+                            Typ::Vector(item.clone()).accepts_vector_source(&args[1], &actual)
+                        } else {
+                            actual.canonical() == item.canonical()
                         }
-                        _ if target == "vector-extend" => Typ::Void,
-                        typ => typ.canonical(),
                     },
-                ) != Some(item.canonical())
+                )
             {
                 return Err("native-lower: vector push requires matching scalar elements".into());
             }

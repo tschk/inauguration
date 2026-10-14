@@ -94,6 +94,9 @@ fn owned_compile_rejects_unknown_field_write_before_execution() {
 fn rust_jit_executes_explicit_scalar_vector_constructors() {
     for text in [
         "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
+        "fn main()->i64{let mut items=vec![20,22];items.extend(vec![]);items[0]+items[1]}",
+        "fn main()->i64{let mut items=vec![20.0,22.0];items.extend(vec![]);(items[0]+items[1]) as i64}",
+        "fn main()->i64{let mut items=vec![true];items.extend([]);if items[0]{42}else{0}}",
         "fn main()->i64{let mut items=vec![20];let source=[22];items.extend(source);items[0]+items[1]}",
         "fn main()->i64{let mut items:Vec<i64>=Vec::new();items.extend(vec![1,2,3,4,5,6,7,8,9,10]);items.len()+items[9]+22}",
         "fn main()->i64{let mut items=vec![20,22];let empty:Vec<i64>=vec![];items.extend(empty);items[0]+items[1]}",
@@ -1740,6 +1743,9 @@ fn native_vector_runtime_refuses_invalid_headers_and_failed_allocations() {
 fn native_vector_clones_preserve_independent_storage_and_returns() {
     for text in [
         "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
+        "fn main()->i64{let mut items=vec![20,22];items.extend(vec![]);items[0]+items[1]}",
+        "fn main()->i64{let mut items=vec![20.0,22.0];items.extend(vec![]);(items[0]+items[1]) as i64}",
+        "fn main()->i64{let mut items=vec![true];items.extend([]);if items[0]{42}else{0}}",
         "fn main()->i64{let mut items=vec![20];let source=[22];items.extend(source);items[0]+items[1]}",
         "fn main()->i64{let mut items:Vec<i64>=Vec::new();items.extend(vec![1,2,3,4,5,6,7,8,9,10]);items.len()+items[9]+22}",
         "fn main()->i64{let mut items=vec![20,22];let empty:Vec<i64>=vec![];items.extend(empty);items[0]+items[1]}",

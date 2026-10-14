@@ -111,6 +111,15 @@ impl Typ {
         matches!(self, Typ::Named(name) if name == "Any")
     }
 
+    pub(crate) fn accepts_vector_source(&self, expr: &Expr, actual: &Typ) -> bool {
+        let Typ::Vector(item) = self.canonical() else {
+            return false;
+        };
+        matches!(actual.canonical(), Typ::Vector(source) | Typ::Array(source) if item.canonical() == source.canonical())
+            || (matches!(expr, Expr::ArrayLit(items) if items.is_empty())
+                && self.accepts_sequence_literal(expr, actual))
+    }
+
     /// Literals acquire their sequence layout from the typed destination.
     pub(crate) fn accepts_sequence_literal(&self, expr: &Expr, actual: &Typ) -> bool {
         let Expr::ArrayLit(items) = expr else {
@@ -895,6 +904,21 @@ pub(crate) fn for_each_expr_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vector_sources_only_infer_empty_literals() {
+        let destination = super::Typ::Vector(Box::new(super::Typ::Int));
+        let unknown = super::Typ::Array(Box::new(super::Typ::Named("Any".into())));
+        assert!(destination.accepts_vector_source(&super::Expr::ArrayLit(vec![]), &unknown));
+        assert!(!destination.accepts_vector_source(
+            &super::Expr::ArrayLit(vec![super::Expr::IntLit(42)]),
+            &unknown
+        ));
+        assert!(!destination.accepts_vector_source(&super::Expr::Ident("source".into()), &unknown));
+        assert!(
+            !destination.accepts_vector_source(&super::Expr::ArrayLit(vec![]), &super::Typ::Int)
+        );
+    }
+
     #[test]
     fn tuple_rest_bindings_use_actual_suffix_field_types() {
         let fields = vec![

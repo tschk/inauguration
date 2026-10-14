@@ -1109,15 +1109,14 @@ fn check_expr_with_array_borrow(
                             ));
                         };
                         if !matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
-                            || expr_type(&args[1], facts, env).map(|typ| match typ {
-                                Typ::Vector(source) | Typ::Array(source)
-                                    if name == "vector-extend" =>
-                                {
-                                    source.canonical()
+                            || !expr_type(&args[1], facts, env).is_some_and(|actual| {
+                                if name == "vector-extend" {
+                                    Typ::Vector(item.clone())
+                                        .accepts_vector_source(&args[1], &actual)
+                                } else {
+                                    actual.canonical() == item.canonical()
                                 }
-                                _ if name == "vector-extend" => Typ::Void,
-                                typ => typ.canonical(),
-                            }) != Some(item.canonical())
+                            })
                         {
                             return Err((
                                 "type-mismatch".into(),

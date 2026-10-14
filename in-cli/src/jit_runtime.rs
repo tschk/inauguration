@@ -4570,6 +4570,9 @@ mod tests {
     fn typed_tuples_preserve_fields_calls_returns_and_order() {
         for source in [
             "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
+            "fn main()->i64{let mut items=vec![20,22];items.extend(vec![]);items[0]+items[1]}",
+            "fn main()->i64{let mut items=vec![20.0,22.0];items.extend(vec![]);(items[0]+items[1]) as i64}",
+            "fn main()->i64{let mut items=vec![true];items.extend([]);if items[0]{42}else{0}}",
             "fn main()->i64{let mut items=vec![20];let source=[22];items.extend(source);items[0]+items[1]}",
             "fn source()->Vec<i64>{vec![20,22]} fn main()->i64{let mut items:Vec<i64>=Vec::new();items.extend(source());items[0]+items[1]}",
             "struct Bag{items:Vec<i64>} fn main()->i64{let mut bag=Bag{items:vec![20]};bag.items.extend(vec![22]);bag.items[0]+bag.items[1]}",

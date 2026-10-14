@@ -583,7 +583,7 @@ impl TypeChecker {
             } else if method == "extend"
                 && args.len() == 2
                 && matches!(&receiver, Typ::Vector(item) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
-                    && self.expr_type(&args[1], facts, env).is_some_and(|actual| matches!(actual, Typ::Vector(ref source) | Typ::Array(ref source) if is_compatible(item, source))))
+                    && self.expr_type(&args[1], facts, env).is_some_and(|actual| receiver.accepts_vector_source(&args[1], &actual)))
             {
                 *callee = Box::new(Expr::Ident("vector-extend".into()));
             } else if method == "len"

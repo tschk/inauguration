@@ -3245,13 +3245,13 @@ fn lower_call_expr(
             return Err("x86_64-lower: vector push requires vector storage".into());
         };
         if !matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
-            || scalar_expr_type(value, ctx).map(|typ| match typ {
-                Typ::Vector(source) | Typ::Array(source) if target_name == "vector-extend" => {
-                    source.canonical()
+            || !scalar_expr_type(value, ctx).is_some_and(|actual| {
+                if target_name == "vector-extend" {
+                    Typ::Vector(item.clone()).accepts_vector_source(value, &actual)
+                } else {
+                    actual.canonical() == item.canonical()
                 }
-                _ if target_name == "vector-extend" => Typ::Void,
-                typ => typ.canonical(),
-            }) != Some(item.canonical())
+            })
         {
             return Err("x86_64-lower: vector push requires matching scalar elements".into());
         }
