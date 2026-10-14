@@ -3745,6 +3745,15 @@ mod tests {
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn rust_statics_use_shared_scalar_storage() {
         for source in [
+            "static VALUE: i64=42; fn main() -> i64 { let VALUE: i64=0; return self::VALUE+VALUE; }",
+            "mod state { pub static mut VALUE: i64=0; use self::VALUE as DATA; pub fn read() -> i64 { unsafe { DATA=42; } return self::VALUE; } } fn main() -> i64 { return state::read(); }",
+            "static VALUE: i64=42; mod child { pub fn read() -> i64 { return crate::VALUE; } } fn main() -> i64 { return child::read(); }",
+            "static mut VALUE: i64=0; fn main() -> i64 { unsafe { crate::VALUE=42; } return unsafe { self::VALUE }; }",
+            "mod state { pub static mut VALUE: i64=0; pub fn add() -> i64 { unsafe { self::VALUE+=21; } return unsafe { self::VALUE }; } } fn main() -> i64 { state::add(); return state::add(); }",
+            "mod state { pub static mut VALUE: i64=0; } fn main() -> i64 { unsafe { crate::state::VALUE=42; } return unsafe { crate::state::VALUE }; }",
+            "mod state { pub static mut VALUE: i64=0; } use crate::state::VALUE as DATA; fn main() -> i64 { unsafe { DATA=42; } return unsafe { crate::state::VALUE }; }",
+            "mod state { pub static VALUE: i64=42; pub struct Point {} impl Point { pub fn read() -> i64 { return self::VALUE; } } } fn main() -> i64 { return state::Point::read(); }",
+            "mod state { pub static VALUE: i64=42; pub mod nested { pub static VALUE: i64=0; pub fn read() -> i64 { return self::VALUE; } } pub fn read() -> i64 { return self::VALUE+ self::nested::VALUE; } } fn main() -> i64 { return state::read(); }",
             "mod state { pub static mut VALUE: i64=0; } fn main() -> i64 { unsafe { state::VALUE=21; state::VALUE+=21; } return unsafe { state::VALUE }; }",
             "mod state { pub static mut VALUE: i64=0; pub fn read() -> i64 { unsafe { VALUE } } } use state::VALUE as DATA; fn main() -> i64 { unsafe { DATA=42; } return state::read(); }",
             "mod state { pub static VALUE: i64=42; pub fn read() -> i64 { return VALUE; } } use state::VALUE; fn main() -> i64 { let VALUE: i64=0; return state::read()+VALUE; }",
@@ -3778,6 +3787,29 @@ mod tests {
                     "{profile:?}: {source}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn rust_static_namespace_rewrites_do_not_capture_parent_bindings() {
+        for source in [
+            "static VALUE: i64=42; mod child { pub fn read() -> i64 { return VALUE; } } fn main() -> i64 { return child::read(); }",
+            "mod state { pub mod nested { pub static VALUE: i64=0; pub fn read() -> i64 { return nested::VALUE; } } } fn main() -> i64 { return state::nested::read(); }",
+            "static VALUE: i64=42; mod child { pub fn read() -> i64 { return self::VALUE; } } fn main() -> i64 { return child::read(); }",
+            "mod parent { pub static VALUE: i64=42; pub mod child { pub fn read() -> i64 { return VALUE; } } } fn main() -> i64 { return parent::child::read(); }",
+            "mod state { pub static VALUE: i64=42; } use state::VALUE as DATA; mod child { pub fn read() -> i64 { return DATA; } } fn main() -> i64 { return child::read(); }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(!verified.ok, "{source}");
+            assert_eq!(
+                verified.reason_code.as_deref(),
+                Some("unresolved-symbol"),
+                "{verified:?}"
+            );
         }
     }
 

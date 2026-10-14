@@ -61,7 +61,32 @@ pub fn parse_rust_artifact_source_with_dir(
 }
 
 fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<UnifiedModule, String> {
-    lower_file_items_at_visited(file, base_dir, &mut HashSet::new(), 0)
+    let mut module = lower_file_items_at_visited(file, base_dir, &mut HashSet::new(), 0)?;
+    let references = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global { name, .. } => Some([
+                (name.clone(), resolved_global(name)),
+                (format!("crate::{name}"), resolved_global(name)),
+                (format!("self::{name}"), resolved_global(name)),
+                (resolved_global(name), resolved_global(name)),
+            ]),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    rewrite_global_references(&mut module.decls, &references, file);
+    let references = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global { name, .. } => Some((resolved_global(name), name.clone())),
+            _ => None,
+        })
+        .collect();
+    rewrite_global_references(&mut module.decls, &references, file);
+    Ok(module)
 }
 
 fn lower_file_items_at_visited(
@@ -200,7 +225,11 @@ fn lower_file_items_at_visited(
                         if let Ok(inner) =
                             lower_file_items_at_visited(&inner_file, base_dir, visited, depth + 1)
                         {
-                            decls.extend(prefix_module_decls(inner.decls, &m.ident.to_string()));
+                            decls.extend(prefix_module_decls(
+                                inner.decls,
+                                &m.ident.to_string(),
+                                &inner_file,
+                            ));
                         }
                     }
                 } else {
@@ -242,7 +271,9 @@ fn lower_file_items_at_visited(
                             lower_file_items_at_visited(&sub_file, sub_dir, &mut v, 1)
                                 .ok()
                                 .map(|m| {
-                                    UnifiedModule::new(prefix_module_decls(m.decls, &mod_name))
+                                    UnifiedModule::new(prefix_module_decls(
+                                        m.decls, &mod_name, &sub_file,
+                                    ))
                                 })
                         })
                 }));
@@ -277,7 +308,7 @@ fn lower_file_items_at_visited(
                         && let Ok(inner) =
                             lower_file_items_at_visited(&sub_file, sub_dir, visited, depth + 1)
                     {
-                        decls.extend(prefix_module_decls(inner.decls, mod_name));
+                        decls.extend(prefix_module_decls(inner.decls, mod_name, &sub_file));
                     }
                 }
             }
@@ -285,7 +316,7 @@ fn lower_file_items_at_visited(
     }
 
     for u in &uses {
-        apply_use_tree(&mut decls, &u.tree, "");
+        apply_use_tree(&mut decls, &u.tree, "", file, depth == 0);
     }
     if decls.is_empty() {
         return Err("rust front parsed file but found no top-level structs/functions".to_string());
@@ -293,18 +324,29 @@ fn lower_file_items_at_visited(
     Ok(UnifiedModule::new(decls))
 }
 
-fn prefix_module_decls(mut decls: Vec<Decl>, module: &str) -> Vec<Decl> {
+fn prefix_module_decls(mut decls: Vec<Decl>, module: &str, file: &syn::File) -> Vec<Decl> {
     if module.is_empty() {
         return decls;
     }
     let globals: HashMap<_, _> = decls
         .iter()
         .filter_map(|decl| match decl {
-            Decl::Global { name, .. } => Some((name.clone(), format!("{module}::{name}"))),
+            Decl::Global { name, .. } => Some([
+                (name.clone(), resolved_global(&format!("{module}::{name}"))),
+                (
+                    format!("self::{name}"),
+                    resolved_global(&format!("{module}::{name}")),
+                ),
+                (
+                    resolved_global(name),
+                    resolved_global(&format!("{module}::{name}")),
+                ),
+            ]),
             _ => None,
         })
+        .flatten()
         .collect();
-    rewrite_global_references(&mut decls, &globals);
+    rewrite_global_references(&mut decls, &globals, file);
     for decl in &mut decls {
         match decl {
             Decl::Function { name, .. } | Decl::Struct { name, .. }
@@ -321,20 +363,60 @@ fn prefix_module_decls(mut decls: Vec<Decl>, module: &str) -> Vec<Decl> {
     decls
 }
 
-fn rewrite_global_references(decls: &mut [Decl], references: &HashMap<String, String>) {
+// Mark resolved names until every enclosing module has applied its prefix.
+fn resolved_global(name: &str) -> String {
+    format!("$global${name}")
+}
+
+fn rewrite_global_references(
+    decls: &mut [Decl],
+    references: &HashMap<String, String>,
+    file: &syn::File,
+) {
     if references.is_empty() {
         return;
     }
+    let child_modules: HashSet<_> = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module) => Some(module.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    let nested_references = references
+        .iter()
+        .map(|(name, target)| {
+            let target = if name.starts_with("$global$") || name.starts_with("crate::") {
+                target.clone()
+            } else {
+                format!("$unresolved_global${name}")
+            };
+            (name.clone(), target)
+        })
+        .collect();
     let mut names = crate::core_bindings::module_names(decls);
     names.extend(references.keys().cloned());
     for decl in decls.iter_mut() {
+        let nested = match decl {
+            Decl::Function { name, .. } | Decl::Global { name, .. } => name
+                .split("::")
+                .next()
+                .is_some_and(|prefix| child_modules.contains(prefix)),
+            _ => false,
+        };
+        let references = if nested {
+            &nested_references
+        } else {
+            references
+        };
         if let Decl::Function { params, body, .. } = decl {
             crate::core_bindings::normalize_function_with_references(
                 params, body, &names, references,
             );
         }
+        crate::core_opt::rewrite_constant_references(std::slice::from_mut(decl), references);
     }
-    crate::core_opt::rewrite_constant_references(decls, references);
 }
 
 fn lower_const_item(c: &syn::ItemConst) -> Option<Decl> {
@@ -359,7 +441,13 @@ fn lower_static_item(s: &syn::ItemStatic) -> Option<Decl> {
     })
 }
 
-fn apply_use_tree(decls: &mut Vec<Decl>, tree: &syn::UseTree, prefix: &str) {
+fn apply_use_tree(
+    decls: &mut Vec<Decl>,
+    tree: &syn::UseTree,
+    prefix: &str,
+    file: &syn::File,
+    root: bool,
+) {
     match tree {
         syn::UseTree::Path(p) => {
             let next = if prefix.is_empty() {
@@ -367,7 +455,7 @@ fn apply_use_tree(decls: &mut Vec<Decl>, tree: &syn::UseTree, prefix: &str) {
             } else {
                 format!("{prefix}::{}", p.ident)
             };
-            apply_use_tree(decls, &p.tree, &next);
+            apply_use_tree(decls, &p.tree, &next, file, root);
         }
         syn::UseTree::Name(n) => {
             let full = if prefix.is_empty() {
@@ -375,7 +463,7 @@ fn apply_use_tree(decls: &mut Vec<Decl>, tree: &syn::UseTree, prefix: &str) {
             } else {
                 format!("{prefix}::{}", n.ident)
             };
-            alias_fn(decls, &full, &n.ident.to_string());
+            alias_fn(decls, &full, &n.ident.to_string(), file, root);
         }
         syn::UseTree::Rename(r) => {
             let full = if prefix.is_empty() {
@@ -383,18 +471,24 @@ fn apply_use_tree(decls: &mut Vec<Decl>, tree: &syn::UseTree, prefix: &str) {
             } else {
                 format!("{prefix}::{}", r.ident)
             };
-            alias_fn(decls, &full, &r.rename.to_string());
+            alias_fn(decls, &full, &r.rename.to_string(), file, root);
         }
         syn::UseTree::Glob(_) => {}
         syn::UseTree::Group(g) => {
             for t in &g.items {
-                apply_use_tree(decls, t, prefix);
+                apply_use_tree(decls, t, prefix, file, root);
             }
         }
     }
 }
 
-fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str) {
+fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str, file: &syn::File, root: bool) {
+    let full = full.strip_prefix("self::").unwrap_or(full);
+    let full = if root {
+        full.strip_prefix("crate::").unwrap_or(full)
+    } else {
+        full
+    };
     if full == short {
         return;
     }
@@ -403,7 +497,7 @@ fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str) {
         .any(|decl| matches!(decl, Decl::Global { name, .. } if name == full))
     {
         if !decls.iter().any(|decl| matches!(decl, Decl::Global { name, .. } | Decl::Function { name, .. } if name == short)) {
-            rewrite_global_references(decls, &HashMap::from([(short.to_owned(), full.to_owned())]));
+            rewrite_global_references(decls, &HashMap::from([(short.to_owned(), resolved_global(full))]), file);
         }
         return;
     }
