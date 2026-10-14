@@ -28,6 +28,11 @@ pub(crate) fn lower_call(
             "native-lower: dynamic call target unsupported in `{fn_name}`"
         ));
     };
+    if crate::core_ir::is_compiler_callee(target) {
+        return Err(format!(
+            "native-lower: unresolved private compiler operation `{target}`"
+        ));
+    }
     if is_inrt_builtin(target) {
         return lower_inrt_call(
             emitter,

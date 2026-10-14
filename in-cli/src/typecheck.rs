@@ -530,6 +530,14 @@ impl TypeChecker {
             }
         }
         if let Expr::Call { callee, args } = expr
+            && matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW)
+            && let [value] = args.as_slice()
+            && let Some(typ) = closure_inference::argument_type(self, value, facts, env)
+            && !matches!(typ, Typ::Named(ref name) if crate::core_ir::tuples::fields(name).is_some())
+        {
+            *expr = value.clone();
+        }
+        if let Expr::Call { callee, args } = expr
             && let Expr::Ident(name) = callee.as_ref()
             && let Some(method) = name.strip_prefix(crate::core_ir::METHOD_PREFIX)
             && let Some(receiver) = args.first().and_then(|arg| self.expr_type(arg, facts, env))

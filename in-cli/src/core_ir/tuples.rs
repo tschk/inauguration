@@ -288,7 +288,13 @@ mod tests {
 
     #[test]
     fn private_intrinsic_declarations_are_rejected() {
-        for name in [VALUE, LET_CHECK, LET_FIELD, "#receiver-method:answer"] {
+        for name in [
+            VALUE,
+            LET_CHECK,
+            LET_FIELD,
+            "#receiver-method:answer",
+            crate::core_ir::BORROW,
+        ] {
             let module = UnifiedModule::new(vec![Decl::Function {
                 name: name.into(),
                 params: vec![],

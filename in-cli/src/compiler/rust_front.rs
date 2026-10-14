@@ -1276,7 +1276,15 @@ fn map_type(ty: &syn::Type) -> Typ {
                 None => Typ::Named(tp.path.to_token_stream().to_string()),
             }
         }
-        syn::Type::Reference(r) => map_type(&r.elem),
+        syn::Type::Reference(r) => {
+            let typ = map_type(&r.elem);
+            if matches!(&typ, Typ::Named(name) if crate::core_ir::tuples::fields(name).is_some()) {
+                // shortcut: tuple borrows need reference types and an address ABI before native execution.
+                Typ::Named("#unsupported-borrowed-tuple".into())
+            } else {
+                typ
+            }
+        }
         syn::Type::Array(array) => Typ::Array(Box::new(map_type(&array.elem))),
         syn::Type::Tuple(t) => {
             crate::core_ir::tuples::typ(&t.elems.iter().map(map_type).collect::<Vec<_>>())
@@ -2032,7 +2040,10 @@ fn lower_expr_with_types_inner(
             // Strip spaces from path (token_stream produces "Point :: new" but table has "Point::new")
             Expr::Ident(path.chars().filter(|&c| c != ' ').collect())
         }
-        syn::Expr::Reference(r) => lower_expr_with_types(&r.expr, local_types),
+        syn::Expr::Reference(r) => Expr::Call {
+            callee: Box::new(Expr::Ident(crate::core_ir::BORROW.into())),
+            args: vec![lower_expr_with_types(&r.expr, local_types)],
+        },
         syn::Expr::Paren(p) => lower_expr_with_types(&p.expr, local_types),
         syn::Expr::Tuple(tuple) if tuple.elems.is_empty() => Expr::IntLit(0),
         syn::Expr::Array(array) => Expr::ArrayLit(
@@ -2888,6 +2899,11 @@ fn main() {
             "fn main()->i64 {let(ref a,b)=(20,22);*a+b}",
             "fn main()->i64 {let(a,a)=(20,22);a}",
             "fn main()->i64 {let(a,b)=&(20,22);a+b}",
+            "fn main()->i64 {let pair=(20,22);let borrowed=&pair;let(a,b)=borrowed;*a+*b}",
+            "fn read(pair:&(i64,i64))->i64 {let(a,b)=pair;*a+*b} fn main()->i64 {read(&(20,22))}",
+            "fn read(pair:&(i64,i64))->i64 {pair.0+pair.1} fn main()->i64 {read(&(20,22))}",
+            "fn main()->i64 {let pair=(20,22);let borrow=|pair| &pair;let(a,b)=borrow(pair);*a+*b}",
+            "static PAIR:(i64,i64)=(20,22); fn borrowed()->&'static (i64,i64) {&PAIR} fn main()->i64 {let(a,b)=borrowed();*a+*b}",
             "fn main()->i64 {let &(a,b)=&(20,22);42}",
             "fn main()->i64 {let ()=0;42}",
             "fn main()->i64 {let(a,b):(i64,bool)=(20,22);a}",

@@ -3233,6 +3233,12 @@ fn lower_call_expr(
         }
     };
 
+    if crate::core_ir::is_compiler_callee(&target_name) {
+        return Err(format!(
+            "x86_64-lower: unresolved private compiler operation `{target_name}`"
+        ));
+    }
+
     if lower_builtin_call(
         emitter,
         ctx,

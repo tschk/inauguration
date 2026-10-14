@@ -28,6 +28,10 @@ fn is_addressable(expr: &Expr) -> bool {
     match expr {
         Expr::Ident(_) => true,
         Expr::Field { base, .. } => is_addressable(base),
+        Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW) =>
+        {
+            matches!(args.as_slice(), [value] if is_addressable(value))
+        }
         _ => false,
     }
 }
@@ -310,6 +314,14 @@ impl Lower {
     }
 
     fn expr(&mut self, expr: &mut Expr, out: &mut Vec<Stmt>) {
+        if let Expr::Call { callee, args } = expr
+            && matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW)
+            && let [value] = args.as_mut_slice()
+        {
+            self.expr(value, out);
+            return;
+        }
+
         if let Expr::Closure { params, body, .. } = expr {
             let constants = self.constants.clone();
             let types = self.types.clone();

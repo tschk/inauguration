@@ -63,6 +63,10 @@ fn decl_has_guard(decl: &Decl) -> bool {
 }
 
 fn expr_has_guard(expr: &Expr) -> bool {
+    if matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if crate::core_ir::is_compiler_callee(name)))
+    {
+        return true;
+    }
     if matches!(expr, Expr::Unary { op, .. } if op.starts_with("numeric-cast-")) {
         return true;
     }

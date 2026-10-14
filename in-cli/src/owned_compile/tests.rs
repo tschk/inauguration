@@ -1426,6 +1426,31 @@ fn aarch64_aggregate_returns_refuse_register_overflow() {
 }
 
 #[test]
+fn native_backends_refuse_unresolved_private_compiler_operations() {
+    for source in [
+        "fn main()->i64 {let pair=(20,22);let borrowed=&pair;let(a,b)=borrowed;*a+*b}",
+        "fn main()->i64 {let pair=(20,22);let borrowed=&pair;borrowed.0}",
+        "fn answer(value:i64)->i64 {42} fn main()->i64 {let value=1;value.answer()}",
+    ] {
+        let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        crate::lower_core::desugar_module(&mut module);
+        for result in [
+            crate::native_emit::lower::lower_module(&module, "main", NativeLinkage::Executable)
+                .map(|_| ()),
+            crate::native_emit::x86_64_lower::lower_module(&module, "main").map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("unresolved private compiler operation"),
+                "{source}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn nested_struct_arrays_refuse_unsupported_layouts() {
     let parsed = crate::compiler::rust_front::parse_rust_source("struct Point {x:i64,y:i64} fn main()->i64 { let values=[Point{x:20,y:22}]; match values {[Point{x:20,y:22}]=>42,_=>0} }").unwrap();
     let mut module =

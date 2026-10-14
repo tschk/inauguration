@@ -4432,6 +4432,7 @@ mod tests {
             "fn main()->i64 { let pair=(42,); pair.0 }",
             "struct Bucket {first:i64,value:i64} impl Bucket {fn answer(&self)->i64 {self.first+self.value}} fn main()->i64 {let pair=(1,Bucket{first:20,value:22});pair.1.answer()}",
             "struct Bucket {value:i64} impl Bucket {fn set(&mut self) {self.value=42;}} fn main()->i64 {let mut pair=(1,Bucket{value:0});pair.1.set();pair.1.value}",
+            "struct Bucket {value:i64} impl Bucket {fn set(&mut self) {self.value=42;}} fn main()->i64 {let mut pair=(1,Bucket{value:0});Bucket::set(&mut pair.1);pair.1.value}",
             "struct Bucket {value:i64} impl Bucket {fn len(&self)->i64 {self.value}} fn len(_bucket:Bucket)->i64 {0} fn main()->i64 {let bucket=Bucket{value:40};bucket.len()+2}",
             "struct Bucket {value:i64} impl Bucket {fn collect(&self)->i64 {self.value}} fn main()->i64 {let bucket=Bucket{value:40};bucket.collect()+2}",
             "struct Bucket {value:i64} impl Bucket {fn answer(&self)->i64 {0}} fn answer(bucket:Bucket)->i64 {bucket.value} fn main()->i64 {answer(Bucket{value:40})+2}",
