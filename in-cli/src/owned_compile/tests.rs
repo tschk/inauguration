@@ -91,6 +91,42 @@ fn owned_compile_rejects_unknown_field_write_before_execution() {
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
+fn rust_jit_executes_explicit_scalar_vector_constructors() {
+    for text in [
+        "fn main()->i64{let mut items=Vec::<i64>::new();items.push(42);items[0]}",
+        "fn values()->Vec<i64>{std::vec::Vec::<i64>::new()} fn main()->i64{let mut items=values();items.push(42);items[0]}",
+        "fn main()->i64{let mut items=alloc::vec::Vec::<f64>::new();items.push(42.0);items[0] as i64}",
+        "fn main()->i64{let mut items=Vec::<bool>::new().clone();items.push(true);if items[0]{42}else{0}}",
+        "fn take(items:Vec<i64>)->i64{items.len()+42} fn main()->i64{take(Vec::<i64>::new())}",
+        "struct Bag{items:Vec<i64>} fn main()->i64{let mut bag=Bag{items:Vec::<i64>::new()};bag.items.push(42);bag.items[0]}",
+        "fn main()->i64{let make=|| Vec::<i64>::new();let mut items=make();items.push(42);items[0]}",
+    ] {
+        let path = temp_path("explicit-vector.rs");
+        fs::write(&path, text).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{text} {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{text} {profile:?}: {report:?}"
+            );
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
 fn rust_jit_preserves_vector_return_storage_after_optimization() {
     let path = temp_path("vector-return-storage.rs");
     fs::write(&path, "fn values()->Vec<i64>{vec![20,22]} fn main()->i64{let mut items=values();items.push(0);items[0]+items[1]}").unwrap();
@@ -1685,6 +1721,8 @@ fn native_vector_runtime_refuses_invalid_headers_and_failed_allocations() {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn native_vector_clones_preserve_independent_storage_and_returns() {
     for text in [
+        "fn main()->i64{let mut items=Vec::<i64>::new();items.push(42);items[0]}",
+        "fn values()->Vec<i64>{std::vec::Vec::<i64>::new()} fn main()->i64{let mut items=values();items.push(42);items[0]}",
         "fn values()->Vec<i64>{vec![20,22]} fn main()->i64{let mut items=values();items.push(0);items[0]+items[1]}",
         "fn main()->i64 {let mut items=vec![20,22];let copied=items.clone();items[0]=0;copied[0]+copied[1]}",
         "fn main()->i64 {let items=vec![42];items.clone()[0]}",

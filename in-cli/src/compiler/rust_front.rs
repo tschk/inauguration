@@ -86,8 +86,89 @@ fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<UnifiedModul
         })
         .collect();
     rewrite_global_references(&mut module.decls, &references, file);
+    register_explicit_vector_constructors(&mut module);
     refuse_static_array_value_uses(&mut module);
     Ok(module)
+}
+
+fn register_explicit_vector_constructors(module: &mut UnifiedModule) {
+    let names = crate::core_bindings::module_names(&module.decls);
+    let shadowed = module.decls.iter().any(|decl| {
+        matches!(decl, Decl::Struct {name, ..} | Decl::Class {name, ..}
+            if name == "Vec" || name.ends_with("::Vec"))
+    });
+    let mut constructors = std::collections::BTreeMap::new();
+    crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+        let Expr::Call { callee, args } = expr else {
+            return;
+        };
+        let Expr::Ident(name) = callee.as_ref() else {
+            return;
+        };
+        if !name.contains("::<") || !args.is_empty() || names.contains(name) {
+            return;
+        }
+        let Ok(path) = syn::parse_str::<syn::ExprPath>(name) else {
+            return;
+        };
+        if path.qself.is_some() {
+            return;
+        }
+        let segments: Vec<_> = path.path.segments.iter().collect();
+        let owner = segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if !matches!(
+            owner.as_str(),
+            "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new"
+        ) || names.contains(&owner)
+            || (owner == "Vec::new" && shadowed)
+            || !matches!(segments.last().unwrap().arguments, syn::PathArguments::None)
+            || segments[..segments.len() - 2]
+                .iter()
+                .any(|s| !matches!(s.arguments, syn::PathArguments::None))
+        {
+            return;
+        }
+        let syn::PathArguments::AngleBracketed(generics) = &segments[segments.len() - 2].arguments
+        else {
+            return;
+        };
+        if generics.args.len() != 1 {
+            return;
+        }
+        let Some(syn::GenericArgument::Type(item)) = generics.args.first() else {
+            return;
+        };
+        // References need an ownership model; do not erase them into scalar elements.
+        let syn::Type::Path(item_path) = item else {
+            return;
+        };
+        if item_path.qself.is_some()
+            || item_path.path.segments.len() != 1
+            || !matches!(
+                item_path.path.segments[0].arguments,
+                syn::PathArguments::None
+            )
+        {
+            return;
+        }
+        let typ = map_type(item);
+        if matches!(typ, Typ::Int | Typ::Float | Typ::Bool) {
+            constructors.insert(name.clone(), Typ::Vector(Box::new(typ)));
+        }
+    });
+    module
+        .decls
+        .extend(constructors.into_iter().map(|(name, ret)| Decl::Function {
+            name,
+            params: vec![],
+            ret,
+            body: vec![Stmt::Return(Some(Expr::ArrayLit(vec![])))],
+            type_params: vec![],
+        }));
 }
 
 fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
@@ -2908,6 +2989,30 @@ fn main() {
             "fn main()->i64 {let &(a,b)=&(20,22);42}",
             "fn main()->i64 {let ()=0;42}",
             "fn main()->i64 {let(a,b):(i64,bool)=(20,22);a}",
+        ] {
+            let parsed = parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}: {module:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_vector_constructors_preserve_types_and_do_not_erase_borrows() {
+        for source in [
+            "fn values()->Vec<bool>{Vec::<i64>::new()} fn main()->i64{values().len()+42}",
+            "fn main()->i64{let mut items=Vec::<i64>::new();items.push(true);42}",
+            "fn main()->i64{let items:Vec<bool>=Vec::<i64>::new();items.len()+42}",
+            "fn take(items:Vec<bool>)->i64{42} fn main()->i64{take(Vec::<i64>::new())}",
+            "fn main()->i64{let mut items=Vec::<&i64>::new();items.push(&42);42}",
+            "fn main()->i64{let items=Vec::<i64,bool>::new();items.len()+42}",
+            "struct Vec{value:i64} fn main()->i64{let items=Vec::<i64>::new();42}",
+            "mod Vec{pub fn new<T>()->i64{0}} fn main()->i64{let items=Vec::<i64>::new();42}",
+            "mod geo{pub struct Vec{value:i64}} use geo::Vec; fn main()->i64{let items=Vec::<i64>::new();42}",
         ] {
             let parsed = parse_rust_source(source).unwrap();
             let mut module =

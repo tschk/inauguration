@@ -97,17 +97,21 @@ pub(crate) fn rewrite_constant_references(decls: &mut [Decl], names: &HashMap<St
             *name = qualified.clone();
         }
     };
+    map_decl_exprs_mut(decls, &mut rewrite);
+}
+
+pub(crate) fn map_decl_exprs_mut(decls: &mut [Decl], rewrite: &mut impl FnMut(&mut Expr)) {
     for decl in decls {
         match decl {
             Decl::Function { body, .. } => {
                 for stmt in body {
-                    map_stmt_mut(stmt, &mut rewrite);
+                    map_stmt_mut(stmt, rewrite);
                 }
             }
             Decl::Global {
                 init: Some(expr), ..
-            } => map_expr_mut(expr, &mut rewrite),
-            Decl::Class { methods, .. } => rewrite_constant_references(methods, names),
+            } => map_expr_mut(expr, rewrite),
+            Decl::Class { methods, .. } => map_decl_exprs_mut(methods, rewrite),
             _ => {}
         }
     }
