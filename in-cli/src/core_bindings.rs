@@ -32,6 +32,15 @@ pub(crate) fn normalize_function(
     body: &mut [Stmt],
     names: &HashSet<String>,
 ) {
+    normalize_function_with_references(params, body, names, &HashMap::new());
+}
+
+pub(crate) fn normalize_function_with_references(
+    params: &mut [(String, Typ)],
+    body: &mut [Stmt],
+    names: &HashSet<String>,
+    references: &HashMap<String, String>,
+) {
     let mut reserved = HashSet::new();
     reserved.extend(params.iter().map(|(name, _)| name.clone()));
     reserve_body(body, &mut reserved);
@@ -41,7 +50,7 @@ pub(crate) fn normalize_function(
         declared: HashSet::new(),
         next: 0,
     };
-    let mut scope = HashMap::new();
+    let mut scope = references.clone();
     for (name, _) in params {
         bindings.bind(name, &mut scope);
     }

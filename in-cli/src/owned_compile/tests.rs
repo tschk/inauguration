@@ -2026,6 +2026,50 @@ fn owned_rust_jit_retains_compile_only_for_uninvocable_entries() {
 }
 
 #[test]
+fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = temp_path("rust-static-ir-only.rs");
+    fs::write(&path, "struct Bag { value: i64 } static VALUES: [i64;2]=[20,22]; fn main() -> Bag { return Bag { value: 42 }; }").unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        None,
+        None,
+    ));
+    fs::remove_file(&path).unwrap();
+    assert!(report.success, "{report:?}");
+    assert_eq!(report.reason_code.as_deref(), Some("jit-ir-only"));
+    assert_eq!(report.backend_level, "owned-core-ir-only");
+    assert_eq!(report.runtime_level, "not-executed");
+    assert_eq!(report.eval_result, None);
+    assert_eq!(report.eval_exit_code, None);
+    assert_eq!(report.artifact_path, None);
+    assert!(
+        report
+            .reason
+            .unwrap()
+            .contains("unsupported native initializer for global `VALUES`")
+    );
+    let path = temp_path("rust-static-executable.rs");
+    fs::write(
+        &path,
+        "static VALUES: [i64;2]=[20,22]; fn main() -> i64 { return 42; }",
+    )
+    .unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        None,
+        None,
+    ));
+    fs::remove_file(&path).unwrap();
+    assert!(!report.success, "{report:?}");
+    assert_eq!(report.eval_result, None);
+}
+
+#[test]
 fn owned_rust_jit_verifies_before_execution() {
     if !native_backend::native_subset_host_available() {
         return;

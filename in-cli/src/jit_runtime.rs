@@ -3743,6 +3743,86 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn rust_statics_use_shared_scalar_storage() {
+        for source in [
+            "mod state { pub static mut VALUE: i64=0; } fn main() -> i64 { unsafe { state::VALUE=21; state::VALUE+=21; } return unsafe { state::VALUE }; }",
+            "mod state { pub static mut VALUE: i64=0; pub fn read() -> i64 { unsafe { VALUE } } } use state::VALUE as DATA; fn main() -> i64 { unsafe { DATA=42; } return state::read(); }",
+            "mod state { pub static VALUE: i64=42; pub fn read() -> i64 { return VALUE; } } use state::VALUE; fn main() -> i64 { let VALUE: i64=0; return state::read()+VALUE; }",
+            "mod state { pub static VALUE: i64=20; pub fn add(VALUE: i64) -> i64 { return VALUE+22; } } fn main() -> i64 { return state::add(20); }",
+            "mod outer { pub mod state { pub static VALUE: i64=42; } pub fn read() -> i64 { return state::VALUE; } } fn main() -> i64 { return outer::read(); }",
+            "static VALUE: i64=42; fn main() -> i64 { return VALUE; }",
+            "static mut VALUE: i64=0; fn main() -> i64 { unsafe { VALUE=42; } return unsafe { VALUE }; }",
+            "static mut VALUE: i64=0; fn add() -> i64 { unsafe { VALUE+=21; } return unsafe { VALUE }; } fn main() -> i64 { add(); return add(); }",
+            "static VALUE: f64=42.9; fn main() -> i64 { return VALUE as i64; }",
+            "static VALUE: bool=true; fn main() -> i64 { if VALUE { return 42; } return 0; }",
+            "static VALUE: i64=42; fn read() -> i64 { return VALUE; } fn main() -> i64 { let VALUE: i64=0; return read()+VALUE; }",
+            "mod left { pub static VALUE: i64=20; pub fn read() -> i64 { return VALUE; } } mod right { pub static VALUE: i64=22; pub fn read() -> i64 { return VALUE; } } fn main() -> i64 { return left::read()+right::read(); }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            crate::typecheck::TypeChecker::new()
+                .check_module(&module)
+                .unwrap();
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{verified:?}: {source}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rust_static_immutability_and_runtime_initializers_are_preserved() {
+        for source in [
+            "static VALUE: i64=0; fn main() -> i64 { unsafe { VALUE=42; } return VALUE; }",
+            "mod state { pub static VALUE: i64=0; } use state::VALUE as DATA; fn main() -> i64 { unsafe { DATA=42; } return DATA; }",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert_eq!(
+                verified.reason_code.as_deref(),
+                Some("immutable-global"),
+                "{verified:?}"
+            );
+        }
+        let parsed = crate::compiler::rust_front::parse_rust_source("static mut CALLS: i64=0; static VALUE: i64=make(); fn make() -> i64 { unsafe { CALLS+=1; } return 42; } fn main() -> i64 { return VALUE; }").unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        crate::lower_core::desugar_module(&mut module);
+        assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        assert!(
+            crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .err()
+            .unwrap()
+            .contains("unsupported native initializer for global `VALUE`")
+        );
+        assert!(
+            crate::native_emit::x86_64_lower::lower_module(&module, "main")
+                .err()
+                .unwrap()
+                .contains("unsupported native initializer for global `VALUE`")
+        );
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn scalar_vector_literals_preserve_call_and_return_values() {
         for source in [
             "fn values() -> Vec<i64> { return vec![20, 22]; } fn main() -> i64 { let items: Vec<i64> = values(); let mut sum = 0; for value in items { sum += value; } return sum; }",

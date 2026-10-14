@@ -156,36 +156,54 @@ pub fn compile_jit(
         })
         .unwrap_or(EntryResultKind::None);
 
-    // Select lowering based on host architecture
+    // Select lowering based on host architecture.
     let lowered = if cfg!(target_arch = "x86_64") {
-        let result = x86_64_lower::lower_module(expanded_module, &resolved_entry)
-            .map_err(|e| format!("jit-lowering-failed: {e}"))?;
-        // Wrap into LoweredModule-compatible shape
-        native_emit::lower::LoweredModule {
-            code: result.code,
-            data: result.data,
-            global_relocs: result.global_relocs,
-            entry_offset: Some(result.entry_offset),
-            exports: vec![],
-            function_offsets: result.exports.into_iter().collect(),
-            relocations: result
-                .relocations
-                .into_iter()
-                .map(|o| (o, result.codegen_base))
-                .collect(),
-            external_refs: Vec::new(),
-            degradations: Vec::new(),
-            error_slot_refs: Vec::new(),
-        }
+        x86_64_lower::lower_module(expanded_module, &resolved_entry).map(|result| {
+            native_emit::lower::LoweredModule {
+                code: result.code,
+                data: result.data,
+                global_relocs: result.global_relocs,
+                entry_offset: Some(result.entry_offset),
+                exports: vec![],
+                function_offsets: result.exports.into_iter().collect(),
+                relocations: result
+                    .relocations
+                    .into_iter()
+                    .map(|o| (o, result.codegen_base))
+                    .collect(),
+                external_refs: Vec::new(),
+                degradations: Vec::new(),
+                error_slot_refs: Vec::new(),
+            }
+        })
     } else {
-        let jobs = jobs_for_request(request);
         lower::lower_module_with_jobs(
             expanded_module,
             &resolved_entry,
             NativeLinkage::Executable,
-            jobs,
+            jobs_for_request(request),
         )
-        .map_err(|e| format!("jit-lowering-failed: {e}"))?
+    };
+    let lowered = match lowered {
+        Ok(lowered) => lowered,
+        Err(reason)
+            if compile_only
+                && !crate::config::env_config().strict_lowering
+                && reason.starts_with("unsupported native initializer for global ") =>
+        {
+            return Ok(NativeCompileResult {
+                artifact_path: String::new(),
+                eval_exit_code: None,
+                eval_result: None,
+                abi_path: None,
+                backend_level: "owned-core-ir-only".into(),
+                runtime_level: "not-executed".into(),
+                reason_code: "jit-ir-only".into(),
+                reason: format!("Rust compile-only module has no native code: {reason}"),
+                degradations: Vec::new(),
+            });
+        }
+        Err(reason) => return Err(format!("jit-lowering-failed: {reason}")),
     };
 
     let degradations = lowered.degradations;

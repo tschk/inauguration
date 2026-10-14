@@ -297,22 +297,14 @@ fn prefix_module_decls(mut decls: Vec<Decl>, module: &str) -> Vec<Decl> {
     if module.is_empty() {
         return decls;
     }
-    let constants: HashMap<_, _> = decls
+    let globals: HashMap<_, _> = decls
         .iter()
         .filter_map(|decl| match decl {
-            Decl::Global {
-                name,
-                constant_value: true,
-                ..
-            } => Some((name.clone(), format!("{module}::{name}"))),
+            Decl::Global { name, .. } => Some((name.clone(), format!("{module}::{name}"))),
             _ => None,
         })
         .collect();
-    if !constants.is_empty() {
-        // Distinguish local shadows before qualifying the constant references.
-        crate::core_bindings::normalize_decls(&mut decls);
-        crate::core_opt::rewrite_constant_references(&mut decls, &constants);
-    }
+    rewrite_global_references(&mut decls, &globals);
     for decl in &mut decls {
         match decl {
             Decl::Function { name, .. } | Decl::Struct { name, .. }
@@ -320,17 +312,29 @@ fn prefix_module_decls(mut decls: Vec<Decl>, module: &str) -> Vec<Decl> {
             {
                 *name = format!("{module}::{name}");
             }
-            Decl::Global {
-                name,
-                constant_value: true,
-                ..
-            } => {
+            Decl::Global { name, .. } => {
                 *name = format!("{module}::{name}");
             }
             _ => {}
         }
     }
     decls
+}
+
+fn rewrite_global_references(decls: &mut [Decl], references: &HashMap<String, String>) {
+    if references.is_empty() {
+        return;
+    }
+    let mut names = crate::core_bindings::module_names(decls);
+    names.extend(references.keys().cloned());
+    for decl in decls.iter_mut() {
+        if let Decl::Function { params, body, .. } = decl {
+            crate::core_bindings::normalize_function_with_references(
+                params, body, &names, references,
+            );
+        }
+    }
+    crate::core_opt::rewrite_constant_references(decls, references);
 }
 
 fn lower_const_item(c: &syn::ItemConst) -> Option<Decl> {
@@ -346,15 +350,12 @@ fn lower_const_item(c: &syn::ItemConst) -> Option<Decl> {
 
 fn lower_static_item(s: &syn::ItemStatic) -> Option<Decl> {
     let mut locals = HashMap::new();
-    Some(Decl::Function {
+    Some(Decl::Global {
         name: s.ident.to_string(),
-        params: vec![],
-        ret: map_type(&s.ty),
-        body: vec![Stmt::Return(Some(lower_expr_with_types(
-            &s.expr,
-            &mut locals,
-        )))],
-        type_params: vec![],
+        typ: map_type(&s.ty),
+        init: Some(Box::new(lower_expr_with_types(&s.expr, &mut locals))),
+        mutable: matches!(s.mutability, syn::StaticMutability::Mut(_)),
+        constant_value: false,
     })
 }
 
@@ -395,6 +396,15 @@ fn apply_use_tree(decls: &mut Vec<Decl>, tree: &syn::UseTree, prefix: &str) {
 
 fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str) {
     if full == short {
+        return;
+    }
+    if decls
+        .iter()
+        .any(|decl| matches!(decl, Decl::Global { name, .. } if name == full))
+    {
+        if !decls.iter().any(|decl| matches!(decl, Decl::Global { name, .. } | Decl::Function { name, .. } if name == short)) {
+            rewrite_global_references(decls, &HashMap::from([(short.to_owned(), full.to_owned())]));
+        }
         return;
     }
     if decls
@@ -1486,7 +1496,7 @@ fn assign_op_from_binop(op: &syn::BinOp) -> Option<&'static str> {
 
 fn assign_lhs_name(lhs: &syn::Expr) -> Option<String> {
     match lhs {
-        syn::Expr::Path(p) => Some(p.path.to_token_stream().to_string()),
+        syn::Expr::Path(_) => rust_path_name(lhs),
         syn::Expr::Field(_) => None, // field assignments handled in Expr::Assign branch
         syn::Expr::Index(i) => Some(i.to_token_stream().to_string()),
         _ => None,
