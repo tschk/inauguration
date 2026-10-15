@@ -5571,3 +5571,65 @@ fn malformed_string_literals_and_patterns_refuse_execution() {
         fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn in_struct_patterns_execute_statement_value_and_guarded_arms() {
+    let schema = "struct Entry {\n Int value\n String text\n}\n";
+    for body in [
+        r#"match entry { Entry {value:x,text:"a,b{c}"} {return x+22;} _ {return 0;} }"#,
+        r#"match entry { Entry {value:x,text:"a,b{c}"} if false -> {return 0;} Entry {value:x,text:"a,b{c}"} if x==20 -> {return x+22;} _ {return 0;} }"#,
+        r#"return match entry { Entry {value:x,text:"a,b{c}"} -> {x+22} _ {0} };"#,
+    ] {
+        let path = temp_path("struct-match.in");
+        fs::write(&path, format!("{schema}fn main()->Int{{let entry:Entry=Entry{{value:20,text:\"a,b{{c}}\"}};{body}}}")).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{body}: {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{body}: {profile:?}: {report:?}"
+            );
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("struct-match-native");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(report.success, "{body}: {profile:?}: {report:?}");
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42)
+                );
+                fs::remove_file(binary).unwrap();
+            }
+        }
+        let canonical =
+            crate::in_canonical::canonicalize_in_source(&fs::read_to_string(&path).unwrap())
+                .unwrap();
+        fs::write(&path, canonical).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        assert!(report.success, "{body}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(42)),
+            "{body}: {report:?}"
+        );
+        fs::remove_file(path).unwrap();
+    }
+}

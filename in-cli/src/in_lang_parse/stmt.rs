@@ -250,6 +250,31 @@ pub(crate) fn parse_match_value_arms(
     })
 }
 
+/// Locate the body after an optional struct pattern without consuming an identifier arm's body.
+fn find_match_arm_body_open(rest: &str) -> Result<usize, String> {
+    let open = find_struct_init_open_brace(rest)
+        .ok_or_else(|| ".in: match arm needs `{` body".to_string())?;
+    let (_, close) = brace_content_bounds_after_open(rest, open)
+        .ok_or_else(|| ".in: unclosed match arm pattern or body".to_string())?;
+    let tail = rest[close + 1..].trim_start();
+    let continuation = tail.starts_with('{')
+        || tail.starts_with("->")
+        || tail.starts_with(':')
+        || tail.starts_with("if ");
+    if continuation
+        && matches!(
+            crate::core_ir::MatchPattern::parse(&rest[..=close]),
+            Ok(crate::core_ir::MatchPattern::StructPat { .. })
+        )
+    {
+        let after_pattern = close + 1;
+        return find_struct_init_open_brace(&rest[after_pattern..])
+            .map(|body| after_pattern + body)
+            .ok_or_else(|| ".in: match arm needs `{` body after struct pattern".to_string());
+    }
+    Ok(open)
+}
+
 fn parse_match_arm_parts<T>(
     inner: &str,
     context: &mut LoopParseContext<'_>,
@@ -264,9 +289,7 @@ fn parse_match_arm_parts<T>(
         }
         let skipped = inner[pos..].len() - rest.len();
         pos += skipped;
-        let rel_open = inner[pos..]
-            .find('{')
-            .ok_or_else(|| ".in: match arm needs `{` body".to_string())?;
+        let rel_open = find_match_arm_body_open(&inner[pos..])?;
         let open = pos + rel_open;
         let mut pattern = trim(&inner[pos..open])
             .trim_end_matches(':')
@@ -523,4 +546,17 @@ fn parse_for_expanded(s: &str, context: &mut LoopParseContext<'_>) -> Result<Vec
         body,
         &mut counter,
     ))
+}
+
+#[cfg(test)]
+mod match_arm_boundary_tests {
+    use super::find_match_arm_body_open;
+
+    #[test]
+    fn unclosed_pattern_reports_boundary_error() {
+        assert_eq!(
+            find_match_arm_body_open("Entry{text:\"a,b\"").unwrap_err(),
+            ".in: unclosed match arm pattern or body"
+        );
+    }
 }

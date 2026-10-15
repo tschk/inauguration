@@ -47,7 +47,7 @@ Dependency lookup uses the registered crate root or existing source search roots
 
 ## Contextual nominal names
 
-Rust impl lowering resolves `Self` and `Self::…` against the owning type in signatures, constructors, closures, and patterns, including macro-lowered values. Nested modules preserve those identities without rewriting field names, string literals, generic parameters, or deferred crate paths. This does not add generic specialization or complete aggregate-vector runtime support. Pattern argument splitting respects quoted commas, brackets, and escaped quotes, so struct, tuple, and array patterns preserve their string values through normalization.
+Rust impl lowering resolves `Self` and `Self::…` against the owning type in signatures, constructors, closures, and patterns, including macro-lowered values. Nested modules preserve those identities without rewriting field names, string literals, generic parameters, or deferred crate paths. This does not add generic specialization or complete aggregate-vector runtime support. Pattern argument splitting respects quoted commas, brackets, and escaped quotes, so struct, tuple, and array patterns preserve their string values through normalization. The `.in` statement and value match parser balances struct-pattern fields before locating the arm body, preserving guards and optional separators.
 
 ## Unit values
 

@@ -5031,6 +5031,36 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn in_struct_pattern_guards_and_bindings_execute_on_native_backends() {
+        for body in [
+            r#"match entry { Entry {value:x,text:"a,b{c}"} if false -> {return 0;} Entry {value:x,text:"a,b{c}"} if x==20 -> {return x+22;} _ {return 0;} }"#,
+            r#"return match entry { Entry {value:x,text:"a,b{c}"} if false -> {0} Entry {value:x,text:"a,b{c}"} if x==20 -> {x+22} _ {0} };"#,
+        ] {
+            let source = format!(
+                "struct Entry {{\n Int value\n String text\n}}\nfn main()->Int{{let entry:Entry=Entry{{value:20,text:\"a,b{{c}}\"}};{body}}}"
+            );
+            let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{body}: {report:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut optimized = module.clone();
+                crate::core_opt::optimize_with_profile(&mut optimized.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&optimized, profile, &[]),
+                    Some(42),
+                    "{body}: {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn conditional_and_block_values_preserve_scope_effects_and_control_flow() {
         for source in [
             "static mut CALLS:i64=0;fn take(unit:())->i64{unsafe{CALLS+41}}fn main()->i64{take({unsafe{CALLS+=1;}})}",

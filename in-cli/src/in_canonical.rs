@@ -342,6 +342,10 @@ fn format_match(scrutinee: &Expr, arms: &[MatchArm], depth: usize, indent: &str,
         out.push_str(indent);
         out.push_str("  ");
         out.push_str(&arm.pattern);
+        if let Some(guard) = &arm.guard {
+            out.push_str(" if ");
+            out.push_str(&format_expr(guard));
+        }
         out.push_str(" {\n");
         format_body(&arm.body, depth + 2, out);
         out.push_str(indent);

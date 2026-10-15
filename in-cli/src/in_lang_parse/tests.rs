@@ -2280,3 +2280,71 @@ fn unit_values_round_trip_and_keep_their_scopes() {
     }
     assert_eq!(parse_expr("()"), Expr::UnitLit);
 }
+
+#[test]
+fn struct_match_arm_boundaries_round_trip_without_changing_identifier_arms() {
+    for pattern in [
+        r#""a,b{c}""#,
+        r#"Entry{text:"a,b{c}"}"#,
+        r#"Entry{text:"a,b{c}"} ->"#,
+        r#"Entry{text:"a,b{c}"}:"#,
+        r#"Entry{text:"a,b{c}"} if true ->"#,
+        r#"Entry{text:"a,b{c}"} if true"#,
+        r#"sample::Entry{text:"a,b{c}"}"#,
+        r#"Entry{text:"escaped\"{,}"}"#,
+        r#"Outer{entry:Entry{text:"a,b{c}"}}"#,
+        r#"(Entry{text:"a,b{c}"}, _)"#,
+        r#"[Entry{text:"a,b{c}"}, ..]"#,
+        "binding",
+        "binding ->",
+        "binding:",
+        "binding if true ->",
+    ] {
+        for value in [false, true] {
+            let body = if value {
+                format!("let answer=(match (entry) {{{pattern} {{42}} _ {{0}}}});return answer;")
+            } else {
+                format!("match entry {{{pattern} {{return 42;}} _ {{return 0;}}}}")
+            };
+            let source = format!("fn main()->Int {{{body}}}");
+            let before =
+                parse_in_source(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+            let after =
+                parse_in_source(&canonical).unwrap_or_else(|error| panic!("{canonical}: {error}"));
+            assert_eq!(before.decls, after.decls, "{source}\n{canonical}");
+            let function = before
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    crate::core_ir::Decl::Function { body, .. } => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            let parsed_pattern = if value {
+                let crate::core_ir::Stmt::Let(_, _, crate::core_ir::Expr::MatchValue { arms, .. }) =
+                    &function[0]
+                else {
+                    panic!("{function:?}")
+                };
+                &arms[0].pattern
+            } else {
+                let crate::core_ir::Stmt::Match { arms, .. } = &function[0] else {
+                    panic!("{function:?}")
+                };
+                &arms[0].pattern
+            };
+            assert_eq!(
+                parsed_pattern,
+                pattern
+                    .split(" if ")
+                    .next()
+                    .unwrap()
+                    .trim_end_matches("->")
+                    .trim_end_matches(':')
+                    .trim(),
+                "{source}"
+            );
+        }
+    }
+}
