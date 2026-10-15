@@ -2308,11 +2308,12 @@ fn lower_ident_ref(
         });
         return Ok(());
     }
-    let offset = ctx.slot_offset(name).unwrap_or_else(|_| {
-        let off = ctx.alloc_slot();
-        ctx.locals.insert(name.to_string(), StackSlot::Scalar(off));
-        off
-    });
+    let offset = ctx.slot_offset(name).map_err(|_| {
+        format!(
+            "x86_64-lower: unresolved identifier `{name}` in `{}`",
+            ctx.fn_name
+        )
+    })?;
     if target_reg == RAX {
         emitter.emit_insns(&x86_64::ldr64(target_reg, offset as u16));
     } else {

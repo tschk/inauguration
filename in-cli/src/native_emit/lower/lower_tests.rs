@@ -2825,3 +2825,95 @@ fn unit_sequence_layouts_are_rejected_before_storage_allocation() {
         }
     }
 }
+
+#[test]
+fn declared_identifier_spellings_resolve_exact_storage() {
+    for name in ["bad value", "bad..value", "回答"] {
+        for parameter in [false, true] {
+            let module = UnifiedModule {
+                identity: Default::default(),
+                decls: vec![Decl::Function {
+                    name: "main".into(),
+                    params: if parameter {
+                        vec![(name.into(), Typ::Int)]
+                    } else {
+                        vec![]
+                    },
+                    ret: Typ::Int,
+                    body: if parameter {
+                        vec![Stmt::Return(Some(Expr::Ident(name.into())))]
+                    } else {
+                        vec![
+                            Stmt::Let(name.into(), Some(Typ::Int), Expr::IntLit(42)),
+                            Stmt::Return(Some(Expr::Ident(name.into()))),
+                        ]
+                    },
+                    type_params: vec![],
+                }],
+            };
+            let arm = lower_module(&module, "main", NativeLinkage::Executable)
+                .expect("ARM declared symbol");
+            let x86 = crate::native_emit::x86_64_lower::lower_module(&module, "main")
+                .expect("x86 declared symbol");
+            #[cfg(target_arch = "aarch64")]
+            let (code, relocations, offsets) = (
+                &arm.code,
+                &arm.relocations,
+                arm.function_offsets
+                    .iter()
+                    .map(|(name, offset)| (name.clone(), *offset, 0))
+                    .collect::<Vec<_>>(),
+            );
+            #[cfg(target_arch = "x86_64")]
+            let x86_relocations = x86
+                .relocations
+                .iter()
+                .map(|site| (*site, x86.codegen_base))
+                .collect::<Vec<_>>();
+            #[cfg(target_arch = "x86_64")]
+            let (code, relocations, offsets) = (
+                &x86.code,
+                &x86_relocations,
+                x86.exports
+                    .iter()
+                    .map(|(name, offset)| (name.clone(), *offset, 0))
+                    .collect::<Vec<_>>(),
+            );
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            {
+                let mut runtime = crate::jit_runtime::JitRuntime::new();
+                runtime
+                    .load(code, &offsets, relocations)
+                    .expect("load exact symbol code");
+                let args: &[i64] = if parameter { &[42] } else { &[] };
+                assert_eq!(
+                    unsafe { runtime.invoke("main", args).expect("invoke exact symbol") },
+                    42,
+                    "{name}, parameter={parameter}"
+                );
+            }
+            let _ = (arm, x86);
+        }
+    }
+}
+
+#[test]
+fn unresolved_identifier_values_are_rejected_by_raw_backends() {
+    for name in ["missing", "bad value", "bad..value"] {
+        let mut module = answer_module();
+        let Decl::Function { body, .. } = &mut module.decls[0] else {
+            unreachable!()
+        };
+        *body = vec![Stmt::Return(Some(Expr::Ident(name.into())))];
+        for error in [
+            lower_module(&module, "answer", NativeLinkage::Executable).err(),
+            crate::native_emit::x86_64_lower::lower_module(&module, "answer").err(),
+        ] {
+            let error = error.expect("unresolved identifier must not produce code");
+            assert!(
+                error.contains("unresolved identifier") && error.contains(name),
+                "{error}"
+            );
+        }
+    }
+}

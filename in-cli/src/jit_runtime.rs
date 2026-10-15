@@ -4873,6 +4873,52 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn declared_symbol_names_are_not_replaced_by_fabricated_values() {
+        for name in ["bad value", "bad..value", "данные", "正常"] {
+            use crate::core_ir::{Decl, Expr, Stmt, Typ, UnifiedModule};
+            let module = UnifiedModule::new(vec![
+                Decl::Function {
+                    name: "take".into(),
+                    params: vec![(name.into(), Typ::Int)],
+                    ret: Typ::Int,
+                    type_params: vec![],
+                    body: vec![Stmt::If {
+                        cond: Expr::Binary {
+                            op: "==".into(),
+                            lhs: Box::new(Expr::Ident(name.into())),
+                            rhs: Box::new(Expr::IntLit(42)),
+                        },
+                        then_body: vec![Stmt::Return(Some(Expr::Ident(name.into())))],
+                        else_body: vec![Stmt::Return(Some(Expr::IntLit(0)))],
+                    }],
+                },
+                Decl::Function {
+                    name: "main".into(),
+                    params: vec![],
+                    ret: Typ::Int,
+                    type_params: vec![],
+                    body: vec![Stmt::Return(Some(Expr::Call {
+                        callee: Box::new(Expr::Ident("take".into())),
+                        args: vec![Expr::IntLit(42)],
+                    }))],
+                },
+            ]);
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{name} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn unit_values_preserve_types_effects_parameters_and_returns() {
         for source in [
             "fn main()->i64{let x=match (){()=>42};x}",

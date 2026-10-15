@@ -237,11 +237,6 @@ pub(crate) fn lower_expr_into(
                 return Ok(());
             }
 
-            if name.contains(' ') || name.contains("..") {
-                // Rust front couldn't parse this expression — emit 0 as fallback
-                emitter.emit_insns(&aarch64::load_i64(rd, 0));
-                return Ok(());
-            }
             if let Some(&pointer) = ctx.receiver_pointers.get(name) {
                 emitter.emit_u32(aarch64::ldr64(rd, aarch64::REG_SP, pointer));
             } else if let Some(offset) = ctx.params.get(name) {
@@ -275,9 +270,9 @@ pub(crate) fn lower_expr_into(
                     emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
                 }
             } else {
-                // Unknown identifier — enum variant, constant, or ZST used as value.
-                // Emit 0 so the function can lower; correct at runtime for None/NULL-like values.
-                emitter.emit_insns(&aarch64::load_i64(rd, 0));
+                return Err(format!(
+                    "native-lower: unresolved identifier `{name}` in `{fn_name}`"
+                ));
             }
             Ok(())
         }

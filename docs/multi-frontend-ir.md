@@ -31,6 +31,10 @@ Value matches require compatible arm types and proven exhaustiveness. An unguard
 
 Rust expression `match` and value-position `if let`, brace-form `.in` matches, and `.icore` v2/v3 `kind: "match-value"` use this representation. The JSON form contains `scrutinee` and `arms`; each arm has `pattern`, optional `guard`, and `value`. C/Go source projection, Thumb, and INISA refuse match values until those emitters preserve the same semantics.
 
+## Native symbol resolution
+
+Native reads resolve declared local, parameter, global, and supported function-address bindings. Core IR symbol names are matched exactly, including names supplied by `.icore` that source-language parsers would not spell as identifiers. A spelling heuristic must not replace a declared value. Unresolved identifiers refuse lowering rather than becoming zero or allocating an uninitialized stack slot.
+
 ## Unit values
 
 `UnitLit` represents `()` with type `Void`, distinct from integer zero and an empty array. Rust, `.in`, canonical source, and `.icore` expression `kind: "unit"` retain this type through checking and lowering. Empty-tuple patterns match unit values, including the results of calls, and explicit unit returns evaluate their producers before returning.

@@ -367,6 +367,66 @@ fn owned_conditional_and_block_values_preserve_scope_effects_and_control_flow() 
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
+fn icore_symbol_names_resolve_declared_parameters_exactly() {
+    for (extension, text) in [
+        (
+            "icore",
+            "{\"icoreVersion\": 2, \"decls\": [{\"kind\": \"function\", \"name\": \"take\", \"params\": [{\"name\": \"bad value\", \"type\": \"Int\"}], \"return\": \"Int\", \"body\": [{\"kind\": \"if\", \"cond\": {\"kind\": \"binary\", \"op\": \"==\", \"lhs\": {\"kind\": \"ident\", \"name\": \"bad value\"}, \"rhs\": 42}, \"then_body\": [{\"kind\": \"return\", \"value\": {\"kind\": \"ident\", \"name\": \"bad value\"}}], \"else_body\": [{\"kind\": \"return\", \"value\": 0}]}]}, {\"kind\": \"function\", \"name\": \"main\", \"params\": [], \"return\": \"Int\", \"body\": [{\"kind\": \"return\", \"value\": {\"kind\": \"call\", \"callee\": \"take\", \"args\": [42]}}]}]}",
+        ),
+        (
+            "icore",
+            "{\"icoreVersion\": 2, \"decls\": [{\"kind\": \"function\", \"name\": \"take\", \"params\": [{\"name\": \"bad..value\", \"type\": \"Int\"}], \"return\": \"Int\", \"body\": [{\"kind\": \"if\", \"cond\": {\"kind\": \"binary\", \"op\": \"==\", \"lhs\": {\"kind\": \"ident\", \"name\": \"bad..value\"}, \"rhs\": 42}, \"then_body\": [{\"kind\": \"return\", \"value\": {\"kind\": \"ident\", \"name\": \"bad..value\"}}], \"else_body\": [{\"kind\": \"return\", \"value\": 0}]}]}, {\"kind\": \"function\", \"name\": \"main\", \"params\": [], \"return\": \"Int\", \"body\": [{\"kind\": \"return\", \"value\": {\"kind\": \"call\", \"callee\": \"take\", \"args\": [42]}}]}]}",
+        ),
+        (
+            "icore",
+            "{\"icoreVersion\": 2, \"decls\": [{\"kind\": \"function\", \"name\": \"take\", \"params\": [{\"name\": \"данные\", \"type\": \"Int\"}], \"return\": \"Int\", \"body\": [{\"kind\": \"if\", \"cond\": {\"kind\": \"binary\", \"op\": \"==\", \"lhs\": {\"kind\": \"ident\", \"name\": \"данные\"}, \"rhs\": 42}, \"then_body\": [{\"kind\": \"return\", \"value\": {\"kind\": \"ident\", \"name\": \"данные\"}}], \"else_body\": [{\"kind\": \"return\", \"value\": 0}]}]}, {\"kind\": \"function\", \"name\": \"main\", \"params\": [], \"return\": \"Int\", \"body\": [{\"kind\": \"return\", \"value\": {\"kind\": \"call\", \"callee\": \"take\", \"args\": [42]}}]}]}",
+        ),
+        (
+            "icore",
+            "{\"icoreVersion\": 2, \"decls\": [{\"kind\": \"function\", \"name\": \"take\", \"params\": [{\"name\": \"正常\", \"type\": \"Int\"}], \"return\": \"Int\", \"body\": [{\"kind\": \"if\", \"cond\": {\"kind\": \"binary\", \"op\": \"==\", \"lhs\": {\"kind\": \"ident\", \"name\": \"正常\"}, \"rhs\": 42}, \"then_body\": [{\"kind\": \"return\", \"value\": {\"kind\": \"ident\", \"name\": \"正常\"}}], \"else_body\": [{\"kind\": \"return\", \"value\": 0}]}]}, {\"kind\": \"function\", \"name\": \"main\", \"params\": [], \"return\": \"Int\", \"body\": [{\"kind\": \"return\", \"value\": {\"kind\": \"call\", \"callee\": \"take\", \"args\": [42]}}]}]}",
+        ),
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path(&format!("symbol-name.{extension}"));
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{text} {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{text} {profile:?}"
+            );
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("shared-symbol-name-native");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(report.success, "{text} {profile:?}: {report:?}");
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42),
+                    "{text} {profile:?}"
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
 fn shared_unit_fronts_preserve_void_values_and_matches() {
     for (extension, text) in [
         (
