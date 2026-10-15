@@ -294,7 +294,7 @@ fn map_stmt_mut<F: FnMut(&mut Expr)>(s: &mut Stmt, f: &mut F) {
     }
 }
 
-fn map_expr<F: FnMut(Expr) -> Expr + Copy>(e: Expr, f: &mut F) -> Expr {
+pub(crate) fn map_expr<F: FnMut(Expr) -> Expr + Copy>(e: Expr, f: &mut F) -> Expr {
     let mapped = match e {
         Expr::MatchValue { scrutinee, arms } => Expr::MatchValue {
             scrutinee: Box::new(map_expr(*scrutinee, f)),
@@ -1212,8 +1212,11 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
                 }
             }
             if let (Expr::StringLit(a), Expr::StringLit(b)) = (lhs.as_ref(), rhs.as_ref()) {
-                if matches!(op.as_str(), "+" | "add") {
-                    return Expr::StringLit(format!("{a}{b}"));
+                match op.as_str() {
+                    "+" | "add" => return Expr::StringLit(format!("{a}{b}")),
+                    "==" | "eq" => return Expr::BoolLit(a == b),
+                    "!=" | "neq" => return Expr::BoolLit(a != b),
+                    _ => {}
                 }
             }
             if let (Expr::IntLit(a), Expr::IntLit(b)) = (lhs.as_ref(), rhs.as_ref()) {
@@ -2838,6 +2841,48 @@ mod tests {
             fold_expr(bin("ge", Expr::IntLit(5), Expr::IntLit(5))),
             Expr::BoolLit(true)
         );
+    }
+
+    #[test]
+    fn fold_string_equality_compares_complete_literal_content() {
+        for (left, right, equal) in [
+            ("λ雪", "λ雪", true),
+            ("λ雪", "λ霜", false),
+            ("", "", true),
+            ("", "λ", false),
+            ("a\0雪", "a\0雪", true),
+            ("a\0雪", "a\0霜", false),
+        ] {
+            for op in ["==", "eq", "!=", "neq"] {
+                let expected = if matches!(op, "==" | "eq") {
+                    equal
+                } else {
+                    !equal
+                };
+                assert_eq!(
+                    fold_expr(bin(
+                        op,
+                        Expr::StringLit(left.into()),
+                        Expr::StringLit(right.into())
+                    )),
+                    Expr::BoolLit(expected),
+                    "{left:?} {op} {right:?}"
+                );
+            }
+        }
+        for op in ["<", ">", "===", "!==", "*", "unknown"] {
+            let expr = bin(op, Expr::StringLit("λ".into()), Expr::StringLit("λ".into()));
+            assert_eq!(fold_expr(expr.clone()), expr);
+        }
+        for op in ["==", "eq", "!=", "neq"] {
+            for expr in [
+                bin(op, call("effect", vec![]), Expr::StringLit("λ".into())),
+                bin(op, Expr::StringLit("λ".into()), call("effect", vec![])),
+                bin(op, call("effect", vec![]), call("effect", vec![])),
+            ] {
+                assert_eq!(fold_expr(expr.clone()), expr);
+            }
+        }
     }
 
     #[test]

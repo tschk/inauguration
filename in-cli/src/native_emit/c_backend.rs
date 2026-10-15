@@ -100,6 +100,32 @@ pub fn emit_c_module(module: &UnifiedModule) -> Result<String, String> {
             _ => None,
         })
         .collect();
+    fn reserve(decls: &[Decl], names: &mut HashSet<String>) {
+        for decl in decls {
+            match decl {
+                Decl::Function {
+                    name, params, body, ..
+                } => {
+                    names.insert(name.clone());
+                    names.extend(params.iter().map(|(name, _)| name.clone()));
+                    crate::core_bindings::reserve_body(body, names);
+                }
+                Decl::Global { name, init, .. } => {
+                    names.insert(name.clone());
+                    if let Some(init) = init {
+                        crate::core_bindings::reserve_expr(init, names);
+                    }
+                }
+                Decl::Class { methods, .. } => reserve(methods, names),
+                _ => {}
+            }
+        }
+    }
+    let mut reserved = HashSet::new();
+    reserve(&module.decls, &mut reserved);
+    ctx.reserved
+        .borrow_mut()
+        .extend(reserved.iter().map(|name| sanitize_ident(name)));
     ctx.global_names = Rc::new(
         module
             .decls
@@ -250,7 +276,16 @@ static inline int64_t in_float_saturate(double value, unsigned bits, int is_sign
             } = decl
             {
                 let init_s = match init {
-                    Some(e) => format!(" = {}", ctx.expr_str(e)),
+                    Some(e) => {
+                        ctx.global_initializer = true;
+                        let value = crate::core_opt::map_expr(
+                            e.as_ref().clone(),
+                            &mut crate::core_opt::fold_expr,
+                        );
+                        let value = ctx.expr_str(&value);
+                        ctx.global_initializer = false;
+                        format!(" = {}", value)
+                    }
                     None => String::new(),
                 };
                 ctx.push(&format!(
@@ -326,6 +361,7 @@ static inline int64_t in_float_saturate(double value, unsigned bits, int is_sign
 struct Ctx {
     out: String,
     facts: Rc<Facts>,
+    reserved: Rc<RefCell<HashSet<String>>>,
     types: HashMap<String, Typ>,
     error: Rc<RefCell<Option<String>>>,
     indent_lvl: u32,
@@ -335,6 +371,7 @@ struct Ctx {
     hoisted: Vec<String>,
     tmp: u32,
     ret_is_void: bool,
+    global_initializer: bool,
 }
 
 impl Ctx {
@@ -342,6 +379,7 @@ impl Ctx {
         Self {
             out: String::with_capacity(4096),
             facts,
+            reserved: Rc::new(RefCell::new(HashSet::new())),
             types: HashMap::new(),
             error: Rc::new(RefCell::new(None)),
             indent_lvl: 0,
@@ -350,6 +388,7 @@ impl Ctx {
             hoisted: Vec::new(),
             tmp: 0,
             ret_is_void: false,
+            global_initializer: false,
         }
     }
 
@@ -368,9 +407,60 @@ impl Ctx {
     }
 
     fn fresh(&mut self, prefix: &str) -> String {
-        let id = self.tmp;
-        self.tmp += 1;
-        format!("__{}_{}", prefix, id)
+        loop {
+            let id = self.tmp;
+            self.tmp += 1;
+            let candidate = format!("__{}_{}", prefix, id);
+            if self.reserved.borrow_mut().insert(candidate.clone()) {
+                return candidate;
+            }
+        }
+    }
+
+    fn string_equality(&mut self, left: &str, right: &str, unequal: bool) -> String {
+        if self.global_initializer {
+            self.fail(
+                "c-backend: String equality in a global initializer requires constant folding"
+                    .into(),
+            );
+            return "0".into();
+        }
+        let a = self.fresh("str_left");
+        let b = self.fresh("str_right");
+        let equal = self.fresh("str_equal");
+        let result = if unequal {
+            format!("!{equal}")
+        } else {
+            equal.clone()
+        };
+        // Keep operands sequenced inside the surrounding lazy expression.
+        // shortcut: C strings use NUL termination; embedded NUL needs a length-bearing ABI.
+        format!(
+            "__extension__({{ const unsigned char *{a} = (const unsigned char*)({left}); const unsigned char *{b} = (const unsigned char*)({right}); int {equal} = 0; if ({a} && {b}) {{ while (*{a} && *{a} == *{b}) {{ ++{a}; ++{b}; }} {equal} = *{a} == *{b}; }} {result}; }})"
+        )
+    }
+
+    fn pattern_condition(
+        &mut self,
+        scrutinee: &str,
+        pattern: &str,
+        typ: &str,
+    ) -> (String, Vec<String>) {
+        if typ == "const char*" {
+            if let Ok(crate::core_ir::MatchPattern::StringPat(value)) =
+                crate::core_ir::MatchPattern::parse(pattern)
+            {
+                return (
+                    self.string_equality(
+                        scrutinee,
+                        &format!("\"{}\"", escape_c_string(&value)),
+                        false,
+                    ),
+                    vec![],
+                );
+            }
+        }
+        match_arm_cond_and_binds(scrutinee, pattern, typ)
     }
 
     fn line(&mut self, s: &str) {
@@ -443,6 +533,20 @@ impl Ctx {
             }
             Expr::Binary { op, lhs, rhs } => {
                 let (l, r) = (self.expr_str(lhs), self.expr_str(rhs));
+                if matches!(op.as_str(), "eq" | "==" | "neq" | "!=") {
+                    let checker = TypeChecker::new();
+                    if checker
+                        .expr_type(lhs, &self.facts, &self.types)
+                        .map(|t| t.canonical())
+                        == Some(Typ::String)
+                        && checker
+                            .expr_type(rhs, &self.facts, &self.types)
+                            .map(|t| t.canonical())
+                            == Some(Typ::String)
+                    {
+                        return self.string_equality(&l, &r, matches!(op.as_str(), "neq" | "!="));
+                    }
+                }
                 match op.as_str() {
                     "land" | "&&" => format!("({} && {})", l, r),
                     "lor" | "||" => format!("({} || {})", l, r),
@@ -577,6 +681,7 @@ impl Ctx {
                 ));
                 let mut nested = Ctx::new(self.func_names.clone(), self.facts.clone());
                 nested.error = self.error.clone();
+                nested.reserved = self.reserved.clone();
                 nested.tmp = self.tmp;
                 nested.types = self.types.clone();
                 nested.types.extend(params.iter().cloned());
@@ -778,6 +883,7 @@ fn emit_fn_def(ctx: &mut Ctx, name: &str, params: &[(String, Typ)], ret: &Typ, b
     // Build body into a nested buffer so hoisted closures land before the fn.
     let mut body_ctx = Ctx::new(ctx.func_names.clone(), ctx.facts.clone());
     body_ctx.error = ctx.error.clone();
+    body_ctx.reserved = ctx.reserved.clone();
     body_ctx.types = ctx.types.clone();
     body_ctx.types.extend(params.iter().cloned());
     body_ctx.global_names = ctx.global_names.clone();
@@ -943,7 +1049,7 @@ fn emit_stmt(ctx: &mut Ctx, stmt: &Stmt) {
             ctx.push(&format!("{} {} = {};", scr_type, scr_tmp, scr));
             let mut first = true;
             for arm in arms {
-                let (cond, binds) = match_arm_cond_and_binds(&scr_tmp, &arm.pattern, &scr_type);
+                let (cond, binds) = ctx.pattern_condition(&scr_tmp, &arm.pattern, &scr_type);
                 if first {
                     ctx.push(&format!("if ({}) {{", cond));
                     first = false;
@@ -985,7 +1091,7 @@ fn emit_stmt(ctx: &mut Ctx, stmt: &Stmt) {
                 ctx.indent();
                 for (i, c) in catches.iter().enumerate() {
                     let bind = c.pattern.trim();
-                    let (cond, binds) = match_arm_cond_and_binds("__in_err_val", bind, "int64_t");
+                    let (cond, binds) = ctx.pattern_condition("__in_err_val", bind, "int64_t");
                     if i == 0 {
                         ctx.push(&format!("if ({}) {{", cond));
                     } else {
@@ -1056,17 +1162,6 @@ fn match_arm_cond_and_binds(scrutinee: &str, pattern: &str, typ: &str) -> (Strin
     }
     if let Ok(n) = p.parse::<i64>() {
         return (format!("(({}) == INT64_C({}))", scrutinee, n), vec![]);
-    }
-    if p.len() >= 2 && p.starts_with('"') && p.ends_with('"') {
-        let inner = &p[1..p.len() - 1];
-        return (
-            format!(
-                "(({}) == (const char*)\"{}\")",
-                scrutinee,
-                escape_c_string(inner)
-            ),
-            vec![],
-        );
     }
     // Ident binding: always matches, bind name = scrutinee.
     if is_simple_ident(p) {

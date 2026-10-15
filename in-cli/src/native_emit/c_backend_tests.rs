@@ -1068,3 +1068,212 @@ fn inferred_c_hardware_intrinsic_alias_retains_integer_type() {
     assert!(source.contains("int64_t value;"), "{source}");
     assert!(source.contains("mov %%cr2"), "{source}");
 }
+
+#[test]
+fn c_string_comparisons_use_distinct_writable_buffers() {
+    let source = "fn equal(a:String,b:String)->Bool{return a==b;}\nfn different(a:String,b:String)->Bool{return a!=b;}\nfn main()->Int{return 0;}";
+    let canonical = crate::in_canonical::canonicalize_in_source(source).unwrap();
+    for source in [source, canonical.as_str()] {
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        for decl in &mut module.decls {
+            if let Decl::Function { name, .. } = decl
+                && name == "main"
+            {
+                *name = "answer".into();
+            }
+        }
+        assert_inferred_c_executes(
+            &module,
+            r#"
+            char left[] = {'h',(char)0xc3,(char)0xa9,0};
+            char right[] = {'h',(char)0xc3,(char)0xa9,0};
+            char empty_left[] = {0}; char empty_right[] = {0};
+            if (!equal(left,right) || different(left,right)) return 1;
+            if (!equal(empty_left,empty_right) || different(empty_left,empty_right)) return 2;
+            right[0]='x';
+            if (equal(left,right) || !different(left,right)) return 3;
+            if (equal(left,empty_left) || !different(left,empty_right)) return 4;
+            return 42;
+        "#,
+        );
+    }
+}
+
+#[test]
+fn c_string_comparison_aliases_and_numeric_comparisons_execute() {
+    for (op, equal_result, different_result) in [("eq", true, false), ("neq", false, true)] {
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "compare".into(),
+            params: vec![("left".into(), Typ::String), ("right".into(), Typ::String)],
+            ret: Typ::Bool,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Binary {
+                op: op.into(),
+                lhs: Box::new(Expr::Ident("left".into())),
+                rhs: Box::new(Expr::Ident("right".into())),
+            }))],
+        }]);
+        assert_inferred_c_executes(
+            &module,
+            &format!(
+                "char a[]={{65,0}};char b[]={{65,0}};char c[]={{66,0}};if(compare(a,b)!={})return 1;if(compare(a,c)!={})return 2;return 42;",
+                u8::from(equal_result),
+                u8::from(different_result)
+            ),
+        );
+    }
+    let mut module = crate::in_lang_parse::parse_in_source(
+        "fn main()->Int{let a=20;let b=22;if a!=b && a+b==42{return 42;}return 0;}",
+    )
+    .unwrap();
+    if let Decl::Function { name, .. } = &mut module.decls[0] {
+        *name = "answer".into();
+    }
+    assert_inferred_c_executes(&module, "return (int)answer();");
+}
+
+#[test]
+fn c_string_comparisons_preserve_effect_order_and_lazy_contexts() {
+    let source = "var calls:Int=0;\nfn left()->String{calls=calls*10+1;return \"hé\";}\nfn right()->String{calls=calls*10+2;return \"hé\";}\nfn main()->Int{if false && left()==right(){return 1;}if true || left()!=right(){}else{return 2;}if calls!=0{return 3;}if left()==right(){if calls==12{return 42;}}return 4;}";
+    let canonical = crate::in_canonical::canonicalize_in_source(source).unwrap();
+    for source in [source, canonical.as_str()] {
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        for decl in &mut module.decls {
+            if let Decl::Function { name, body, .. } = decl
+                && name == "main"
+            {
+                *name = "answer".into();
+                let comparison = Expr::Binary {
+                    op: "==".into(),
+                    lhs: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Ident("left".into())),
+                        args: vec![],
+                    }),
+                    rhs: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Ident("right".into())),
+                        args: vec![],
+                    }),
+                };
+                // Both unselected conditional arms must keep the comparison lazy.
+                for (cond, then_expr, else_expr) in [
+                    (false, comparison.clone(), Expr::BoolLit(true)),
+                    (true, Expr::BoolLit(true), comparison),
+                ] {
+                    body.insert(
+                        0,
+                        Stmt::Expr(Expr::Conditional {
+                            cond: Box::new(Expr::BoolLit(cond)),
+                            then_expr: Box::new(then_expr),
+                            else_expr: Box::new(else_expr),
+                        }),
+                    );
+                }
+            }
+        }
+        assert_inferred_c_executes(&module, "return (int)answer();");
+    }
+}
+
+#[test]
+fn c_string_literal_matches_decode_escapes_and_avoid_temporary_collisions() {
+    // Emit compare first so an unreserved fresh counter deterministically collides at0/1/2.
+    let source = r#"fn compare(__str_left_0:String,__str_right_1:String)->Int{let __str_equal_2:Int=20;let __scr_0:Int=22;if __str_left_0==__str_right_1{return __str_equal_2+__scr_0;}return 0;}
+fn matched(text:String)->Int{match text{"a\"é\n{" {return 42;} _ {return 0;}}return 0;}
+fn main()->Int{return 0;}"#;
+    let canonical = crate::in_canonical::canonicalize_in_source(source).unwrap();
+    for source in [source, canonical.as_str()] {
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        for decl in &mut module.decls {
+            if let Decl::Function { name, .. } = decl
+                && name == "main"
+            {
+                *name = "answer".into();
+            }
+        }
+        assert_inferred_c_executes(
+            &module,
+            r#"
+            char text[]={'a','"',(char)0xc3,(char)0xa9,'\n','{',0};
+            char other[]={'a','"',(char)0xc3,(char)0xa9,'\n','{',0};
+            if(matched(text)!=42 || compare(text,other)!=42)return 1;
+            text[0]='x';if(matched(text)!=0)return 2;
+            return 42;
+        "#,
+        );
+    }
+}
+
+#[test]
+fn c_string_literal_global_comparisons_are_valid_file_scope_constants() {
+    for op in ["==", "eq", "!=", "neq"] {
+        let inequality = matches!(op, "!=" | "neq");
+        let decls = [
+            ("unicode", "hé", "hé", true),
+            ("unequal", "a", "b", false),
+            ("empty", "", "", true),
+        ]
+        .into_iter()
+        .map(|(name, left, right, _)| Decl::Global {
+            name: name.into(),
+            typ: Typ::Bool,
+            mutable: true,
+            constant_value: false,
+            init: Some(Box::new(Expr::Binary {
+                op: op.into(),
+                lhs: Box::new(Expr::StringLit(left.into())),
+                rhs: Box::new(Expr::StringLit(right.into())),
+            })),
+        })
+        .collect();
+        let module = UnifiedModule::new(decls);
+        let equal = u8::from(!inequality);
+        let unequal = u8::from(inequality);
+        assert_inferred_c_executes(
+            &module,
+            &format!(
+                "if(unicode!={equal} || unequal!={unequal} || empty!={equal})return 1;return 42;"
+            ),
+        );
+    }
+    let nested = UnifiedModule::new(vec![Decl::Global {
+        name: "nested".into(),
+        typ: Typ::Bool,
+        mutable: true,
+        constant_value: false,
+        init: Some(Box::new(Expr::Binary {
+            op: "==".into(),
+            lhs: Box::new(Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(Expr::StringLit("λ".into())),
+                rhs: Box::new(Expr::StringLit("雪".into())),
+            }),
+            rhs: Box::new(Expr::StringLit("λ雪".into())),
+        })),
+    }]);
+    assert_inferred_c_executes(&nested, "return nested ? 42 : 0;");
+    let module = UnifiedModule::new(vec![
+        Decl::Function {
+            name: "text".into(),
+            params: vec![],
+            ret: Typ::String,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::StringLit("a".into())))],
+        },
+        Decl::Global {
+            name: "dynamic".into(),
+            typ: Typ::Bool,
+            mutable: true,
+            constant_value: false,
+            init: Some(Box::new(Expr::Binary {
+                op: "==".into(),
+                lhs: Box::new(Expr::Call {
+                    callee: Box::new(Expr::Ident("text".into())),
+                    args: vec![],
+                }),
+                rhs: Box::new(Expr::StringLit("a".into())),
+            })),
+        },
+    ]);
+    let error = emit_c_module(&module).unwrap_err();
+    assert!(error.contains("global initializer"), "{error}");
+}
