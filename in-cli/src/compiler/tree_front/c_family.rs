@@ -190,16 +190,18 @@ fn c_like_fn_name<'a>(src: &[u8], func_def: Node<'a>) -> Option<String> {
     Some(normalize_entry(node_txt(src, id).trim()))
 }
 
-/// C / C++ / ObjC++ `function_definition`: name, coarse types, parameters, optional trivial
-/// `return <integer>;`, `return <param>;`, or `return;` body (single statement, no locals).
+/// Lower a C / C++ / ObjC++ function definition with its source body.
 pub(super) fn c_like_function_decl<'a>(src: &[u8], func_def: Node<'a>) -> Option<Decl> {
     let name = c_like_fn_name(src, func_def)?;
     let ret = c_coarse_return_typ(src, func_def);
     let params = c_parameter_list(src, func_def);
-    let body = func_def
-        .child_by_field_name("body")
-        .map(|b| c_body(src, b))
-        .unwrap_or_default();
+    let body_node = func_def.child_by_field_name("body");
+    let mut body = body_node.map(|b| c_body(src, b)).unwrap_or_default();
+    // Empty bodies denote extern declarations in Core IR. Preserve actual
+    // void definitions, including bodies containing only comments or `;`.
+    if body_node.is_some() && ret.canonical() == Typ::Void && body.is_empty() {
+        body.push(Stmt::Return(None));
+    }
     Some(Decl::Function {
         name,
         params,
@@ -987,6 +989,96 @@ mod tests {
             "1e2",
         ] {
             assert_eq!(parse_c_integer_literal(text), None, "{text}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod empty_definition_tests {
+    use super::*;
+    use crate::core_ir::UnifiedModule;
+
+    fn extract(source: &str, cpp: bool) -> UnifiedModule {
+        let mut parser = tree_sitter::Parser::new();
+        let language = if cpp {
+            tree_sitter_cpp::LANGUAGE.into()
+        } else {
+            tree_sitter_c::LANGUAGE.into()
+        };
+        parser.set_language(&language).expect("C-family grammar");
+        let tree = parser.parse(source, None).expect("parse C-family source");
+        assert!(!tree.root_node().has_error(), "{source}");
+        let decls = if cpp {
+            extract_cpp_with_classes(source.as_bytes(), tree.root_node())
+        } else {
+            extract_c(source.as_bytes(), tree.root_node())
+        };
+        UnifiedModule::new(decls.expect("extract C-family source"))
+    }
+
+    #[test]
+    fn empty_void_definitions_remain_defined_on_native_backends() {
+        for cpp in [false, true] {
+            for contents in ["", "/* intentionally empty */", ";"] {
+                let source = format!(
+                    "void noop(void) {{{contents}}} long long main(void) {{ noop(); return 42; }}"
+                );
+                let module = extract(&source, cpp);
+                let body = module
+                    .decls
+                    .iter()
+                    .find_map(|decl| match decl {
+                        Decl::Function { name, body, .. } if name == "noop" => Some(body),
+                        _ => None,
+                    })
+                    .expect("noop definition");
+                assert!(matches!(body.as_slice(), [Stmt::Return(None)]));
+                let thumb = crate::native_emit::thumb_lower::lower_module(&module, "main")
+                    .expect("lower empty void definition to Thumb");
+                assert!(!thumb.code.is_empty());
+                assert!(thumb.exports.iter().any(|(name, _)| name == "noop"));
+                assert!(!thumb.externs.iter().any(|name| name == "noop"));
+                let x86 = crate::native_emit::x86_64_lower::lower_module(&module, "main")
+                    .expect("lower empty void definition to x86");
+                assert!(!x86.code.is_empty());
+                assert!(x86.exports.iter().any(|(name, _)| name == "noop"));
+                assert!(!x86.externs.iter().any(|name| name == "noop"));
+            }
+        }
+    }
+
+    #[test]
+    fn nonvoid_definitions_do_not_gain_void_returns_or_hide_unsupported_bodies() {
+        for cpp in [false, true] {
+            let module = extract(
+                "long long empty(void) {} void unsupported(void) { goto done; done: ; }",
+                cpp,
+            );
+            let thumb_error = crate::native_emit::thumb_lower::lower_module(&module, "unsupported")
+                .map(|_| ())
+                .expect_err("unsupported statement must refuse Thumb lowering");
+            assert!(thumb_error.contains("__unsupported_c_"), "{thumb_error}");
+            let x86_error = crate::native_emit::x86_64_lower::lower_module(&module, "unsupported")
+                .map(|_| ())
+                .expect_err("unsupported statement must refuse x86 lowering");
+            assert!(x86_error.contains("__unsupported_c_"), "{x86_error}");
+            for decl in &module.decls {
+                if let Decl::Function { name, body, .. } = decl {
+                    match name.as_str() {
+                        "empty" => {
+                            assert!(!body.iter().any(|stmt| matches!(stmt, Stmt::Return(None))))
+                        }
+                        "unsupported" => {
+                            assert!(!body.is_empty());
+                            assert!(body.iter().any(|stmt| matches!(stmt,
+                                Stmt::Expr(Expr::Call { callee, .. })
+                                    if matches!(callee.as_ref(), Expr::Ident(name) if name.starts_with("__unsupported_c_"))
+                            )));
+                        }
+                        _ => panic!("unexpected definition {name}"),
+                    }
+                }
+            }
         }
     }
 }

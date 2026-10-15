@@ -1,0 +1,22 @@
+[
+  {
+    "name": "c-prototype-before",
+    "extension": "c",
+    "expected": 42
+  },
+  {
+    "name": "c-prototype-after",
+    "extension": "c",
+    "expected": 42
+  },
+  {
+    "name": "cpp-prototype-before",
+    "extension": "cpp",
+    "expected": 42
+  },
+  {
+    "name": "cpp-prototype-after",
+    "extension": "cpp",
+    "expected": 42
+  }
+]

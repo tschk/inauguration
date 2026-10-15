@@ -67,6 +67,8 @@ Selected Thumb and x86 MMIO intrinsics require integer addresses and values,
 integer load results and void store results. Their bodyless declarations must
 match those signatures. AArch64 declared MMIO names remain ordinary external
 calls with their declared ABI.
+C-family empty `void` definitions retain an explicit return in Core IR, so Thumb
+and x86 emit owned functions rather than undefined external symbols.
 
 AArch64 JIT and macOS executable lowering share writable scalar globals and
 scalar struct fields across function calls. Both native backends use the same
