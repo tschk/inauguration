@@ -1,0 +1,171 @@
+// Bounded canonical CBOR primitives. No policy, hashing or cryptography.
+// All arrays are read-only. Caller must ensure 0 <= limit <= physical array
+// length; emit/compare callers must ensure their offset ranges are allocated.
+// Error is -1. Supported unsigned maximum is 9007199253740991.
+
+fn cbor_head_value(src: [Int], pos: Int, limit: Int, major: Int, maximum: Int) -> Int {
+  if pos < 0 || limit < 0 || pos >= limit { return -1; }
+  let first: Int = src[pos];
+  if first < 0 || first > 255 || first / 32 != major { return -1; }
+  let tag: Int = first % 32;
+  if tag < 24 {
+    if tag > maximum { return -1; }
+    return tag;
+  }
+  let count: Int = 0;
+  let minimum: Int = 0;
+  if tag == 24 { count = 1; minimum = 24; }
+  if tag == 25 { count = 2; minimum = 256; }
+  if tag == 26 { count = 4; minimum = 65536; }
+  if tag == 27 { count = 8; minimum = 4294967296; }
+  if count == 0 { return -1; }
+  if limit - pos <= count { return -1; }
+  let value: Int = 0;
+  let i: Int = 0;
+  while i < count {
+    let octet: Int = src[pos + 1 + i];
+    if octet < 0 || octet > 255 { return -1; }
+    // Check before multiplication, including adversarial eight-byte values.
+    if value > maximum / 256 { return -1; }
+    value = value * 256 + octet;
+    if value > maximum { return -1; }
+    i = i + 1;
+  }
+  if value < minimum { return -1; }
+  return value;
+}
+
+fn cbor_uint(src: [Int], pos: Int, limit: Int) -> Int {
+  return cbor_head_value(src, pos, limit, 0, 9007199253740991);
+}
+
+fn cbor_uint_width(src: [Int], pos: Int, limit: Int) -> Int {
+  if cbor_uint(src, pos, limit) < 0 { return -1; }
+  let tag: Int = src[pos] % 32;
+  if tag < 24 { return 1; }
+  if tag == 24 { return 2; }
+  if tag == 25 { return 3; }
+  if tag == 26 { return 5; }
+  return 9;
+}
+
+fn cbor_array_len(src: [Int], pos: Int, limit: Int) -> Int {
+  return cbor_head_value(src, pos, limit, 4, 64);
+}
+
+fn cbor_array_width(src: [Int], pos: Int, limit: Int) -> Int {
+  if cbor_array_len(src, pos, limit) < 0 { return -1; }
+  if src[pos] % 32 < 24 { return 1; }
+  return 2;
+}
+
+fn bytes_start(src: [Int], pos: Int, limit: Int, expectedLength: Int) -> Int {
+  if expectedLength != 32 && expectedLength != 64 { return -1; }
+  if cbor_head_value(src, pos, limit, 2, 64) != expectedLength { return -1; }
+  // Both supported byte lengths have exactly the canonical [0x58, length] header.
+  if limit - pos < expectedLength + 2 { return -1; }
+  let i: Int = 0;
+  while i < expectedLength {
+    let octet: Int = src[pos + 2 + i];
+    if octet < 0 || octet > 255 { return -1; }
+    i = i + 1;
+  }
+  return pos + 2;
+}
+
+// These two helpers require caller-validated bounds and octets.
+fn bytes_equal(a: [Int], ao: Int, b: [Int], bo: Int, n: Int) -> Int {
+  let i: Int = 0;
+  while i < n {
+    if a[ao + i] != b[bo + i] { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+fn bytes_compare(a: [Int], ao: Int, b: [Int], bo: Int, n: Int) -> Int {
+  let i: Int = 0;
+  while i < n {
+    if a[ao + i] < b[bo + i] { return -1; }
+    if a[ao + i] > b[bo + i] { return 1; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// Diagnostic transport: decimal octets separated by commas, never newlines.
+// Host framing may collect these octets; this module decides their CBOR encoding.
+fn emit_byte(value: Int) -> Int {
+  if value < 0 || value > 255 { return -1; }
+  print(to-string(value));
+  print(",");
+  return 0;
+}
+
+fn emit_head(major: Int, value: Int) -> Int {
+  if major < 0 || major > 6 || value < 0 || value > 9007199253740991 { return -1; }
+  let count: Int = 0;
+  let divisor: Int = 0;
+  if value < 24 { emit_byte(major * 32 + value); return 0; }
+  if value <= 255 { emit_byte(major * 32 + 24); count = 1; divisor = 1; }
+  if value > 255 && value <= 65535 { emit_byte(major * 32 + 25); count = 2; divisor = 256; }
+  if value > 65535 && value <= 4294967295 { emit_byte(major * 32 + 26); count = 4; divisor = 16777216; }
+  if value > 4294967295 { emit_byte(major * 32 + 27); count = 8; divisor = 72057594037927936; }
+  let remaining: Int = value;
+  let i: Int = 0;
+  while i < count {
+    emit_byte(remaining / divisor);
+    remaining = remaining % divisor;
+    divisor = divisor / 256;
+    i = i + 1;
+  }
+  return 0;
+}
+
+fn emit_uint(value: Int) -> Int { return emit_head(0, value); }
+
+fn emit_array(length: Int) -> Int {
+  if length < 0 || length > 64 { return -1; }
+  return emit_head(4, length);
+}
+
+// Generic bounded bytes emitter supports 0..64 bytes. All input octets are
+// validated before output starts. Physical offset/length bound is caller-owned.
+fn emit_bytes(src: [Int], offset: Int, length: Int) -> Int {
+  if offset < 0 || length < 0 || length > 64 { return -1; }
+  let i: Int = 0;
+  while i < length {
+    if src[offset + i] < 0 || src[offset + i] > 255 { return -1; }
+    i = i + 1;
+  }
+  emit_head(2, length);
+  i = 0;
+  while i < length { emit_byte(src[offset + i]); i = i + 1; }
+  return 0;
+}
+
+fn emit_null() -> Int { return emit_byte(246); }
+
+fn emit_hex_digit(value: Int) -> Int {
+  if value < 0 || value > 15 { return -1; }
+  if value < 10 { return emit_byte(48 + value); }
+  return emit_byte(87 + value);
+}
+
+// Exactly 32 octets -> canonical CBOR text containing 64 lower-case hex chars.
+fn emit_hex_text(src: [Int], offset: Int, length: Int) -> Int {
+  if offset < 0 || length != 32 { return -1; }
+  let i: Int = 0;
+  while i < length {
+    if src[offset + i] < 0 || src[offset + i] > 255 { return -1; }
+    i = i + 1;
+  }
+  emit_head(3, 64);
+  i = 0;
+  while i < length {
+    emit_hex_digit(src[offset + i] / 16);
+    emit_hex_digit(src[offset + i] % 16);
+    i = i + 1;
+  }
+  return 0;
+}

@@ -1,0 +1,2 @@
+fn make() -> [Int] { return [1, 2, 3]; }
+fn main() -> Int { let xs: [Int] = make(); return xs[2] - 3; }

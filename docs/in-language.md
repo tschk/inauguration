@@ -293,6 +293,12 @@ fn ops(a: Int, b: Int) -> Bool {
 }
 ```
 
+`&&` and `||` evaluate left to right and short-circuit: `&&` evaluates its
+right operand only when the left is true; `||` evaluates it only when the left
+is false. Skipped operands perform no calls, side effects, or runtime checks.
+Their result is a Boolean (the native/Core IR representation is normalized to
+0 or 1). Bitwise `&` and `|` evaluate both operands.
+
 Arithmetic, bitwise, and comparisons chain as in the table in [parser-surface.md](parser-surface.md); method calls desugar to mangled functions on classes.
 
 ## Ideology
