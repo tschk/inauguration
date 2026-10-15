@@ -1,0 +1,5 @@
+fn main() -> Int {
+  let count: Int = 0;
+  if 42 <= 255 { count = 1; }
+  return count;
+}
