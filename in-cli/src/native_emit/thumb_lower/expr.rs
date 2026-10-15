@@ -125,16 +125,27 @@ pub(crate) fn lower_expr_into(
                     ctx.fn_name
                 ));
             };
+            // A lexical callee binding cannot fall through to a global intrinsic.
+            if ctx.local_types.contains_key(name) || ctx.locals.contains_key(name) {
+                return Err(
+                    "thumb-lower: local indirect callee requires a function signature".into(),
+                );
+            }
+            // Defined functions override intrinsic spellings; extern MMIO wrappers do not.
+            if ctx
+                .functions
+                .get(name)
+                .is_some_and(|function| !function.body.is_empty())
+            {
+                return lower_call_args(emitter, ctx, name, args, dest, pending);
+            }
             if crate::core_ir_verifier::is_native_invoke(name) && !ctx.functions.contains_key(name)
             {
-                if ctx.local_types.contains_key(name) {
-                    return Err(
-                        "thumb-lower: local indirect callee requires a function signature".into(),
-                    );
-                }
                 return lower_native_invoke(emitter, ctx, name, args, dest, pending);
             }
-            if matches!(name.as_str(), "invoke" | "invoke1" | "invoke2") {
+            if matches!(name.as_str(), "invoke" | "invoke1" | "invoke2")
+                && !ctx.functions.contains_key(name)
+            {
                 return lower_invoke(emitter, ctx, args, dest, pending);
             }
             if try_lower_mmio(emitter, ctx, name, args, dest, pending)? {
@@ -1348,5 +1359,130 @@ mod checked_index_branch_tests {
         assert_bounds_return_paths(&emitter, ctx.frame_reserve());
         assert!(words(&emitter).contains(&thumb::str_imm(R4, R1, 0).unwrap()));
         assert_eq!(ctx.call_arg_depth, 0);
+    }
+}
+
+#[cfg(test)]
+mod declared_call_priority_tests {
+    use super::super::{ctx::FunctionInfo, stmt::lower_function};
+    use super::*;
+    use crate::core_ir::Stmt;
+
+    #[test]
+    fn declared_builtin_names_emit_calls_including_externs() {
+        for name in [
+            "load8",
+            "load16",
+            "load32",
+            "load64",
+            "store8",
+            "store16",
+            "store32",
+            "store64",
+            "invoke",
+            "invoke1",
+            "invoke2",
+            "invoke-native",
+            "invoke-native1",
+            "invoke-native2",
+            "invoke_native",
+            "invoke_native1",
+            "invoke_native2",
+        ] {
+            for external in [false, true] {
+                if external && (name.starts_with("load") || name.starts_with("store")) {
+                    continue;
+                }
+                let declared = FunctionInfo {
+                    name: name.into(),
+                    params: vec![("value".into(), Typ::Int)],
+                    ret: Typ::Int,
+                    body: if external {
+                        vec![]
+                    } else {
+                        vec![Stmt::Return(Some(Expr::IntLit(42)))]
+                    },
+                };
+                let entry = FunctionInfo {
+                    name: "entry".into(),
+                    params: vec![],
+                    ret: Typ::Int,
+                    body: vec![Stmt::Return(Some(Expr::Call {
+                        callee: Box::new(Expr::Ident(name.into())),
+                        args: vec![Expr::IntLit(9)],
+                    }))],
+                };
+                let functions =
+                    HashMap::from([(name.into(), declared), ("entry".into(), entry.clone())]);
+                let mut emitter = CodeEmitter::new();
+                let mut pending = Vec::new();
+                lower_function(
+                    &mut emitter,
+                    &entry,
+                    &functions,
+                    &HashMap::new(),
+                    &mut pending,
+                )
+                .unwrap();
+                assert_eq!(pending.len(), 1, "{name}");
+                assert_eq!(pending[0].target, name);
+                assert_eq!(pending[0].is_extern, external);
+                assert_eq!(pending[0].kind, RelocKind::Call);
+            }
+        }
+    }
+
+    #[test]
+    fn bodyless_mmio_declaration_keeps_intrinsic_lowering() {
+        let function = FunctionInfo {
+            name: "load32".into(),
+            params: vec![("address".into(), Typ::Int)],
+            ret: Typ::Int,
+            body: vec![],
+        };
+        let functions = HashMap::from([("load32".into(), function)]);
+        let structs = HashMap::new();
+        let mut ctx = LowerCtx::new("entry", &[], &functions, &structs);
+        let mut emitter = CodeEmitter::new();
+        let mut pending = Vec::new();
+        lower_expr_into(
+            &mut emitter,
+            &mut ctx,
+            &Expr::Call {
+                callee: Box::new(Expr::Ident("load32".into())),
+                args: vec![Expr::IntLit(0x38001000)],
+            },
+            R0,
+            &mut pending,
+        )
+        .unwrap();
+        assert!(pending.is_empty());
+        let ldr = thumb::ldr_imm(R0, R1, 0).unwrap().to_le_bytes();
+        assert!(emitter.bytes.ends_with(&ldr));
+    }
+
+    #[test]
+    fn local_builtin_names_cannot_fall_through_to_intrinsics() {
+        for name in ["load32", "invoke", "invoke-native"] {
+            let function = FunctionInfo {
+                name: "entry".into(),
+                params: vec![(name.into(), Typ::Int)],
+                ret: Typ::Int,
+                body: vec![Stmt::Return(Some(Expr::Call {
+                    callee: Box::new(Expr::Ident(name.into())),
+                    args: vec![Expr::IntLit(9)],
+                }))],
+            };
+            let functions = HashMap::from([("entry".into(), function.clone())]);
+            let error = lower_function(
+                &mut CodeEmitter::new(),
+                &function,
+                &functions,
+                &HashMap::new(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+            assert!(error.contains("local indirect callee"), "{error}");
+        }
     }
 }

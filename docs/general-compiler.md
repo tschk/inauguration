@@ -60,6 +60,9 @@ binding before `continue` on both native backends. AArch64 rejects loop jumps
 outside a loop or across a `try` scope; error-flag unwind for those jumps remains
 unsupported. Thumb `while` loops send `continue` to the innermost condition
 and `break` to its exit; a `continue` outside a loop is refused.
+Thumb call lowering honors defined functions before MMIO and invoke intrinsics.
+Bodyless MMIO declarations retain intrinsic behavior; declared invoke symbols
+use ordinary calls. Local callee bindings remain unsupported.
 
 AArch64 JIT and macOS executable lowering share writable scalar globals and
 scalar struct fields across function calls. Both native backends use the same

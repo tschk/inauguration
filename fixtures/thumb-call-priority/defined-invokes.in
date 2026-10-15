@@ -1,0 +1,5 @@
+fn invoke(value:Int)->Int{let i=0;while i<1{i+=1;}return value+1;}
+fn invoke1(first:Int,second:Int)->Int{let i=0;while i<1{i+=1;}return first+second;}
+fn invoke2(first:Int,second:Int,third:Int)->Int{let i=0;while i<1{i+=1;}return first+second+third;}
+fn invoke-native(value:Int)->Int{let i=0;while i<1{i+=1;}return value+1;}
+fn main()->Int{if invoke(41)!=42{return 1;}if invoke1(20,22)!=42{return 2;}if invoke2(10,12,20)!=42{return 3;}if invoke-native(41)!=42{return 4;}return 42;}

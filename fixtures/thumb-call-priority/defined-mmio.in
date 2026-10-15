@@ -1,0 +1,3 @@
+fn load32(address:Int)->Int{let i=0;while i<1{i+=1;}return load8(address)+1;}
+fn store32(address:Int,value:Int)->Int{let i=0;while i<1{i+=1;}store8(address,value);return value+1;}
+fn main()->Int{store8(0x38001000,40);if load32(0x38001000)!=41{return 1;}if store32(0x38001000,41)!=42{return 2;}if load8(0x38001000)!=41{return 3;}return 42;}

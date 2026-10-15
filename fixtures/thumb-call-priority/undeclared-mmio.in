@@ -1,0 +1,1 @@
+fn main()->Int{store32(0x38001000,42);return load32(0x38001000);}

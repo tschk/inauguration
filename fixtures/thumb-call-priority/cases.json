@@ -1,0 +1,18 @@
+[
+  {
+    "name": "defined-mmio",
+    "expected": 42
+  },
+  {
+    "name": "defined-invokes",
+    "expected": 42
+  },
+  {
+    "name": "undeclared-mmio",
+    "expected": 42
+  },
+  {
+    "name": "bodyless-mmio",
+    "expected": 42
+  }
+]
