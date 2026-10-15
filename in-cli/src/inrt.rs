@@ -24,6 +24,8 @@ pub const INRT_STR_CONTAINS: &str = "__inrt_str_contains";
 /// `in_print` and `in_print_int` wrappers do not exist outside the compiler.
 pub const INRT_PRINT: &str = "__inrt_print";
 pub const INRT_PRINT_INT: &str = "__inrt_print_int";
+/// Decimal i64 conversion returning an allocated length-prefixed String.
+pub const INRT_INT_TO_STRING: &str = "__inrt_int_to_string";
 
 /// Builtin reached when a native program executes code the lowerer could not
 /// compile. It writes the supplied message to stderr and exits with
@@ -46,6 +48,7 @@ pub const INRT_BUILTINS: &[&str] = &[
     INRT_STR_CONTAINS,
     INRT_PRINT,
     INRT_PRINT_INT,
+    INRT_INT_TO_STRING,
     "__inrt_str_substr",
     "__inrt_array_len",
     "__inrt_array_load",
@@ -66,7 +69,7 @@ pub fn inrt_builtin_param_slots(name: &str) -> Option<usize> {
         "__inrt_array_push" | INRT_VECTOR_PUSH => Some(2),
         INRT_VECTOR_EXTEND => Some(4),
         INRT_STR_CONCAT | INRT_STR_EQ | INRT_STR_CONTAINS => Some(2),
-        INRT_PRINT | INRT_PRINT_INT => Some(1),
+        INRT_PRINT | INRT_PRINT_INT | INRT_INT_TO_STRING => Some(1),
         "__inrt_str_substr" => Some(3),
         INRT_TRAP_BUILTIN => Some(2),
         _ => None,
@@ -323,7 +326,19 @@ fn build_inrt_print_int() -> Vec<u8> {
     let mut e = aarch64::CodeEmitter::new();
     e.emit_u32(aarch64::stp_pre(FP, LR, -48));
     e.emit_u32(aarch64::add_imm64(FP, SP, 0));
-    e.emit_u32(aarch64::add_imm64(X1, SP, 48)); // one past the last digit
+    emit_decimal_digits(&mut e, 48);
+    e.emit_u32(aarch64::movz64(X0, 1, 0)); // stdout
+    e.emit_u32(aarch64::movz64(X16, 4, 0)); // SYS_write
+    e.emit_u32(aarch64::svc(0x80));
+    e.emit_u32(aarch64::ldp_post(FP, LR, 48));
+    e.emit_u32(aarch64::ret());
+    e.bytes
+}
+
+/// Emit decimal bytes backwards into a bounded stack buffer. Input x0; output
+/// x1 points to the first byte and x2 is its length (at most 20 bytes).
+fn emit_decimal_digits(e: &mut aarch64::CodeEmitter, buffer_end: u16) {
+    e.emit_u32(aarch64::add_imm64(X1, SP, buffer_end)); // one past the last digit
     e.emit_u32(aarch64::movz64(X2, 10, 0)); // divisor
     e.emit_u32(aarch64::mov_zero64(X7)); // sign: 0 positive, 1 negative
     e.emit_u32(aarch64::cmp_reg64(X0, XZR));
@@ -354,13 +369,46 @@ fn build_inrt_print_int() -> Vec<u8> {
         no_sign,
         aarch64::b_cond(aarch64::COND_EQ, write as i32 - no_sign as i32),
     );
-    e.emit_u32(aarch64::add_imm64(X2, SP, 48));
+    e.emit_u32(aarch64::add_imm64(X2, SP, buffer_end));
     e.emit_u32(aarch64::sub_reg64(X2, X2, X1)); // length
-    e.emit_u32(aarch64::movz64(X0, 1, 0)); // stdout
-    e.emit_u32(aarch64::movz64(X16, 4, 0)); // SYS_write
-    e.emit_u32(aarch64::svc(0x80));
-    e.emit_u32(aarch64::ldp_post(FP, LR, 48));
+}
+
+fn build_inrt_int_to_string() -> Vec<u8> {
+    // shortcut: mappings live until process exit; release them when Core IR models drop ownership.
+    let mut e = aarch64::CodeEmitter::new();
+    e.emit_u32(aarch64::stp_pre(FP, LR, -64));
+    e.emit_u32(aarch64::add_imm64(FP, SP, 0));
+    emit_decimal_digits(&mut e, 64);
+    e.emit_u32(aarch64::str64(X1, SP, 16));
+    e.emit_u32(aarch64::str64(X2, SP, 24));
+    e.emit_u32(aarch64::add_imm64(X1, X2, 8));
+    e.emit_u32(aarch64::mov_zero64(X0));
+    emit_inline_mmap(&mut e.bytes);
+    let allocation_error = e.emit_insn(aarch64::b_cond(2, 0)); // Darwin carry set
+    e.emit_u32(aarch64::cmp_reg64(X0, XZR));
+    let allocation_null = e.emit_insn(aarch64::b_cond(0, 0));
+    e.emit_u32(aarch64::ldr64(X2, SP, 24));
+    e.emit_u32(aarch64::str64(X2, X0, 0));
+    e.emit_u32(aarch64::ldr64(X3, SP, 16));
+    e.emit_u32(aarch64::add_imm64(X4, X0, 8));
+    let copy = e.len();
+    e.emit_u32(aarch64::ldrb(X6, X3, 0));
+    e.emit_u32(aarch64::strb(X6, X4, 0));
+    e.emit_u32(aarch64::add_imm64(X3, X3, 1));
+    e.emit_u32(aarch64::add_imm64(X4, X4, 1));
+    e.emit_u32(aarch64::sub_imm64(X2, X2, 1));
+    e.emit_u32(aarch64::cmp_reg64(X2, XZR));
+    e.emit_u32(aarch64::b_cond(
+        aarch64::COND_NE,
+        copy as i32 - e.len() as i32,
+    ));
+    e.emit_u32(aarch64::ldp_post(FP, LR, 64));
     e.emit_u32(aarch64::ret());
+    emit_runtime_failure(
+        &mut e,
+        vec![(allocation_error, 2), (allocation_null, 0)],
+        b"inrt: String allocation failure\n",
+    );
     e.bytes
 }
 
@@ -813,6 +861,14 @@ fn build_inrt_vector_extend() -> Vec<u8> {
 }
 
 fn emit_vector_failure(e: &mut aarch64::CodeEmitter, failures: Vec<(u32, u8)>) {
+    emit_runtime_failure(
+        e,
+        failures,
+        b"inrt: invalid vector header or allocation failure\n",
+    );
+}
+
+fn emit_runtime_failure(e: &mut aarch64::CodeEmitter, failures: Vec<(u32, u8)>, message: &[u8]) {
     let failed = e.len();
     for (site, condition) in failures {
         e.patch_u32(
@@ -820,7 +876,6 @@ fn emit_vector_failure(e: &mut aarch64::CodeEmitter, failures: Vec<(u32, u8)>) {
             aarch64::b_cond(condition, failed as i32 - site as i32),
         );
     }
-    let message = b"inrt: invalid vector header or allocation failure\n";
     let message_address = e.emit_insn(aarch64::adr(X1, 0));
     e.emit_u32(aarch64::movz64(X0, 2, 0));
     e.emit_u32(aarch64::movz64(X2, message.len() as u16, 0));
@@ -951,6 +1006,7 @@ pub fn build_runtime_blob() -> (Vec<u8>, BTreeMap<String, u32>) {
     add_fn!(INRT_STR_CONTAINS, build_inrt_str_contains());
     add_fn!(INRT_PRINT, build_inrt_print());
     add_fn!(INRT_PRINT_INT, build_inrt_print_int());
+    add_fn!(INRT_INT_TO_STRING, build_inrt_int_to_string());
     add_fn!("__inrt_str_substr", build_inrt_str_substr());
     add_fn!("__inrt_array_len", build_inrt_array_len());
     add_fn!("__inrt_array_load", build_inrt_array_load());
@@ -975,6 +1031,37 @@ mod tests {
             assert!(offsets.contains_key(*name), "missing {name}");
         }
     }
+    #[test]
+    fn integer_string_builtin_allocates_checks_failure_and_has_scalar_arity() {
+        assert!(is_inrt_builtin(INRT_INT_TO_STRING));
+        assert_eq!(inrt_builtin_param_slots(INRT_INT_TO_STRING), Some(1));
+        assert_eq!(
+            crate::core_ir_verifier::intrinsic_return_type(INRT_INT_TO_STRING),
+            Some(&crate::core_ir::Typ::String)
+        );
+        let code = build_inrt_int_to_string();
+        let words: Vec<_> = code
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| u32::from_le_bytes(*bytes))
+            .collect();
+        let syscall = words
+            .iter()
+            .position(|word| *word == aarch64::svc(0x80))
+            .unwrap();
+        // The carry check must inspect syscall flags before any comparison.
+        assert_eq!(words[syscall + 1] & 0xff00_001f, aarch64::b_cond(2, 0));
+        assert_eq!(words[syscall + 2], aarch64::cmp_reg64(X0, XZR));
+        assert!(words.contains(&aarch64::str64(X2, X0, 0)));
+        assert!(words.contains(&aarch64::udiv64(X5, X0, X2)));
+        assert!(words.contains(&aarch64::movz64(X0, INRT_TRAP_EXIT_CODE, 0)));
+        assert!(
+            code.windows(b"String allocation failure".len())
+                .any(|window| window == b"String allocation failure")
+        );
+    }
+
     #[test]
     fn str_len_is_small() {
         assert!(build_inrt_str_len().len() <= 16);
@@ -1031,6 +1118,7 @@ mod tests {
                 INRT_STR_CONTAINS => build_inrt_str_contains(),
                 INRT_PRINT => build_inrt_print(),
                 INRT_PRINT_INT => build_inrt_print_int(),
+                INRT_INT_TO_STRING => build_inrt_int_to_string(),
                 "__inrt_str_substr" => build_inrt_str_substr(),
                 "__inrt_array_len" => build_inrt_array_len(),
                 "__inrt_array_load" => build_inrt_array_load(),

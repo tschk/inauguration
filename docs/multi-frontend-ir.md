@@ -55,6 +55,8 @@ The `.in` normalization, declaration, and surface passes share quote state acros
 
 Method lookup uses declared global types alongside parameter, local, closure, and pattern bindings, and retries unresolved methods after local imports merge. Constant substitution respects the same lexical shadows so an outer constant cannot replace a receiver bound in an inner scope.
 
+Int-to-String conversion in native Apple ARM64 executables returns an allocated length-prefixed String. It shares decimal encoding with integer printing, including zero and both signed 64-bit limits, and traps explicitly if allocation fails.
+
 ## Unit values
 
 `UnitLit` represents `()` with type `Void`, distinct from integer zero and an empty array. Rust, `.in`, canonical source, and `.icore` expression `kind: "unit"` retain this type through checking and lowering. Empty-tuple patterns match unit values, including the results of calls, and explicit unit returns evaluate their producers before returning.

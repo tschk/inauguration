@@ -5996,3 +5996,70 @@ fn owned_explicit_global_receiver_methods_respect_parameter_and_local_shadows() 
         }
     }
 }
+
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_integer_strings_preserve_extremes_lifetimes_and_print_digits() {
+    let cases = [
+        ("(-9223372036854775807 - 1)", "-9223372036854775808"),
+        ("9223372036854775807", "9223372036854775807"),
+        ("0", "0"),
+        ("-1", "-1"),
+        ("1", "1"),
+        ("9", "9"),
+        ("10", "10"),
+        ("-10", "-10"),
+        ("1000000000000", "1000000000000"),
+    ];
+    let mut body = String::new();
+    for (index, (value, _)) in cases.iter().enumerate() {
+        body.push_str(&format!("let text{index}=convert({value});"));
+    }
+    for (index, (_, expected)) in cases.iter().enumerate() {
+        body.push_str(&format!(
+            "if text{index}!=\"{expected}\"{{return \"wrong digits\";}}"
+        ));
+    }
+    body.push_str("return text0+\"|\"+text1+\"|\"+text2;");
+    let expected = "-9223372036854775808|9223372036854775807|0";
+    let printed = "-9223372036854775808|9223372036854775807";
+    let original = format!(
+        "var calls:Int=0;\nfn convert(value:Int)->String{{calls+=1;return value.toStr();}}\nfn stringentry()->String{{{body}}}\nfn main()->Int{{let result=stringentry();if result!=\"{expected}\" || calls!={}{{return 0;}}__inrt_print_int((-9223372036854775807 - 1));__inrt_print(\"|\");__inrt_print_int(9223372036854775807);return 42;}}",
+        cases.len()
+    );
+    let canonical = crate::in_canonical::canonicalize_in_source(&original).unwrap();
+    for text in [original.as_str(), canonical.as_str()] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("native-integer-string.in");
+            let binary = temp_path("native-integer-string");
+            fs::write(&source, text).unwrap();
+            let mut request = default_request(
+                source.clone(),
+                CompileTarget::Jit,
+                Some("stringentry"),
+                None,
+            );
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?} {report:?}");
+            assert_eq!(report.eval_result, Some(EvalValue::Str(expected.into())));
+            request.target = CompileTarget::Native;
+            request.entry = Some("main".into());
+            request.out = Some(binary.clone());
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.degradations.is_empty(),
+                "{profile:?} {report:?}"
+            );
+            let output = std::process::Command::new(&binary).output().unwrap();
+            assert_eq!(output.status.code(), Some(42), "{profile:?}: {output:?}");
+            assert_eq!(output.stdout, printed.as_bytes(), "{profile:?}");
+            fs::remove_file(binary).unwrap();
+            fs::remove_file(source).unwrap();
+        }
+    }
+}

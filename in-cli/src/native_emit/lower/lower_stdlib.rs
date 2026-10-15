@@ -65,6 +65,7 @@ fn native_inrt_builtin(wrapper: &str) -> Option<&'static str> {
         "in_str_contains" => Some(crate::inrt::INRT_STR_CONTAINS),
         "in_print" => Some(crate::inrt::INRT_PRINT),
         "in_print_int" => Some(crate::inrt::INRT_PRINT_INT),
+        "in_int_to_string" => Some(crate::inrt::INRT_INT_TO_STRING),
         _ => None,
     }
 }

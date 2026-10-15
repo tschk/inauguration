@@ -270,7 +270,9 @@ fn intrinsic_ret(name: &str) -> Option<IntrinsicRet> {
         return Some(*ret);
     }
     match name {
-        crate::inrt::INRT_STR_CONCAT | "__inrt_str_substr" => Some(IntrinsicRet::String),
+        crate::inrt::INRT_STR_CONCAT | crate::inrt::INRT_INT_TO_STRING | "__inrt_str_substr" => {
+            Some(IntrinsicRet::String)
+        }
         crate::inrt::INRT_STR_EQ | crate::inrt::INRT_STR_CONTAINS => Some(IntrinsicRet::Bool),
         crate::inrt::INRT_PRINT | crate::inrt::INRT_PRINT_INT | crate::inrt::INRT_TRAP_BUILTIN => {
             Some(IntrinsicRet::Void)
