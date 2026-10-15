@@ -601,6 +601,26 @@ pub(crate) fn try_lower_mmio(
     dest: u8,
     pending: &mut Vec<PendingCall>,
 ) -> Result<bool, String> {
+    if matches!(
+        name,
+        "load8" | "load16" | "load32" | "load64" | "store8" | "store16" | "store32" | "store64"
+    ) {
+        let checker = crate::typecheck::TypeChecker::new();
+        crate::native_emit::stdlib_wrappers::validate_intrinsic_call(
+            name,
+            ctx.functions
+                .get(name)
+                .map(|function| (function.params.as_slice(), &function.ret)),
+            args.iter()
+                .map(|argument| checker.expr_type(argument, &ctx.facts, &ctx.local_types)),
+        )
+        .map_err(|error| {
+            format!(
+                "thumb-lower: incompatible MMIO {} `{name}`",
+                error.category()
+            )
+        })?;
+    }
     match name {
         "load8" => {
             if args.len() != 1 {
@@ -1483,6 +1503,82 @@ mod declared_call_priority_tests {
             )
             .unwrap_err();
             assert!(error.contains("local indirect callee"), "{error}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod selected_mmio_contract_tests {
+    fn lower(source: &str) -> Result<(), String> {
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        super::super::lower_module(&module, "main").map(|_| ())
+    }
+
+    #[test]
+    fn raw_lowering_checks_selected_mmio_declarations_and_actual_arguments() {
+        for name in [
+            "load8", "load16", "load32", "load64", "store8", "store16", "store32", "store64",
+        ] {
+            let store = name.starts_with("store");
+            let signature = if store {
+                "address:Int,value:Int"
+            } else {
+                "address:Int"
+            };
+            let ret = if store { "void" } else { "Int" };
+            let arguments = if store { "0,42" } else { "0" };
+            let source = format!(
+                "extern asm fn {name}({signature})->{ret}\nfn main()->Int{{{name}({arguments});return 42;}}"
+            );
+            assert!(lower(&source).is_ok(), "canonical {name}");
+
+            let bad_signature = if store {
+                "address:Int,value:Bool"
+            } else {
+                "address:Bool"
+            };
+            let bad_arguments = if store { "0,false" } else { "false" };
+            for source in [
+                format!(
+                    "extern asm fn {name}({bad_signature})->{ret}\nfn main()->Int{{{name}({bad_arguments});return 42;}}"
+                ),
+                format!(
+                    "extern asm fn {name}({signature})->Bool\nfn main()->Int{{{name}({arguments});return 42;}}"
+                ),
+            ] {
+                let error = lower(&source).unwrap_err();
+                assert!(
+                    error.contains("incompatible MMIO declaration"),
+                    "{name}: {error}"
+                );
+            }
+            for arguments in [
+                bad_arguments,
+                if store { "0,missing" } else { "missing" },
+                "",
+                if store { "0,42,7" } else { "0,42" },
+            ] {
+                let source = format!("fn main()->Int{{{name}({arguments});return 42;}}");
+                let error = lower(&source).unwrap_err();
+                assert!(
+                    error.contains("incompatible MMIO arguments"),
+                    "{name}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn defined_mmio_names_keep_their_ordinary_function_signature() {
+        for name in [
+            "load8", "load16", "load32", "load64", "store8", "store16", "store32", "store64",
+        ] {
+            // This is a real definition, not a selected memory intrinsic. Its
+            // Bool parameter and Int return must retain their declared meaning.
+            let source = format!(
+                "fn {name}(value:Bool)->Int{{if value{{return 1;}}return 42;}}\nfn main()->Int{{return {name}(false);}}"
+            );
+            assert!(lower(&source).is_ok(), "defined override {name}");
         }
     }
 }

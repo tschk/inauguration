@@ -14,5 +14,9 @@
   {
     "name": "bodyless-mmio",
     "expected": 42
+  },
+  {
+    "name": "all-widths",
+    "expected": 42
   }
 ]

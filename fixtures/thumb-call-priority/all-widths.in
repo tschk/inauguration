@@ -1,0 +1,26 @@
+extern C fn load8(address:Int)->Int;
+extern C fn load16(address:Int)->Int;
+extern C fn load32(address:Int)->Int;
+extern C fn load64(address:Int)->Int;
+extern C fn store8(address:Int,value:Int)->Void;
+extern C fn store16(address:Int,value:Int)->Void;
+extern C fn store32(address:Int,value:Int)->Void;
+extern C fn store64(address:Int,value:Int)->Void;
+fn main()->Int{
+  store32(0x38001000,0x11223344);
+  store8(0x38001000,42);
+  if load8(0x38001000)!=42{return 1;}
+  if load32(0x38001000)!=0x1122332a{return 2;}
+  store16(0x38001000,42);
+  if load16(0x38001000)!=42{return 3;}
+  if load32(0x38001000)!=0x1122002a{return 4;}
+  store32(0x38001000,42);
+  if load32(0x38001000)!=42{return 5;}
+  store32(0x38001004,0x13579);
+  store64(0x38001000,42);
+  if load64(0x38001000)!=42{return 6;}
+  if load32(0x38001004)!=0x13579{return 7;}
+  store32(0x38001008,0x38001000);
+  if load32(load32(0x38001008))!=42{return 8;}
+  return 42;
+}

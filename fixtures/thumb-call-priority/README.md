@@ -12,7 +12,12 @@ controls retain real word load/store behavior at initialized AN521 SRAM.
 
 The optional runner requires installed Zig and qemu-system-arm, installs no
 dependencies and builds no compiler. It reuses existing Thumb stack-argument
-board glue and a shared Zig build directory. Four programs run original and
-actual canonical source across all three profiles (24 QEMU executions).
+board glue and a shared Zig build directory. Five programs run original and
+actual canonical source across all three profiles (30 QEMU executions).
 Compiler snapshot/version/hash, per-case objects and executed ELF hashes,
 compile/build reports and serial output remain in the evidence directory.
+
+The all-widths bodyless-declaration control checks byte/halfword writes preserve
+neighboring bytes, all eight load/store names, and a nested load through an
+explicit initialized SRAM pointer. Thumb Int is 32 bits: load64/store64 expose
+only the low word, and a neighboring-word sentinel verifies that bounded behavior.

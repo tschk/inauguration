@@ -88,6 +88,41 @@ pub(crate) fn validate_scalar_call(
         .find_map(|(name, candidate)| (*candidate == wrapper).then_some(*name));
     let params = intrinsic.and_then(crate::core_ir_verifier::intrinsic_param_types);
     let ret = intrinsic.and_then(crate::core_ir_verifier::intrinsic_return_type);
+    validate_catalog_call(
+        params,
+        ret,
+        declared,
+        actual,
+        matches!(
+            wrapper,
+            "in_vec_join" | "in_vec_extend" | "in_vec_push" | "in_vec_push_words" | "in_array_len"
+        ),
+    )
+}
+
+/// Validate the canonical ABI when a backend actually selects an intrinsic.
+/// Ordinary declared external calls do not use this contract.
+pub(crate) fn validate_intrinsic_call(
+    name: &str,
+    declared: Option<(&[(String, Typ)], &Typ)>,
+    actual: impl ExactSizeIterator<Item = Option<Typ>>,
+) -> Result<(), AbiMismatch> {
+    validate_catalog_call(
+        crate::core_ir_verifier::intrinsic_param_types(name),
+        crate::core_ir_verifier::intrinsic_return_type(name),
+        declared,
+        actual,
+        false,
+    )
+}
+
+fn validate_catalog_call(
+    params: Option<&[Typ]>,
+    ret: Option<&Typ>,
+    declared: Option<(&[(String, Typ)], &Typ)>,
+    actual: impl ExactSizeIterator<Item = Option<Typ>>,
+    allow_untyped: bool,
+) -> Result<(), AbiMismatch> {
     if let Some((declared_params, declared_ret)) = declared {
         if params.is_none_or(|params| {
             declared_params.len() != params.len()
@@ -101,12 +136,7 @@ pub(crate) fn validate_scalar_call(
         }
     }
     // Generic vector/array helpers have separate layout checks in their lowering paths.
-    if (params.is_none() || ret.is_none())
-        && !matches!(
-            wrapper,
-            "in_vec_join" | "in_vec_extend" | "in_vec_push" | "in_vec_push_words" | "in_array_len"
-        )
-    {
+    if (params.is_none() || ret.is_none()) && !allow_untyped {
         return Err(AbiMismatch::Arguments);
     }
     if let Some(params) = params {
@@ -124,6 +154,106 @@ pub(crate) fn validate_scalar_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_mmio_intrinsics_check_all_word_signatures_and_canonical_aliases() {
+        for name in [
+            "load8", "load16", "load32", "load64", "store8", "store16", "store32", "store64",
+        ] {
+            let store = name.starts_with("store");
+            let count = if store { 2 } else { 1 };
+            let params = (0..count)
+                .map(|index| (format!("arg{index}"), Typ::Named("Int".into())))
+                .collect::<Vec<_>>();
+            let ret = if store {
+                Typ::Void
+            } else {
+                Typ::Named("Int".into())
+            };
+            let actual = vec![Some(Typ::Named("Int".into())); count];
+            assert_eq!(
+                validate_intrinsic_call(name, Some((&params, &ret)), actual.clone().into_iter()),
+                Ok(()),
+                "{name}"
+            );
+            assert_eq!(
+                validate_intrinsic_call(name, None, actual.clone().into_iter()),
+                Ok(()),
+                "{name}"
+            );
+
+            let mut wrong_params = params.clone();
+            wrong_params[0].1 = Typ::Bool;
+            assert_eq!(
+                validate_intrinsic_call(
+                    name,
+                    Some((&wrong_params, &ret)),
+                    actual.clone().into_iter()
+                ),
+                Err(AbiMismatch::Declaration),
+                "{name}"
+            );
+            let wrong_ret = if store { Typ::Int } else { Typ::Bool };
+            assert_eq!(
+                validate_intrinsic_call(
+                    name,
+                    Some((&params, &wrong_ret)),
+                    actual.clone().into_iter()
+                ),
+                Err(AbiMismatch::Declaration),
+                "{name}"
+            );
+            assert_eq!(
+                validate_intrinsic_call(
+                    name,
+                    Some((&params[..count - 1], &ret)),
+                    actual.clone().into_iter()
+                ),
+                Err(AbiMismatch::Declaration),
+                "{name}"
+            );
+
+            for argument in [None, Some(Typ::Bool), Some(Typ::Float), Some(Typ::String)] {
+                let mut invalid = actual.clone();
+                invalid[count - 1] = argument;
+                assert_eq!(
+                    validate_intrinsic_call(name, None, invalid.into_iter()),
+                    Err(AbiMismatch::Arguments),
+                    "{name}"
+                );
+            }
+            for arity in [count - 1, count + 1] {
+                assert_eq!(
+                    validate_intrinsic_call(name, None, vec![Some(Typ::Int); arity].into_iter()),
+                    Err(AbiMismatch::Arguments),
+                    "{name}/{arity}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extracting_catalog_validation_preserves_generic_wrapper_exemptions() {
+        for wrapper in [
+            "in_vec_join",
+            "in_vec_extend",
+            "in_vec_push",
+            "in_vec_push_words",
+            "in_array_len",
+        ] {
+            assert_eq!(
+                validate_scalar_call(wrapper, None, [].into_iter()),
+                Ok(()),
+                "{wrapper}"
+            );
+        }
+        assert_eq!(
+            validate_intrinsic_call("not-an-intrinsic", None, [].into_iter()),
+            Err(AbiMismatch::Arguments)
+        );
+        assert_eq!(AbiMismatch::Declaration.category(), "declaration");
+        assert_eq!(AbiMismatch::Arguments.category(), "arguments");
+    }
     #[test]
     fn selected_wrapper_checks_catalog_aliases_declarations_and_actual_arguments() {
         let aliases = vec![("text".into(), Typ::Named("String".into()))];

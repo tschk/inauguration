@@ -956,10 +956,21 @@ impl TypeChecker {
                 }
                 Expr::Call { callee, args } => {
                     if let Expr::Ident(name) = callee.as_ref()
-                        && let Some((params, _)) = facts.functions.get(name)
+                        && !env.contains_key(name)
                     {
-                        for (arg, (_, expected)) in args.iter_mut().zip(params) {
-                            self.resolve_c_value(arg, expected, facts, env);
+                        if let Some((params, _)) = facts.functions.get(name) {
+                            for (arg, (_, expected)) in args.iter_mut().zip(params) {
+                                self.resolve_c_value(arg, expected, facts, env);
+                            }
+                        } else if let Some(params) =
+                            crate::core_ir_verifier::intrinsic_param_types(name)
+                        {
+                            // C prototypes may not produce a Core IR declaration.
+                            // Apply the same C value promotions to known intrinsic
+                            // parameters; definitions still keep their own ABI.
+                            for (arg, expected) in args.iter_mut().zip(params) {
+                                self.resolve_c_value(arg, expected, facts, env);
+                            }
                         }
                     }
                 }
@@ -2955,6 +2966,67 @@ fn normalize_parser_type(parser_id: ParserId, typ: &Typ) -> Typ {
 mod tests {
     use super::uses_family_typecheck;
     use crate::parser_registry::ParserId;
+
+    #[test]
+    fn c_intrinsic_arguments_use_c_value_promotions_without_changing_defined_abis() {
+        use crate::core_ir::{Decl, Expr};
+        for name in [
+            "load8", "load16", "load32", "load64", "store8", "store16", "store32", "store64",
+        ] {
+            let store = name.starts_with("store");
+            for prototype in [false, true] {
+                let declaration = if !prototype {
+                    String::new()
+                } else if store {
+                    format!("extern void {name}(long long, long long);\n")
+                } else {
+                    format!("extern long long {name}(long long);\n")
+                };
+                let body = if store {
+                    format!("{name}(0,flag);return 42;")
+                } else {
+                    format!("return {name}(flag);")
+                };
+                let source = format!("{declaration}long long main(void){{_Bool flag=1;{body}}}");
+                let path = std::env::temp_dir().join(format!(
+                    "in-c-mmio-{}-{}.c",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                std::fs::write(&path, source).unwrap();
+                let parsed = crate::compiler::tree_front::parse_polyglot_file(ParserId::C, &path);
+                std::fs::remove_file(&path).unwrap();
+                let mut normalized = super::normalize_module(ParserId::C, &parsed.unwrap());
+                let report = crate::core_ir_verifier::verify_for_entry(&normalized, "main");
+                assert!(report.ok, "{name}/{prototype}: {report:?}");
+                let mut conversions = 0;
+                crate::core_opt::map_decl_exprs_mut(&mut normalized.decls, &mut |expr| {
+                    if matches!(expr, Expr::Unary { op, .. } if op == "bool-to-int") {
+                        conversions += 1;
+                    }
+                });
+                assert_eq!(conversions, 1, "{name}/{prototype}");
+            }
+        }
+        let parsed = crate::in_lang_parse::parse_in_source("fn load32(flag:Bool)->Int{if flag{return 42;}return 0;}\nfn main()->Int{let flag:Bool=true;return load32(flag);}").unwrap();
+        let normalized = super::normalize_module(ParserId::C, &parsed);
+        let Decl::Function { body, .. } = normalized.decls.last().unwrap() else {
+            panic!("main");
+        };
+        assert!(
+            matches!(body.last(), Some(crate::core_ir::Stmt::Return(Some(Expr::Call {args,..}))) if matches!(args.as_slice(), [Expr::Ident(_)]))
+        );
+        assert!(crate::core_ir_verifier::verify_for_entry(&normalized, "main").ok);
+
+        let strict = crate::in_lang_parse::parse_in_source(
+            "fn main()->Int{let flag:Bool=true;return load32(flag);}",
+        )
+        .unwrap();
+        assert!(!crate::core_ir_verifier::verify_for_entry(&strict, "main").ok);
+    }
 
     #[test]
     fn numeric_casts_resolve_from_index_fields_calls_and_arithmetic() {

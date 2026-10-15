@@ -2457,7 +2457,11 @@ fn scalar_expr_type_with_bindings(
             }
         }
 
-        Expr::Ident(name) => ctx.scalar_types.get(name).map(Typ::canonical),
+        Expr::Ident(name) => ctx
+            .scalar_types
+            .get(name)
+            .map(Typ::canonical)
+            .or_else(|| ctx.functions.contains_key(name).then_some(Typ::Int)),
         Expr::Index { base, .. } => {
             match scalar_expr_type_with_bindings(base, ctx, bindings)?.canonical() {
                 Typ::Array(item) | Typ::Vector(item) => Some(*item),
@@ -2850,6 +2854,24 @@ fn lower_builtin_call(
         .is_some_and(|function| !function.body.is_empty())
     {
         return Ok(false);
+    }
+    if matches!(
+        target_name,
+        "load8" | "load16" | "load32" | "load64" | "store8" | "store16" | "store32" | "store64"
+    ) {
+        crate::native_emit::stdlib_wrappers::validate_intrinsic_call(
+            target_name,
+            ctx.functions
+                .get(target_name)
+                .map(|function| (function.params.as_slice(), &function.ret)),
+            args.iter().map(|argument| scalar_expr_type(argument, ctx)),
+        )
+        .map_err(|error| {
+            format!(
+                "x86_64-lower: incompatible MMIO {} `{target_name}`",
+                error.category()
+            )
+        })?;
     }
     if !ctx.functions.contains_key(target_name) {
         if let Some(order) = crate::core_atomic::ordering(&Expr::Call {
@@ -5786,4 +5808,92 @@ mod profile_smoke_tests {
 fn lowers_nested_scalar_struct_copies() {
     let module = crate::in_lang_parse::parse_in_source("struct Inner { Int x }\nstruct Outer { Inner inner }\nfn main() -> Int { var source: Outer = Outer { inner: Inner { x: 42 } }; var copied: Outer = source; return copied.inner.x; }").unwrap();
     lower_module(&module, "main").expect("nested scalar struct copy");
+}
+
+#[cfg(test)]
+mod selected_mmio_contract_tests {
+    fn lower(source: &str) -> Result<(), String> {
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        super::lower_module(&module, "main").map(|_| ())
+    }
+
+    #[test]
+    fn raw_lowering_checks_selected_mmio_declarations_and_actual_arguments() {
+        for name in [
+            "load8", "load16", "load32", "load64", "store8", "store16", "store32", "store64",
+        ] {
+            let store = name.starts_with("store");
+            let signature = if store {
+                "address:Int,value:Int"
+            } else {
+                "address:Int"
+            };
+            let ret = if store { "void" } else { "Int" };
+            let arguments = if store { "0,42" } else { "0" };
+            let source = format!(
+                "extern asm fn {name}({signature})->{ret}\nfn main()->Int{{{name}({arguments});return 42;}}"
+            );
+            assert!(lower(&source).is_ok(), "canonical {name}");
+
+            let bad_signature = if store {
+                "address:Int,value:Bool"
+            } else {
+                "address:Bool"
+            };
+            let bad_arguments = if store { "0,false" } else { "false" };
+            for source in [
+                format!(
+                    "extern asm fn {name}({bad_signature})->{ret}\nfn main()->Int{{{name}({bad_arguments});return 42;}}"
+                ),
+                format!(
+                    "extern asm fn {name}({signature})->Bool\nfn main()->Int{{{name}({arguments});return 42;}}"
+                ),
+            ] {
+                let error = lower(&source).unwrap_err();
+                assert!(
+                    error.contains("incompatible MMIO declaration"),
+                    "{name}: {error}"
+                );
+            }
+            for arguments in [
+                bad_arguments,
+                if store { "0,missing" } else { "missing" },
+                "",
+                if store { "0,42,7" } else { "0,42" },
+            ] {
+                let source = format!("fn main()->Int{{{name}({arguments});return 42;}}");
+                let error = lower(&source).unwrap_err();
+                assert!(
+                    error.contains("incompatible MMIO arguments"),
+                    "{name}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mmio_accepts_function_addresses_without_overriding_local_types() {
+        assert!(
+            lower(
+                "fn target()->Int{return 42;}\nfn main()->Int{store64(0x38000000,target);return 42;}"
+            )
+            .is_ok()
+        );
+        let error = lower("fn target()->Int{return 42;}\nfn main()->Int{let target=false;store64(0x38000000,target);return 42;}").unwrap_err();
+        assert!(error.contains("incompatible MMIO arguments"), "{error}");
+    }
+
+    #[test]
+    fn defined_mmio_names_keep_their_ordinary_function_signature() {
+        for name in [
+            "load8", "load16", "load32", "load64", "store8", "store16", "store32", "store64",
+        ] {
+            // This is a real definition, not a selected memory intrinsic. Its
+            // Bool parameter and Int return must retain their declared meaning.
+            let source = format!(
+                "fn {name}(value:Bool)->Int{{if value{{return 1;}}return 42;}}\nfn main()->Int{{return {name}(false);}}"
+            );
+            assert!(lower(&source).is_ok(), "defined override {name}");
+        }
+    }
 }

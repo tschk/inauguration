@@ -379,6 +379,8 @@ pub(crate) fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
         .unwrap_or(name)
         .replace('_', "-");
     Some(match name.as_str() {
+        "load8" | "load16" | "load32" | "load64" => &[Typ::Int],
+        "store8" | "store16" | "store32" | "store64" => &[Typ::Int, Typ::Int],
         "inb" | "inw" | "inl" => &[Typ::Int],
         "outb" | "outw" | "outl" => &[Typ::Int, Typ::Int],
         "str-concat" | "str-eq" | "str-contains" | "str-starts-with" | "str-ends-with"
@@ -2990,6 +2992,85 @@ mod tests {
             )]);
             let report = verify_for_entry(&module, "main");
             assert_eq!(report.ok, accepted, "{report:?}");
+        }
+    }
+
+    #[test]
+    fn mmio_intrinsics_require_exact_int_arguments() {
+        for name in [
+            "load8", "load16", "load32", "load64", "store8", "store16", "store32", "store64",
+        ] {
+            let count = if name.starts_with("store") { 2 } else { 1 };
+            assert_eq!(
+                intrinsic_param_types(name),
+                Some(vec![Typ::Int; count].as_slice())
+            );
+            let valid = vec![Expr::IntLit(0xffff_ffff); count];
+            let verify = |args| {
+                verify_for_entry(
+                    &module(vec![function(
+                        "main",
+                        vec![Stmt::Expr(Expr::Call {
+                            callee: Box::new(Expr::Ident(name.into())),
+                            args,
+                        })],
+                    )]),
+                    "main",
+                )
+            };
+            assert!(
+                verify(valid.clone()).ok,
+                "{name}: Int carrier must admit high-bit addresses"
+            );
+            for position in 0..count {
+                for invalid in [
+                    Expr::BoolLit(true),
+                    Expr::StringLit("not an address".into()),
+                ] {
+                    let mut args = valid.clone();
+                    args[position] = invalid;
+                    assert!(!verify(args).ok, "{name}: invalid argument {position}");
+                }
+            }
+            assert!(
+                !verify(valid[..count - 1].to_vec()).ok,
+                "{name}: missing argument"
+            );
+            let mut extra = valid;
+            extra.push(Expr::IntLit(0));
+            assert!(!verify(extra).ok, "{name}: extra argument");
+        }
+    }
+
+    #[test]
+    fn mmio_named_declarations_keep_their_declared_verifier_abi() {
+        for name in [
+            "load8", "load16", "load32", "load64", "store8", "store16", "store32", "store64",
+        ] {
+            for body in [vec![], vec![Stmt::Return(Some(Expr::BoolLit(true)))]] {
+                let declaration =
+                    function_with_params(name, vec![("flag".into(), Typ::Bool)], Typ::Bool, body);
+                let call = |arg| {
+                    function_with_ret(
+                        "main",
+                        Typ::Bool,
+                        vec![Stmt::Return(Some(Expr::Call {
+                            callee: Box::new(Expr::Ident(name.into())),
+                            args: vec![arg],
+                        }))],
+                    )
+                };
+                let valid = module(vec![declaration.clone(), call(Expr::BoolLit(true))]);
+                assert!(
+                    verify_for_entry(&valid, "main").ok,
+                    "{name}: declared ABI must take precedence"
+                );
+                let invalid = module(vec![declaration, call(Expr::IntLit(42))]);
+                assert!(
+                    !verify_for_entry(&invalid, "main").ok,
+                    "{name}: declared ABI must be checked"
+                );
+            }
         }
     }
 }

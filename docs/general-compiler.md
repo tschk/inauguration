@@ -63,6 +63,10 @@ and `break` to its exit; a `continue` outside a loop is refused.
 Thumb call lowering honors defined functions before MMIO and invoke intrinsics.
 Bodyless MMIO declarations retain intrinsic behavior; declared invoke symbols
 use ordinary calls. Local callee bindings remain unsupported.
+Selected Thumb and x86 MMIO intrinsics require integer addresses and values,
+integer load results and void store results. Their bodyless declarations must
+match those signatures. AArch64 declared MMIO names remain ordinary external
+calls with their declared ABI.
 
 AArch64 JIT and macOS executable lowering share writable scalar globals and
 scalar struct fields across function calls. Both native backends use the same
