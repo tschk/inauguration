@@ -6743,3 +6743,69 @@ fn owned_canonical_closures_preserve_typed_values_and_nested_calls() {
         }
     }
 }
+
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn owned_scalar_array_struct_fields_preserve_layout_lifetime_and_effects() {
+    for original in [
+        "struct Holder{[Int] items}\nfn main()->Int{let h=Holder{items:[20,22]};return h.items[0]+h.items[1];}",
+        "struct Holder{Int before;[Int] items;Int after}\nfn main()->Int{let h=Holder{before:20,items:[],after:22};if array-len(h.items)!=0{return 0;}return h.before+h.after;}",
+        "struct Holder{Int before;[Int] items;Int after}\nfn main()->Int{let h=Holder{before:10,items:[20],after:12};return h.before+h.items[0]+h.after;}",
+        "struct Holder{Int before;[Int] items;Int after}\nfn main()->Int{let h=Holder{before:10,items:[1,2,3],after:26};return h.before+h.items[0]+h.items[1]+h.items[2]+h.after;}",
+        "struct Holder{Int before;[Int] items;Int after}\nstruct Outer{Int before;Holder holder;Int after}\nfn main()->Int{let h=Outer{before:1,holder:Holder{before:2,items:[20,16],after:2},after:1};return h.before+h.holder.before+h.holder.items[0]+h.holder.items[1]+h.holder.after+h.after;}",
+        "struct Holder{[Int] items}\nfn id(items:[Int])->[Int]{return items;}\nfn sum(items:[Int])->Int{return items[0]+items[1];}\nfn main()->Int{let h=Holder{items:[20,22]};let items=id(h.items);return sum(items);}",
+        "struct Holder{Int before;[Int] items;Int after}\nfn id(value:Holder)->Holder{return value;}\nfn make()->Holder{let value=Holder{before:1,items:[20,20],after:1};return id(value);}\nfn main()->Int{let first=make();let second=make();return first.before+first.items[0]+first.items[1]+first.after+second.items[0]-20;}",
+        "struct Holder{Int before;[Int] items;Int after}\nfn main()->Int{let h=Holder{before:10,items:[0],after:12};h.items=[20];return h.before+h.items[0]+h.after;}",
+        "struct Holder{Int before;[Int] items;Int after}\nfn Holder-replace(self:Holder,items:[Int])->Int{self.items=items;return 0;}\nfn main()->Int{let h=Holder{before:10,items:[0],after:12};h.replace([20]);return h.before+h.items[0]+h.after;}",
+        "struct Holder{[Int] items}\nfn main()->Int{let values:[Int]=[0,22];let h=Holder{items:values};values[0]=20;let alias=h.items;alias[1]=22;return h.items[0]+h.items[1];}",
+        "struct Holder{Int before;[Int] items;Int after}\nvar calls:Int=0;\nfn next()->Int{calls+=1;return 20;}\nfn main()->Int{let h=Holder{before:1,items:[next(),20],after:1};if calls!=1{return 0;}return h.before+h.items[0]+h.items[1]+h.after;}",
+        "struct Holder{[Int] items}\nfn fail()->[Int]{throw 9;return [0];}\nfn main()->Int{let h=Holder{items:[20,22]};try{h.items=fail();return 0;}catch 9{return h.items[0]+h.items[1];}return 0;}",
+        "struct Holder{[Bool] flags;[Float] amounts;[String] words;Int after}\nfn main()->Int{let h=Holder{flags:[true,false],amounts:[1.5,2.5],words:[\"λ雪\",\"\"],after:42};if !h.flags[0] || h.flags[1] || h.amounts[0]!=1.5 || h.amounts[1]!=2.5 || h.words[0]!=\"λ雪\" || h.words[1]!=\"\"{return 0;}return h.after;}",
+        "struct Holder{[Int] items}\nfn values(h:Holder)->[Int]{return h.items;}\nfn make()->[Int]{let h=Holder{items:[20,22]};return values(h);}\nfn main()->Int{let items=make();return items[0]+items[1];}",
+        "struct Holder{Int x;[Int] items;Int y}\nfn total(a:Int,b:Int,c:Int,d:Int,e:Int,f:Int,g:Int,h:Holder,z:Int)->Int{return a+b+c+d+e+f+g+h.x+h.items[0]+h.items[1]+h.y+z;}\nfn main()->Int{return total(1,1,1,1,1,1,1,Holder{x:1,items:[20,12],y:1},1);}",
+        "struct Holder{[Int] items}\nvar trace:Int=0;\nfn first()->Int{trace=trace*10+1;return 1;}\nfn fail()->Int{trace=trace*10+2;throw 9;}\nfn last()->Int{trace=999;return 0;}\nfn main()->Int{let h=Holder{items:[20,22]};try{h.items=[first(),fail(),last()];return 0;}catch 9{if trace==12{return h.items[0]+h.items[1];}}return 0;}",
+        "class Holder{flags:[Bool];amounts:[Float];words:[String];fn change()->Int{flags[0]=true;amounts[0]=2.5;words[0]=\"λ雪\";return 0;}}\nfn main()->Int{let h=Holder{flags:[false],amounts:[0.0],words:[\"\"]};h.change();if h.flags[0] && h.amounts[0]==2.5 && h.words[0]==\"λ雪\"{return 42;}return 0;}",
+        "struct Holder{[Int] items}\nfn main()->Int{let h=Holder{items:if true{[20,22]}else{[0]}};let alias=h.items;h.items={let x=40;[x,2]};alias[0]=0;return h.items[0]+h.items[1];}",
+        "class Holder{items:[Int];fn index()->Int{items=[0];return 0;}}\nfn main()->Int{let h=Holder{items:[42]};return h.items[h.index()];}",
+    ] {
+        let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+        for text in [original, canonical.as_str()] {
+            let source = temp_path("array-struct-fields.in");
+            fs::write(&source, text).unwrap();
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut request =
+                    default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{profile:?}/{text}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{profile:?}/{text}: {report:?}"
+                );
+                let binary = temp_path("array-struct-fields-native");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{profile:?}/{text}: {report:?}"
+                );
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42),
+                    "{profile:?}/{text}"
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}

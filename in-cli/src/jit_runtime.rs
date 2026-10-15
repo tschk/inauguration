@@ -2333,6 +2333,25 @@ mod tests {
         }
     }
 
+    #[test]
+    #[cfg(all(unix, target_arch = "aarch64"))]
+    fn array_field_index_snapshots_header_before_index_effects() {
+        let source = "class Holder{items:[Int];fn index()->Int{items=[0];return 0;}}\nfn main()->Int{let h=Holder{items:[42]};return h.items[h.index()];}";
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        crate::lower_core::desugar_module(&mut module);
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            assert_eq!(
+                invoke_module(&module, profile, &[]),
+                Some(42),
+                "{profile:?}"
+            );
+        }
+    }
+
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn invoke_source(
         source: &str,

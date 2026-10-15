@@ -1,6 +1,7 @@
 use super::PendingInrtCall;
 use super::lower_util::{
-    array_item_matches, base_struct_name, ensure_native_array_element, expr_type,
+    array_item_matches, base_struct_name, ensure_native_array_element,
+    ensure_native_array_field_element, expr_type,
 };
 use crate::core_ir::{Expr, LoopKind, Stmt, Typ};
 use crate::native_emit::aarch64::{self, CodeEmitter};
@@ -367,6 +368,7 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) error_branches: Vec<Vec<u32>>,
     pub(crate) error_types: HashMap<String, u32>,
     pub(crate) ret_typ: Typ,
+    arrays_in_aggregates: bool,
     pub(crate) loop_branches: Vec<LoopBranches>,
     pub(crate) _params_src: &'a [(String, Typ)],
     pub(crate) try_flag_slots: Vec<u32>,
@@ -448,6 +450,22 @@ fn alloc_nested_struct_slots_inner(
                 slots.insert(field.clone(), offset);
                 *abi_idx += 1;
             }
+            Typ::Array(elem) => {
+                ensure_native_array_field_element(elem, _fn_name)?;
+                // Preserve the scalar array ABI order for aggregate copies and receivers.
+                for suffix in ["ptr", "len"] {
+                    let offset = ctx.alloc_slot();
+                    if store_params {
+                        if *abi_idx < 8 {
+                            ctx.param_stores.push((*abi_idx as u8, offset));
+                        } else {
+                            ctx.stack_params.push(((*abi_idx - 8) as u32, offset));
+                        }
+                    }
+                    slots.insert(format!("{field}.{suffix}"), offset);
+                    *abi_idx += 1;
+                }
+            }
             Typ::Named(_) | Typ::Vector(_) => {
                 let inner_name = match field_ty {
                     Typ::Named(name) => name.as_str(),
@@ -511,6 +529,11 @@ pub(crate) fn alloc_local_struct_fields(
             }
             Typ::Int | Typ::Bool | Typ::String | Typ::Float => {
                 slots.insert(field.clone(), ctx.alloc_slot());
+            }
+            Typ::Array(elem) => {
+                ensure_native_array_field_element(elem, _fn_name)?;
+                slots.insert(format!("{field}.ptr"), ctx.alloc_slot());
+                slots.insert(format!("{field}.len"), ctx.alloc_slot());
             }
             Typ::Named(_) | Typ::Vector(_) => {
                 let inner_name = match field_ty {
@@ -584,6 +607,10 @@ impl<'a> LowerCtx<'a> {
             error_branches: Vec::new(),
             error_types: HashMap::new(),
             ret_typ: Typ::Int,
+            arrays_in_aggregates: structs
+                .values()
+                .flatten()
+                .any(|(_, typ)| matches!(typ.canonical(), Typ::Array(_))),
             loop_branches: Vec::new(),
             _params_src: params,
             try_flag_slots: Vec::new(),
@@ -881,9 +908,14 @@ impl<'a> LowerCtx<'a> {
                 return Ok(());
             }
             // Array-returning functions can forward locals through other calls.
-            // Own their literals from initialization so aliases cannot escape the frame.
+            // Heap-backed aggregate fields must preserve aliases before and after a frame exits.
+            // shortcut: any array-bearing schema disables inline locals; refine with escape analysis.
             let inline_items = match expr {
-                Expr::ArrayLit(items) if !matches!(self.ret_typ, Typ::Array(_)) => Some(items),
+                Expr::ArrayLit(items)
+                    if !self.arrays_in_aggregates && !matches!(self.ret_typ, Typ::Array(_)) =>
+                {
+                    Some(items)
+                }
                 _ => None,
             };
             let Some(items) = inline_items else {

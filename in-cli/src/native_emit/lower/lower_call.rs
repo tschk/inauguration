@@ -629,6 +629,13 @@ pub(crate) fn aggregate_scratch_fields(
                 fields.insert(prefix.to_string(), *next_offset);
                 *next_offset += 8;
             }
+            Typ::Array(elem) => {
+                super::lower_util::ensure_native_array_element(elem, fn_name, "aggregate field")?;
+                for name in ["ptr", "len"] {
+                    fields.insert(format!("{prefix}.{name}"), *next_offset);
+                    *next_offset += 8;
+                }
+            }
             Typ::Vector(_) => {
                 for name in ["ptr", "len", "cap"] {
                     fields.insert(format!("{prefix}.{name}"), *next_offset);
@@ -917,39 +924,6 @@ pub(crate) fn lower_array_call_arg(
         return Err(format!(
             "native-lower: array argument must have scalar element type, got `{elem:?}` in `{fn_name}`"
         ));
-    }
-    // Handle self.field for array fields
-    if let Expr::Field { base, name } = arg {
-        if let Expr::Ident(local) = base.as_ref() {
-            if let Some(LocalSlot::Struct { fields: slots, .. }) = ctx.locals.get(local) {
-                // Find the field value — it's an Array slot at some offset
-                // Load ptr and len from that offset
-                let ptr_key = format!("{name}.ptr");
-                let len_key = format!("{name}.len");
-                if let (Some(&p_off), Some(&l_off)) = (slots.get(&ptr_key), slots.get(&len_key)) {
-                    emitter.emit_u32(aarch64::ldr64(reg, aarch64::REG_SP, p_off));
-                    emitter.emit_u32(aarch64::ldr64(reg + 1, aarch64::REG_SP, l_off));
-                    return Ok(reg + 2);
-                }
-                // Fallback: inline array field — compute base address and element count
-                let mut field_elems: Vec<(u32, u32)> = slots
-                    .iter()
-                    .filter_map(|(k, &v)| {
-                        k.strip_prefix(&format!("{name}."))
-                            .and_then(|suffix| suffix.parse::<u32>().ok())
-                            .map(|idx| (idx, v))
-                    })
-                    .collect();
-                if !field_elems.is_empty() {
-                    field_elems.sort_by_key(|(idx, _)| *idx);
-                    let base = field_elems[0].1;
-                    let count = field_elems.len();
-                    emitter.emit_u32(aarch64::add_imm64(reg, aarch64::REG_SP, base as u16));
-                    emitter.emit_insns(&aarch64::load_i64(reg + 1, count as i64));
-                    return Ok(reg + 2);
-                }
-            }
-        }
     }
     let Expr::Ident(local) = arg else {
         super::lower_stmt::lower_array_expr_into_regs(

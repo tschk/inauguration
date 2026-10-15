@@ -2692,8 +2692,50 @@ pub fn normalize_module(parser_id: ParserId, module: &UnifiedModule) -> UnifiedM
     if parser_id == ParserId::Rust {
         crate::lower_core::lower_inline_constants(&mut normalized.decls);
         TypeChecker::new().resolve_complements(&mut normalized);
+        refuse_rust_array_tuple_values(&mut normalized);
     }
     normalized
+}
+
+/// Dynamic Array headers cannot implement Rust fixed-array tuple value copies.
+/// Preserve refusal after tuple inference, while leaving unused schemas available.
+fn refuse_rust_array_tuple_values(module: &mut UnifiedModule) {
+    fn array_value(typ: &Typ) -> bool {
+        match typ {
+            Typ::Array(_) => true,
+            Typ::Named(name) => crate::core_ir::tuples::fields(name)
+                .is_some_and(|fields| fields.iter().any(|(_, typ)| array_value(typ))),
+            _ => false,
+        }
+    }
+    fn tuple_value(typ: &Typ) -> bool {
+        matches!(typ, Typ::Named(name) if crate::core_ir::tuples::fields(name).is_some())
+            && array_value(typ)
+    }
+    fn marker() -> Expr {
+        Expr::Ident("#unsupported-rust-fixed-array-tuple-value".into())
+    }
+    for decl in &mut module.decls {
+        if let Decl::Function {
+            params, ret, body, ..
+        } = decl
+            && (tuple_value(ret) || params.iter().any(|(_, typ)| tuple_value(typ)))
+        {
+            body.insert(0, Stmt::Expr(marker()));
+        }
+    }
+    crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+        if matches!(expr, Expr::StructInit { name, .. } if tuple_value(&Typ::Named(name.clone()))) {
+            *expr = marker();
+        }
+        if let Expr::Closure {
+            params, ret, body, ..
+        } = expr
+            && (tuple_value(ret) || params.iter().any(|(_, typ)| tuple_value(typ)))
+        {
+            body.insert(0, Stmt::Expr(marker()));
+        }
+    });
 }
 
 fn normalize_decl(parser_id: ParserId, decl: &Decl) -> Decl {
@@ -4558,5 +4600,83 @@ mod tests {
             assert!(!report.ok, "{expression}: {report:?}");
             assert_eq!(report.reason_code.as_deref(), Some("unresolved-symbol"));
         }
+    }
+}
+
+#[cfg(test)]
+mod rust_array_tuple_value_tests {
+    use super::*;
+
+    #[test]
+    fn rust_array_tuple_copies_remain_refused_after_tuple_inference() {
+        for source in [
+            "fn main()->i64{let mut a=([42,0],1);let b=a;a.0[0]=0;b.0[0]}",
+            "fn main()->i64{let values=[42,0];let mut a=(values,1);let b=a;a.0[0]=0;b.0[0]}",
+            "fn main()->i64{let mut a=((([42,0],1),2),3);let b=a;a.0.0.0[0]=0;b.0.0.0[0]}",
+            "fn take(mut value:([i64;2],i64))->i64{value.0[0]=0;value.0[0]} fn main()->i64{take(([42,0],1))}",
+            "fn make()->([i64;2],i64){([42,0],1)} fn main()->i64{make().0[0]}",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module = normalize_module(ParserId::Rust, &parsed);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(!report.ok, "{source}");
+            assert!(
+                report.reason.as_deref().is_some_and(
+                    |reason| reason.contains("#unsupported-rust-fixed-array-tuple-value")
+                ),
+                "{report:?}: {source}"
+            );
+            crate::lower_core::desugar_module(&mut module);
+            match crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable,
+            ) {
+                Err(_) => {}
+                Ok(lowered) => assert!(
+                    lowered.degradations.iter().any(|item| item.reachable
+                        && item
+                            .reason
+                            .contains("#unsupported-rust-fixed-array-tuple-value")),
+                    "{source}: {:?}",
+                    lowered.degradations
+                ),
+            }
+            assert!(
+                crate::native_emit::x86_64_lower::lower_module(&module, "main").is_err(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn unused_array_tuple_schemas_and_ordinary_tuple_values_remain_usable() {
+        let parsed = crate::compiler::rust_front::parse_rust_source(
+            "fn helper()->i64{42} fn main()->i64{let values=(20,22);values.0+values.1}",
+        )
+        .unwrap();
+        let mut module = parsed;
+        let Typ::Named(name) =
+            crate::core_ir::tuples::typ(&[Typ::Array(Box::new(Typ::Int)), Typ::Int])
+        else {
+            unreachable!()
+        };
+        module.decls.push(Decl::Struct {
+            fields: crate::core_ir::tuples::fields(&name).unwrap(),
+            name,
+            type_params: vec![],
+        });
+        let mut module = normalize_module(ParserId::Rust, &module);
+        assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        crate::lower_core::desugar_module(&mut module);
+        assert!(
+            crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .is_ok()
+        );
+        assert!(crate::native_emit::x86_64_lower::lower_module(&module, "main").is_ok());
     }
 }

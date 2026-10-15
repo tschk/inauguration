@@ -820,7 +820,7 @@ fn lower_array_len(
                 "native-lower: array_len source `{local}` is not an array in `{fn_name}`"
             )),
         },
-        Expr::Call { .. } | Expr::Index { .. } => {
+        Expr::Call { .. } | Expr::Index { .. } | Expr::Field { .. } => {
             let Some(Typ::Array(elem)) =
                 super::lower_expr::native_expr_type(source, ctx, functions)
             else {

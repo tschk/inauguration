@@ -412,6 +412,7 @@ pub(crate) fn lower_index(
         base,
         Expr::Call { .. }
             | Expr::ArrayLit(_)
+            | Expr::Field { .. }
             | Expr::Index { .. }
             | Expr::Conditional { .. }
             | Expr::Block { .. }
@@ -509,33 +510,16 @@ pub(crate) fn lower_index(
         ctx.release_binop_temp();
         return Ok(());
     }
-    let (slot, field_ptr_off, field_len_off) = match base {
+    let slot = match base {
         Expr::Ident(name) => {
             match ctx.locals.get(name.as_str()).cloned() {
-                Some(slot) => (slot, None, None),
+                Some(slot) => slot,
                 None => {
                     // Unknown identifier (enum variant, constant): emit 0
                     emitter.emit_insns(&aarch64::load_i64(rd, 0));
                     return Ok(());
                 }
             }
-        }
-        Expr::Field { .. } => {
-            let (local, path) = super::lower_util::field_path(base).ok_or_else(|| {
-                format!("native-lower: indexed field is not addressable in `{fn_name}`")
-            })?;
-            let Some(LocalSlot::Struct { fields, .. }) = ctx.locals.get(local) else {
-                return Err(format!(
-                    "native-lower: indexed field root `{local}` is not a struct in `{fn_name}`"
-                ));
-            };
-            let ptr = fields.get(&format!("{path}.ptr")).ok_or_else(|| {
-                format!("native-lower: indexed field `{path}` missing pointer in `{fn_name}`")
-            })?;
-            let len = fields.get(&format!("{path}.len")).ok_or_else(|| {
-                format!("native-lower: indexed field `{path}` missing length in `{fn_name}`")
-            })?;
-            (LocalSlot::Scalar(0), Some(*ptr), Some(*len))
         }
         _ => {
             // Unknown base expression: try lowering it, then emit 0
@@ -556,75 +540,14 @@ pub(crate) fn lower_index(
     emitter.emit_u32(aarch64::cmp_reg64(index_reg, aarch64::REG_XZR));
     let negative_branch = emitter.emit_insn(aarch64::b_cond(11, 0));
     let len_reg = pick_scratch(&[rd, index_reg]);
-    let base_reg = if let (Some(ptr_off), Some(len_off)) = (field_ptr_off, field_len_off) {
-        let scratch = pick_scratch(&[rd, index_reg, len_reg]);
-        if let Some((root, path)) = super::lower_util::field_path(base)
-            && let Some((pointer, offset)) = ctx.receiver_field(root, &format!("{path}.ptr"))
-            && let Some((_, len_offset)) = ctx.receiver_field(root, &format!("{path}.len"))
-        {
-            emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, pointer));
-            emitter.emit_u32(aarch64::ldr64(len_reg, scratch, len_offset));
-            emitter.emit_u32(aarch64::ldr64(scratch, scratch, offset));
-        } else {
-            emitter.emit_u32(aarch64::ldr64(len_reg, aarch64::REG_SP, len_off));
-            emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, ptr_off));
-        }
-        scratch
-    } else {
-        match slot {
-            LocalSlot::Array { offsets, .. } => {
-                emitter.emit_insns(&aarch64::load_i64(len_reg, offsets.len() as i64));
-                // With length zero, every index takes the bounds-failure branch.
-                let base_offset = offsets.first().copied().unwrap_or(0);
-                if base_offset == 0 {
-                    aarch64::REG_SP
-                } else {
-                    let scratch = pick_scratch(&[rd, index_reg, len_reg]);
-                    emitter.emit_u32(aarch64::add_imm64(
-                        scratch,
-                        aarch64::REG_SP,
-                        base_offset as u16,
-                    ));
-                    scratch
-                }
-            }
-            LocalSlot::ArrayParam {
-                ptr_offset,
-                len_offset,
-                ..
-            } => {
-                emitter.emit_u32(aarch64::ldr64(len_reg, aarch64::REG_SP, len_offset));
-                let scratch = pick_scratch(&[rd, index_reg, len_reg]);
-                emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, ptr_offset));
-                scratch
-            }
-            LocalSlot::Struct { typ, fields } if typ == "Vec" => {
-                let len = find_field_offset(&fields, "len")
-                    .ok_or_else(|| format!("native-lower: Vec missing length in `{fn_name}`"))?;
-                let ptr = find_field_offset(&fields, "ptr")
-                    .ok_or_else(|| format!("native-lower: Vec missing pointer in `{fn_name}`"))?;
-                emitter.emit_u32(aarch64::ldr64(len_reg, aarch64::REG_SP, *len));
-                let scratch = pick_scratch(&[rd, index_reg, len_reg]);
-                emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, *ptr));
-                scratch
-            }
-            LocalSlot::Struct { fields: slots, .. } => {
-                // Struct-backed inline array: fields like _0, _1, _2 are array elements
-                let mut field_offsets: Vec<(u32, u32)> = slots
-                    .iter()
-                    .filter_map(|(k, &v)| {
-                        k.strip_prefix('_')
-                            .and_then(|n| n.parse::<u32>().ok())
-                            .map(|idx| (idx, v))
-                    })
-                    .collect();
-                if field_offsets.is_empty() {
-                    emitter.emit_insns(&aarch64::load_i64(rd, 0));
-                    return Ok(());
-                }
-                field_offsets.sort_by_key(|(idx, _)| *idx);
-                let base_offset = field_offsets[0].1;
-                emitter.emit_insns(&aarch64::load_i64(len_reg, field_offsets.len() as i64));
+    let base_reg = match slot {
+        LocalSlot::Array { offsets, .. } => {
+            emitter.emit_insns(&aarch64::load_i64(len_reg, offsets.len() as i64));
+            // With length zero, every index takes the bounds-failure branch.
+            let base_offset = offsets.first().copied().unwrap_or(0);
+            if base_offset == 0 {
+                aarch64::REG_SP
+            } else {
                 let scratch = pick_scratch(&[rd, index_reg, len_reg]);
                 emitter.emit_u32(aarch64::add_imm64(
                     scratch,
@@ -633,19 +556,64 @@ pub(crate) fn lower_index(
                 ));
                 scratch
             }
-            LocalSlot::Scalar(offset) => {
-                // Scalar used as array base — try [ptr @ offset, len @ offset+8] pattern
-                emitter.emit_u32(aarch64::ldr64(len_reg, aarch64::REG_SP, offset + 8));
-                let scratch = pick_scratch(&[rd, index_reg, len_reg]);
-                emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, offset));
-                scratch
+        }
+        LocalSlot::ArrayParam {
+            ptr_offset,
+            len_offset,
+            ..
+        } => {
+            emitter.emit_u32(aarch64::ldr64(len_reg, aarch64::REG_SP, len_offset));
+            let scratch = pick_scratch(&[rd, index_reg, len_reg]);
+            emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, ptr_offset));
+            scratch
+        }
+        LocalSlot::Struct { typ, fields } if typ == "Vec" => {
+            let len = find_field_offset(&fields, "len")
+                .ok_or_else(|| format!("native-lower: Vec missing length in `{fn_name}`"))?;
+            let ptr = find_field_offset(&fields, "ptr")
+                .ok_or_else(|| format!("native-lower: Vec missing pointer in `{fn_name}`"))?;
+            emitter.emit_u32(aarch64::ldr64(len_reg, aarch64::REG_SP, *len));
+            let scratch = pick_scratch(&[rd, index_reg, len_reg]);
+            emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, *ptr));
+            scratch
+        }
+        LocalSlot::Struct { fields: slots, .. } => {
+            // Struct-backed inline array: fields like _0, _1, _2 are array elements
+            let mut field_offsets: Vec<(u32, u32)> = slots
+                .iter()
+                .filter_map(|(k, &v)| {
+                    k.strip_prefix('_')
+                        .and_then(|n| n.parse::<u32>().ok())
+                        .map(|idx| (idx, v))
+                })
+                .collect();
+            if field_offsets.is_empty() {
+                emitter.emit_insns(&aarch64::load_i64(rd, 0));
+                return Ok(());
             }
-            #[allow(unreachable_patterns)]
-            _ => {
-                return Err(format!(
-                    "native-lower: unsupported array index base in `{fn_name}`"
-                ));
-            }
+            field_offsets.sort_by_key(|(idx, _)| *idx);
+            let base_offset = field_offsets[0].1;
+            emitter.emit_insns(&aarch64::load_i64(len_reg, field_offsets.len() as i64));
+            let scratch = pick_scratch(&[rd, index_reg, len_reg]);
+            emitter.emit_u32(aarch64::add_imm64(
+                scratch,
+                aarch64::REG_SP,
+                base_offset as u16,
+            ));
+            scratch
+        }
+        LocalSlot::Scalar(offset) => {
+            // Scalar used as array base — try [ptr @ offset, len @ offset+8] pattern
+            emitter.emit_u32(aarch64::ldr64(len_reg, aarch64::REG_SP, offset + 8));
+            let scratch = pick_scratch(&[rd, index_reg, len_reg]);
+            emitter.emit_u32(aarch64::ldr64(scratch, aarch64::REG_SP, offset));
+            scratch
+        }
+        #[allow(unreachable_patterns)]
+        _ => {
+            return Err(format!(
+                "native-lower: unsupported array index base in `{fn_name}`"
+            ));
         }
     };
     emitter.emit_u32(aarch64::cmp_reg64(index_reg, len_reg));

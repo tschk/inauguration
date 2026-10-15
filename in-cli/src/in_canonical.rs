@@ -58,7 +58,57 @@ fn format_decl(decl: &Decl, out: &mut String) {
             format_body(body, 1, out);
             out.push('}');
         }
-        Decl::Class { .. } | Decl::Interface { .. } | Decl::Component { .. } => {}
+        Decl::Class {
+            name,
+            fields,
+            methods,
+            extends,
+            implements,
+            ..
+        } => {
+            out.push_str("class ");
+            out.push_str(name);
+            if let Some(parent) = extends {
+                out.push_str(" extends ");
+                out.push_str(parent);
+            }
+            if !implements.is_empty() {
+                out.push_str(" implements ");
+                out.push_str(&implements.join(", "));
+            }
+            out.push_str(" {\n");
+            for (field, typ) in fields {
+                out.push_str(&format!("  {field}: {}\n", format_type(typ)));
+            }
+            for method in methods {
+                let mut rendered = String::new();
+                format_decl(method, &mut rendered);
+                for line in rendered.lines() {
+                    out.push_str("  ");
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            out.push('}');
+        }
+        Decl::Interface { name, methods, .. } => {
+            out.push_str(&format!("interface {name} {{\n"));
+            for method in methods {
+                let params = method
+                    .params
+                    .iter()
+                    .map(|(name, typ)| format!("{name}: {}", format_type(typ)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    "  fn {}({params}) -> {}\n",
+                    method.name,
+                    format_type(&method.ret)
+                ));
+            }
+            out.push('}');
+        }
+        Decl::Component { .. } => {}
         Decl::Global {
             name,
             typ,
@@ -476,6 +526,56 @@ mod tests {
                 original,
                 "{canonical}"
             );
+        }
+    }
+
+    #[test]
+    fn canonical_classes_preserve_fields_methods_and_contracts() {
+        for source in [
+            "class Holder{flags:[Bool];amounts:[Float];words:[String];fn change()->Int{flags[0]=true;amounts[0]=2.5;words[0]=\"λ雪\";return 0;}}\nfn main()->Int{let h=Holder{flags:[false],amounts:[0.0],words:[\"\"]};h.change();if h.flags[0] && h.amounts[0]==2.5 && h.words[0]==\"λ雪\"{return 42;}return 0;}",
+            "interface Readable{fn read()->Int}\nclass Base{value:Int;fn read()->Int{return value;}}\nclass Child extends Base implements Readable{value:Int;fn new(value:Int)->Child{return Child{value:value};} fn read()->Int{return value;}}\nfn main()->Int{let value=Child{value:42};return value.read();}",
+        ] {
+            let parsed = parse_in_source(source).unwrap();
+            let canonical = canonicalize_in_source(source).unwrap();
+            let after = parse_in_source(&canonical).unwrap();
+            assert_eq!(after, parsed, "{canonical}");
+            assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+            for decl in &after.decls {
+                if let Decl::Class {
+                    name: owner,
+                    fields,
+                    methods,
+                    ..
+                } = decl
+                {
+                    assert!(!methods.is_empty());
+                    if owner == "Holder" {
+                        assert_eq!(fields.len(), 3);
+                        let Decl::Function {
+                            name, params, body, ..
+                        } = &methods[0]
+                        else {
+                            panic!("missing change method")
+                        };
+                        assert_eq!(name, "change");
+                        assert!(params.is_empty());
+                        assert!(
+                            matches!(body.first(), Some(Stmt::IndexAssign { base, .. }) if base == &Expr::Ident("flags".into()))
+                        );
+                    }
+                    for method in methods {
+                        let Decl::Function {
+                            name, params, body, ..
+                        } = method
+                        else {
+                            panic!("non-function method")
+                        };
+                        assert!(!name.contains("Holder_") && !name.contains("Child_"));
+                        assert!(!params.iter().any(|(name, _)| name == "self"));
+                        assert!(!body.is_empty());
+                    }
+                }
+            }
         }
     }
 

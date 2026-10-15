@@ -637,6 +637,25 @@ pub(crate) fn lower_field_assign(
     };
     let qualified = (!prefix.is_empty()).then(|| format!("{prefix}.{name}"));
     let name = qualified.as_deref().unwrap_or(name);
+    if let Some(Typ::Array(elem)) = &field_type {
+        lower_array_expr_into_regs(emitter, ctx, value, elem, functions, pending_calls, fn_name)?;
+        for (reg, suffix) in ["ptr", "len"].into_iter().enumerate() {
+            let field = format!("{name}.{suffix}");
+            if let Some((pointer, offset)) = ctx.receiver_field(base_name, &field) {
+                emitter.emit_u32(aarch64::ldr64(2, aarch64::REG_SP, pointer));
+                emitter.emit_u32(aarch64::str64(reg as u8, 2, offset));
+            } else if let Some(LocalSlot::Struct { fields, .. }) = ctx.locals.get(base_name)
+                && let Some(&offset) = fields.get(&field)
+            {
+                emitter.emit_u32(aarch64::str64(reg as u8, aarch64::REG_SP, offset));
+            } else {
+                return Err(format!(
+                    "native-lower: missing array destination `{base_name}.{field}` in `{fn_name}`"
+                ));
+            }
+        }
+        return Ok(());
+    }
     let aggregate = match &field_type {
         Some(Typ::Named(name)) => Some(name.clone()),
         Some(Typ::Vector(_)) => Some("Vec".to_string()),
@@ -793,7 +812,7 @@ pub(crate) fn lower_index_assign(
             ptr_offset,
             len_offset,
         }
-    } else if matches!(base, Expr::Index { .. }) {
+    } else if matches!(base, Expr::Index { .. } | Expr::Field { .. }) {
         let Some(Typ::Array(elem)) = lower_expr::native_expr_type(base, ctx, functions) else {
             return Err("native-lower: indexed store base must be an array".into());
         };
@@ -998,6 +1017,24 @@ pub(crate) fn lower_struct_expr_into_slots(
                 let Some((_, field_typ)) = schema.iter().find(|(name, _)| name == field) else {
                     continue; // skip unknown fields
                 };
+                if let Typ::Array(elem) = field_typ {
+                    lower_array_expr_into_regs(
+                        emitter,
+                        ctx,
+                        value,
+                        elem,
+                        functions,
+                        pending_calls,
+                        fn_name,
+                    )?;
+                    for (reg, suffix) in ["ptr", "len"].into_iter().enumerate() {
+                        let key = format!("{field}.{suffix}");
+                        let offset = find_field_offset(fields, &key)
+                            .ok_or("native-lower: missing array field storage")?;
+                        emitter.emit_u32(aarch64::str64(reg as u8, aarch64::REG_SP, *offset));
+                    }
+                    continue;
+                }
                 if let (Typ::Vector(elem), Expr::ArrayLit(items)) = (field_typ, value) {
                     let ptr_key = format!("{field}.ptr");
                     let len_key = format!("{field}.len");
@@ -1166,7 +1203,7 @@ pub(crate) fn lower_struct_expr_into_slots(
                 pending_calls,
                 fn_name,
             )?;
-            let schema = crate::native_emit::struct_layout::scalar_fields(ctx.structs, typ)
+            let schema = crate::native_emit::struct_layout::arm_fields(ctx.structs, typ)
                 .or_else(|_| native_struct_fields(ctx.structs, typ, fn_name))?;
             for (reg, (field, _)) in schema.iter().enumerate() {
                 let Some(&offset) = find_field_offset(fields, field) else {
@@ -1218,7 +1255,7 @@ pub(crate) fn lower_struct_expr_into_regs(
         );
     }
 
-    if let Ok(layout) = crate::native_emit::struct_layout::scalar_fields(ctx.structs, typ) {
+    if let Ok(layout) = crate::native_emit::struct_layout::arm_fields(ctx.structs, typ) {
         // shortcut: scalar aggregate returns use eight GPRs; widen with an indirect ABI.
         if layout.len() > 8 {
             return Err(format!(
@@ -1503,6 +1540,16 @@ pub(crate) fn lower_array_expr_into_regs(
         ));
     }
     match expr {
+        Expr::Field { .. } => {
+            if !matches!(lower_expr::native_expr_type(expr, ctx, functions), Some(Typ::Array(actual)) if actual.canonical() == elem.canonical())
+            {
+                return Err(format!(
+                    "native-lower: array field type mismatch in `{fn_name}`"
+                ));
+            }
+            lower_expr::lower_struct_field_into(emitter, ctx, expr, "ptr", 0, fn_name)?;
+            lower_expr::lower_struct_field_into(emitter, ctx, expr, "len", 1, fn_name)
+        }
         Expr::Ident(local) => {
             let slot = ctx.locals.get(local).cloned().ok_or_else(|| {
                 format!("native-lower: array references unknown local `{local}` in `{fn_name}`")

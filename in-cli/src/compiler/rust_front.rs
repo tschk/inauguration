@@ -1214,6 +1214,25 @@ fn boundary_symbol_from_fn(f: &syn::ItemFn, layout_specs: &RustLayoutSpecs) -> B
     }
 }
 
+/// Fixed-array fields need value-copy storage, not the dynamic Array pointer/length ABI.
+/// Borrowed slices keep their existing representation; unused schemas remain available.
+fn rust_struct_field_type(typ: &syn::Type) -> Typ {
+    fn fixed_value(typ: &syn::Type) -> bool {
+        match typ {
+            syn::Type::Array(_) => true,
+            syn::Type::Tuple(tuple) => tuple.elems.iter().any(fixed_value),
+            syn::Type::Paren(typ) => fixed_value(&typ.elem),
+            syn::Type::Group(typ) => fixed_value(&typ.elem),
+            _ => false,
+        }
+    }
+    if fixed_value(typ) {
+        Typ::Named("#unsupported-rust-fixed-array-struct-value".into())
+    } else {
+        map_type(typ)
+    }
+}
+
 fn rust_struct_fields(fields: &syn::Fields) -> Vec<(String, Typ)> {
     match fields {
         syn::Fields::Named(named) => named
@@ -1225,7 +1244,7 @@ fn rust_struct_fields(fields: &syn::Fields) -> Vec<(String, Typ)> {
                         .as_ref()
                         .map(std::string::ToString::to_string)
                         .unwrap_or_else(|| "field".to_string()),
-                    map_type(&f.ty),
+                    rust_struct_field_type(&f.ty),
                 )
             })
             .collect(),
@@ -1233,7 +1252,7 @@ fn rust_struct_fields(fields: &syn::Fields) -> Vec<(String, Typ)> {
             .unnamed
             .iter()
             .enumerate()
-            .map(|(i, f)| (format!("_{i}"), map_type(&f.ty)))
+            .map(|(i, f)| (format!("_{i}"), rust_struct_field_type(&f.ty)))
             .collect(),
         syn::Fields::Unit => vec![],
     }
@@ -3773,5 +3792,57 @@ fn main() {
         }
         assert!(calls.contains(&"Left::First::eq".into()), "{calls:?}");
         assert!(calls.contains(&"eq".into()), "{calls:?}");
+    }
+
+    #[test]
+    fn fixed_array_struct_values_preserve_native_refusal() {
+        for source in [
+            "#[derive(Clone,Copy)] struct Holder{items:[i64;2]} fn main()->i64{let mut a=Holder{items:[42,0]};let b=a;a.items[0]=0;b.items[0]}",
+            "struct Inner{items:[i64;2]} struct Outer{inner:Inner} fn take(value:Outer)->i64{value.inner.items[0]} fn main()->i64{take(Outer{inner:Inner{items:[42,0]}})}",
+            "struct Holder([i64;2]); fn main()->i64{let h=Holder([42,0]);h.0[0]}",
+        ] {
+            let mut module = parse_rust_source(source).unwrap();
+            assert!(module.decls.iter().any(|decl| matches!(decl,
+                Decl::Struct {fields,..} if fields.iter().any(|(_,typ)| matches!(typ,
+                    Typ::Named(name) if name=="#unsupported-rust-fixed-array-struct-value")))));
+            crate::lower_core::desugar_module(&mut module);
+            assert!(
+                crate::native_emit::lower::lower_module(
+                    &module,
+                    "main",
+                    crate::native_emit::NativeLinkage::Executable
+                )
+                .is_err(),
+                "{source}"
+            );
+            assert!(
+                crate::native_emit::x86_64_lower::lower_module(&module, "main").is_err(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn unused_fixed_array_struct_schema_and_borrowed_slice_schema_remain_parsable() {
+        let mut module = parse_rust_source("mod shapes{pub struct Fixed{pub items:[i64;2]} pub struct Slice<'a>{pub items:&'a [i64]}} fn main()->i64{42}").unwrap();
+        assert!(module.decls.iter().any(|decl| matches!(decl, Decl::Struct{name,fields,..}
+            if name=="shapes::Fixed" && matches!(&fields[0].1,Typ::Named(name) if name=="#unsupported-rust-fixed-array-struct-value"))));
+        assert!(
+            module
+                .decls
+                .iter()
+                .any(|decl| matches!(decl, Decl::Struct{name,fields,..}
+            if name=="shapes::Slice" && fields[0].1 == map_type(&syn::parse_str::<syn::Type>("&[i64]").unwrap())))
+        );
+        crate::lower_core::desugar_module(&mut module);
+        assert!(
+            crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .is_ok()
+        );
+        assert!(crate::native_emit::x86_64_lower::lower_module(&module, "main").is_ok());
     }
 }

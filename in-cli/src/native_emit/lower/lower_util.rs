@@ -230,6 +230,9 @@ pub(crate) fn native_param_abi_slots(
                 visited.push(base.to_string());
                 let mut total = 0usize;
                 for (_, field_ty) in fields {
+                    if let Typ::Array(elem) = field_ty.canonical() {
+                        ensure_native_array_field_element(&elem, fn_name)?;
+                    }
                     total += count_type_slots(field_ty, structs, fn_name, visited, depth + 1)?;
                 }
                 visited.pop();
@@ -285,6 +288,9 @@ pub(crate) fn native_struct_fields(
                 Ok((name.clone(), field_ty.clone()))
             }
             Typ::Vector(_) => Ok((name.clone(), field_ty.clone())),
+            Typ::Array(elem) => ensure_native_array_field_element(&elem, fn_name)
+                .map(|()| (name.clone(), Typ::Array(elem)))
+                .map_err(|_| ()),
             _ => Err(()),
         })
         .collect::<Result<Vec<_>, ()>>();
@@ -343,6 +349,17 @@ pub(crate) fn ensure_native_array_element(
     }
 }
 
+/// Array fields use a pointer/length pair; aggregate element layouts remain unsupported.
+pub(crate) fn ensure_native_array_field_element(elem: &Typ, fn_name: &str) -> Result<(), String> {
+    ensure_native_array_element(elem, fn_name, "struct field")?;
+    if !is_native_scalar_type(elem) {
+        return Err(format!(
+            "native-lower: struct array field requires scalar elements in `{fn_name}`"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn array_item_matches(expected: &Typ, actual: &Typ) -> bool {
     let expected = canonical_type(expected);
     let actual = canonical_type(actual);
@@ -380,6 +397,53 @@ pub(crate) use crate::core_ir::expr_contains_call;
 #[cfg(test)]
 mod tests {
     use super::comparison_cond;
+
+    #[test]
+    fn scalar_array_struct_fields_count_two_argument_words() {
+        use crate::core_ir::Typ;
+        use std::collections::HashMap;
+        let structs = HashMap::from([(
+            "Holder".into(),
+            vec![
+                ("before".into(), Typ::Int),
+                ("items".into(), Typ::Array(Box::new(Typ::String))),
+                ("after".into(), Typ::Bool),
+            ],
+        )]);
+        assert_eq!(
+            super::native_param_abi_slots(
+                &[("value".into(), Typ::Named("Holder".into()))],
+                &structs,
+                "take"
+            )
+            .unwrap(),
+            4
+        );
+        assert_eq!(
+            super::native_param_abi_slots(
+                &[("self".into(), Typ::Named("Holder".into()))],
+                &structs,
+                "Holder::read"
+            )
+            .unwrap(),
+            1
+        );
+        let unsupported = HashMap::from([(
+            "Holder".into(),
+            vec![(
+                "items".into(),
+                Typ::Array(Box::new(Typ::Named("Unknown".into()))),
+            )],
+        )]);
+        assert!(
+            super::native_param_abi_slots(
+                &[("value".into(), Typ::Named("Holder".into()))],
+                &unsupported,
+                "take"
+            )
+            .is_err()
+        );
+    }
 
     /// `fcmp` reports an unordered pair as `N=0, Z=0, C=1, V=1`, so `<` and `<=`
     /// must use the `MI` and `LS` codes: the integer aliases `LT` (`N != V`) and
