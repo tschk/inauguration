@@ -1,3 +1,4 @@
+use super::lower_ctx::LoopBranchSites;
 use super::lower_expr;
 use super::lower_util::{
     array_item_matches, emit_epilogue, emit_failure_return, expr_contains_call, expr_type,
@@ -58,6 +59,7 @@ pub(crate) fn lower_stmt(
                         )?;
                     }
                     Typ::Array(elem) => {
+                        reject_array_return_with_unproven_lifetime(ctx, expr, functions, fn_name)?;
                         lower_array_expr_into_regs(
                             emitter,
                             ctx,
@@ -151,6 +153,14 @@ pub(crate) fn lower_stmt(
             ret_typ,
         ),
         Stmt::Assign(name, expr) => {
+            if !ctx.locals.contains_key(name)
+                && !ctx.params.contains_key(name)
+                && ctx.globals.names.contains(name)
+            {
+                return Err(format!(
+                    "native-lower: assignment to global `{name}` is unsupported in `{fn_name}`"
+                ));
+            }
             if !ctx.locals.contains_key(name) {
                 let offset = ctx.alloc_slot();
                 ctx.locals.insert(name.clone(), LocalSlot::Scalar(offset));
@@ -234,6 +244,7 @@ pub(crate) fn lower_stmt(
         }
         Stmt::Try { body, catches, .. } => {
             emit_error_slot_adr(emitter, fn_name)?;
+            ctx.try_depth += 1;
             // Save previous error flag from global location to stack
             emitter.emit_u32(aarch64::ldrb(1, 27, 0));
             emitter.emit_u32(aarch64::strb(1, aarch64::REG_SP, ctx.saved_flag_offset));
@@ -290,6 +301,7 @@ pub(crate) fn lower_stmt(
             // Restore previous error flag from stack to global location
             emitter.emit_u32(aarch64::ldrb(1, aarch64::REG_SP, ctx.saved_flag_offset));
             emitter.emit_u32(aarch64::strb(1, 27, 0));
+            ctx.try_depth -= 1;
 
             Ok(())
         }
@@ -302,8 +314,25 @@ pub(crate) fn lower_stmt(
             emitter.patch_u32(continue_branch, aarch64::cbz_w(0, end_offset));
             Ok(())
         }
-        Stmt::Break => Ok(()),
-        Stmt::Continue => Ok(()),
+        Stmt::Break | Stmt::Continue => {
+            let Some(loop_sites) = ctx.loop_branches.last_mut() else {
+                return Err(format!(
+                    "native-lower: loop control outside a loop in `{fn_name}`"
+                ));
+            };
+            if ctx.try_depth != loop_sites.try_depth {
+                return Err(format!(
+                    "native-lower: loop control exiting a try block is unsupported in `{fn_name}`"
+                ));
+            }
+            let site = emitter.emit_insn(aarch64::b(0));
+            if matches!(stmt, Stmt::Break) {
+                loop_sites.breaks.push(site);
+            } else {
+                loop_sites.continues.push(site);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -419,6 +448,35 @@ pub(crate) fn lower_field_assign(
         lower_expr::lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
         emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, off));
         return Ok(());
+    }
+    if ctx.params.contains_key(base_name) {
+        return Err(format!(
+            "native-lower: field assignment base `{base_name}` is a scalar parameter in `{fn_name}`"
+        ));
+    }
+    if !ctx.locals.contains_key(base_name) {
+        if let Some(field) = ctx.globals.fields.get(&format!("{base_name}.{name}")) {
+            if !field.mutable {
+                return Err(format!(
+                    "native-lower: cannot assign to immutable global `{base_name}.{name}` in `{fn_name}`"
+                ));
+            }
+            let offset = field.offset;
+            lower_expr::lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
+            ctx.emit_global_address(emitter, 9, offset);
+            emitter.emit_u32(aarch64::str64(0, 9, 0));
+            return Ok(());
+        }
+        if ctx.globals.structs.contains_key(base_name) {
+            return Err(format!(
+                "native-lower: unknown field `{name}` on struct global `{base_name}` in `{fn_name}`"
+            ));
+        }
+        if ctx.globals.names.contains(base_name) {
+            return Err(format!(
+                "native-lower: field assignment to global `{base_name}` is unsupported in `{fn_name}`"
+            ));
+        }
     }
     let Some(LocalSlot::Struct { fields, .. }) = ctx.locals.get(base_name) else {
         return Err(format!(
@@ -878,6 +936,107 @@ pub(crate) fn lower_struct_expr_into_regs(
     }
 }
 
+fn array_binding_reassigned(body: &[Stmt], name: &str) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Let(local, ..) | Stmt::Assign(local, _) => local == name,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => array_binding_reassigned(then_body, name) || array_binding_reassigned(else_body, name),
+        Stmt::Loop { body, .. } => array_binding_reassigned(body, name),
+        Stmt::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| array_binding_reassigned(&arm.body, name)),
+        Stmt::Try { body, catches, .. } => {
+            array_binding_reassigned(body, name)
+                || catches
+                    .iter()
+                    .any(|arm| array_binding_reassigned(&arm.body, name))
+        }
+        _ => false,
+    })
+}
+
+fn array_param_has_caller_lifetime(
+    ctx: &LowerCtx<'_>,
+    functions: &HashMap<String, FunctionInfo>,
+    fn_name: &str,
+    local: &str,
+) -> bool {
+    ctx._params_src
+        .iter()
+        .any(|(name, typ)| name == local && matches!(typ, Typ::Array(_)))
+        && functions
+            .get(fn_name)
+            .is_some_and(|func| !array_binding_reassigned(&func.body, local))
+}
+
+fn reject_array_return_with_unproven_lifetime(
+    ctx: &LowerCtx<'_>,
+    expr: &Expr,
+    functions: &HashMap<String, FunctionInfo>,
+    fn_name: &str,
+) -> Result<(), String> {
+    if let Expr::Ident(local) = expr {
+        if matches!(ctx.locals.get(local), Some(LocalSlot::ArrayParam { .. }))
+            && !array_param_has_caller_lifetime(ctx, functions, fn_name, local)
+        {
+            return Err(format!(
+                "native-lower: returning array alias `{local}` from `{fn_name}` has unproven storage lifetime"
+            ));
+        }
+        return Ok(());
+    }
+    let Expr::Call { callee, args, .. } = expr else {
+        return Ok(());
+    };
+    let Expr::Ident(target) = callee.as_ref() else {
+        return Ok(());
+    };
+    let Some(called) = functions.get(target) else {
+        return Ok(());
+    };
+    // A returned array may borrow an array argument. Only an unmodified
+    // parameter is known to refer to storage in our caller's live frame.
+    for (arg, (_, param_typ)) in args.iter().zip(&called.params) {
+        if !matches!(param_typ, Typ::Array(_)) {
+            continue;
+        }
+        let local = match arg {
+            Expr::Ident(local) => match ctx.locals.get(local) {
+                Some(LocalSlot::Array { .. }) => Some((local.as_str(), true)),
+                Some(LocalSlot::ArrayParam { .. })
+                    if !array_param_has_caller_lifetime(ctx, functions, fn_name, local) =>
+                {
+                    Some((local.as_str(), false))
+                }
+                _ => None,
+            },
+            Expr::Field { base, .. } => match base.as_ref() {
+                Expr::Ident(local)
+                    if matches!(ctx.locals.get(local), Some(LocalSlot::Struct { .. })) =>
+                {
+                    Some((local.as_str(), true))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((local, stack_local)) = local {
+            let kind = if stack_local {
+                "stack-local array argument"
+            } else {
+                "array argument with unproven storage lifetime"
+            };
+            return Err(format!(
+                "native-lower: returning array call from `{fn_name}` may outlive {kind} `{local}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn lower_array_expr_into_regs(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -912,6 +1071,9 @@ pub(crate) fn lower_array_expr_into_regs(
                     emitter.emit_u32(aarch64::ldr64(1, aarch64::REG_SP, *len_offset));
                     Ok(())
                 }
+                LocalSlot::Array { .. } => Err(format!(
+                    "native-lower: returning local array `{local}` from `{fn_name}` would outlive its stack storage"
+                )),
                 _ => {
                     emitter.emit_insns(&crate::native_emit::aarch64::load_i64(0, 0));
                     Ok(())
@@ -1059,6 +1221,10 @@ pub(crate) fn lower_loop(
     } else {
         None
     };
+    ctx.loop_branches.push(LoopBranchSites {
+        try_depth: ctx.try_depth,
+        ..Default::default()
+    });
     for stmt in body {
         lower_stmt(
             emitter,
@@ -1070,11 +1236,19 @@ pub(crate) fn lower_loop(
             ret_typ,
         )?;
     }
+    let loop_sites = ctx.loop_branches.pop().expect("loop branch scope");
+    for site in loop_sites.continues {
+        emitter.patch_u32(site, aarch64::b(head as i32 - site as i32));
+    }
     let back_offset = head as i32 - emitter.len() as i32;
     emitter.emit_u32(aarch64::b(back_offset));
+    let after = emitter.len();
     if let Some(end_branch) = end_branch {
-        let end_offset = emitter.len() as i32 - end_branch as i32;
+        let end_offset = after as i32 - end_branch as i32;
         emitter.patch_u32(end_branch, aarch64::b_cond(0, end_offset));
+    }
+    for site in loop_sites.breaks {
+        emitter.patch_u32(site, aarch64::b(after as i32 - site as i32));
     }
     Ok(())
 }

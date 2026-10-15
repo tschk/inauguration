@@ -2,7 +2,7 @@
 
 use super::lower_call;
 use super::{
-    FunctionInfo, LocalSlot, LowerCtx, PendingCall, contains_call, emit_failure_return, expr_type,
+    FunctionInfo, LocalSlot, LowerCtx, PendingCall, emit_failure_return, expr_type,
     find_field_offset, lower_comparison_result, pick_scratch,
 };
 use crate::core_ir::{Expr, FloatVal, Typ};
@@ -66,6 +66,14 @@ pub(crate) fn lower_expr_into(
                         emitter.emit_u32(aarch64::add_imm64(rd, aarch64::REG_SP, addr as u16));
                     }
                 }
+            } else if ctx.globals.structs.contains_key(name) {
+                return Err(format!(
+                    "native-lower: struct global `{name}` requires a field access in `{fn_name}`"
+                ));
+            } else if ctx.globals.names.contains(name) {
+                return Err(format!(
+                    "native-lower: direct access to global `{name}` is unsupported in `{fn_name}`"
+                ));
             } else {
                 // Unknown identifier — enum variant, constant, or ZST used as value.
                 // Emit 0 so the function can lower; correct at runtime for None/NULL-like values.
@@ -414,13 +422,41 @@ pub(crate) fn lower_field(
                             return Ok(());
                         }
                     }
+                    return Err(format!(
+                        "native-lower: unknown field `{name}` on struct local `{local}` in `{fn_name}`"
+                    ));
                 }
                 Some(LocalSlot::Scalar(offset)) => {
                     // Opaque struct field: load scalar value
                     emitter.emit_u32(aarch64::ldr64(rd, aarch64::REG_SP, *offset));
                     return Ok(());
                 }
-                _ => {}
+                Some(_) => {
+                    return Err(format!(
+                        "native-lower: field access base `{local}` is not a struct local in `{fn_name}`"
+                    ));
+                }
+                None => {}
+            }
+            if ctx.params.contains_key(local) {
+                return Err(format!(
+                    "native-lower: field access base `{local}` is a scalar parameter in `{fn_name}`"
+                ));
+            }
+            if let Some(field) = ctx.globals.fields.get(&format!("{local}.{name}")) {
+                ctx.emit_global_address(emitter, rd, field.offset);
+                emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
+                return Ok(());
+            }
+            if ctx.globals.structs.contains_key(local) {
+                return Err(format!(
+                    "native-lower: unknown field `{name}` on struct global `{local}` in `{fn_name}`"
+                ));
+            }
+            if ctx.globals.names.contains(local) {
+                return Err(format!(
+                    "native-lower: field access on global `{local}` is unsupported in `{fn_name}`"
+                ));
             }
             emitter.emit_insns(&aarch64::load_i64(rd, 0));
             Ok(())
@@ -514,6 +550,23 @@ pub(crate) fn lower_float_binary(
 ) -> Result<(), String> {
     lower_expr_into(emitter, ctx, lhs, rd, functions, pending_calls, fn_name)?;
     let rhs_reg = if rd == 1 { 2 } else { 1 };
+    // Floats live as f64 bit patterns in general-purpose registers until fmov.
+    // A composite RHS can overwrite the LHS just as in integer lowering.
+    let temp = if matches!(
+        rhs,
+        Expr::IntLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::StringLit(_)
+            | Expr::Ident(_)
+    ) {
+        None
+    } else {
+        Some(ctx.acquire_binop_temp(fn_name)?)
+    };
+    if let Some(offset) = temp {
+        emitter.emit_u32(aarch64::str64(rd, aarch64::REG_SP, offset));
+    }
     lower_expr_into(
         emitter,
         ctx,
@@ -523,6 +576,10 @@ pub(crate) fn lower_float_binary(
         pending_calls,
         fn_name,
     )?;
+    if let Some(offset) = temp {
+        emitter.emit_u32(aarch64::ldr64(rd, aarch64::REG_SP, offset));
+        ctx.release_binop_temp();
+    }
     emitter.emit_u32(aarch64::fmov_from_gp(rd, rd));
     emitter.emit_u32(aarch64::fmov_from_gp(rhs_reg, rhs_reg));
     match op {
@@ -559,6 +616,23 @@ pub(crate) fn lower_binary(
     fn_name: &str,
 ) -> Result<(), String> {
     let op = op.trim();
+    if matches!(op, "&&" | "||") {
+        // Normalize before the branch so the skipped path already has its result.
+        lower_expr_into(emitter, ctx, lhs, rd, functions, pending_calls, fn_name)?;
+        lower_truthy_result(emitter, rd);
+        emitter.emit_u32(aarch64::cmp_reg64(rd, aarch64::REG_XZR));
+        let condition = if op == "&&" {
+            aarch64::COND_EQ
+        } else {
+            aarch64::COND_NE
+        };
+        let skip_rhs = emitter.emit_insn(aarch64::b_cond(condition, 0));
+        lower_expr_into(emitter, ctx, rhs, rd, functions, pending_calls, fn_name)?;
+        lower_truthy_result(emitter, rd);
+        let delta = emitter.len() as i32 - skip_rhs as i32;
+        emitter.patch_u32(skip_rhs, aarch64::b_cond(condition, delta));
+        return Ok(());
+    }
     let is_float = matches!(native_expr_type(lhs, ctx, functions), Some(Typ::Float))
         || matches!(native_expr_type(rhs, ctx, functions), Some(Typ::Float));
     if is_float {
@@ -592,20 +666,25 @@ pub(crate) fn lower_binary(
     lower_expr_into(emitter, ctx, lhs, rd, functions, pending_calls, fn_name)?;
     let lhs_reg = rd;
     let rhs_reg = if rd == 1 { 2 } else { 1 };
-    // ponytail: if rhs contains a function call, its arg loading overwrites
-    // the lhs result. Save lhs to the fixed binop_temp stack slot.
-    let rhs_has_call = contains_call(rhs);
-    let temp = if rhs_has_call {
+    // Composite expressions may use registers besides their result register,
+    // including index operands and nested binary expressions with no calls.
+    // Preserve the LHS before the RHS. The existing 64-live-spill limit also
+    // applies to composite expressions without calls; overflow is diagnosed.
+    let preserve_lhs = !matches!(
+        rhs,
+        Expr::IntLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::StringLit(_)
+            | Expr::Ident(_)
+    );
+    let temp = if preserve_lhs {
         Some(ctx.acquire_binop_temp(fn_name)?)
     } else {
         None
     };
-    if rhs_has_call {
-        emitter.emit_u32(aarch64::str64(
-            lhs_reg,
-            aarch64::REG_SP,
-            temp.expect("binary temp"),
-        ));
+    if let Some(offset) = temp {
+        emitter.emit_u32(aarch64::str64(lhs_reg, aarch64::REG_SP, offset));
     }
     lower_expr_into(
         emitter,
@@ -616,12 +695,8 @@ pub(crate) fn lower_binary(
         pending_calls,
         fn_name,
     )?;
-    if rhs_has_call {
-        emitter.emit_u32(aarch64::ldr64(
-            lhs_reg,
-            aarch64::REG_SP,
-            temp.expect("binary temp"),
-        ));
+    if let Some(offset) = temp {
+        emitter.emit_u32(aarch64::ldr64(lhs_reg, aarch64::REG_SP, offset));
         ctx.release_binop_temp();
     }
     let insn = match op {
@@ -635,12 +710,12 @@ pub(crate) fn lower_binary(
         "%" => {
             return lower_checked_div_or_mod(emitter, ctx, rd, lhs_reg, rhs_reg, true);
         }
-        "&&" | "||" | "??" | "and" => {
+        "??" | "and" => {
             lower_truthy_result(emitter, lhs_reg);
             lower_truthy_result(emitter, rhs_reg);
             match op {
-                "&&" | "and" => aarch64::and_reg64(rd, lhs_reg, rhs_reg),
-                "||" | "??" => aarch64::orr_reg64(rd, lhs_reg, rhs_reg),
+                "and" => aarch64::and_reg64(rd, lhs_reg, rhs_reg),
+                "??" => aarch64::orr_reg64(rd, lhs_reg, rhs_reg),
                 _ => {
                     return Err(format!(
                         "native-lower: unsupported logical operator `{op}` in `{fn_name}`"

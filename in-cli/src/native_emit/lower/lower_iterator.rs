@@ -1,3 +1,4 @@
+use super::lower_ctx::LoopBranchSites;
 use super::lower_stmt::{lower_stmt, lower_struct_expr_into_regs};
 use super::{FunctionInfo, LocalSlot, LowerCtx, PendingCall};
 use crate::core_ir::{Expr, Stmt, Typ};
@@ -108,6 +109,10 @@ pub(crate) fn lower_vec_for(
     }
     emitter.emit_u32(aarch64::add_imm64(2, 2, 1));
     emitter.emit_u32(aarch64::str64(2, aarch64::REG_SP, slots.index));
+    ctx.loop_branches.push(LoopBranchSites {
+        try_depth: ctx.try_depth,
+        ..Default::default()
+    });
     for stmt in body {
         lower_stmt(
             emitter,
@@ -119,9 +124,17 @@ pub(crate) fn lower_vec_for(
             ret_typ,
         )?;
     }
+    let loop_sites = ctx.loop_branches.pop().expect("iterator loop branch scope");
+    for site in loop_sites.continues {
+        emitter.patch_u32(site, aarch64::b(head as i32 - site as i32));
+    }
     let back_offset = head as i32 - emitter.len() as i32;
     emitter.emit_u32(aarch64::b(back_offset));
-    let end_offset = emitter.len() as i32 - end_branch as i32;
+    let after = emitter.len();
+    let end_offset = after as i32 - end_branch as i32;
     emitter.patch_u32(end_branch, aarch64::b_cond(10, end_offset));
+    for site in loop_sites.breaks {
+        emitter.patch_u32(site, aarch64::b(after as i32 - site as i32));
+    }
     Ok(())
 }
