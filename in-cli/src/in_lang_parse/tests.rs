@@ -3161,3 +3161,71 @@ fn catch_pattern_braces_and_escapes_preserve_multiple_handler_boundaries() {
         }
     }
 }
+
+#[test]
+fn immediate_closure_calls_preserve_the_callee_expression() {
+    for source in [
+        "(fn(value:Int)->Int{return value;})(42)",
+        "fn(value:Int)->Int{return value;}(42)",
+    ] {
+        let expression = parse_expr(source);
+        let Expr::Call { callee, args } = expression else {
+            panic!("expected call: {source}")
+        };
+        assert!(
+            matches!(callee.as_ref(), Expr::Closure { params, ret: Typ::Int, .. } if params == &vec![("value".into(), Typ::Int)]),
+            "{source}: {callee:?}"
+        );
+        assert_eq!(args, vec![Expr::IntLit(42)]);
+    }
+}
+
+#[test]
+fn closure_trailing_text_is_not_silently_discarded() {
+    let source = "fn()->Int{return 42;} trailing";
+    assert!(!matches!(parse_expr(source), Expr::Closure { .. }));
+    let source = "fn main()->Int{let f=fn()->Int{return 42;} trailing;return 42;}";
+    if let Ok(parsed) = parse_in_source(source) {
+        let report = crate::core_ir_verifier::verify_for_entry(&parsed, "main");
+        assert!(!report.ok, "{report:?}");
+    }
+}
+
+#[test]
+fn closure_postfix_calls_remain_in_the_enclosing_statement() {
+    for gap in ["", "\n"] {
+        let source =
+            format!("fn main()->Int{{return fn(value:Int)->Int{{return value;}}{gap}(42);}}");
+        let parsed = parse_in_source(&source).unwrap();
+        let Decl::Function { body, .. } = &parsed.decls[0] else {
+            panic!("missing main")
+        };
+        assert!(
+            matches!(body.as_slice(), [Stmt::Return(Some(Expr::Call { callee, args }))] if matches!(callee.as_ref(), Expr::Closure { .. }) && args == &vec![Expr::IntLit(42)]),
+            "{body:?}"
+        );
+        let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+        assert_eq!(parse_in_source(&canonical).unwrap(), parsed, "{canonical}");
+    }
+}
+
+#[test]
+fn brace_postfix_boundaries_preserve_control_flow_statement_separation() {
+    for body in [
+        "if true {}\n(42);",
+        "while false {} (42);",
+        "loop {break;} [42];",
+        "match 1 {_ {}} (42);",
+    ] {
+        let parts = super::util::split_function_statements(body);
+        assert_eq!(parts.len(), 2, "{body}: {parts:?}");
+    }
+    for body in [
+        "let item=Pair{x:42}[0];",
+        "return fn()->Int{return 42;}\n();",
+        "let f=fn()->String{return \"quoted { }\";}();",
+    ] {
+        let parts = super::util::split_function_statements(body);
+        assert_eq!(parts.len(), 1, "{body}: {parts:?}");
+    }
+}

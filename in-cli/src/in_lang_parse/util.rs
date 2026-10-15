@@ -567,6 +567,26 @@ pub(crate) fn split_struct_init_fields(inner: &str) -> Vec<String> {
     split_call_args(inner)
 }
 
+fn brace_expression_continues(prefix: &str, tail: &str) -> bool {
+    if tail.starts_with("else") || tail.starts_with("catch") || tail.starts_with('.') {
+        return true;
+    }
+    if !tail.starts_with(['(', '[']) {
+        return false;
+    }
+    // A postfix belongs to an expression (including a closure initializer or
+    // return), but a completed control-flow body precedes a new statement.
+    let prefix = prefix.trim_start();
+    let keyword = prefix
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
+        .next();
+    !prefix.starts_with('{')
+        && !matches!(
+            keyword,
+            Some("if" | "while" | "for" | "loop" | "match" | "try")
+        )
+}
+
 pub(crate) fn split_function_statements(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -595,13 +615,7 @@ pub(crate) fn split_function_statements(body: &str) -> Vec<String> {
             '}' => {
                 depth -= 1;
                 if depth == 0 && expression_depth == 0 {
-                    if body[i + 1..].trim_start().starts_with("else") {
-                        continue;
-                    }
-                    if body[i + 1..].trim_start().starts_with("catch") {
-                        continue;
-                    }
-                    if body[i + 1..].trim_start().starts_with('.') {
+                    if brace_expression_continues(&body[start..=i], body[i + 1..].trim_start()) {
                         continue;
                     }
                     let stmt = trim(&body[start..=i]);
@@ -614,10 +628,7 @@ pub(crate) fn split_function_statements(body: &str) -> Vec<String> {
             ';' | '\n' if depth == 0 && expression_depth == 0 => {
                 if c == '\n' && body[start..i].trim_end().ends_with('}') {
                     let tail = body[i + 1..].trim_start();
-                    if tail.starts_with("else")
-                        || tail.starts_with("catch")
-                        || tail.starts_with('.')
-                    {
+                    if brace_expression_continues(&body[start..i], tail) {
                         continue;
                     }
                 }

@@ -144,8 +144,16 @@ pub(crate) fn parse_expr_with_context(s: &str, context: &mut LoopParseContext<'_
     if let Some(value) = try_parse_control_value(s, context) {
         return value;
     }
-    if let Some(closure) = try_parse_closure_expr(s) {
-        return closure;
+    if let Some((closure, tail)) = parse_closure_prefix(s) {
+        if tail.is_empty() {
+            return closure;
+        }
+        if tail.starts_with('(') {
+            // Group the complete closure before ordinary postfix parsing, so
+            // its return-type arrow cannot be mistaken for a binary operator.
+            let prefix = &s[..s.len() - tail.len()];
+            return parse_expr_with_context(&format!("({prefix}){tail}"), context);
+        }
     }
     if s.contains(['.', 'e', 'E'])
         && let Ok(value) = s.parse::<f64>()
@@ -299,7 +307,7 @@ pub(crate) fn parse_expr_with_context(s: &str, context: &mut LoopParseContext<'_
                 }
             }
             return Expr::Call {
-                callee: Box::new(Expr::Ident(callee.to_string())),
+                callee: Box::new(parse_expr_with_context(callee, context)),
                 args,
             };
         }
@@ -318,6 +326,11 @@ pub(crate) fn parse_expr_with_context(s: &str, context: &mut LoopParseContext<'_
 }
 
 pub(crate) fn try_parse_closure_expr(s: &str) -> Option<Expr> {
+    let (closure, tail) = parse_closure_prefix(s)?;
+    tail.is_empty().then_some(closure)
+}
+
+fn parse_closure_prefix(s: &str) -> Option<(Expr, &str)> {
     let s = trim(s);
     let rest = s.strip_prefix("fn")?;
     if !rest.starts_with('(') && !rest.starts_with(" (") {
@@ -378,12 +391,16 @@ pub(crate) fn try_parse_closure_expr(s: &str) -> Option<Expr> {
         Typ::Void
     };
     let body_rest = &tail[body_start..];
-    let body_inner = brace_content_after_open(body_rest, 0)?;
+    let (body_inner, close) = brace_content_bounds_after_open(body_rest, 0)?;
+    let tail = trim(&body_rest[close + 1..]);
     let body = parse_function_body(body_inner).ok()?;
-    Some(Expr::Closure {
-        params,
-        ret,
-        body,
-        captures: vec![],
-    })
+    Some((
+        Expr::Closure {
+            params,
+            ret,
+            body,
+            captures: vec![],
+        },
+        tail,
+    ))
 }

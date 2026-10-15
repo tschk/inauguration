@@ -6697,3 +6697,49 @@ fn main()->Int{let whole:Int=999;let result:Int=0;match make(){whole if reject(w
         }
     }
 }
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_canonical_closures_preserve_typed_values_and_nested_calls() {
+    for original in [
+        "fn main()->Int{let f=fn(value:Float)->Float{let copy=value;return copy;};if f(1.5)==1.5{return 42;}return 0;}",
+        "fn main()->Int{let f=fn()->Int{let inner=fn(value:Int)->Int{return value+1;};return inner(41);};return f();}",
+        "fn main()->Int{let value:Int=999;let f=fn(value:Int)->Int{return value;};return f(42);}",
+        "fn main()->Int{return (fn(value:Int)->Int{return value;})(42);}",
+        "fn main()->Int{let f=fn(flag:Bool,text:String)->Int{if flag && text==\"λ雪\"{return 42;}return 0;};return f(true,\"λ雪\");}",
+        "var calls:Int=0;\nfn main()->Int{let f=fn()->void{calls=42;return;};f();return calls;}",
+        "fn main()->Int{return fn(value:Int)->Int{return value;}(42);}",
+    ] {
+        let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+        for text in [original, canonical.as_str()] {
+            let source = temp_path("canonical-closure.in");
+            fs::write(&source, text).unwrap();
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut request =
+                    default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{profile:?}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{profile:?}: {text}"
+                );
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}

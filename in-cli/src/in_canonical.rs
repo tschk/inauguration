@@ -313,7 +313,20 @@ fn format_expr(expr: &Expr) -> String {
             out.push_str("})");
             out
         }
-        Expr::Closure { .. } => "closure".to_string(),
+        Expr::Closure {
+            params, ret, body, ..
+        } => {
+            let params = params
+                .iter()
+                .map(|(name, typ)| format!("{name}: {}", format_type(typ)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            // Parentheses preserve closure values in call/argument positions.
+            let mut out = format!("(fn({params}) -> {} {{\n", format_type(ret));
+            format_body(body, 1, &mut out);
+            out.push_str("})");
+            out
+        }
     }
 }
 
@@ -413,6 +426,58 @@ mod tests {
 
     use super::*;
     use crate::in_lang_parse::parse_in_source;
+
+    #[test]
+    fn canonical_closures_preserve_params_return_body_and_nested_scopes() {
+        for source in [
+            "fn main()->Int{let f=fn(value:Float)->Float{let copy=value;return copy;};if f(1.5)==1.5{return 42;}return 0;}",
+            "fn main()->Int{let f=fn()->Int{let inner=fn(value:Int)->Int{return value+1;};return inner(41);};return f();}",
+            "fn main()->Int{let value:Int=999;let f=fn(value:Int)->Int{return value;};return f(42);}",
+            "fn main()->Int{let f=fn(flag:Bool,text:String)->Int{if flag && text==\"λ雪\"{return 42;}return 0;};return f(true,\"λ雪\");}",
+            // Source closure syntax has implicit lexical names, not an explicit
+            // Core IR captures list. Parsing preserves the body references.
+            "fn main()->Int{let captured:Int=42;let f=fn()->Int{return captured;};return 42;}",
+        ] {
+            let original = parse_in_source(source).unwrap();
+            let canonical = canonicalize_in_source(source).unwrap();
+            assert!(!canonical.contains("= closure"), "{canonical}");
+            assert_eq!(
+                parse_in_source(&canonical).unwrap(),
+                original,
+                "{canonical}"
+            );
+            assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+        }
+    }
+
+    #[test]
+    fn canonical_closure_expression_operands_roundtrip() {
+        for source in [
+            "fn(value:Float)->Float{return value;}",
+            "[fn(value:Int)->Int{return value;}]",
+            "accept(fn(value:Int)->Int{return value;})",
+            "(fn(value:Int)->Int{return value;})(42)",
+        ] {
+            let original = crate::in_lang_parse::parse_expr(source);
+            assert!(
+                match &original {
+                    Expr::Closure { .. } => true,
+                    Expr::ArrayLit(items) => matches!(items.as_slice(), [Expr::Closure { .. }]),
+                    Expr::Call { callee, args } =>
+                        matches!(callee.as_ref(), Expr::Closure { .. })
+                            || matches!(args.as_slice(), [Expr::Closure { .. }]),
+                    _ => false,
+                },
+                "closure was not parsed: {source}: {original:?}"
+            );
+            let canonical = format_expr(&original);
+            assert_eq!(
+                crate::in_lang_parse::parse_expr(&canonical),
+                original,
+                "{canonical}"
+            );
+        }
+    }
 
     #[test]
     fn canonical_float_literals_preserve_type_and_bits() {
