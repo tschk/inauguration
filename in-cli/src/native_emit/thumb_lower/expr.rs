@@ -15,6 +15,10 @@ pub(crate) fn lower_expr_into(
     pending: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
     match expr {
+        Expr::UnitLit => {
+            thumb::load_i32(emitter, dest, 0);
+            Ok(())
+        }
         Expr::MatchValue { .. } => {
             Err("thumb-lower: match values require owned ARM64 or x86 lowering".into())
         }

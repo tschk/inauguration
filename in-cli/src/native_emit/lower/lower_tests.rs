@@ -2781,3 +2781,47 @@ fn raw_conditional_lowering_rejects_condition_and_branch_type_mismatches() {
         assert!(x86_error.contains(expected), "{x86_error}");
     }
 }
+
+#[test]
+fn unit_sequence_layouts_are_rejected_before_storage_allocation() {
+    for typ in [
+        Typ::Array(Box::new(Typ::Void)),
+        Typ::Vector(Box::new(Typ::Void)),
+    ] {
+        for placement in ["local", "parameter", "return"] {
+            let mut module = answer_module();
+            let Decl::Function {
+                params, ret, body, ..
+            } = &mut module.decls[0]
+            else {
+                unreachable!()
+            };
+            match placement {
+                "local" => body.insert(
+                    0,
+                    Stmt::Let(
+                        "units".into(),
+                        Some(typ.clone()),
+                        Expr::ArrayLit(vec![Expr::UnitLit]),
+                    ),
+                ),
+                "parameter" => params.push(("units".into(), typ.clone())),
+                "return" => {
+                    *ret = typ.clone();
+                    *body = vec![Stmt::Return(Some(Expr::ArrayLit(vec![Expr::UnitLit])))];
+                }
+                _ => unreachable!(),
+            }
+            for error in [
+                lower_module(&module, "answer", NativeLinkage::Executable).err(),
+                crate::native_emit::x86_64_lower::lower_module(&module, "answer").err(),
+            ] {
+                let error = error.expect("unit sequence must be refused");
+                assert!(
+                    error.contains("unit") && error.contains("layout"),
+                    "{placement}: {error}"
+                );
+            }
+        }
+    }
+}

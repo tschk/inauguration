@@ -75,7 +75,7 @@ mod lower_iterator;
 mod lower_stdlib;
 mod lower_stmt;
 mod lower_util;
-pub(crate) use lower_util::field_path;
+pub(crate) use lower_util::{ensure_unit_sequence_layout, field_path};
 
 pub use lower_compile::{
     NativeArtifactOutcome, compile_native_artifact, compile_native_artifact_for_host,
@@ -1132,7 +1132,8 @@ fn has_iter_once(body: &[Stmt]) -> bool {
             Expr::Index { base, index } => expr_has_once(base) || expr_has_once(index),
             Expr::StructInit { fields, .. } => fields.iter().any(|(_, value)| expr_has_once(value)),
             Expr::ArrayLit(items) => items.iter().any(expr_has_once),
-            Expr::IntLit(_)
+            Expr::UnitLit
+            | Expr::IntLit(_)
             | Expr::FloatLit(_)
             | Expr::StringLit(_)
             | Expr::BoolLit(_)
@@ -1199,7 +1200,8 @@ fn has_iter_map(body: &[Stmt]) -> bool {
             Expr::StructInit { fields, .. } => fields.iter().any(|(_, value)| expr_has_map(value)),
             Expr::ArrayLit(items) => items.iter().any(expr_has_map),
             Expr::Closure { body, .. } => has_iter_map(body),
-            Expr::IntLit(_)
+            Expr::UnitLit
+            | Expr::IntLit(_)
             | Expr::FloatLit(_)
             | Expr::StringLit(_)
             | Expr::BoolLit(_)
@@ -1266,7 +1268,8 @@ fn has_iter_chain(body: &[Stmt]) -> bool {
                 fields.iter().any(|(_, value)| expr_has_chain(value))
             }
             Expr::ArrayLit(items) => items.iter().any(expr_has_chain),
-            Expr::IntLit(_)
+            Expr::UnitLit
+            | Expr::IntLit(_)
             | Expr::FloatLit(_)
             | Expr::StringLit(_)
             | Expr::BoolLit(_)
@@ -1488,7 +1491,8 @@ fn max_aggregate_vector_literal_words(
                 }
                 inspect_body(body, structs, fn_name, max)?;
             }
-            Expr::IntLit(_)
+            Expr::UnitLit
+            | Expr::IntLit(_)
             | Expr::FloatLit(_)
             | Expr::StringLit(_)
             | Expr::BoolLit(_)

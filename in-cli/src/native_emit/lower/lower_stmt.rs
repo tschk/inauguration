@@ -95,6 +95,13 @@ pub(crate) fn lower_stmt(
     match stmt {
         Stmt::Return(expr) => {
             if let Some(expr) = expr {
+                if ret_typ.canonical() == Typ::Void
+                    && !crate::core_ir::expr_diverges(expr)
+                    && lower_expr::native_expr_type(expr, ctx, functions).map(|typ| typ.canonical())
+                        != Some(Typ::Void)
+                {
+                    return Err("native-lower: void return requires a unit value".into());
+                }
                 match ret_typ {
                     Typ::Named(struct_name) => {
                         lower_struct_expr_into_regs(

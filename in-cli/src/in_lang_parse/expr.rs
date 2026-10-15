@@ -140,7 +140,13 @@ pub(crate) fn parse_expr(s: &str) -> Expr {
 
 pub(crate) fn parse_expr_with_context(s: &str, context: &mut LoopParseContext<'_>) -> Expr {
     let s = trim(s);
+    if s == "()" {
+        return Expr::UnitLit;
+    }
     if let Some(inner) = strip_enclosing_parens(s) {
+        if trim(inner).is_empty() {
+            return Expr::UnitLit;
+        }
         return parse_expr_with_context(inner, context);
     }
     if let Some(value) = try_parse_control_value(s, context) {

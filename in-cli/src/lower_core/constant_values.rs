@@ -64,7 +64,11 @@ fn resolve(
     cache: &mut HashMap<String, Option<Expr>>,
 ) -> Option<Expr> {
     let value = match expr {
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) => expr.clone(),
+        Expr::UnitLit
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_) => expr.clone(),
         Expr::Ident(name) => return resolve_name(name, defs, active, cache),
         Expr::Unary { op, expr } => Expr::Unary {
             op: op.clone(),

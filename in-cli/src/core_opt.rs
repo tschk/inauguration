@@ -2604,7 +2604,11 @@ fn rename_calls_in_expr(e: &mut Expr, rename: &HashMap<String, String>) {
             }
         }
         Expr::Closure { body, .. } => rename_calls_in_stmts(body, rename),
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => {}
+        Expr::UnitLit
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::StringLit(_)
+        | Expr::BoolLit(_) => {}
     }
 }
 

@@ -612,7 +612,9 @@ fn check_stmt(
         Stmt::Break | Stmt::Continue => Ok(()),
         Stmt::Return(Some(expr)) => {
             check_expr_in_loop(fn_name, expr, facts, env, call_edges, loop_depth)?;
-            if canonical_type(ret) == Typ::Void {
+            if canonical_type(ret) == Typ::Void
+                && expr_type(expr, facts, env).is_none_or(|typ| canonical_type(&typ) != Typ::Void)
+            {
                 return Err((
                     "return-type-mismatch".to_string(),
                     format!("return value in void function `{fn_name}`"),
@@ -876,7 +878,11 @@ fn check_expr_with_array_borrow(
             }
             Ok(())
         }
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => Ok(()),
+        Expr::UnitLit
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::StringLit(_)
+        | Expr::BoolLit(_) => Ok(()),
         Expr::Closure { .. } => Ok(()),
         Expr::Ident(name) => {
             if !array_borrow
@@ -907,6 +913,14 @@ fn check_expr_with_array_borrow(
         }
         Expr::Unary { op, expr } => {
             check_expr_in_loop(fn_name, expr, facts, env, call_edges, loop_depth)?;
+            if matches!(op.as_str(), "-" | "neg" | "!" | "not")
+                && expr_type(expr, facts, env) == Some(Typ::Void)
+            {
+                return Err((
+                    "type-mismatch".into(),
+                    "unit is not a numeric or Bool operand".into(),
+                ));
+            }
             if op == "vector-clone"
                 && !matches!(expr_type(expr, facts, env), Some(Typ::Vector(item)) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
             {
@@ -1430,6 +1444,7 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
                 .map(|value| expr_type(value, facts, &inner))
                 .unwrap_or(Some(Typ::Void))
         }
+        Expr::UnitLit => Some(Typ::Void),
         Expr::IntLit(_) => Some(Typ::Int),
         Expr::FloatLit(_) => Some(Typ::Float),
         Expr::StringLit(_) => Some(Typ::String),
@@ -2926,6 +2941,40 @@ mod match_value_tests {
                 "fn main()->i64{let value=match true{true if 1=>42,_=>0};value}",
                 false,
             ),
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            let report = super::verify_for_entry(&module, "main");
+            assert_eq!(report.ok, valid, "{source}: {report:?}; {module:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod unit_value_tests {
+    #[test]
+    fn unit_values_preserve_void_types_without_numeric_coercion() {
+        for (source, valid) in [
+            (
+                "fn done()->(){return ();} fn main()->i64{let value:()=done();match value{()=>42}}",
+                true,
+            ),
+            (
+                "fn main()->i64{let value=();let answer={let value=42;value};match value{()=>answer}}",
+                true,
+            ),
+            (
+                "fn main()->i64{let pair=((),42);let ()=pair.0;pair.1}",
+                true,
+            ),
+            ("fn done()->(){return 1;} fn main()->i64{done();42}", false),
+            ("fn main()->i64{let value=();value}", false),
+            ("fn main()->i64{let value:i64=();42}", false),
+            ("fn main()->i64{if (){42}else{0}}", false),
+            ("fn main()->i64{let value=()+1;42}", false),
+            ("fn main()->i64{let value=-();42}", false),
+            ("fn main()->i64{let value=!();42}", false),
         ] {
             let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
             let module =

@@ -562,6 +562,11 @@ pub(crate) fn value_pattern_test<'a>(
 ) -> Result<(Expr, Vec<Stmt>), String> {
     let pattern = MatchPattern::parse(source)?;
     let bindings = pattern.typed_bindings(typ, fields)?;
+    if matches!(&pattern,MatchPattern::TuplePat(items) if items.is_empty())
+        && typ.canonical() == Typ::Void
+    {
+        return Ok((Expr::BoolLit(true), vec![]));
+    }
     let pattern = typed_pattern_with_schema(&pattern, typ, fields);
     let (test, mut statements) = pattern_test(&pattern, value)
         .ok_or_else(|| "unsupported value match pattern".to_string())?;
@@ -590,6 +595,7 @@ fn typed_pattern_with_schema<'a>(
     schema_lookup: &impl Fn(&str) -> Option<&'a [(String, Typ)]>,
 ) -> MatchPattern {
     match (pattern, typ) {
+        (MatchPattern::TuplePat(items), Typ::Void) if items.is_empty() => MatchPattern::WildPat,
         (MatchPattern::TuplePat(items), Typ::Named(name)) => {
             let Some(schema) = schema_lookup(name) else {
                 return pattern.clone();
@@ -667,6 +673,43 @@ fn typed_pattern_with_schema<'a>(
 #[cfg(test)]
 mod value_pattern_tests {
     use super::*;
+
+    #[test]
+    fn unit_statement_pattern_forces_native_preparation_without_spills() {
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Match {
+                scrutinee: Expr::UnitLit,
+                arms: vec![MatchArm {
+                    pattern: "()".into(),
+                    guard: None,
+                    body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                }],
+            }],
+        }]);
+        let prepared = prepared_native_module(&module);
+        assert!(matches!(prepared, Cow::Owned(_)));
+        let Decl::Function { body, .. } = &prepared.decls[0] else {
+            panic!()
+        };
+        let Stmt::Match { arms, .. } = &body[0] else {
+            panic!("{body:?}")
+        };
+        assert_eq!(arms[0].pattern, "_");
+        assert_eq!(arms[0].body, vec![Stmt::Return(Some(Expr::IntLit(42)))]);
+    }
+
+    #[test]
+    fn unit_pattern_never_uses_sequence_storage() {
+        assert_eq!(
+            value_pattern_test("()", &Typ::Void, &|_| None, Expr::UnitLit).unwrap(),
+            (Expr::BoolLit(true), vec![])
+        );
+        assert!(value_pattern_test("()", &Typ::Int, &|_| None, Expr::IntLit(0)).is_err());
+    }
 
     #[test]
     fn tuple_value_patterns_use_typed_field_bindings() {

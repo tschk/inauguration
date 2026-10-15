@@ -1422,7 +1422,11 @@ impl TypeChecker {
             }
             Stmt::Return(Some(expr)) => {
                 self.check_expr(fn_name, expr, facts, env, errors);
-                if fn_ret.canonical() == Typ::Void {
+                if fn_ret.canonical() == Typ::Void
+                    && self
+                        .expr_type(expr, facts, env)
+                        .is_none_or(|typ| typ.canonical() != Typ::Void)
+                {
                     errors.push(TypeError::ReturnValueInVoid {
                         fn_name: fn_name.to_string(),
                     });
@@ -1718,7 +1722,8 @@ impl TypeChecker {
                     self.check_expr(fn_name, value, facts, &inner, errors);
                 }
             }
-            Expr::IntLit(_)
+            Expr::UnitLit
+            | Expr::IntLit(_)
             | Expr::FloatLit(_)
             | Expr::StringLit(_)
             | Expr::BoolLit(_)
@@ -1733,6 +1738,15 @@ impl TypeChecker {
             }
             Expr::Unary { op, expr: inner } => {
                 self.check_expr(fn_name, inner, facts, env, errors);
+                if matches!(op.as_str(), "-" | "neg" | "!" | "not")
+                    && self.expr_type(inner, facts, env) == Some(Typ::Void)
+                {
+                    errors.push(TypeError::TypeMismatch {
+                        context: format!("unary `{op}` in `{fn_name}`"),
+                        expected: Typ::Named("numeric-or-Bool".into()),
+                        got: Typ::Void,
+                    });
+                }
                 if op == "vector-clone"
                     && !matches!(self.expr_type(inner, facts, env), Some(Typ::Vector(item)) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
                 {
@@ -2150,6 +2164,7 @@ impl TypeChecker {
                     .map(|value| self.expr_type(value, facts, &inner))
                     .unwrap_or(Some(Typ::Void))
             }
+            Expr::UnitLit => Some(Typ::Void),
             Expr::IntLit(_) => Some(Typ::Int),
             Expr::FloatLit(_) => Some(Typ::Float),
             Expr::StringLit(_) => Some(Typ::String),
@@ -2750,6 +2765,7 @@ fn infer_return_type_from_body(body: &[Stmt]) -> Option<Typ> {
 
 fn expr_type_hint(expr: &Expr) -> Option<Typ> {
     match expr {
+        Expr::UnitLit => Some(Typ::Void),
         Expr::IntLit(_) => Some(Typ::Int),
         Expr::FloatLit(_) => Some(Typ::Float),
         Expr::StringLit(_) => Some(Typ::String),

@@ -234,6 +234,7 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
     depth_ok(depth)?;
     bump(nodes)?;
     match e {
+        Expr::UnitLit => Err("c-backend: unit values require owned native lowering".into()),
         Expr::Conditional {
             cond,
             then_expr,

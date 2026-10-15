@@ -282,6 +282,7 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn alloc_local(&mut self, name: &str, typ: &Typ) -> Result<(), String> {
+        super::lower::ensure_unit_sequence_layout(typ)?;
         self.scalar_types.insert(name.to_string(), typ.clone());
         if self.locals.contains_key(name) {
             return Ok(());
@@ -819,7 +820,8 @@ fn rename_calls_in_expr(expr: &mut Expr, name_map: &HashMap<String, String>) {
                 rename_calls_in_expr(item, name_map);
             }
         }
-        Expr::IntLit(_)
+        Expr::UnitLit
+        | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::StringLit(_)
         | Expr::BoolLit(_)
@@ -1046,6 +1048,10 @@ fn lower_function(
     is_interrupt: bool,
     runtime_error_slot: bool,
 ) -> Result<Vec<PendingGlobal>, String> {
+    super::lower::ensure_unit_sequence_layout(&func.ret)?;
+    for (_, typ) in &func.params {
+        super::lower::ensure_unit_sequence_layout(typ)?;
+    }
     // Validate return type and store for use in Return handling
     let _ret_is_struct = matches!(&func.ret, Typ::Named(_) | Typ::Array(_));
     match &func.ret {
@@ -1322,6 +1328,13 @@ fn lower_stmt(
         Stmt::Return(expr) => {
             if let Some(expr) = expr {
                 let ret_typ = ctx.ret_typ.canonical();
+                if ret_typ == Typ::Void
+                    && !crate::core_ir::expr_diverges(expr)
+                    && scalar_expr_type(expr, ctx).map(|typ| typ.canonical()) != Some(Typ::Void)
+                {
+                    return Err("x86_64-lower: void return requires a unit value".into());
+                }
+
                 if let Typ::Named(name) = &ret_typ
                     && ctx.structs.contains_key(name)
                 {
@@ -2175,6 +2188,9 @@ fn lower_ident_ref(
     name: &str,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if ctx.scalar_types.get(name).map(Typ::canonical) == Some(Typ::Void) {
+        return lower_int_lit(emitter, target_reg, 0);
+    }
     if let Some(&pointer) = ctx.receiver_pointers.get(name) {
         emitter.emit_insns(&x86_64::ldr64(target_reg, pointer as u16));
         return Ok(());
@@ -4147,6 +4163,12 @@ fn materialize_array_literal(
     items: &[Expr],
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<Vec<u32>, String> {
+    if items
+        .iter()
+        .any(|item| scalar_expr_type(item, ctx).map(|typ| typ.canonical()) == Some(Typ::Void))
+    {
+        return Err("x86_64-lower: unit array elements require a zero-width layout".into());
+    }
     let mut offsets = Vec::with_capacity(items.len());
     for _ in items {
         offsets.push(ctx.alloc_slot());
@@ -4436,6 +4458,7 @@ fn lower_expr_into(
 
     match expr {
         Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. } => unreachable!(),
+        Expr::UnitLit => lower_int_lit(emitter, target_reg, 0),
         Expr::IntLit(value) => lower_int_lit(emitter, target_reg, *value),
         Expr::BoolLit(value) => lower_bool_lit(emitter, target_reg, *value),
         Expr::Ident(name) => {
@@ -4475,6 +4498,12 @@ fn lower_expr_into(
             lower_int_lit(emitter, target_reg, v.0.to_bits() as i64)
         }
         Expr::ArrayLit(items) => {
+            if items.iter().any(|item| {
+                scalar_expr_type(item, ctx).map(|typ| typ.canonical()) == Some(Typ::Void)
+            }) {
+                return Err("x86_64-lower: unit array elements require a zero-width layout".into());
+            }
+
             let offsets = materialize_array_literal(emitter, ctx, items, pending_calls)?;
             lower_heap_array(emitter, ctx, &offsets, pending_calls)?;
             if target_reg != RAX {
@@ -4525,7 +4554,7 @@ fn answer() -> Int {
   return 42
 }
 
-fn main() -> void { return 0 }
+fn main() -> void { return }
 "#;
         crate::in_lang_parse::parse_in_source(src).expect("parse")
     }
@@ -4622,7 +4651,7 @@ fn add(a: Int, b: Int) -> Int {
   return a + b
 }
 
-fn main() -> void { return 0 }
+fn main() -> void { return }
 "#;
         crate::in_lang_parse::parse_in_source(src).expect("parse")
     }
@@ -4637,7 +4666,7 @@ fn entry() -> Int {
   return helper()
 }
 
-fn main() -> void { return 0 }
+fn main() -> void { return }
 "#;
         crate::in_lang_parse::parse_in_source(src).expect("parse")
     }
@@ -4652,7 +4681,7 @@ fn max(a: Int, b: Int) -> Int {
   }
 }
 
-fn main() -> void { return 0 }
+fn main() -> void { return }
 "#;
         crate::in_lang_parse::parse_in_source(src).expect("parse")
     }
@@ -4826,7 +4855,7 @@ fn answer() -> Int {
   return 0
 }
 
-fn main() -> void { return 0 }
+fn main() -> void { return }
 "#;
         let module = crate::in_lang_parse::parse_in_source(src).expect("parse");
         let result = lower_module(&module, "answer").expect("lower");
@@ -4881,7 +4910,7 @@ fn answer() -> Int {
   return 0
 }
 
-fn main() -> void { return 0 }
+fn main() -> void { return }
 "#;
         let module = crate::in_lang_parse::parse_in_source(src).expect("parse");
         let result = lower_module(&module, "answer").expect("lower");
@@ -4931,7 +4960,7 @@ fn count() -> Int {
   return to
 }
 
-fn main() -> void { return 0 }
+fn main() -> void { return }
 "#;
         let module = crate::in_lang_parse::parse_in_source(src).expect("parse");
         let result = lower_module(&module, "count").expect("lower");
@@ -4973,7 +5002,7 @@ fn seven(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int) -> Int {
   return g
 }
 
-fn main() -> void { return 0 }
+fn main() -> void { return }
 "#;
         let module = crate::in_lang_parse::parse_in_source(src).expect("parse");
         let result = lower_module(&module, "seven").expect("lower");
@@ -5068,7 +5097,7 @@ fn classify(x: Int) -> Int {
   return 0
 }
 
-fn main() -> void { return 0 }
+fn main() -> void { return }
 "#;
         let module = crate::in_lang_parse::parse_in_source(src).expect("parse");
         let result = lower_module(&module, "classify").expect("lower");
@@ -5087,7 +5116,7 @@ fn default-match(x: Int) -> Int {
   return 0
 }
 
-fn main() -> void { return 0 }
+fn main() -> void { return }
 "#;
         let module = crate::in_lang_parse::parse_in_source(src).expect("parse");
         let result = lower_module(&module, "default_match").expect("lower");
@@ -5102,7 +5131,7 @@ fn thrower() -> Int {
   return 0
 }
 
-fn main() -> void { return 0 }
+fn main() -> void { return }
 "#;
         let module = crate::in_lang_parse::parse_in_source(src).expect("parse");
         let result = lower_module(&module, "thrower").expect("lower");
@@ -5129,7 +5158,7 @@ fn catcher() -> Int {
   return 0
 }
 
-fn main() -> void { return 0 }
+fn main() -> void { return }
 "#;
         let module = crate::in_lang_parse::parse_in_source(src).expect("parse");
         let result = lower_module(&module, "catcher").expect("lower");

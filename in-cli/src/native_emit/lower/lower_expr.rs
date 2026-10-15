@@ -205,6 +205,10 @@ pub(crate) fn lower_expr_into(
     }
     match expr {
         Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. } => unreachable!(),
+        Expr::UnitLit => {
+            emitter.emit_insns(&aarch64::load_i64(rd, 0));
+            Ok(())
+        }
         Expr::IntLit(value) => {
             emitter.emit_insns(&aarch64::load_i64(rd, *value));
             Ok(())
@@ -228,6 +232,11 @@ pub(crate) fn lower_expr_into(
             Ok(())
         }
         Expr::Ident(name) => {
+            if ctx.scalar_type(name).map(|typ| typ.canonical()) == Some(Typ::Void) {
+                emitter.emit_insns(&aarch64::load_i64(rd, 0));
+                return Ok(());
+            }
+
             if name.contains(' ') || name.contains("..") {
                 // Rust front couldn't parse this expression — emit 0 as fallback
                 emitter.emit_insns(&aarch64::load_i64(rd, 0));

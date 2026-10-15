@@ -317,6 +317,7 @@ fn rewrite_this_receiver_in_expr(expr: &mut Expr) {
         }
         Expr::Closure { body, .. } => rewrite_this_receiver_in_body(body),
         Expr::Ident(_)
+        | Expr::UnitLit
         | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::StringLit(_)
@@ -487,6 +488,7 @@ fn rewrite_constructor_calls_in_expr(expr: &mut Expr, class_fields: &HashMap<Str
         }
         Expr::Closure { body, .. } => rewrite_constructor_calls_in_body(body, class_fields),
         Expr::Ident(_)
+        | Expr::UnitLit
         | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::StringLit(_)

@@ -205,7 +205,11 @@ pub(crate) fn validate_expr_shapes(
             }
             Ok(())
         }
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => Ok(()),
+        Expr::UnitLit
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::StringLit(_)
+        | Expr::BoolLit(_) => Ok(()),
         Expr::Ident(name) => {
             // The expression parser turns tokens it cannot classify into
             // identifiers. A numeric-looking token that failed the i64 parse
@@ -534,7 +538,8 @@ pub(crate) fn desugar_method_calls_in_expr(
                 }
             }
         }
-        Expr::IntLit(_)
+        Expr::UnitLit
+        | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::StringLit(_)
         | Expr::BoolLit(_)
@@ -590,6 +595,7 @@ pub(crate) fn infer_in_expr_type(
                 infer_in_expr_type(value, &inner, structs, fn_rets)
             })
         }
+        Expr::UnitLit => Some(Typ::Void),
         Expr::IntLit(_) => Some(Typ::Int),
         Expr::FloatLit(_) => Some(Typ::Float),
         Expr::StringLit(_) => Some(Typ::String),
@@ -728,7 +734,11 @@ fn replace_idents(expr: &mut Expr, consts: &std::collections::HashMap<String, Ex
                 replace_stmt_idents(stmt, consts);
             }
         }
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => {}
+        Expr::UnitLit
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::StringLit(_)
+        | Expr::BoolLit(_) => {}
     }
 }
 

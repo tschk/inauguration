@@ -372,6 +372,7 @@ fn compile_expr(
         Expr::MatchValue { .. } | Expr::Conditional { .. } | Expr::Block { .. } => {
             return Err("inisa: conditional and block values require owned native lowering".into());
         }
+        Expr::UnitLit => return Err("inisa: unit values require owned native lowering".into()),
         Expr::IntLit(v) => emit_pushi(&mut c.code, *v),
         Expr::BoolLit(b) => emit_pushi(&mut c.code, i64::from(*b)),
         Expr::Ident(name) => {

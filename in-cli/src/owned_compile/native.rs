@@ -276,7 +276,11 @@ fn collect_expr_calls(expr: &Expr, out: &mut HashSet<String>) {
             // The caller will filter these against module function names.
             out.insert(normalize_name(name));
         }
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => {}
+        Expr::UnitLit
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::StringLit(_)
+        | Expr::BoolLit(_) => {}
     }
 }
 

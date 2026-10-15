@@ -375,6 +375,7 @@ impl Ctx {
             ),
             Expr::MatchValue { .. } => unreachable!("match values rejected by C backend scan"),
             Expr::Block { .. } => unreachable!("block values rejected by C backend scan"),
+            Expr::UnitLit => unreachable!("unit values refused by C backend scan"),
             Expr::IntLit(n) => format!("INT64_C({})", n),
             Expr::FloatLit(f) => {
                 let bits = f.0;

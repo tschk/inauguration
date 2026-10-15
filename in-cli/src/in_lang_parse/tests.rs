@@ -2264,3 +2264,19 @@ fn match_values_round_trip_with_guards_and_arm_scopes() {
         assert_eq!(before.decls, after.decls, "{source}\n{canonical}");
     }
 }
+
+#[test]
+fn unit_values_round_trip_and_keep_their_scopes() {
+    for source in [
+        "fn main()->Int {let unit:()=();let answer=({let unit=42;unit});return (match (unit) {() -> {answer}});}",
+        "fn done()->void {return ();}\nfn main()->Int {let value=done();return 42;}",
+        "fn main()->Int {let value=( );return 42;}",
+    ] {
+        let before = parse_in_source(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        let canonical = crate::in_canonical::canonicalize_in_source(source).unwrap();
+        let after =
+            parse_in_source(&canonical).unwrap_or_else(|error| panic!("{canonical}: {error}"));
+        assert_eq!(before.decls, after.decls, "{source}\n{canonical}");
+    }
+    assert_eq!(parse_expr("()"), Expr::UnitLit);
+}

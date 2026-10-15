@@ -2263,7 +2263,7 @@ fn lower_expr_with_types_inner(
             args: vec![lower_expr_with_types(&r.expr, local_types)],
         },
         syn::Expr::Paren(p) => lower_expr_with_types(&p.expr, local_types),
-        syn::Expr::Tuple(tuple) if tuple.elems.is_empty() => Expr::IntLit(0),
+        syn::Expr::Tuple(tuple) if tuple.elems.is_empty() => Expr::UnitLit,
         syn::Expr::Array(array) => Expr::ArrayLit(
             array
                 .elems
@@ -2768,11 +2768,11 @@ fn main() { let v = 7; return; }
     }
 
     #[test]
-    fn lowers_unit_tuple_to_zero() {
+    fn lowers_unit_tuple_without_numeric_coercion() {
         let expr: syn::Expr = syn::parse_str("()").expect("parse unit tuple");
         assert_eq!(
             lower_expr_with_types(&expr, &mut HashMap::new()),
-            Expr::IntLit(0)
+            Expr::UnitLit
         );
     }
 

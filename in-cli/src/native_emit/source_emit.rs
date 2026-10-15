@@ -323,6 +323,7 @@ fn expr(lang: SourceLang, e: &Expr) -> String {
             out.push('}');
             out
         }
+        Expr::UnitLit => "()".into(),
         Expr::IntLit(n) => format!("{n}"),
         Expr::FloatLit(f) => format!("{:?}", f.0),
         Expr::BoolLit(b) => {
@@ -722,6 +723,7 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool
         return false;
     }
     match e {
+        Expr::UnitLit => lang == SourceLang::Rust,
         Expr::MatchValue { .. } => false,
         Expr::Conditional {
             cond,

@@ -44,6 +44,7 @@ fn bounded(value: &Expr) -> bool {
 
 fn value_type(value: &Expr) -> Option<Typ> {
     Some(match value {
+        Expr::UnitLit => Typ::Void,
         Expr::IntLit(_) => Typ::Int,
         Expr::BoolLit(_) => Typ::Bool,
         Expr::FloatLit(_) => Typ::Float,
@@ -97,7 +98,11 @@ fn const_syntax(
                     .and_then(Option::as_ref)
                     .is_some_and(|init| visit(init, &HashSet::new(), fuel))
         }
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) => true,
+        Expr::UnitLit
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_) => true,
         Expr::Closure { .. } => false,
         Expr::Call { callee, args } => {
             let Expr::Ident(name) = callee.as_ref() else {
@@ -120,7 +125,7 @@ fn const_syntax(
             }
             result
                 .as_deref()
-                .is_some_and(|value| visit(value, &scope, fuel))
+                .is_none_or(|value| visit(value, &scope, fuel))
         }
         Expr::Conditional {
             cond,
@@ -250,7 +255,10 @@ impl Eval<'_> {
                 let mut inner = env.clone();
                 let value = match self.body(body, &mut inner)? {
                     Some(value) => value,
-                    None => self.expr(result.as_deref()?, &mut inner)?,
+                    None => match result {
+                        Some(result) => self.expr(result, &mut inner)?,
+                        None => Expr::UnitLit,
+                    },
                 };
                 for (name, value) in env.iter_mut() {
                     *value = inner.get(name)?.clone();
@@ -296,9 +304,11 @@ impl Eval<'_> {
                     .find(|(field, _)| field == name)
                     .map(|(_, value)| value);
             }
-            Expr::IntLit(_) | Expr::BoolLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) => {
-                expr.clone()
-            }
+            Expr::UnitLit
+            | Expr::IntLit(_)
+            | Expr::BoolLit(_)
+            | Expr::FloatLit(_)
+            | Expr::StringLit(_) => expr.clone(),
             Expr::Ident(name) => {
                 if let Some(value) = env.get(name) {
                     return bounded(&value.0).then(|| value.0.clone());
@@ -493,7 +503,8 @@ impl Eval<'_> {
         }
         matches!(
             value,
-            Expr::IntLit(_)
+            Expr::UnitLit
+                | Expr::IntLit(_)
                 | Expr::BoolLit(_)
                 | Expr::FloatLit(_)
                 | Expr::StringLit(_)
@@ -796,6 +807,36 @@ mod tests {
             strict: true,
         }
         .expr(expr, &mut HashMap::new())
+    }
+
+    #[test]
+    fn inline_constant_unit_values_keep_void_type() {
+        assert_eq!(
+            evaluate_inline(&inline(vec![], Expr::UnitLit), 65536),
+            Some(Expr::UnitLit)
+        );
+        let marker = Expr::Call {
+            callee: Box::new(Expr::Ident(crate::core_ir::INLINE_CONST.into())),
+            args: vec![Expr::Block {
+                body: vec![Stmt::Expr(Expr::IntLit(42))],
+                result: None,
+            }],
+        };
+        assert_eq!(evaluate_inline(&marker, 65536), Some(Expr::UnitLit));
+        assert!(matches_value(&Typ::Void, &Expr::UnitLit));
+        assert!(!matches_value(&Typ::Int, &Expr::UnitLit));
+        let mut decls = vec![Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Void,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(marker))],
+        }];
+        lower_inline_constants(&mut decls);
+        let Decl::Function { body, .. } = &decls[0] else {
+            panic!()
+        };
+        assert_eq!(body, &vec![Stmt::Return(Some(Expr::UnitLit))]);
     }
 
     #[test]

@@ -385,7 +385,8 @@ fn collect_dependency_symbol_calls_from_expr<'a>(
                 );
             }
         }
-        Expr::IntLit(_)
+        Expr::UnitLit
+        | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::StringLit(_)
         | Expr::BoolLit(_)

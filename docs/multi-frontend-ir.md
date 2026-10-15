@@ -31,6 +31,12 @@ Value matches require compatible arm types and proven exhaustiveness. An unguard
 
 Rust expression `match` and value-position `if let`, brace-form `.in` matches, and `.icore` v2/v3 `kind: "match-value"` use this representation. The JSON form contains `scrutinee` and `arms`; each arm has `pattern`, optional `guard`, and `value`. C/Go source projection, Thumb, and INISA refuse match values until those emitters preserve the same semantics.
 
+## Unit values
+
+`UnitLit` represents `()` with type `Void`, distinct from integer zero and an empty array. Rust, `.in`, canonical source, and `.icore` expression `kind: "unit"` retain this type through checking and lowering. Empty-tuple patterns match unit values, including the results of calls, and explicit unit returns evaluate their producers before returning.
+
+Native lowering uses a zero carrier for unit locals and parameter reads. AArch64 unit arguments occupy no ABI words; x86 keeps its existing argument convention. Unit elements in native arrays, vectors, and struct fields remain refused until their zero-width layouts are supported. C/Go source projection and INISA also refuse unit literals.
+
 ## Rust inline constants
 
 Rust `const { ... }` lowers to the reserved `#rust-inline-const` call with one scoped `Block` argument. It must be evaluated within the bounded constant evaluator before native lowering; it is neither a closure nor a runtime block. Its environment contains constant globals and its own locals, never captured runtime bindings. Unsupported evaluation remains an explicit refusal.

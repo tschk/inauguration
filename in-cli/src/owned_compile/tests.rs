@@ -45,6 +45,35 @@ fn default_request(
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
+fn unit_aggregate_layouts_refuse_until_zero_width_storage_is_supported() {
+    for text in [
+        "fn main()->i64{let items=[()];match items[0]{()=>42}}",
+        "struct Pair{unit:(),answer:i64}fn main()->i64{let value=Pair{unit:(),answer:42};value.answer}",
+        "fn main()->i64{let value=((),42);value.1}",
+        "fn main()->i64{let items=vec![()];if items.len()==1{42}else{0}}",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("unit-layout-refused.rs");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(!report.success, "{text} {profile:?}: {report:?}");
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
 fn inline_constants_refuse_runtime_dependencies_and_invalid_unused_values() {
     for text in [
         "fn main()->i64{let runtime=42;let value=const{runtime};value}",
@@ -112,6 +141,66 @@ fn owned_inline_constants_execute_only_folded_values() {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
                 let binary = temp_path("inline-const-native");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(report.success, "{text} {profile:?}: {report:?}");
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42),
+                    "{text} {profile:?}"
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_unit_values_preserve_types_effects_parameters_and_returns() {
+    for text in [
+        "fn main()->i64{let x=match (){()=>42};x}",
+        "fn main()->i64{match (){()=>42}}",
+        "fn main()->i64{let mut x=0;match (){()=>{x=42;}}x}",
+        "static mut CALLS:i64=0;fn unit(){unsafe{CALLS+=1;}}fn main()->i64{match unit(){()=>unsafe{CALLS+41}}}",
+        "fn unit()->(){()}fn main()->i64{let x=match unit(){()=>42};x}",
+        "fn main()->i64{let u:()=if true{()}else{()};let x=match u{()=>42};x}",
+        "fn take(unit:())->i64{let alias=unit;match alias{()=>42}}fn main()->i64{take(())}",
+        "fn take(a:i64,unit:(),b:i64)->i64{match unit{()=>a+b}}fn main()->i64{take(20,(),22)}",
+        "static mut CALLS:i64=0;fn touch()->(){unsafe{CALLS+=1;}return ();}fn main()->i64{let value=touch();match value{()=>unsafe{CALLS+41}}}",
+        "static mut CALLS:i64=0;fn touch(){unsafe{CALLS+=1;}}fn relay(){return touch();}fn main()->i64{relay();unsafe{CALLS+41}}",
+        "static mut CALLS:i64=0;fn touch(){unsafe{CALLS+=1;}}fn take(a:i64,unit:(),b:i64)->i64{match unit{()=>a+b}}fn main()->i64{take(20,touch(),unsafe{CALLS+21})}",
+        "fn main()->i64{let x=match (){u if u==()=>42,_=>0};x}",
+        "fn main()->i64{if ()==(){42}else{0}}",
+        "fn main()->i64{let x=const{()};match x{()=>42}}",
+        "fn main()->i64{let x=const{let y=42;};match x{()=>42}}",
+        "fn choose(flag:bool)->(){if flag{return ();}()}fn main()->i64{let x=choose(true);match x{()=>42}}",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("unit-value.rs");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{text} {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{text} {profile:?}"
+            );
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("unit-value-native");
                 request.target = CompileTarget::Native;
                 request.out = Some(binary.clone());
                 let report = compile_owned(&request);
@@ -257,6 +346,58 @@ fn owned_conditional_and_block_values_preserve_scope_effects_and_control_flow() 
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
                 let binary = temp_path("conditional-block-native");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(report.success, "{text} {profile:?}: {report:?}");
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42),
+                    "{text} {profile:?}"
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn shared_unit_fronts_preserve_void_values_and_matches() {
+    for (extension, text) in [
+        (
+            "in",
+            "fn unit()->void {return ();}\nfn main()->Int {let value=unit();let answer=(match (value) {() -> {42}});return answer;}",
+        ),
+        (
+            "icore",
+            "{\"icoreVersion\": 2, \"decls\": [{\"kind\": \"function\", \"name\": \"main\", \"params\": [], \"return\": \"Int\", \"body\": [{\"kind\": \"return\", \"expr\": {\"kind\": \"match-value\", \"scrutinee\": {\"kind\": \"unit\"}, \"arms\": [{\"pattern\": \"()\", \"value\": 42}]}}]}]}",
+        ),
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path(&format!("unit-value.{extension}"));
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{text} {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{text} {profile:?}"
+            );
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("shared-unit-value-native");
                 request.target = CompileTarget::Native;
                 request.out = Some(binary.clone());
                 let report = compile_owned(&request);

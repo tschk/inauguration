@@ -398,7 +398,8 @@ fn collect_expr_strings(expr: &Expr, values: &mut Vec<String>) {
                 collect_expr_strings(arg, values);
             }
         }
-        Expr::IntLit(_)
+        Expr::UnitLit
+        | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::BoolLit(_)
         | Expr::Ident(_)

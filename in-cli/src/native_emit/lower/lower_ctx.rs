@@ -435,6 +435,11 @@ fn alloc_nested_struct_slots_inner(
     visited.push(base_name.to_string());
     for (field, field_ty) in fields {
         match field_ty {
+            Typ::Void => {
+                return Err(
+                    "native-lower: unit aggregate fields require a zero-width layout".into(),
+                );
+            }
             Typ::Int | Typ::Bool | Typ::String | Typ::Float => {
                 let offset = ctx.alloc_slot();
                 if store_params {
@@ -503,6 +508,11 @@ pub(crate) fn alloc_local_struct_fields(
 ) -> Result<(), String> {
     for (field, field_ty) in fields {
         match field_ty {
+            Typ::Void => {
+                return Err(
+                    "native-lower: unit aggregate fields require a zero-width layout".into(),
+                );
+            }
             Typ::Int | Typ::Bool | Typ::String | Typ::Float => {
                 slots.insert(field.clone(), ctx.alloc_slot());
             }
@@ -720,6 +730,7 @@ impl<'a> LowerCtx<'a> {
                     abi_idx += 2;
                 }
                 Typ::Vector(_) => {
+                    super::lower_util::ensure_unit_sequence_layout(typ)?;
                     ctx.param_types.insert(name.clone(), typ.clone());
                     let Some(fields) = structs.get("Vec") else {
                         return Err(format!("native-lower: missing Vec ABI type in `{fn_name}`"));
@@ -762,6 +773,9 @@ impl<'a> LowerCtx<'a> {
         typ: Option<&Typ>,
         fn_name: &str,
     ) -> Result<(), String> {
+        if let Some(typ) = typ {
+            super::lower_util::ensure_unit_sequence_layout(typ)?;
+        }
         if self.locals.contains_key(name) {
             return Ok(());
         }
@@ -856,6 +870,9 @@ impl<'a> LowerCtx<'a> {
         let resolved = typ
             .cloned()
             .or_else(|| super::lower_expr::native_expr_type(expr, self, functions));
+        if let Some(typ) = &resolved {
+            super::lower_util::ensure_unit_sequence_layout(typ)?;
+        }
         if let Some(Typ::Array(elem)) = resolved.as_ref() {
             ensure_native_array_element(elem, fn_name, "local")?;
             // Local aliases share inline array metadata rather than pretending

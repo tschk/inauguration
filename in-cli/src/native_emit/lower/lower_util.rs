@@ -134,6 +134,7 @@ pub(crate) fn ensure_return_type(
     fn_name: &str,
     structs: &HashMap<String, Vec<(String, Typ)>>,
 ) -> Result<(), String> {
+    ensure_unit_sequence_layout(ret)?;
     match ret {
         Typ::Int | Typ::Float | Typ::Bool | Typ::String | Typ::Void => Ok(()),
         Typ::Named(struct_name) => {
@@ -210,6 +211,7 @@ pub(crate) fn native_param_abi_slots(
         if depth > 40 {
             return Ok(1); // deep nesting, treat as opaque
         }
+        ensure_unit_sequence_layout(typ)?;
         match typ {
             Typ::Int | Typ::Bool | Typ::String | Typ::Float => Ok(1),
             Typ::Void => Ok(0),
@@ -309,11 +311,28 @@ pub(crate) fn is_native_scalar_type(typ: &Typ) -> bool {
     )
 }
 
+pub(crate) fn ensure_unit_sequence_layout(typ: &Typ) -> Result<(), String> {
+    match typ {
+        Typ::Array(item) | Typ::Vector(item) => {
+            if item.canonical() == Typ::Void {
+                return Err(
+                    "native-lower: unit sequence elements require a zero-width layout".into(),
+                );
+            }
+            ensure_unit_sequence_layout(item)
+        }
+        _ => Ok(()),
+    }
+}
+
 pub(crate) fn ensure_native_array_element(
     elem: &Typ,
     fn_name: &str,
     context: &str,
 ) -> Result<(), String> {
+    if elem.canonical() == Typ::Void {
+        return Err("native-lower: unit array elements require a zero-width layout".into());
+    }
     match canonical_type(elem) {
         Typ::Int | Typ::Bool | Typ::String | Typ::Float => Ok(()),
         Typ::Array(_) => Err(format!(
@@ -343,6 +362,7 @@ pub(crate) fn expr_type(expr: &Expr) -> Option<Typ> {
             expr_type(else_expr),
         ),
         Expr::Block { result, .. } => result.as_deref().and_then(expr_type),
+        Expr::UnitLit => Some(Typ::Void),
         Expr::IntLit(_) => Some(Typ::Int),
         Expr::FloatLit(_) => Some(Typ::Float),
         Expr::BoolLit(_) => Some(Typ::Bool),

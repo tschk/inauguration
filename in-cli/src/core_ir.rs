@@ -370,7 +370,8 @@ pub(crate) fn expr_contains_call(expr: &Expr) -> bool {
         Expr::Field { base, .. } => expr_contains_call(base),
         Expr::ArrayLit(items) => items.iter().any(expr_contains_call),
         Expr::Index { base, index, .. } => expr_contains_call(base) || expr_contains_call(index),
-        Expr::IntLit(_)
+        Expr::UnitLit
+        | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::StringLit(_)
         | Expr::BoolLit(_)
@@ -432,6 +433,7 @@ pub(crate) fn integer_cast_expr(value: Expr, op: &str) -> Option<Expr> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
+    UnitLit,
     IntLit(i64),
     FloatLit(FloatVal),
     StringLit(String),
@@ -737,6 +739,11 @@ impl MatchPattern {
         let mut bindings = Vec::new();
         match self {
             Self::IdentPat(name) => bindings.push((name.clone(), typ.clone())),
+            Self::TuplePat(items) if items.is_empty() => {
+                if typ.canonical() != Typ::Void {
+                    return Err(format!("unit pattern does not match {typ:?}"));
+                }
+            }
             Self::StructPat { name, fields } => {
                 if typ.canonical() != Typ::Named(name.clone()) {
                     return Err(format!("struct pattern `{name}` does not match {typ:?}"));
@@ -830,6 +837,7 @@ impl MatchPattern {
     ) -> bool {
         match self {
             Self::WildPat | Self::IdentPat(_) | Self::RestPat => true,
+            Self::TuplePat(items) if items.is_empty() && typ.canonical() == Typ::Void => true,
             Self::StructPat { name, fields } if typ.canonical() == Typ::Named(name.clone()) => {
                 schema(name).is_some_and(|declared| {
                     fields.iter().all(|(field, pattern)| {
@@ -1094,7 +1102,8 @@ pub fn for_each_expr_child<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
                 f(i);
             }
         }
-        Expr::IntLit(_)
+        Expr::UnitLit
+        | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::StringLit(_)
         | Expr::BoolLit(_)
@@ -1156,7 +1165,8 @@ pub(crate) fn for_each_expr_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr
                 f(i);
             }
         }
-        Expr::IntLit(_)
+        Expr::UnitLit
+        | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::StringLit(_)
         | Expr::BoolLit(_)
@@ -1167,6 +1177,26 @@ pub(crate) fn for_each_expr_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unit_patterns_keep_unit_distinct_from_zero_and_empty_arrays() {
+        use super::*;
+        let unit = MatchPattern::parse("()").unwrap();
+        assert_eq!(unit.typed_bindings(&Typ::Void, &|_| None), Ok(vec![]));
+        assert!(unit.irrefutable(&Typ::Void, &|_| None));
+        assert!(unit.typed_bindings(&Typ::Int, &|_| None).is_err());
+        assert!(
+            unit.typed_bindings(&Typ::Array(Box::new(Typ::Int)), &|_| None)
+                .is_err()
+        );
+        assert!(
+            MatchPattern::parse("[]")
+                .unwrap()
+                .typed_bindings(&Typ::Void, &|_| None)
+                .is_err()
+        );
+        assert!(!expr_contains_call(&Expr::UnitLit));
+    }
+
     #[test]
     fn value_matches_require_unguarded_exhaustive_patterns_and_compatible_values() {
         use super::*;

@@ -184,6 +184,7 @@ fn format_stmt(stmt: &Stmt, depth: usize, out: &mut String) {
 
 fn format_expr(expr: &Expr) -> String {
     match expr {
+        Expr::UnitLit => "()".into(),
         Expr::IntLit(n) => n.to_string(),
         Expr::FloatLit(f) => f.0.to_string(),
         Expr::StringLit(value) => format!("{value:?}"),

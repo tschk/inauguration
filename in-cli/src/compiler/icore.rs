@@ -308,6 +308,7 @@ fn parse_v2_expr(value: &Value, context: &str) -> Result<Expr, String> {
     let object = value_object(value, context)?;
     let kind = string_field(object, "kind", context)?;
     match kind {
+        "unit" => Ok(Expr::UnitLit),
         "int" => required_field(object, "value", context)?
             .as_i64()
             .map(Expr::IntLit)
@@ -581,6 +582,15 @@ fn validate_module(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_explicit_unit_without_accepting_legacy_null() {
+        assert_eq!(
+            super::parse_v2_expr(&serde_json::json!({"kind":"unit"}), "test").unwrap(),
+            crate::core_ir::Expr::UnitLit
+        );
+        assert!(super::parse_v2_expr(&serde_json::Value::Null, "test").is_err());
+    }
+
     #[test]
     fn parses_typed_match_values_and_rejects_malformed_arms() {
         let value = serde_json::json!({"kind":"match-value", "scrutinee":true, "arms":[

@@ -660,7 +660,11 @@ fn rewrite_field_refs_in_expr(expr: &mut Expr, fields: &HashSet<String>, bound: 
                 rewrite_field_refs_in_expr(item, fields, bound);
             }
         }
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => {}
+        Expr::UnitLit
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::StringLit(_)
+        | Expr::BoolLit(_) => {}
     }
 }
 
@@ -914,7 +918,8 @@ fn rewrite_captures_in_expr(expr: &mut Expr, captures: &HashSet<&str>) {
                 rewrite_captures_in_expr(arg, captures);
             }
         }
-        Expr::Ident(_)
+        Expr::UnitLit
+        | Expr::Ident(_)
         | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::StringLit(_)
@@ -1037,7 +1042,8 @@ fn desugar_closures_in_expr(
                 desugar_closures_in_expr(arg, counter, extra_decls, names, globals);
             }
         }
-        Expr::IntLit(_)
+        Expr::UnitLit
+        | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::StringLit(_)
         | Expr::BoolLit(_)
@@ -1173,7 +1179,8 @@ fn rewrite_method_calls_in_expr(expr: &mut Expr, method_map: &HashMap<String, St
             rewrite_method_calls_in_expr(base, method_map);
             rewrite_method_calls_in_expr(index, method_map);
         }
-        Expr::IntLit(_)
+        Expr::UnitLit
+        | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::StringLit(_)
         | Expr::BoolLit(_)
@@ -1196,6 +1203,12 @@ fn lower_expr(
             let id = *ssa;
             *ssa += 1;
             out.push_str(&format!("%{id} = unsupported_structured_value\n"));
+            id
+        }
+        Expr::UnitLit => {
+            let id = *ssa;
+            *ssa += 1;
+            out.push_str(&format!("%{id} = tuple ()\n"));
             id
         }
         Expr::IntLit(n) => {
@@ -1500,7 +1513,11 @@ fn collect_expr_reads(e: &Expr, reads: &mut HashSet<String>) {
                 collect_expr_reads(arg, reads);
             }
         }
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::BoolLit(_) => {}
+        Expr::UnitLit
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::StringLit(_)
+        | Expr::BoolLit(_) => {}
         Expr::Closure { .. } => {}
     }
 }

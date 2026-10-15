@@ -4873,6 +4873,47 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn unit_values_preserve_types_effects_parameters_and_returns() {
+        for source in [
+            "fn main()->i64{let x=match (){()=>42};x}",
+            "fn main()->i64{match (){()=>42}}",
+            "fn main()->i64{let mut x=0;match (){()=>{x=42;}}x}",
+            "static mut CALLS:i64=0;fn unit(){unsafe{CALLS+=1;}}fn main()->i64{match unit(){()=>unsafe{CALLS+41}}}",
+            "fn unit()->(){()}fn main()->i64{let x=match unit(){()=>42};x}",
+            "fn main()->i64{let u:()=if true{()}else{()};let x=match u{()=>42};x}",
+            "fn take(unit:())->i64{let alias=unit;match alias{()=>42}}fn main()->i64{take(())}",
+            "fn take(a:i64,unit:(),b:i64)->i64{match unit{()=>a+b}}fn main()->i64{take(20,(),22)}",
+            "static mut CALLS:i64=0;fn touch()->(){unsafe{CALLS+=1;}return ();}fn main()->i64{let value=touch();match value{()=>unsafe{CALLS+41}}}",
+            "static mut CALLS:i64=0;fn touch(){unsafe{CALLS+=1;}}fn relay(){return touch();}fn main()->i64{relay();unsafe{CALLS+41}}",
+            "static mut CALLS:i64=0;fn touch(){unsafe{CALLS+=1;}}fn take(a:i64,unit:(),b:i64)->i64{match unit{()=>a+b}}fn main()->i64{take(20,touch(),unsafe{CALLS+21})}",
+            "fn main()->i64{let x=match (){u if u==()=>42,_=>0};x}",
+            "fn main()->i64{if ()==(){42}else{0}}",
+            "fn main()->i64{let x=const{()};match x{()=>42}}",
+            "fn main()->i64{let x=const{let y=42;};match x{()=>42}}",
+            "fn choose(flag:bool)->(){if flag{return ();}()}fn main()->i64{let x=choose(true);match x{()=>42}}",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{source}: {report:?}; {module:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn match_values_preserve_selected_effects_bindings_and_control_flow() {
         for source in [
             "fn main()->i64{let tag=1;let value=match tag{0=>20,1=>42,_=>0};value}",
