@@ -1,0 +1,33 @@
+// Scratch is normal writable RAM on both regression machines. It prevents
+// the optimizer from replacing runtime operations with constant expressions.
+fn identity(value: Int) -> Int {
+  store32(0x300000, value)
+  return load32(0x300000)
+}
+
+fn main() -> Int {
+  if (2147483647 + 1) != -2147483648 { return 1 }
+  if (identity(2147483647) + identity(1)) != -2147483648 { return 2 }
+  if 0xffffffff >= 0 { return 3 }
+  if identity(0xffffffff) >= identity(0) { return 4 }
+  if -(-2147483648) != -2147483648 { return 5 }
+  if -identity(-2147483648) != -2147483648 { return 6 }
+  if ((2147483647 + 1) * 2) != 0 { return 7 }
+  if ((identity(2147483647) + identity(1)) * identity(2)) != 0 { return 8 }
+  if (-2147483648 - 1) != 2147483647 { return 9 }
+  if (identity(-2147483648) - identity(1)) != 2147483647 { return 10 }
+  if (65536 * 65536) != 0 { return 11 }
+  if (identity(65536) * identity(65536)) != 0 { return 12 }
+  if (1 << 31) != -2147483648 { return 13 }
+  if (identity(1) << identity(31)) != -2147483648 { return 14 }
+  let shift = 0
+  while shift < 32 {
+    let bit = identity(1) << identity(shift)
+    if (bit >> identity(shift)) != 1 && shift < 31 { return 15 }
+    if (identity(0x7fffffff) >> identity(shift)) < 0 { return 16 }
+    shift = shift + 1
+  }
+  if -0xffffffff != 1 { return 17 }
+  if -identity(0xffffffff) != 1 { return 18 }
+  return 42
+}

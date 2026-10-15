@@ -7,6 +7,7 @@
 
 use crate::core_ir::{CatchArm, Decl, Expr, LoopKind, MatchArm, Stmt, Typ};
 use crate::emit_profile::EmitProfile;
+use crate::integer_semantics::IntegerSemantics;
 use std::collections::{HashMap, HashSet};
 
 pub fn optimize(decls: &mut Vec<Decl>) {
@@ -32,8 +33,24 @@ pub fn optimize_with_linkage(
     profile: EmitProfile,
     keep_all_functions: bool,
 ) {
+    optimize_with_linkage_and_semantics(
+        decls,
+        entry,
+        profile,
+        keep_all_functions,
+        IntegerSemantics::Word64,
+    );
+}
+
+pub fn optimize_with_linkage_and_semantics(
+    decls: &mut Vec<Decl>,
+    entry: Option<&str>,
+    profile: EmitProfile,
+    keep_all_functions: bool,
+    semantics: IntegerSemantics,
+) {
     crate::lower_core::lower_guarded_decls(decls);
-    crate::lower_core::lower_named_constants(decls);
+    crate::lower_core::lower_named_constants_with_semantics(decls, semantics);
     crate::lower_core::lower_value_spills(decls);
     crate::core_bindings::normalize_decls(decls);
     match profile {
@@ -41,10 +58,10 @@ pub fn optimize_with_linkage(
             // Fast owned path: more inlining than a textbook compiler, then fold/DCE.
             inline_small_functions_with(decls, INLINE_THRESHOLD, DEFAULT_INLINE_DEPTH);
             inline_small_functions_with(decls, INLINE_THRESHOLD, DEFAULT_INLINE_DEPTH);
-            algebraic_simplify(decls);
-            fold_constants_in_decls(decls);
+            algebraic_simplify(decls, semantics);
+            fold_constants_in_decls(decls, semantics);
             propagate_constants(decls);
-            fold_constants_in_decls(decls);
+            fold_constants_in_decls(decls, semantics);
             dead_code_eliminate(decls);
             if !keep_all_functions {
                 remove_dead_functions(decls, entry);
@@ -54,10 +71,10 @@ pub fn optimize_with_linkage(
             // Aggressive inlining + deeper recursion, then standard cleanup.
             inline_small_functions_with(decls, LEAN_INLINE_THRESHOLD, LEAN_INLINE_DEPTH);
             inline_small_functions_with(decls, LEAN_INLINE_THRESHOLD, LEAN_INLINE_DEPTH);
-            algebraic_simplify(decls);
-            fold_constants_in_decls(decls);
+            algebraic_simplify(decls, semantics);
+            fold_constants_in_decls(decls, semantics);
             propagate_constants(decls);
-            fold_constants_in_decls(decls);
+            fold_constants_in_decls(decls, semantics);
             dead_code_eliminate(decls);
             if !keep_all_functions {
                 remove_dead_functions(decls, entry);
@@ -66,17 +83,17 @@ pub fn optimize_with_linkage(
         EmitProfile::Harden => {
             // Normal opts first so harden noise is not immediately folded away.
             inline_small_functions_with(decls, INLINE_THRESHOLD, DEFAULT_INLINE_DEPTH);
-            algebraic_simplify(decls);
-            fold_constants_in_decls(decls);
+            algebraic_simplify(decls, semantics);
+            fold_constants_in_decls(decls, semantics);
             propagate_constants(decls);
-            fold_constants_in_decls(decls);
+            fold_constants_in_decls(decls, semantics);
             dead_code_eliminate(decls);
             if !keep_all_functions {
                 remove_dead_functions(decls, entry);
             }
             // Anti-decomp transforms (must run after fold/dce).
             harden_mba_arithmetic(decls);
-            harden_obscure_literals(decls);
+            harden_obscure_literals(decls, semantics);
             harden_opaque_predicates(decls);
             harden_bogus_blocks(decls);
             // Flatten eligible bodies into a pc dispatcher before junk pads
@@ -746,34 +763,45 @@ fn ptr_in_expr(expr: &Expr, out: &mut Vec<String>) {
 // ─── Algebraic Simplification ──────────────────────────────────────────────
 
 /// x+0→x, x*1→x, x&-1→x, x|0→x, x^0→x, x<<0→x, etc.
-fn algebraic_simplify(decls: &mut [Decl]) {
+fn algebraic_simplify(decls: &mut [Decl], semantics: IntegerSemantics) {
     for body in fn_bodies_mut(decls) {
         let old = std::mem::take(body);
         *body = old
             .into_iter()
-            .map(|s| map_stmt(s, &mut |e| simplify_expr(e)))
+            .map(|s| map_stmt(s, &mut |e| simplify_expr_with_semantics(e, semantics)))
             .collect();
     }
 }
 
-fn fold_int_constants(op: &str, a: i64, b: i64) -> Option<Expr> {
-    match op {
-        "add" | "+" => a.checked_add(b).map(Expr::IntLit),
-        "sub" | "-" => a.checked_sub(b).map(Expr::IntLit),
-        "mul" | "*" => a.checked_mul(b).map(Expr::IntLit),
-        "div" | "/" => a.checked_div(b).map(Expr::IntLit),
-        "mod" | "%" => a.checked_rem(b).map(Expr::IntLit),
-        _ => None,
+fn simplify_binary_expr(
+    original: Expr,
+    op: &str,
+    lhs: &Expr,
+    rhs: &Expr,
+    semantics: IntegerSemantics,
+) -> Expr {
+    if [lhs, rhs].into_iter().any(
+        |expr| matches!(expr, Expr::IntLit(value) if semantics.normalize_word(*value).is_none()),
+    ) {
+        return original;
     }
-}
-
-fn simplify_binary_expr(original: Expr, op: &str, lhs: &Expr, rhs: &Expr) -> Expr {
+    if matches!(op, "shl" | "<<" | "shr" | ">>")
+        && let Expr::IntLit(count) = rhs
+        && !(0..if semantics == IntegerSemantics::Word32 {
+            32
+        } else {
+            64
+        })
+            .contains(count)
+    {
+        return original;
+    }
     // Absorbing identities must retain calls, mutation, and nonlocal block exits.
     if expr_has_call(lhs) || expr_has_call(rhs) {
         return original;
     }
     if let (Expr::IntLit(a), Expr::IntLit(b)) = (lhs, rhs) {
-        if let Some(folded) = fold_int_constants(op, *a, *b) {
+        if let Some(folded) = semantics.fold_binary(op, *a, *b) {
             return folded;
         }
     }
@@ -974,10 +1002,25 @@ fn simplify_unary_expr(original: Expr, op: &str, expr: &Expr) -> Expr {
     original
 }
 
+#[cfg(test)]
 fn simplify_expr(e: Expr) -> Expr {
+    simplify_expr_with_semantics(e, IntegerSemantics::Word64)
+}
+
+fn simplify_expr_with_semantics(e: Expr, semantics: IntegerSemantics) -> Expr {
+    // Keep invalid target-word literals visible even inside absorbing identities.
+    let mut invalid_word = false;
+    walk_expr(&e, &mut |expr| {
+        if let Expr::IntLit(value) = expr {
+            invalid_word |= semantics.normalize_word(*value).is_none();
+        }
+    });
+    if invalid_word {
+        return e;
+    }
     // Clone-and-match on owned value to avoid borrow gymnastics
     match e.clone() {
-        Expr::Binary { op, lhs, rhs, .. } => simplify_binary_expr(e, &op, &lhs, &rhs),
+        Expr::Binary { op, lhs, rhs, .. } => simplify_binary_expr(e, &op, &lhs, &rhs, semantics),
         Expr::Unary { op, expr, .. } => simplify_unary_expr(e, &op, &expr),
         _ => e,
     }
@@ -1118,39 +1161,64 @@ fn collect_calls_in_expr(e: &Expr, out: &mut HashSet<String>) {
 // ─── Constant Folding ──────────────────────────────────────────────────────
 
 /// Evaluate compile-time integer expressions: `3 + 4` → `7`.
-fn fold_constants_in_decls(decls: &mut [Decl]) {
+fn fold_constants_in_decls(decls: &mut [Decl], semantics: IntegerSemantics) {
     for decl in decls.iter_mut() {
         if let Decl::Global { init, .. } = decl {
-            *init = init
-                .take()
-                .map(|expr| Box::new(map_expr(*expr, &mut fold_expr)));
+            *init = init.take().map(|expr| {
+                Box::new(map_expr(*expr, &mut |e| {
+                    fold_expr_with_semantics(e, semantics)
+                }))
+            });
         }
     }
     for body in fn_bodies_mut(decls) {
         let old = std::mem::take(body);
         *body = old
             .into_iter()
-            .flat_map(|s| fold_stmt_matches(map_stmt(s, &mut |e| fold_expr(e))))
+            .flat_map(|s| {
+                fold_stmt_matches(
+                    map_stmt(s, &mut |e| fold_expr_with_semantics(e, semantics)),
+                    semantics,
+                )
+            })
             .collect();
     }
 }
 
-fn fold_stmt_matches(s: Stmt) -> Vec<Stmt> {
+fn fold_stmt_matches(s: Stmt, semantics: IntegerSemantics) -> Vec<Stmt> {
     match s {
         Stmt::Match {
             scrutinee, arms, ..
         } => {
-            if matches!(
-                &scrutinee,
-                Expr::IntLit(_) | Expr::StringLit(_) | Expr::BoolLit(_)
-            ) {
+            use crate::core_ir::MatchPattern;
+            let invalid_word = matches!(&scrutinee, Expr::IntLit(value) if semantics.normalize_word(*value).is_none());
+            // An early wildcard must not hide invalid or unsupported patterns.
+            let valid_patterns = arms
+                .iter()
+                .all(|arm| match MatchPattern::parse(&arm.pattern) {
+                    Ok(MatchPattern::IntPat(value)) => semantics.normalize_word(value).is_some(),
+                    Ok(
+                        MatchPattern::WildPat
+                        | MatchPattern::StringPat(_)
+                        | MatchPattern::BoolPat(_),
+                    ) => true,
+                    _ => false,
+                });
+            if !invalid_word
+                && valid_patterns
+                && matches!(
+                    &scrutinee,
+                    Expr::IntLit(_) | Expr::StringLit(_) | Expr::BoolLit(_)
+                )
+            {
                 for arm in &arms {
                     use crate::core_ir::MatchPattern;
                     let matches = match (&scrutinee, MatchPattern::parse(&arm.pattern)) {
                         (_, Ok(MatchPattern::WildPat)) => true,
-                        (Expr::IntLit(value), Ok(MatchPattern::IntPat(pattern))) => {
-                            *value == pattern
-                        }
+                        (Expr::IntLit(value), Ok(MatchPattern::IntPat(pattern))) => semantics
+                            .normalize_word(*value)
+                            .zip(semantics.normalize_word(pattern))
+                            .is_some_and(|(value, pattern)| value == pattern),
                         (Expr::BoolLit(value), Ok(MatchPattern::BoolPat(pattern))) => {
                             *value == pattern
                         }
@@ -1172,6 +1240,10 @@ fn fold_stmt_matches(s: Stmt) -> Vec<Stmt> {
 }
 
 pub(crate) fn fold_expr(e: Expr) -> Expr {
+    fold_expr_with_semantics(e, IntegerSemantics::Word64)
+}
+
+pub(crate) fn fold_expr_with_semantics(e: Expr, semantics: IntegerSemantics) -> Expr {
     match &e {
         Expr::Binary { op, lhs, rhs, .. } => {
             if let (Expr::BoolLit(lhs), Expr::BoolLit(rhs)) = (lhs.as_ref(), rhs.as_ref()) {
@@ -1220,51 +1292,8 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
                 }
             }
             if let (Expr::IntLit(a), Expr::IntLit(b)) = (lhs.as_ref(), rhs.as_ref()) {
-                // ponytail: skip div-by-zero (would change runtime behavior)
-                let result = match op.as_str() {
-                    "add" | "+" => a.checked_add(*b),
-                    "sub" | "-" => a.checked_sub(*b),
-                    "mul" | "*" => a.checked_mul(*b),
-                    "div" | "/" if *b != 0 => a.checked_div(*b),
-                    "mod" | "%" if *b != 0 => a.checked_rem(*b),
-                    "band" | "&" => Some(a & b),
-                    "bor" | "|" => Some(a | b),
-                    "xor" | "^" => Some(a ^ b),
-                    "shl" | "<<" if *b >= 0 && *b < 64 => a.checked_shl(*b as u32),
-                    "shr" | ">>" if *b >= 0 && *b < 64 => a.checked_shr(*b as u32),
-                    "eq" | "==" => Some(if a == b { 1 } else { 0 }),
-                    "neq" | "!=" => Some(if a != b { 1 } else { 0 }),
-                    "lt" | "<" => Some(if a < b { 1 } else { 0 }),
-                    "gt" | ">" => Some(if a > b { 1 } else { 0 }),
-                    "le" | "<=" => Some(if a <= b { 1 } else { 0 }),
-                    "ge" | ">=" => Some(if a >= b { 1 } else { 0 }),
-                    "land" | "&&" => Some(if *a != 0 && *b != 0 { 1 } else { 0 }),
-                    "lor" | "||" => Some(if *a != 0 || *b != 0 { 1 } else { 0 }),
-                    _ => None,
-                };
-                if let Some(v) = result {
-                    return if matches!(
-                        op.as_str(),
-                        "eq" | "=="
-                            | "neq"
-                            | "!="
-                            | "lt"
-                            | "<"
-                            | "gt"
-                            | ">"
-                            | "le"
-                            | "<="
-                            | "ge"
-                            | ">="
-                            | "land"
-                            | "&&"
-                            | "lor"
-                            | "||"
-                    ) {
-                        Expr::BoolLit(v != 0)
-                    } else {
-                        Expr::IntLit(v)
-                    };
+                if let Some(value) = semantics.fold_binary(op, *a, *b) {
+                    return value;
                 }
             }
             e
@@ -1279,7 +1308,7 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
                 if let Some(value) = value {
                     return map_expr(
                         crate::core_ir::integer_cast_expr(value, op).unwrap(),
-                        &mut |expr| fold_expr(expr),
+                        &mut |expr| fold_expr_with_semantics(expr, semantics),
                     );
                 }
             }
@@ -1295,7 +1324,9 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
             if op == "int-to-float"
                 && let Expr::IntLit(value) = expr.as_ref()
             {
-                return Expr::FloatLit(crate::core_ir::FloatVal(*value as f64));
+                if let Some(value) = semantics.normalize_word(*value) {
+                    return Expr::FloatLit(crate::core_ir::FloatVal(value as f64));
+                }
             }
             if let Some((bits, signed)) = crate::core_ir::saturating_float_cast_spec(op)
                 && let Expr::FloatLit(value) = expr.as_ref()
@@ -1316,17 +1347,8 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
                 return Expr::IntLit(i64::from(*value));
             }
             if let Expr::IntLit(n) = expr.as_ref() {
-                let result = match op.as_str() {
-                    "neg" | "-" => n.checked_neg(),
-                    "not" | "!" => Some(if *n == 0 { 1 } else { 0 }),
-                    _ => None,
-                };
-                if let Some(v) = result {
-                    return if matches!(op.as_str(), "not" | "!") {
-                        Expr::BoolLit(v != 0)
-                    } else {
-                        Expr::IntLit(v)
-                    };
+                if let Some(value) = semantics.fold_unary(op, *n) {
+                    return value;
                 }
             }
             e
@@ -2206,26 +2228,39 @@ fn harden_mba_arithmetic(decls: &mut [Decl]) {
 }
 
 /// Obscure integer/bool literals as `(x ^ k) ^ k` / equivalent forms.
-fn harden_obscure_literals(decls: &mut [Decl]) {
+fn harden_obscure_literals(decls: &mut [Decl], semantics: IntegerSemantics) {
     let mut counter = 0u64;
     for body in fn_bodies_mut(decls) {
         for stmt in body.iter_mut() {
             map_stmt_mut(stmt, &mut |e| {
-                obscure_expr_literals(e, &mut counter);
+                obscure_expr_literals(e, &mut counter, semantics);
             });
         }
     }
 }
 
-fn obscure_expr_literals(e: &mut Expr, counter: &mut u64) {
+fn obscure_expr_literals(e: &mut Expr, counter: &mut u64, semantics: IntegerSemantics) {
     match e {
         Expr::IntLit(v) => {
             *counter = counter.wrapping_add(1);
             let k = ((*counter).wrapping_mul(0x9E3779B97F4A7C15) ^ (*v as u64)) as i64 | 1;
+            let (value, k) = if semantics == IntegerSemantics::Word32 {
+                let Some(value) = semantics.normalize_word(*v) else {
+                    return;
+                };
+                (value, i64::from(k as i32))
+            } else {
+                (*v, k)
+            };
+            let masked = if semantics == IntegerSemantics::Word32 {
+                i64::from((value as i32) ^ (k as i32))
+            } else {
+                value ^ k
+            };
             // ((v ^ k) ^ k) | (k & 0) == v. Extra `| 0` is noise, not a third XOR of k.
             *e = bin_expr(
                 "|",
-                bin_expr("^", Expr::IntLit(*v ^ k), Expr::IntLit(k)),
+                bin_expr("^", Expr::IntLit(masked), Expr::IntLit(k)),
                 bin_expr("&", Expr::IntLit(k), Expr::IntLit(0)),
             );
         }
@@ -2508,6 +2543,150 @@ mod tests {
     use super::*;
 
     #[test]
+    fn word32_optimizations_keep_invalid_carriers_visible() {
+        let semantics = IntegerSemantics::Word32;
+        let invalid = bin(
+            "*",
+            bin("+", Expr::IntLit(0x100000000), ident("value")),
+            Expr::IntLit(0),
+        );
+        assert_eq!(
+            map_expr(invalid.clone(), &mut |expr| simplify_expr_with_semantics(
+                expr, semantics
+            )),
+            invalid
+        );
+        for (scrutinee, pattern) in [(0x100000000, "_"), (42, "4294967296")] {
+            let statement = Stmt::Match {
+                scrutinee: Expr::IntLit(scrutinee),
+                arms: vec![
+                    MatchArm {
+                        pattern: "_".into(),
+                        guard: None,
+                        body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                    },
+                    MatchArm {
+                        pattern: pattern.into(),
+                        guard: None,
+                        body: vec![],
+                    },
+                ],
+            };
+            assert_eq!(
+                fold_stmt_matches(statement.clone(), semantics),
+                vec![statement]
+            );
+        }
+    }
+
+    #[test]
+    fn word32_folding_and_harden_noise_preserve_machine_word_values() {
+        let semantics = IntegerSemantics::Word32;
+        let expression = bin("+", Expr::IntLit(0x7fffffff), Expr::IntLit(1));
+        assert_eq!(
+            fold_expr_with_semantics(expression.clone(), semantics),
+            Expr::IntLit(i32::MIN.into())
+        );
+        assert_eq!(fold_expr(expression), Expr::IntLit(0x80000000));
+        for value in [0, 42, -1, i32::MIN.into(), 0xffffffff] {
+            let mut obscured = Expr::IntLit(value);
+            obscure_expr_literals(&mut obscured, &mut 0, semantics);
+            walk_expr(&obscured, &mut |expr| {
+                if let Expr::IntLit(value) = expr {
+                    assert!(
+                        semantics.normalize_word(*value).is_some(),
+                        "illegal harden literal {value}"
+                    );
+                }
+            });
+            let folded = map_expr(obscured, &mut |expr| {
+                fold_expr_with_semantics(expr, semantics)
+            });
+            assert_eq!(
+                folded,
+                Expr::IntLit(semantics.normalize_word(value).unwrap())
+            );
+        }
+        for count in [-1, 32, 64] {
+            let expression = bin("<<", Expr::IntLit(0), Expr::IntLit(count));
+            assert_eq!(
+                simplify_expr_with_semantics(expression.clone(), semantics),
+                expression
+            );
+        }
+    }
+
+    #[test]
+    fn every_profile_uses_word32_folding_for_globals_and_propagated_values() {
+        let source = "var result: Int = 2147483647 + 1\nfn main()->Int{let value:Int=4294967295;return value+1;}";
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            optimize_with_linkage_and_semantics(
+                &mut module.decls,
+                Some("main"),
+                profile,
+                false,
+                IntegerSemantics::Word32,
+            );
+            let global = module
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Global { init, .. } => init.as_deref(),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(global, &Expr::IntLit(i32::MIN.into()), "{profile:?}");
+            for body in fn_bodies_mut(&mut module.decls) {
+                let mut body = body.clone();
+                for stmt in &mut body {
+                    map_stmt_mut(stmt, &mut |expr| {
+                        *expr = fold_expr_with_semantics(expr.clone(), IntegerSemantics::Word32);
+                    });
+                }
+                let mut pending: Vec<_> = body.iter().collect();
+                let mut returns = Vec::new();
+                while let Some(stmt) = pending.pop() {
+                    match stmt {
+                        Stmt::Return(value) => returns.push(value.as_ref()),
+                        Stmt::Loop { body, .. } => pending.extend(body),
+                        Stmt::If {
+                            then_body,
+                            else_body,
+                            ..
+                        } => {
+                            pending.extend(then_body);
+                            pending.extend(else_body);
+                        }
+                        Stmt::Match { arms, .. } => {
+                            for arm in arms {
+                                pending.extend(&arm.body);
+                            }
+                        }
+                        Stmt::Try { body, catches } => {
+                            pending.extend(body);
+                            for catch in catches {
+                                pending.extend(&catch.body);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                assert!(
+                    !returns.is_empty(),
+                    "missing return for {profile:?}: {body:?}"
+                );
+                assert!(
+                    returns
+                        .iter()
+                        .all(|value| matches!(value, Some(Expr::IntLit(0)))),
+                    "{profile:?}: {body:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn hardened_block_array_keeps_local_type_and_result_scope() {
         let mut decls = vec![Decl::Function {
             name: "main".into(),
@@ -2573,7 +2752,7 @@ mod tests {
             };
             let original = bin_expr(op, exit.clone(), rhs.clone());
             assert_eq!(
-                simplify_binary_expr(original.clone(), op, &exit, &rhs),
+                simplify_binary_expr(original.clone(), op, &exit, &rhs, IntegerSemantics::Word64),
                 original
             );
         }
@@ -2626,6 +2805,7 @@ mod tests {
 
     use crate::core_ir::{CatchArm, Decl, Expr, LoopKind, Stmt, Typ};
     use crate::emit_profile::EmitProfile;
+    use crate::integer_semantics::IntegerSemantics;
 
     fn make_fn(name: &str, body: Vec<Stmt>) -> Decl {
         Decl::Function {
@@ -2773,7 +2953,7 @@ mod tests {
         })
         .collect();
         let original = decls.clone();
-        fold_constants_in_decls(&mut decls);
+        fold_constants_in_decls(&mut decls, IntegerSemantics::Word64);
         assert_eq!(decls, original);
     }
 

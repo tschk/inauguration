@@ -1,5 +1,6 @@
 //! Fold bounded, pure global initializer calls before native data layout.
 use crate::core_ir::{Decl, Expr, Stmt, Typ};
+use crate::integer_semantics::IntegerSemantics;
 use std::collections::{HashMap, HashSet};
 
 fn value_nodes(value: &Expr) -> usize {
@@ -233,6 +234,7 @@ struct Eval<'a> {
     fuel: usize,
     depth: usize,
     strict: bool,
+    semantics: IntegerSemantics,
 }
 impl Eval<'_> {
     fn step(&mut self) -> Option<()> {
@@ -304,11 +306,10 @@ impl Eval<'_> {
                     .find(|(field, _)| field == name)
                     .map(|(_, value)| value);
             }
-            Expr::UnitLit
-            | Expr::IntLit(_)
-            | Expr::BoolLit(_)
-            | Expr::FloatLit(_)
-            | Expr::StringLit(_) => expr.clone(),
+            Expr::IntLit(value) => Expr::IntLit(self.semantics.normalize_word(*value)?),
+            Expr::UnitLit | Expr::BoolLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) => {
+                expr.clone()
+            }
             Expr::Ident(name) => {
                 if let Some(value) = env.get(name) {
                     return bounded(&value.0).then(|| value.0.clone());
@@ -384,31 +385,25 @@ impl Eval<'_> {
                         return Some(Expr::BoolLit(*lhs || *rhs));
                     }
                 }
-                // Core IR integers use i64; narrower Rust widths retain the existing frontend semantics.
                 if self.strict {
                     if let (Expr::IntLit(lhs), Expr::IntLit(rhs)) = (&lhs, &rhs) {
-                        let checked = match op.as_str() {
-                            "+" | "add" => Some(lhs.checked_add(*rhs)),
-                            "-" | "sub" => Some(lhs.checked_sub(*rhs)),
-                            "*" | "mul" => Some(lhs.checked_mul(*rhs)),
-                            "/" | "div" => Some(lhs.checked_div(*rhs)),
-                            "%" | "mod" => Some(lhs.checked_rem(*rhs)),
-                            "<<" | "shl" => Some(
-                                u32::try_from(*rhs)
-                                    .ok()
-                                    .filter(|count| *count < 64)
-                                    .and_then(|count| lhs.checked_shl(count)),
-                            ),
-                            ">>" | "shr" => Some(
-                                u32::try_from(*rhs)
-                                    .ok()
-                                    .filter(|count| *count < 64)
-                                    .and_then(|count| lhs.checked_shr(count)),
-                            ),
-                            _ => None,
-                        };
-                        if let Some(value) = checked {
-                            return value.map(Expr::IntLit);
+                        if matches!(
+                            op.as_str(),
+                            "+" | "add"
+                                | "-"
+                                | "sub"
+                                | "*"
+                                | "mul"
+                                | "/"
+                                | "div"
+                                | "%"
+                                | "mod"
+                                | "<<"
+                                | "shl"
+                                | ">>"
+                                | "shr"
+                        ) {
+                            return self.semantics.fold_binary(op, *lhs, *rhs);
                         }
                     }
                 }
@@ -427,7 +422,7 @@ impl Eval<'_> {
                 let value = self.expr(expr, env)?;
                 if self.strict && matches!(op.as_str(), "-" | "neg") {
                     if let Expr::IntLit(value) = value {
-                        return value.checked_neg().map(Expr::IntLit);
+                        return self.semantics.fold_unary(op, value);
                     }
                 }
                 Expr::Unary {
@@ -460,7 +455,13 @@ impl Eval<'_> {
                     && args.len() == 2
                 {
                     let value = self.expr(&args[0], env)?;
-                    let Expr::IntLit(count) = self.expr(&args[1], env)? else {
+                    // Repeat counts are checked allocation sizes, not machine-word
+                    // arithmetic. Restore the value context even if count evaluation fails.
+                    let semantics = self.semantics;
+                    self.semantics = IntegerSemantics::Word64;
+                    let count = self.expr(&args[1], env);
+                    self.semantics = semantics;
+                    let Expr::IntLit(count) = count? else {
                         return None;
                     };
                     let count = usize::try_from(count).ok()?;
@@ -497,7 +498,7 @@ impl Eval<'_> {
             }
             _ => return None,
         };
-        let value = crate::core_opt::fold_expr(value);
+        let value = crate::core_opt::fold_expr_with_semantics(value, self.semantics);
         if !bounded(&value) {
             return None;
         }
@@ -653,7 +654,15 @@ impl Eval<'_> {
     }
 }
 
-pub(crate) fn lower_inline_constants(decls: &mut [Decl]) {
+#[cfg(test)]
+fn lower_inline_constants(decls: &mut [Decl]) {
+    lower_inline_constants_with_semantics(decls, IntegerSemantics::Word64);
+}
+
+pub(crate) fn lower_inline_constants_with_semantics(
+    decls: &mut [Decl],
+    semantics: IntegerSemantics,
+) {
     let mut present = false;
     crate::core_opt::map_decl_exprs_mut(decls, &mut |expr| {
         present |= matches!(expr,Expr::Call {callee,..} if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::INLINE_CONST));
@@ -718,6 +727,7 @@ pub(crate) fn lower_inline_constants(decls: &mut [Decl]) {
                 fuel: 65536,
                 depth: 0,
                 strict: true,
+                semantics,
             };
             if let Some(value) = eval.expr(expr, &mut HashMap::new()) {
                 *expr = value;
@@ -726,7 +736,15 @@ pub(crate) fn lower_inline_constants(decls: &mut [Decl]) {
     });
 }
 
+#[cfg(test)]
 pub(super) fn fold_static_initializers(decls: &mut [Decl]) {
+    fold_static_initializers_with_semantics(decls, IntegerSemantics::Word64);
+}
+
+pub(super) fn fold_static_initializers_with_semantics(
+    decls: &mut [Decl],
+    semantics: IntegerSemantics,
+) {
     let names = crate::core_bindings::module_names(decls);
     for decl in decls.iter_mut() {
         if let Decl::Global {
@@ -775,6 +793,7 @@ pub(super) fn fold_static_initializers(decls: &mut [Decl]) {
                 fuel: 65536,
                 depth: 0,
                 strict: false,
+                semantics,
             };
             if let Some(value) = eval.expr(init, &mut HashMap::new()) {
                 **init = value;
@@ -786,6 +805,146 @@ pub(super) fn fold_static_initializers(decls: &mut [Decl]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn target_word_constants_reach_named_global_and_inline_values() {
+        use IntegerSemantics::{Word32, Word64};
+        for (semantics, expected_word, expected_branch) in
+            [(Word32, i64::from(i32::MIN), 42), (Word64, 2147483648, 0)]
+        {
+            let mut module = crate::in_lang_parse::parse_in_source(
+                "const named:Int=2147483647+1;\nvar selected:Int=if named<0{42}else{0};\nfn main()->Int{return named;}",
+            ).unwrap();
+            crate::lower_core::desugar_module_with_semantics(&mut module, semantics);
+            assert!(
+                module.decls.iter().any(|decl| matches!(decl,
+                    Decl::Global { name, init: Some(value), .. }
+                    if name == "selected" && value.as_ref() == &Expr::IntLit(expected_branch)
+                )),
+                "{semantics:?}: {:?}",
+                module.decls
+            );
+            crate::core_opt::optimize_with_linkage_and_semantics(
+                &mut module.decls,
+                Some("main"),
+                crate::emit_profile::EmitProfile::Default,
+                false,
+                semantics,
+            );
+            let main = module
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Function { name, body, .. } if name == "main" => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                main.as_slice(),
+                &[Stmt::Return(Some(Expr::IntLit(expected_word)))]
+            );
+
+            let expression = inline(
+                vec![Stmt::Let(
+                    "local".into(),
+                    Some(Typ::Int),
+                    Expr::Binary {
+                        op: "+".into(),
+                        lhs: Box::new(Expr::IntLit(2147483647)),
+                        rhs: Box::new(Expr::IntLit(1)),
+                    },
+                )],
+                Expr::Conditional {
+                    cond: Box::new(Expr::Binary {
+                        op: "<".into(),
+                        lhs: Box::new(Expr::Ident("local".into())),
+                        rhs: Box::new(Expr::IntLit(0)),
+                    }),
+                    then_expr: Box::new(Expr::IntLit(42)),
+                    else_expr: Box::new(Expr::IntLit(0)),
+                },
+            );
+            let globals = HashMap::new();
+            let functions = HashSet::new();
+            let result = Eval {
+                globals: &globals,
+                functions: &functions,
+                active: HashSet::new(),
+                fuel: 65536,
+                depth: 0,
+                strict: true,
+                semantics,
+            }
+            .expr(&expression, &mut HashMap::new());
+            assert_eq!(result, Some(Expr::IntLit(expected_branch)), "{semantics:?}");
+        }
+    }
+
+    #[test]
+    fn repeat_counts_do_not_wrap_as_machine_words() {
+        let globals = HashMap::new();
+        let functions = HashSet::new();
+        for strict in [false, true] {
+            let mut eval = Eval {
+                globals: &globals,
+                functions: &functions,
+                active: HashSet::new(),
+                fuel: 65536,
+                depth: 0,
+                strict,
+                semantics: IntegerSemantics::Word32,
+            };
+            let repeat = |count| Expr::Call {
+                callee: Box::new(Expr::Ident("array-repeat".into())),
+                args: vec![Expr::IntLit(42), count],
+            };
+            let huge = Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(Expr::IntLit(0xFFFFFFFF)),
+                rhs: Box::new(Expr::IntLit(1)),
+            };
+            assert_eq!(eval.expr(&repeat(huge), &mut HashMap::new()), None);
+            assert_eq!(eval.semantics, IntegerSemantics::Word32);
+            assert_eq!(
+                eval.expr(&repeat(Expr::IntLit(2)), &mut HashMap::new()),
+                Some(Expr::ArrayLit(vec![Expr::IntLit(42); 2]))
+            );
+            assert_eq!(
+                eval.expr(&repeat(Expr::IntLit(-1)), &mut HashMap::new()),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn target_word_bit_patterns_compare_signed_without_accepting_wide_literals() {
+        let globals = HashMap::new();
+        let functions = HashSet::new();
+        for strict in [false, true] {
+            let mut eval = Eval {
+                globals: &globals,
+                functions: &functions,
+                active: HashSet::new(),
+                fuel: 65536,
+                depth: 0,
+                strict,
+                semantics: IntegerSemantics::Word32,
+            };
+            let expr = Expr::Binary {
+                op: "<".into(),
+                lhs: Box::new(Expr::IntLit(0xFFFFFFFF)),
+                rhs: Box::new(Expr::IntLit(0)),
+            };
+            assert_eq!(
+                eval.expr(&expr, &mut HashMap::new()),
+                Some(Expr::BoolLit(true))
+            );
+            assert_eq!(
+                eval.expr(&Expr::IntLit(0x100000000), &mut HashMap::new()),
+                None
+            );
+        }
+    }
+
     fn inline(body: Vec<Stmt>, result: Expr) -> Expr {
         Expr::Call {
             callee: Box::new(Expr::Ident(crate::core_ir::INLINE_CONST.into())),
@@ -805,6 +964,7 @@ mod tests {
             fuel,
             depth: 0,
             strict: true,
+            semantics: IntegerSemantics::Word64,
         }
         .expr(expr, &mut HashMap::new())
     }
@@ -1223,6 +1383,7 @@ mod tests {
                 fuel: 65536,
                 depth: 0,
                 strict: false,
+                semantics: IntegerSemantics::Word64,
             };
             assert!(eval.expr(init, &mut empty).is_none(), "{source}");
         }

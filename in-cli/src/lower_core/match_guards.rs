@@ -3,6 +3,16 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 pub(crate) fn prepared_native_module(module: &UnifiedModule) -> Cow<'_, UnifiedModule> {
+    prepared_native_module_with_semantics(
+        module,
+        crate::integer_semantics::IntegerSemantics::Word64,
+    )
+}
+
+pub(crate) fn prepared_native_module_with_semantics(
+    module: &UnifiedModule,
+    semantics: crate::integer_semantics::IntegerSemantics,
+) -> Cow<'_, UnifiedModule> {
     let whole_bindings = module
         .decls
         .iter()
@@ -32,7 +42,7 @@ pub(crate) fn prepared_native_module(module: &UnifiedModule) -> Cow<'_, UnifiedM
     if prepare_native_patterns(&mut lowered.decls, &names, &mut counter, &structs) {
         lower_members(&mut lowered.decls, &names, &mut counter, true);
     }
-    super::lower_named_constants(&mut lowered.decls);
+    super::lower_named_constants_with_semantics(&mut lowered.decls, semantics);
     super::lower_value_spills(&mut lowered.decls);
     crate::core_bindings::normalize_decls(&mut lowered.decls);
     crate::typecheck::TypeChecker::new().resolve_complements(&mut lowered);

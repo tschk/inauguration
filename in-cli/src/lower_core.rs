@@ -10,14 +10,24 @@ mod constant_values;
 mod static_initializers;
 #[path = "lower_core/value_spills.rs"]
 mod value_spills;
-pub(crate) use constant_values::lower_named_constants;
-pub(crate) use static_initializers::lower_inline_constants;
+pub(crate) use constant_values::lower_named_constants_with_semantics;
+pub(crate) use static_initializers::lower_inline_constants_with_semantics;
 #[path = "lower_core/match_guards.rs"]
 mod match_guards;
-pub(crate) use match_guards::{lower_guarded_decls, prepared_native_module, value_pattern_test};
+pub(crate) use match_guards::{
+    lower_guarded_decls, prepared_native_module, prepared_native_module_with_semantics,
+    value_pattern_test,
+};
 pub(crate) use value_spills::lower_value_spills;
 
 pub fn desugar_module(module: &mut UnifiedModule) {
+    desugar_module_with_semantics(module, crate::integer_semantics::IntegerSemantics::Word64);
+}
+
+pub fn desugar_module_with_semantics(
+    module: &mut UnifiedModule,
+    semantics: crate::integer_semantics::IntegerSemantics,
+) {
     crate::core_bindings::normalize_decls(&mut module.decls);
     lower_guarded_decls(&mut module.decls);
     let mut method_map: HashMap<String, String> = HashMap::new();
@@ -81,9 +91,9 @@ pub fn desugar_module(module: &mut UnifiedModule) {
             }
         }
     }
-    lower_inline_constants(&mut new_decls);
-    static_initializers::fold_static_initializers(&mut new_decls);
-    lower_named_constants(&mut new_decls);
+    lower_inline_constants_with_semantics(&mut new_decls, semantics);
+    static_initializers::fold_static_initializers_with_semantics(&mut new_decls, semantics);
+    lower_named_constants_with_semantics(&mut new_decls, semantics);
     lower_value_spills(&mut new_decls);
 
     let mut closure_counter = 0usize;

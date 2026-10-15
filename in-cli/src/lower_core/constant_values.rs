@@ -2,6 +2,7 @@
 //! Runtime read-only globals keep their storage and initialization semantics.
 
 use crate::core_ir::{Decl, Expr, Stmt};
+use crate::integer_semantics::IntegerSemantics;
 use std::collections::{HashMap, HashSet};
 
 pub(super) fn has_named_constants(decls: &[Decl]) -> bool {
@@ -16,7 +17,10 @@ pub(super) fn has_named_constants(decls: &[Decl]) -> bool {
     })
 }
 
-pub(crate) fn lower_named_constants(decls: &mut [Decl]) {
+pub(crate) fn lower_named_constants_with_semantics(
+    decls: &mut [Decl],
+    semantics: IntegerSemantics,
+) {
     if !has_named_constants(decls) {
         return;
     }
@@ -42,7 +46,13 @@ pub(crate) fn lower_named_constants(decls: &mut [Decl]) {
     let mut names: Vec<_> = definitions.keys().cloned().collect();
     names.sort_unstable();
     for name in names {
-        resolve_name(&name, &definitions, &mut HashSet::new(), &mut values);
+        resolve_name(
+            &name,
+            &definitions,
+            &mut HashSet::new(),
+            &mut values,
+            semantics,
+        );
     }
     for decl in decls {
         match decl {
@@ -62,38 +72,42 @@ fn resolve(
     defs: &HashMap<String, Option<Expr>>,
     active: &mut HashSet<String>,
     cache: &mut HashMap<String, Option<Expr>>,
+    semantics: IntegerSemantics,
 ) -> Option<Expr> {
     let value = match expr {
-        Expr::UnitLit
-        | Expr::IntLit(_)
-        | Expr::FloatLit(_)
-        | Expr::BoolLit(_)
-        | Expr::StringLit(_) => expr.clone(),
-        Expr::Ident(name) => return resolve_name(name, defs, active, cache),
+        Expr::IntLit(value) => Expr::IntLit(semantics.normalize_word(*value)?),
+        Expr::UnitLit | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) => expr.clone(),
+        Expr::Ident(name) => return resolve_name(name, defs, active, cache, semantics),
         Expr::Unary { op, expr } => Expr::Unary {
             op: op.clone(),
-            expr: Box::new(resolve(expr, defs, active, cache)?),
+            expr: Box::new(resolve(expr, defs, active, cache, semantics)?),
         },
         Expr::Binary { op, lhs, rhs } => Expr::Binary {
             op: op.clone(),
-            lhs: Box::new(resolve(lhs, defs, active, cache)?),
-            rhs: Box::new(resolve(rhs, defs, active, cache)?),
+            lhs: Box::new(resolve(lhs, defs, active, cache, semantics)?),
+            rhs: Box::new(resolve(rhs, defs, active, cache, semantics)?),
         },
         Expr::ArrayLit(items) => Expr::ArrayLit(
             items
                 .iter()
-                .map(|expr| resolve(expr, defs, active, cache))
+                .map(|expr| resolve(expr, defs, active, cache, semantics))
                 .collect::<Option<Vec<_>>>()?,
         ),
         Expr::StructInit { name, fields } => Expr::StructInit {
             name: name.clone(),
             fields: fields
                 .iter()
-                .map(|(name, value)| Some((name.clone(), resolve(value, defs, active, cache)?)))
+                .map(|(name, value)| {
+                    Some((
+                        name.clone(),
+                        resolve(value, defs, active, cache, semantics)?,
+                    ))
+                })
                 .collect::<Option<Vec<_>>>()?,
         },
         Expr::Field { base, name } => {
-            let Expr::StructInit { fields, .. } = resolve(base, defs, active, cache)? else {
+            let Expr::StructInit { fields, .. } = resolve(base, defs, active, cache, semantics)?
+            else {
                 return None;
             };
             return fields
@@ -102,19 +116,31 @@ fn resolve(
                 .map(|(_, value)| value);
         }
         Expr::Index { base, index } => {
-            let Expr::ArrayLit(items) = resolve(base, defs, active, cache)? else {
+            let Expr::ArrayLit(items) = resolve(base, defs, active, cache, semantics)? else {
                 return None;
             };
-            let index =
-                usize::try_from(super::const_int(&resolve(index, defs, active, cache)?)?).ok()?;
+            let index = usize::try_from(super::const_int(&resolve(
+                index, defs, active, cache, semantics,
+            )?)?)
+            .ok()?;
             return items.get(index).cloned();
         }
-        Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if matches!(name.as_str(), "array-repeat" | "range-exclusive" | "range-inclusive" | "range-from" | "range-to" | "range-to-inclusive" | "range-full")) => {
+        Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if matches!(name.as_str(), "array-repeat" | "range-exclusive" | "range-inclusive" | "range-from" | "range-to" | "range-to-inclusive" | "range-full")) =>
+        {
             Expr::Call {
                 callee: callee.clone(),
                 args: args
                     .iter()
-                    .map(|expr| resolve(expr, defs, active, cache))
+                    .enumerate()
+                    .map(|(index, expr)| {
+                        if index == 1 && matches!(callee.as_ref(), Expr::Ident(name) if name == "array-repeat") {
+                            // A count alias must not reuse a machine-word value cached
+                            // for ordinary expressions in this declaration.
+                            resolve(expr, defs, active, &mut HashMap::new(), IntegerSemantics::Word64)
+                        } else {
+                            resolve(expr, defs, active, cache, semantics)
+                        }
+                    })
                     .collect::<Option<Vec<_>>>()?,
             }
         }
@@ -122,7 +148,7 @@ fn resolve(
     };
     // Fold each resolved node before caching it, so repeated scalar aliases
     // form a DAG of small values rather than exponentially growing expressions.
-    let value = crate::core_opt::fold_expr(value);
+    let value = crate::core_opt::fold_expr_with_semantics(value, semantics);
     let mut pending = vec![&value];
     let mut nodes = 0;
     while let Some(expr) = pending.pop() {
@@ -144,6 +170,7 @@ fn resolve_name(
     defs: &HashMap<String, Option<Expr>>,
     active: &mut HashSet<String>,
     cache: &mut HashMap<String, Option<Expr>>,
+    semantics: IntegerSemantics,
 ) -> Option<Expr> {
     if let Some(value) = cache.get(name) {
         return value.clone();
@@ -154,7 +181,7 @@ fn resolve_name(
     let value = defs
         .get(name)
         .and_then(Option::as_ref)
-        .and_then(|expr| resolve(expr, defs, active, cache));
+        .and_then(|expr| resolve(expr, defs, active, cache, semantics));
     active.remove(name);
     cache.insert(name.to_string(), value.clone());
     value

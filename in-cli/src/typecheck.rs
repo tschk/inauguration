@@ -2684,6 +2684,18 @@ fn typecheck_polyglot_entrypoints(module: &UnifiedModule) -> Result<(), String> 
 }
 
 pub fn normalize_module(parser_id: ParserId, module: &UnifiedModule) -> UnifiedModule {
+    normalize_module_with_semantics(
+        parser_id,
+        module,
+        crate::integer_semantics::IntegerSemantics::Word64,
+    )
+}
+
+pub fn normalize_module_with_semantics(
+    parser_id: ParserId,
+    module: &UnifiedModule,
+    semantics: crate::integer_semantics::IntegerSemantics,
+) -> UnifiedModule {
     let decls = module
         .decls
         .iter()
@@ -2697,7 +2709,7 @@ pub fn normalize_module(parser_id: ParserId, module: &UnifiedModule) -> UnifiedM
         TypeChecker::new().resolve_c_value_promotions(&mut normalized);
     }
     if parser_id == ParserId::Rust {
-        crate::lower_core::lower_inline_constants(&mut normalized.decls);
+        crate::lower_core::lower_inline_constants_with_semantics(&mut normalized.decls, semantics);
         TypeChecker::new().resolve_complements(&mut normalized);
         refuse_rust_array_tuple_values(&mut normalized);
     }

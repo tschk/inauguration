@@ -150,7 +150,10 @@ impl Compiler {
         self.last_unified = None;
         let mut unified = crate::in_lang_parse::parse_in_library_source(source)
             .map_err(CompileError::Frontend)?;
-        crate::lower_core::desugar_module(&mut unified);
+        crate::lower_core::desugar_module_with_semantics(
+            &mut unified,
+            crate::target::integer_semantics(Some(&self.config.target)),
+        );
         let mut module = lower_unified_to_ir(&unified)?;
         self.last_unified = Some(unified);
 
@@ -213,9 +216,12 @@ impl Compiler {
         if self.config.optimization_level != OptimizationLevel::None
             && let Some(unified) = &mut self.last_unified
         {
-            crate::core_opt::optimize_with_entry(
+            crate::core_opt::optimize_with_linkage_and_semantics(
                 &mut unified.decls,
                 self.config.entry_point.as_deref().or(Some("main")),
+                crate::emit_profile::EmitProfile::Default,
+                false,
+                crate::target::integer_semantics(Some(&self.config.target)),
             );
         }
         self.timings.stages.push(StageTime {

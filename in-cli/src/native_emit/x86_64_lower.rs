@@ -397,7 +397,12 @@ fn lower_module_impl(
     layout: X86StringLayout,
     runtime_error_slot: bool,
 ) -> Result<X86_64CompileResult, String> {
-    let prepared = crate::lower_core::prepared_native_module(module);
+    let semantics = if x86_64::is_32bit() {
+        crate::integer_semantics::IntegerSemantics::Word32
+    } else {
+        crate::integer_semantics::IntegerSemantics::Word64
+    };
+    let prepared = crate::lower_core::prepared_native_module_with_semantics(module, semantics);
     let module = prepared.as_ref();
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);

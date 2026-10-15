@@ -438,12 +438,21 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         }
     }
 
-    // Lower module: desugar classes to structs before typecheck
-    crate::lower_core::desugar_module(&mut module);
+    let integer_semantics = if request.target == CompileTarget::Jit {
+        crate::integer_semantics::IntegerSemantics::Word64
+    } else {
+        crate::target::integer_semantics(request.target_triple.as_deref())
+    };
+    // Desugaring and optimization must evaluate constants in the same target word.
+    crate::lower_core::desugar_module_with_semantics(&mut module, integer_semantics);
     if let parser_registry::ResolvedBuildParser::CoreIr(parser_id) = resolved
         && crate::typecheck::uses_family_typecheck(parser_id)
     {
-        module = crate::typecheck::normalize_module(parser_id, &module);
+        module = crate::typecheck::normalize_module_with_semantics(
+            parser_id,
+            &module,
+            integer_semantics,
+        );
     }
 
     if request.target != CompileTarget::Jit {
@@ -551,11 +560,12 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         let keep_all = request.linkage == crate::native_emit::NativeLinkage::StaticLib
             || matches!(request.emit, Some(OwnedEmit::Sci { .. }))
             || (matches!(request.target, CompileTarget::Jit) && entry.is_none());
-        crate::core_opt::optimize_with_linkage(
+        crate::core_opt::optimize_with_linkage_and_semantics(
             &mut module.decls,
             entry.as_deref(),
             request.profile,
             keep_all,
+            integer_semantics,
         );
         report.typed_function_count = count_functions(&module);
         report.call_edge_count = count_call_edges(&module, &request.module_id);

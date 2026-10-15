@@ -36,6 +36,11 @@ pub struct ThumbCompileResult {
 }
 
 pub fn lower_module(module: &UnifiedModule, entry: &str) -> Result<ThumbCompileResult, String> {
+    let prepared = crate::lower_core::prepared_native_module_with_semantics(
+        module,
+        crate::integer_semantics::IntegerSemantics::Word32,
+    );
+    let module = prepared.as_ref();
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
     if !functions.contains_key(entry) {

@@ -5,6 +5,15 @@ pub const NATIVE_BACKEND_NOT_IMPLEMENTED: &str = "native-backend-not-implemented
 pub const NATIVE_AARCH64_SUBSET: &str = "native-aarch64-subset";
 pub const NATIVE_OBJECT_SUBSET: &str = "native-object-subset";
 
+/// Integer carriers used by the implemented native target paths.
+pub fn integer_semantics(triple: Option<&str>) -> crate::integer_semantics::IntegerSemantics {
+    use crate::integer_semantics::IntegerSemantics;
+    match triple.and_then(|triple| triple.split('-').next()) {
+        Some("thumbv8m.main" | "i386" | "i686" | "armv7" | "wasm32") => IntegerSemantics::Word32,
+        _ => IntegerSemantics::Word64,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TargetSpec {
     pub name: &'static str,
@@ -571,5 +580,32 @@ mod tests {
         assert_eq!(spec.artifact_kind, "mach-o-executable");
         assert_eq!(spec.host_triple, Some("aarch64-apple-darwin"));
         assert!(!spec.backend_artifact_supported);
+    }
+}
+
+#[cfg(test)]
+mod integer_semantics_tests {
+    use super::integer_semantics;
+    use crate::integer_semantics::IntegerSemantics::{Word32, Word64};
+
+    #[test]
+    fn implemented_native_integer_carriers_follow_the_selected_target() {
+        for triple in [
+            "thumbv8m.main-none-eabi",
+            "i386-unknown-none",
+            "i686-unknown-none",
+            "armv7-unknown-linux-gnueabihf",
+            "wasm32-unknown-unknown",
+        ] {
+            assert_eq!(integer_semantics(Some(triple)), Word32, "{triple}");
+        }
+        for triple in [
+            None,
+            Some("native"),
+            Some("x86_64-unknown-none"),
+            Some("aarch64-apple-darwin"),
+        ] {
+            assert_eq!(integer_semantics(triple), Word64);
+        }
     }
 }

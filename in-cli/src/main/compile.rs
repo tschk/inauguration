@@ -326,11 +326,12 @@ fn cmd_emit_boot(
     // expose every defined kernel function, because dynamically linked apps
     // bind export-only leaves (e.g. ticks-now) that nothing in the kernel
     // calls. Keep all functions instead of pruning to entry-reachable ones.
-    inauguration::core_opt::optimize_with_linkage(
+    inauguration::core_opt::optimize_with_linkage_and_semantics(
         &mut module.decls,
         Some(entry_name),
         inauguration::emit_profile::EmitProfile::Default,
         true,
+        inauguration::target::integer_semantics(target_triple),
     );
 
     let (_mir, code, kernel_exports, data) =

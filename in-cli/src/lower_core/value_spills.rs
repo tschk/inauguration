@@ -201,30 +201,69 @@ pub(crate) fn lower_value_spills(decls: &mut [Decl]) {
     lower.members(decls);
 }
 
+// Distinguish an invalid checked constant from a genuinely runtime count.
+// constant_int alone returns None for both arithmetic overflow and unknown values.
+fn numeric_constant_shape(expr: &Expr, constants: &HashMap<String, i64>) -> bool {
+    match expr {
+        Expr::IntLit(_) => true,
+        Expr::Ident(name) => constants.contains_key(name),
+        Expr::Unary { op, expr } if matches!(op.as_str(), "-" | "neg" | "~" | "bitnot") => {
+            numeric_constant_shape(expr, constants)
+        }
+        Expr::Binary { op, lhs, rhs }
+            if matches!(
+                op.as_str(),
+                "+" | "add"
+                    | "-"
+                    | "sub"
+                    | "*"
+                    | "mul"
+                    | "/"
+                    | "div"
+                    | "%"
+                    | "mod"
+                    | "&"
+                    | "band"
+                    | "|"
+                    | "bor"
+                    | "^"
+                    | "xor"
+                    | "<<"
+                    | "shl"
+                    | ">>"
+                    | "shr"
+            ) =>
+        {
+            numeric_constant_shape(lhs, constants) && numeric_constant_shape(rhs, constants)
+        }
+        _ => false,
+    }
+}
+
 fn constant_int(expr: &Expr, constants: &HashMap<String, i64>) -> Option<i64> {
     match expr {
         Expr::Ident(name) => constants.get(name).copied(),
         Expr::Unary { op, expr } => {
             let value = constant_int(expr, constants)?;
             match op.as_str() {
-                "-" => value.checked_neg(),
-                "~" => Some(!value),
+                "-" | "neg" => value.checked_neg(),
+                "~" | "bitnot" => Some(!value),
                 _ => None,
             }
         }
         Expr::Binary { op, lhs, rhs } => {
             let (lhs, rhs) = (constant_int(lhs, constants)?, constant_int(rhs, constants)?);
             match op.as_str() {
-                "+" => lhs.checked_add(rhs),
-                "-" => lhs.checked_sub(rhs),
-                "*" => lhs.checked_mul(rhs),
-                "/" => lhs.checked_div(rhs),
-                "%" => lhs.checked_rem(rhs),
-                "&" => Some(lhs & rhs),
-                "|" => Some(lhs | rhs),
-                "^" => Some(lhs ^ rhs),
-                "<<" => lhs.checked_shl(u32::try_from(rhs).ok()?),
-                ">>" => lhs.checked_shr(u32::try_from(rhs).ok()?),
+                "+" | "add" => lhs.checked_add(rhs),
+                "-" | "sub" => lhs.checked_sub(rhs),
+                "*" | "mul" => lhs.checked_mul(rhs),
+                "/" | "div" => lhs.checked_div(rhs),
+                "%" | "mod" => lhs.checked_rem(rhs),
+                "&" | "band" => Some(lhs & rhs),
+                "|" | "bor" => Some(lhs | rhs),
+                "^" | "xor" => Some(lhs ^ rhs),
+                "<<" | "shl" => lhs.checked_shl(u32::try_from(rhs).ok()?),
+                ">>" | "shr" => lhs.checked_shr(u32::try_from(rhs).ok()?),
                 _ => None,
             }
         }
@@ -300,6 +339,9 @@ impl Lower {
                 Decl::Global {
                     init: Some(expr), ..
                 } if is_repeat(expr) => {
+                    if self.reject_invalid_repeat(expr) {
+                        continue;
+                    }
                     if let Expr::Call { args, .. } = expr.as_mut()
                         && args.len() == 2
                         && matches!(
@@ -319,12 +361,34 @@ impl Lower {
         }
     }
 
+    fn reject_invalid_repeat(&self, expr: &mut Expr) -> bool {
+        let Expr::Call { callee, args } = expr else {
+            return false;
+        };
+        if !matches!(callee.as_ref(), Expr::Ident(name) if name == "array-repeat")
+            || self.facts.function_signature("array-repeat").is_some()
+            || args.len() != 2
+        {
+            return false;
+        }
+        if numeric_constant_shape(&args[1], &self.constants) && self.count(&args[1]).is_none() {
+            // Keep this refusal stable through later machine-word optimization:
+            // a huge structural size must never wrap into a small/empty array.
+            **callee = Expr::Ident("__unsupported_array_repeat_count".into());
+            return true;
+        }
+        false
+    }
+
     fn count(&self, expr: &Expr) -> Option<usize> {
         let count = usize::try_from(constant_int(expr, &self.constants)?).ok()?;
         (count <= MAX_EXPANDED_ITEMS).then_some(count)
     }
 
     fn expr(&mut self, expr: &mut Expr, out: &mut Vec<Stmt>) {
+        if self.reject_invalid_repeat(expr) {
+            return;
+        }
         // Failed compile-time evaluation must remain a refusal, never runtime work.
         if matches!(expr,Expr::Call {callee,..} if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::INLINE_CONST))
         {
@@ -727,6 +791,77 @@ impl Lower {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn structural_repeat_checks_core_ir_operator_aliases() {
+        let constants = HashMap::new();
+        for (op, lhs, rhs, expected) in [
+            ("add", 1, 1, Some(2)),
+            ("mul", i64::MAX, 2, None),
+            ("div", 1, 0, None),
+            ("shl", 1, 64, None),
+        ] {
+            let expression = Expr::Binary {
+                op: op.into(),
+                lhs: Box::new(Expr::IntLit(lhs)),
+                rhs: Box::new(Expr::IntLit(rhs)),
+            };
+            assert!(numeric_constant_shape(&expression, &constants));
+            assert_eq!(constant_int(&expression, &constants), expected);
+        }
+    }
+
+    #[test]
+    fn structural_repeat_refusal_survives_target_word_optimization() {
+        use crate::emit_profile::EmitProfile::{Default, Harden, Lean};
+        use crate::integer_semantics::IntegerSemantics::{Word32, Word64};
+        for semantics in [Word32, Word64] {
+            for profile in [Default, Lean, Harden] {
+                for count in [
+                    "0xffffffff+1",
+                    "4097",
+                    "-1",
+                    "(2147483647*2147483647)*4",
+                    "1/0",
+                ] {
+                    for source in [
+                        format!(
+                            "fn main()->Int{{let values=array-repeat(42,{count});return array_len(values);}}"
+                        ),
+                        format!(
+                            "var values:[Int]=array-repeat(42,{count});\nfn main()->Int{{return array_len(values);}}"
+                        ),
+                    ] {
+                        let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                        crate::lower_core::desugar_module_with_semantics(&mut module, semantics);
+                        crate::core_opt::optimize_with_linkage_and_semantics(
+                            &mut module.decls,
+                            Some("main"),
+                            profile,
+                            false,
+                            semantics,
+                        );
+                        let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+                        assert!(!report.ok, "{semantics:?}/{profile:?}: {source}");
+                    }
+                }
+                let mut module = crate::in_lang_parse::parse_in_source(
+                    "fn main()->Int{let values=array-repeat(21,2);return values[0]+values[1];}",
+                )
+                .unwrap();
+                crate::lower_core::desugar_module_with_semantics(&mut module, semantics);
+                crate::core_opt::optimize_with_linkage_and_semantics(
+                    &mut module.decls,
+                    Some("main"),
+                    profile,
+                    false,
+                    semantics,
+                );
+                let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+                assert!(report.ok, "{semantics:?}/{profile:?}: {report:?}");
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

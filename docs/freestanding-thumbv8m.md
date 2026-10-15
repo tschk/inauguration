@@ -34,6 +34,12 @@ Generic Cortex-M33 freestanding target support in Inauguration.
 
 Supported: structs, fixed-size array locals with index/load/store, >4 params (AAPCS stack args), short-circuit `&&`/`||`, `break`.
 Rejected for now: strings, floats, closures, heap, array type annotations with explicit length.
+`Int` uses a signed 32-bit machine word. Arithmetic and constant evaluation use
+the same 32-bit wrapping addition, subtraction and multiplication; comparisons
+interpret the word as signed. Unsigned literals through `0xffffffff` remain
+accepted as word bit patterns. Harden-profile generated integer constants use
+that same width. Repeat counts remain checked allocation sizes.
+
 `load64` / `store64` touch the low 32-bit word only (freestanding `Int` is machine word).
 
 ## ABI contract (MVP)
