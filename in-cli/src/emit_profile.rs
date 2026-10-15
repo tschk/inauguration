@@ -369,4 +369,10 @@ mod tests {
             ResolvedEmit::Single(EmitProfile::Lean)
         );
     }
+    #[test]
+    fn as_str_mapping() {
+        assert_eq!(EmitProfile::Default.as_str(), "default");
+        assert_eq!(EmitProfile::Harden.as_str(), "harden");
+        assert_eq!(EmitProfile::Lean.as_str(), "lean");
+    }
 }
