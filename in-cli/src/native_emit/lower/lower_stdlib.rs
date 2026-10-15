@@ -875,7 +875,11 @@ pub(crate) fn try_emit_closure_call(
     }
     let site = emitter.len();
     emitter.emit_u32(aarch64::bl(0));
-    pending_calls.push(PendingCall { site, target });
+    pending_calls.push(PendingCall {
+        site,
+        target,
+        kind: super::FunctionReferenceKind::Call,
+    });
     Ok(true)
 }
 

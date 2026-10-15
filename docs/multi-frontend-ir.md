@@ -35,6 +35,12 @@ Rust expression `match` and value-position `if let`, brace-form `.in` matches, a
 
 Native reads resolve declared local, parameter, global, and supported function-address bindings. Core IR symbol names are matched exactly, including names supplied by `.icore` that source-language parsers would not spell as identifiers. A spelling heuristic must not replace a declared value. Unresolved identifiers refuse lowering rather than becoming zero or allocating an uninitialized stack slot.
 
+## Function addresses and indirect calls
+
+Declared functions used as values retain their definitions through optimization and use an `Int` address carrier. AArch64 resolves these addresses relative to the emitted code; out-of-range address sites refuse lowering. `invoke(pointer)`, `invoke1(pointer, value)`, and `invoke2(pointer, first, second)` use the low-level integer calling convention. The pointer and arguments evaluate once, in order, before the call; callback errors propagate through the existing error slot. Arity and argument carriers are checked, and directly named callback targets must match the integer signature.
+
+These intrinsics do not provide typed function pointers or closure capture support. Opaque integer pointers require a valid code address with the matching signature; their provenance cannot be checked statically. Native targets without the runtime error slot refuse indirect calls that require it. Global function-address initializers still refuse native lowering until data initialization can relocate code addresses.
+
 ## Unit values
 
 `UnitLit` represents `()` with type `Void`, distinct from integer zero and an empty array. Rust, `.in`, canonical source, and `.icore` expression `kind: "unit"` retain this type through checking and lowering. Empty-tuple patterns match unit values, including the results of calls, and explicit unit returns evaluate their producers before returning.

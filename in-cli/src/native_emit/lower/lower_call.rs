@@ -33,6 +33,80 @@ pub(crate) fn lower_call(
             "native-lower: unresolved private compiler operation `{target}`"
         ));
     }
+    if matches!(target.as_str(), "invoke" | "invoke1" | "invoke2")
+        && !functions.contains_key(target)
+    {
+        let expected = match target.as_str() {
+            "invoke" => 1,
+            "invoke1" => 2,
+            _ => 3,
+        };
+        if args.len() != expected {
+            return Err(format!(
+                "native-lower: `{target}` requires {expected} arguments"
+            ));
+        }
+        if let Expr::Ident(name) = &args[0]
+            && !ctx.locals.contains_key(name)
+            && !ctx.params.contains_key(name)
+            && !ctx.globals.contains_key(name)
+            && let Some(function) = functions.get(name)
+        {
+            if function.ret.canonical() != Typ::Int
+                || function.params.len() != expected - 1
+                || function
+                    .params
+                    .iter()
+                    .any(|(_, typ)| typ.canonical() != Typ::Int)
+            {
+                return Err("native-lower: indirect calls require an Int scalar signature".into());
+            }
+        } else if native_expr_type(&args[0], ctx, functions).map(|typ| typ.canonical())
+            != Some(Typ::Int)
+        {
+            return Err("native-lower: indirect call target must be an Int address".into());
+        }
+        for arg in &args[1..] {
+            if native_expr_type(arg, ctx, functions).map(|typ| typ.canonical()) != Some(Typ::Int) {
+                return Err("native-lower: indirect arguments must be Int scalars".into());
+            }
+        }
+        let base = ctx.acquire_call_arg_slots(fn_name, expected)?;
+        for (index, arg) in args.iter().enumerate() {
+            lower_expr_into(emitter, ctx, arg, 0, functions, pending_calls, fn_name)?;
+            emitter.emit_u32(aarch64::str64(
+                0,
+                aarch64::REG_SP,
+                ctx.call_arg_temps[base + index],
+            ));
+        }
+        emitter.emit_u32(aarch64::ldr64(
+            16,
+            aarch64::REG_SP,
+            ctx.call_arg_temps[base],
+        ));
+        emitter.emit_u32(aarch64::cmp_reg64(16, aarch64::REG_XZR));
+        let valid = emitter.emit_insn(aarch64::b_cond(1, 0));
+        super::emit_failure_return(emitter, ctx, fn_name)?;
+        emitter.patch_u32(
+            valid,
+            aarch64::b_cond(1, emitter.len() as i32 - valid as i32),
+        );
+        for index in 1..expected {
+            emitter.emit_u32(aarch64::ldr64(
+                (index - 1) as u8,
+                aarch64::REG_SP,
+                ctx.call_arg_temps[base + index],
+            ));
+        }
+        emitter.emit_u32(0xD63F_0000 | (16 << 5));
+        ctx.release_call_arg_temps();
+        super::lower_stmt::emit_error_check(emitter, ctx, fn_name)?;
+        if rd != 0 {
+            emitter.emit_u32(aarch64::mov_reg64(rd, 0));
+        }
+        return Ok(());
+    }
     if target == "vector-clear" && args.len() != 1 {
         return Err("native-lower: vector clear requires one argument".into());
     }
@@ -105,6 +179,7 @@ pub(crate) fn lower_call(
             pending_calls.push(PendingCall {
                 site: call_site,
                 target: target.clone(),
+                kind: super::FunctionReferenceKind::Call,
             });
         }
         if rd != 0 {
@@ -222,6 +297,7 @@ pub(crate) fn lower_call(
     pending_calls.push(PendingCall {
         site: call_site,
         target: target.clone(),
+        kind: super::FunctionReferenceKind::Call,
     });
     ctx.release_call_arg_temps();
     if functions[target].may_throw {

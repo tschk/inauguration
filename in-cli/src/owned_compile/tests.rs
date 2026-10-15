@@ -367,6 +367,57 @@ fn owned_conditional_and_block_values_preserve_scope_effects_and_control_flow() 
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
+fn owned_function_addresses_preserve_targets_and_indirect_arguments() {
+    for text in [
+        "fn answer()->Int{return 42;}\nfn main()->Int{let pointer:Int=answer;return invoke(pointer);}",
+        "fn next(value:Int)->Int{return value+1;}\nfn main()->Int{let pointer:Int=next;return invoke1(pointer,41);}",
+        "fn add(a:Int,b:Int)->Int{return a+b;}\nfn main()->Int{let pointer:Int=add;return invoke2(pointer,20,22);}",
+        "fn add(a:Int,b:Int)->Int{return a+b;}\nfn pointer()->Int{return add;}\nfn twenty()->Int{return 20;}\nfn twenty_two()->Int{return 22;}\nfn main()->Int{return invoke2(pointer(),twenty(),twenty_two());}",
+        "fn next(value:Int)->Int{return value+1;}\nfn main()->Int{let pointers:[Int]=[next];return invoke1(pointers[0],41);}",
+        "fn target(value:Int)->Int{return value+1;}\nfn main()->Int{let pointer:Int=target;if pointer!=0{return 42;}return 0;}",
+        "fn fail(value:Int)->Int{throw value;return 0;}\nfn bridge()->Int{let pointer:Int=fail;return invoke1(pointer,7);}\nfn main()->Int{try {bridge();return 0;} catch 7 {return 42;} return 0;}",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("function-address.in");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{text} {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{text} {profile:?}"
+            );
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("function-address-native");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(report.success, "{text} {profile:?}: {report:?}");
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42),
+                    "{text} {profile:?}"
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
 fn icore_symbol_names_resolve_declared_parameters_exactly() {
     for (extension, text) in [
         (

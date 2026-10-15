@@ -4873,6 +4873,30 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn optimized_indirect_calls_preserve_addresses_arguments_and_errors() {
+        for source in [
+            "fn add(a:Int,b:Int)->Int{return a+b;}\nfn pointer()->Int{if true{return add;}return add;}\nfn main()->Int{return invoke2(pointer(),20,22);}",
+            "fn fail(value:Int)->Int{throw value;return 0;}\nfn bridge()->Int{let pointer:Int=fail;return invoke1(pointer,7);}\nfn main()->Int{try {bridge();return 0;} catch 7 {return 42;} return 0;}",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                crate::lower_core::desugar_module(&mut module);
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn declared_symbol_names_are_not_replaced_by_fabricated_values() {
         for name in ["bad value", "bad..value", "данные", "正常"] {
             use crate::core_ir::{Decl, Expr, Stmt, Typ, UnifiedModule};

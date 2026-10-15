@@ -139,6 +139,7 @@ fn fail_report(
 
 struct ModuleFacts<'a> {
     functions: HashMap<&'a str, FunctionSig<'a>>,
+    declared_functions: HashSet<&'a str>,
     structs: HashMap<&'a str, &'a [(String, Typ)]>,
     globals: HashMap<&'a str, GlobalSig<'a>>,
 }
@@ -315,7 +316,38 @@ pub(crate) fn intrinsic_return_type(name: &str) -> Option<&'static Typ> {
     })
 }
 
+pub(crate) fn invoke_param_types(name: &str) -> Option<&'static [Typ]> {
+    match name {
+        "invoke" => Some(&[Typ::Int]),
+        "invoke1" => Some(&[Typ::Int, Typ::Int]),
+        "invoke2" => Some(&[Typ::Int, Typ::Int, Typ::Int]),
+        _ => None,
+    }
+}
+
+pub(crate) fn invoke_signature_error(
+    name: &str,
+    params: &[(String, Typ)],
+    ret: &Typ,
+) -> Option<String> {
+    let carriers = invoke_param_types(name)?;
+    if params.len() + 1 != carriers.len()
+        || ret.canonical() != Typ::Int
+        || params.iter().any(|(_, typ)| typ.canonical() != Typ::Int)
+    {
+        Some(format!(
+            "`{name}` requires a function with {} Int parameters and an Int return",
+            carriers.len() - 1
+        ))
+    } else {
+        None
+    }
+}
+
 fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
+    if let Some(params) = invoke_param_types(name) {
+        return Some(params);
+    }
     if let Some(sig) = crate::core_atomic::signature(name) {
         return Some(&sig.params);
     }
@@ -377,6 +409,7 @@ fn check_and_insert_top_level<'a>(
 fn collect_module_facts(module: &UnifiedModule) -> Result<ModuleFacts<'_>, (String, String)> {
     let mut top_level = HashSet::new();
     let mut functions = HashMap::new();
+    let mut declared_functions = HashSet::new();
     let mut structs = HashMap::new();
     let mut globals = HashMap::new();
 
@@ -398,6 +431,7 @@ fn collect_module_facts(module: &UnifiedModule) -> Result<ModuleFacts<'_>, (Stri
             } => {
                 check_and_insert_top_level(&mut top_level, name.as_str())?;
                 functions.insert(name.as_str(), FunctionSig { params, ret });
+                declared_functions.insert(name.as_str());
             }
             Decl::Interface { .. } => {}
             Decl::Component { .. } => {}
@@ -418,6 +452,7 @@ fn collect_module_facts(module: &UnifiedModule) -> Result<ModuleFacts<'_>, (Stri
 
     Ok(ModuleFacts {
         functions,
+        declared_functions,
         structs,
         globals,
     })
@@ -1170,6 +1205,12 @@ fn check_expr_with_array_borrow(
         }
         Expr::Call { callee, args, .. } => {
             if let Expr::Ident(name) = callee.as_ref() {
+                if env.contains_key(name) && invoke_param_types(name).is_some() {
+                    return Err((
+                        "unresolved-symbol".into(),
+                        format!("call target `{name}` is shadowed by a value"),
+                    ));
+                }
                 let Some(sig) = function_sig(facts, name) else {
                     return Err((
                         "unresolved-symbol".to_string(),
@@ -1177,8 +1218,19 @@ fn check_expr_with_array_borrow(
                     ));
                 };
                 call_edges.push((fn_name.to_string(), name.clone()));
+                if !facts.declared_functions.contains(name.as_str())
+                    && !env.contains_key(name)
+                    && invoke_param_types(name).is_some()
+                    && let Some(Expr::Ident(target)) = args.first()
+                    && !env.contains_key(target)
+                    && let Some(target_sig) = function_sig(facts, target)
+                    && let Some(error) =
+                        invoke_signature_error(name, target_sig.params, target_sig.ret)
+                {
+                    return Err(("type-mismatch".into(), error));
+                }
                 // Scalar runtime intrinsics require their declared argument types.
-                if !is_intrinsic(name) {
+                if !is_intrinsic(name) || facts.declared_functions.contains(name.as_str()) {
                     if args.len() != sig.params.len() {
                         return Err((
                             "call-arity-mismatch".to_string(),
@@ -1452,7 +1504,7 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
         Expr::Ident(name) => env
             .get(name)
             .cloned()
-            .or_else(|| function_sig(facts, name).map(|sig| sig.ret.clone()))
+            .or_else(|| function_sig(facts, name).map(|_| Typ::Int))
             .or_else(|| {
                 facts
                     .globals
@@ -2981,6 +3033,77 @@ mod unit_value_tests {
                 crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
             let report = super::verify_for_entry(&module, "main");
             assert_eq!(report.ok, valid, "{source}: {report:?}; {module:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod invoke_value_tests {
+    #[test]
+    fn function_addresses_and_invocation_use_the_int_carrier_contract() {
+        for (source, valid) in [
+            ("fn main()->i64{let invoke:i64=1;invoke(1)}", false),
+            (
+                "fn invoke(value:bool)->i64{42} fn main()->i64{invoke(true)}",
+                true,
+            ),
+            (
+                "fn invoke1(value:bool)->bool{value} fn main()->i64{if invoke1(true){42}else{0}}",
+                true,
+            ),
+            (
+                "fn invoke2(value:bool)->i64{42} fn main()->i64{invoke2(true)}",
+                true,
+            ),
+            (
+                "fn invoke(value:bool)->i64{42} fn main()->i64{invoke(1)}",
+                false,
+            ),
+            ("fn target()->i64{42} fn main()->i64{invoke(target)}", true),
+            (
+                "fn target(x:i64)->i64{x} fn main()->i64{invoke1(target,42)}",
+                true,
+            ),
+            (
+                "fn target(x:i64,y:i64)->i64{x+y} fn main()->i64{invoke2(target,20,22)}",
+                true,
+            ),
+            (
+                "fn target()->f64{42.0} fn main()->i64{let pointer:i64=target;42}",
+                true,
+            ),
+            (
+                "fn target()->f64{42.0} fn main()->i64{let target:i64=1;invoke(target)}",
+                true,
+            ),
+            ("fn main()->i64{invoke1()}", false),
+            ("fn main()->i64{invoke2(1)}", false),
+            ("fn main()->i64{invoke(1,2,3,4)}", false),
+            ("fn main()->i64{invoke(true)}", false),
+            ("fn main()->i64{invoke1(1,true)}", false),
+            (
+                "fn target()->f64{42.0} fn main()->i64{invoke(target)}",
+                false,
+            ),
+            (
+                "fn target(x:f64)->i64{42} fn main()->i64{invoke1(target,42)}",
+                false,
+            ),
+            (
+                "fn target(x:i64)->i64{x} fn main()->i64{invoke(target)}",
+                false,
+            ),
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            let checked = crate::typecheck::TypeChecker::new().check_module(&module);
+            let report = super::verify_for_entry(&module, "main");
+            assert_eq!(checked.is_ok(), valid, "checker {source}: {checked:?}");
+            assert_eq!(
+                report.ok, valid,
+                "verifier {source}: {report:?}; {module:?}"
+            );
         }
     }
 }

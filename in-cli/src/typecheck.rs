@@ -1729,7 +1729,10 @@ impl TypeChecker {
             | Expr::BoolLit(_)
             | Expr::Closure { .. } => {}
             Expr::Ident(name) => {
-                if !env.contains_key(name) && !is_builtin_fn(name) {
+                if !env.contains_key(name)
+                    && !facts.functions.contains_key(name)
+                    && !is_builtin_fn(name)
+                {
                     errors.push(TypeError::UndefinedVariable {
                         fn_name: fn_name.to_string(),
                         name: name.clone(),
@@ -2072,7 +2075,64 @@ impl TypeChecker {
             }
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident(callee_name) = callee.as_ref() {
-                    if is_builtin_fn(callee_name) {
+                    if let Some(actual) = env.get(callee_name)
+                        && crate::core_ir_verifier::invoke_param_types(callee_name).is_some()
+                    {
+                        errors.push(TypeError::TypeMismatch {
+                            context: format!("call target `{callee_name}` is shadowed by a value"),
+                            expected: Typ::Named("callable".into()),
+                            got: actual.clone(),
+                        });
+                        for arg in args {
+                            self.check_expr(fn_name, arg, facts, env, errors);
+                        }
+                        return;
+                    }
+                    if is_builtin_fn(callee_name)
+                        && !facts.functions.contains_key(callee_name)
+                        && !env.contains_key(callee_name)
+                    {
+                        if let Some(params) =
+                            crate::core_ir_verifier::invoke_param_types(callee_name)
+                        {
+                            if params.len() != args.len() {
+                                errors.push(TypeError::ArityMismatch {
+                                    caller: fn_name.into(),
+                                    fn_name: callee_name.clone(),
+                                    expected: params.len(),
+                                    got: args.len(),
+                                });
+                            }
+                            for (expected, arg) in params.iter().zip(args) {
+                                if let Some(actual) = self.expr_type(arg, facts, env)
+                                    && actual.canonical() != *expected
+                                {
+                                    errors.push(TypeError::TypeMismatch {
+                                        context: format!(
+                                            "argument for `{callee_name}` in `{fn_name}`"
+                                        ),
+                                        expected: expected.clone(),
+                                        got: actual,
+                                    });
+                                }
+                            }
+                            if let Some(Expr::Ident(target)) = args.first()
+                                && !env.contains_key(target)
+                                && let Some((params, ret)) = facts.functions.get(target)
+                                && let Some(reason) =
+                                    crate::core_ir_verifier::invoke_signature_error(
+                                        callee_name,
+                                        params,
+                                        ret,
+                                    )
+                            {
+                                errors.push(TypeError::TypeMismatch {
+                                    context: reason,
+                                    expected: Typ::Named("Int-function-signature".into()),
+                                    got: Typ::Named(target.clone()),
+                                });
+                            }
+                        }
                         for arg in args {
                             self.check_expr(fn_name, arg, facts, env, errors);
                         }
@@ -2172,6 +2232,7 @@ impl TypeChecker {
             Expr::Ident(name) => env
                 .get(name)
                 .cloned()
+                .or_else(|| facts.functions.contains_key(name).then_some(Typ::Int))
                 .or_else(|| is_builtin_fn(name).then(|| builtin_return_type(name))),
             Expr::StructInit { name, .. } => Some(Typ::Named(name.clone())),
             Expr::Field { base, name, .. } => {
@@ -2263,11 +2324,11 @@ impl TypeChecker {
                             .collect::<Option<Vec<_>>>()?;
                         return Some(crate::core_ir::tuples::typ(&types));
                     }
-                    if is_builtin_fn(name) {
-                        Some(builtin_return_type(name))
-                    } else {
-                        facts.functions.get(name).map(|(_, ret)| ret.clone())
-                    }
+                    facts
+                        .functions
+                        .get(name)
+                        .map(|(_, ret)| ret.clone())
+                        .or_else(|| is_builtin_fn(name).then(|| builtin_return_type(name)))
                 } else {
                     None
                 }

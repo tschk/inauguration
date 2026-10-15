@@ -3216,33 +3216,68 @@ fn lower_builtin_call(
             }
             Ok(true)
         }
-        "invoke" | "invoke1" | "invoke2" => {
-            if args.len() >= 1 {
-                lower_expr_into(emitter, ctx, &args[0], RDI, pending_calls)?;
-                if args.len() >= 2 {
-                    lower_expr_into(emitter, ctx, &args[1], RSI, pending_calls)?;
-                }
-                if args.len() >= 3 {
-                    lower_expr_into(emitter, ctx, &args[2], RDX, pending_calls)?;
-                }
-                if args.len() == 1 {
-                    emitter.emit_width(&[0x89, 0xF8, 0xFF, 0xD0], &[0x48, 0x89, 0xF8, 0xFF, 0xD0]); // mov eax/rax, edi/rdi; call eax/rax
-                } else if args.len() >= 2 {
-                    emitter.emit_width(&[0x89, 0xF8], &[0x48, 0x89, 0xF8]); // mov eax/rax, edi/rdi
-                    emitter.emit_width(&[0x89, 0xF7], &[0x48, 0x89, 0xF7]); // mov edi/rdi, esi/rsi
-                    if args.len() >= 3 {
-                        emitter.emit_width(&[0x89, 0xD6], &[0x48, 0x89, 0xD6]); // mov esi/rsi, edx/rdx
-                    }
-                    emitter.emit_width(&[0xFF, 0xD0], &[0xFF, 0xD0]); // call eax/rax
-                }
-            } else {
+        "invoke" | "invoke1" | "invoke2" if !ctx.functions.contains_key(target_name) => {
+            if x86_64::is_32bit() {
+                return Err("x86_64-lower: indirect Int calls require 64-bit mode".into());
+            }
+            let expected = match target_name {
+                "invoke" => 1,
+                "invoke1" => 2,
+                _ => 3,
+            };
+            if args.len() != expected {
                 return Err(format!(
-                    "x86_64-lower: `invoke` requires at least 1 argument in `{}`",
-                    ctx.fn_name
+                    "x86_64-lower: `{target_name}` requires {expected} arguments"
                 ));
+            }
+            if let Expr::Ident(name) = &args[0]
+                && !ctx.locals.contains_key(name)
+                && !ctx.globals.contains_key(name)
+                && let Some(function) = ctx.functions.get(name)
+            {
+                if function.ret.canonical() != Typ::Int
+                    || function.params.len() != expected - 1
+                    || function
+                        .params
+                        .iter()
+                        .any(|(_, typ)| typ.canonical() != Typ::Int)
+                {
+                    return Err(
+                        "x86_64-lower: indirect calls require an Int scalar signature".into(),
+                    );
+                }
+            } else if scalar_expr_type(&args[0], ctx).map(|typ| typ.canonical()) != Some(Typ::Int) {
+                return Err("x86_64-lower: indirect call target must be an Int address".into());
+            }
+            for arg in &args[1..] {
+                if scalar_expr_type(arg, ctx).map(|typ| typ.canonical()) != Some(Typ::Int) {
+                    return Err("x86_64-lower: indirect arguments must be Int scalars".into());
+                }
+            }
+            let mut staged = Vec::with_capacity(expected);
+            for arg in args {
+                let slot = ctx.alloc_slot();
+                lower_expr_into(emitter, ctx, arg, RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::str64(RAX, slot as u16));
+                staged.push(slot);
+            }
+            emitter.emit_insns(&x86_64::ldr64(RAX, staged[0] as u16));
+            emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 0));
+            let valid = emitter.len();
+            emitter.emit_insns(&x86_64::jcc_near(0x05, 0));
+            emit_failure_return(emitter, ctx)?;
+            emitter.patch_u32(valid + 2, emitter.len() - valid - 6);
+            for (slot, reg) in staged[1..].iter().zip([RDI, RSI]) {
+                emitter.emit_insns(&x86_64::ldr64(reg, *slot as u16));
+            }
+            emitter.emit_insns(&[0xFF, 0xD0]);
+            emit_error_check(emitter, ctx)?;
+            if target_reg != RAX {
+                emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
             }
             Ok(true)
         }
+
         _ => Ok(false),
     }
 }

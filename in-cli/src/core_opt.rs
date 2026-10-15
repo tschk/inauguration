@@ -649,10 +649,16 @@ fn has_cf(stmts: &[Stmt]) -> bool {
     })
 }
 
+// Callers normalize lexical bindings before collecting value references.
 fn detect_ptr_refs(decls: &[Decl], out: &mut Vec<String>) {
-    for d in decls {
-        if let Decl::Function { body, .. } = d {
-            ptr_in_stmts(body, out);
+    for decl in decls {
+        match decl {
+            Decl::Function { body, .. } => ptr_in_stmts(body, out),
+            Decl::Global {
+                init: Some(expr), ..
+            } => ptr_in_expr(expr, out),
+            Decl::Class { methods, .. } => detect_ptr_refs(methods, out),
+            _ => {}
         }
     }
 }
@@ -670,14 +676,21 @@ fn ptr_in_stmts(stmts: &[Stmt], out: &mut Vec<String>) {
                 ptr_in_expr(value, out);
             }
             Stmt::If {
+                cond,
                 then_body,
                 else_body,
                 ..
             } => {
+                ptr_in_expr(cond, out);
                 ptr_in_stmts(then_body, out);
                 ptr_in_stmts(else_body, out);
             }
-            Stmt::Loop { body, .. } => ptr_in_stmts(body, out),
+            Stmt::Loop { cond, body, .. } => {
+                if let Some(cond) = cond {
+                    ptr_in_expr(cond, out);
+                }
+                ptr_in_stmts(body, out);
+            }
             Stmt::Throw(e) => ptr_in_expr(e, out),
             Stmt::Try { body, catches, .. } => {
                 ptr_in_stmts(body, out);
@@ -690,6 +703,9 @@ fn ptr_in_stmts(stmts: &[Stmt], out: &mut Vec<String>) {
             } => {
                 ptr_in_expr(scrutinee, out);
                 for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        ptr_in_expr(guard, out);
+                    }
                     ptr_in_stmts(&arm.body, out);
                 }
             }
@@ -701,68 +717,29 @@ fn ptr_in_stmts(stmts: &[Stmt], out: &mut Vec<String>) {
         }
     }
 }
-fn ptr_in_expr(e: &Expr, out: &mut Vec<String>) {
-    match e {
-        Expr::MatchValue { scrutinee, arms } => {
-            ptr_in_expr(scrutinee, out);
-            for arm in arms {
-                if let Some(guard) = &arm.guard {
-                    ptr_in_expr(guard, out);
-                }
-                ptr_in_expr(&arm.value, out);
+fn ptr_in_expr(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::Ident(name) => {
+            if !out.contains(name) {
+                out.push(name.clone());
             }
         }
-        Expr::Conditional {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
-            ptr_in_expr(cond, out);
-            ptr_in_expr(then_expr, out);
-            ptr_in_expr(else_expr, out);
+        Expr::Call { callee, args } => {
+            if !matches!(callee.as_ref(), Expr::Ident(_)) {
+                ptr_in_expr(callee, out);
+            }
+            for arg in args {
+                ptr_in_expr(arg, out);
+            }
         }
+        Expr::Closure { body, .. } => ptr_in_stmts(body, out),
         Expr::Block { body, result } => {
             ptr_in_stmts(body, out);
             if let Some(result) = result {
                 ptr_in_expr(result, out);
             }
         }
-        Expr::Call { callee, args, .. } => {
-            if let Expr::Ident(name) = callee.as_ref() {
-                if matches!(name.as_str(), "invoke" | "invoke1" | "invoke2") {
-                    if let Some(Expr::Ident(fn_name)) = args.first() {
-                        if !out.contains(fn_name) {
-                            out.push(fn_name.clone());
-                        }
-                    }
-                }
-            }
-            for arg in args {
-                if let Expr::Ident(name) = arg {
-                    if !out.contains(name) {
-                        out.push(name.clone());
-                    }
-                }
-                ptr_in_expr(arg, out);
-            }
-            ptr_in_expr(callee, out);
-        }
-        Expr::Binary { lhs, rhs, .. } => {
-            ptr_in_expr(lhs, out);
-            ptr_in_expr(rhs, out);
-        }
-        Expr::Unary { expr, .. } => ptr_in_expr(expr, out),
-        Expr::Field { base, .. } => ptr_in_expr(base, out),
-        Expr::Index { base, index, .. } => {
-            ptr_in_expr(base, out);
-            ptr_in_expr(index, out);
-        }
-        Expr::StructInit { fields, .. } => {
-            for (_, e) in fields {
-                ptr_in_expr(e, out);
-            }
-        }
-        _ => {}
+        _ => crate::core_ir::for_each_expr_child(expr, &mut |child| ptr_in_expr(child, out)),
     }
 }
 
@@ -2488,128 +2465,19 @@ fn harden_hash_symbols(decls: &mut [Decl], entry: Option<&str>) {
         return;
     }
     for d in decls.iter_mut() {
-        if let Decl::Function { name, body, .. } = d {
-            if let Some(new) = rename.get(name) {
-                *name = new.clone();
-            }
-            rename_calls_in_stmts(body, &rename);
-        }
-    }
-}
-
-fn rename_calls_in_stmts(stmts: &mut [Stmt], rename: &HashMap<String, String>) {
-    for stmt in stmts.iter_mut() {
-        match stmt {
-            Stmt::Let(_, _, e)
-            | Stmt::Assign(_, e)
-            | Stmt::FieldAssign { value: e, .. }
-            | Stmt::Return(Some(e))
-            | Stmt::Throw(e)
-            | Stmt::Expr(e) => rename_calls_in_expr(e, rename),
-            Stmt::IndexAssign {
-                base, index, value, ..
-            } => {
-                rename_calls_in_expr(base, rename);
-                rename_calls_in_expr(index, rename);
-                rename_calls_in_expr(value, rename);
-            }
-            Stmt::If {
-                cond,
-                then_body,
-                else_body,
-            } => {
-                rename_calls_in_expr(cond, rename);
-                rename_calls_in_stmts(then_body, rename);
-                rename_calls_in_stmts(else_body, rename);
-            }
-            Stmt::Loop { cond, body, .. } => {
-                if let Some(c) = cond {
-                    rename_calls_in_expr(c, rename);
-                }
-                rename_calls_in_stmts(body, rename);
-            }
-            Stmt::Match { scrutinee, arms } => {
-                rename_calls_in_expr(scrutinee, rename);
-                for arm in arms.iter_mut() {
-                    rename_calls_in_stmts(&mut arm.body, rename);
-                }
-            }
-            Stmt::Try { body, catches } => {
-                rename_calls_in_stmts(body, rename);
-                for c in catches.iter_mut() {
-                    rename_calls_in_stmts(&mut c.body, rename);
-                }
-            }
-            Stmt::Return(None) | Stmt::Propagate | Stmt::Break | Stmt::Continue => {}
-        }
-    }
-}
-
-fn rename_calls_in_expr(e: &mut Expr, rename: &HashMap<String, String>) {
-    match e {
-        Expr::Ident(name) => {
+        if let Decl::Function { name, .. } = d {
             if let Some(new) = rename.get(name) {
                 *name = new.clone();
             }
         }
-        Expr::Call { callee, args, .. } => {
-            rename_calls_in_expr(callee, rename);
-            for a in args.iter_mut() {
-                rename_calls_in_expr(a, rename);
-            }
-        }
-        Expr::Binary { lhs, rhs, .. } => {
-            rename_calls_in_expr(lhs, rename);
-            rename_calls_in_expr(rhs, rename);
-        }
-        Expr::Unary { expr, .. } | Expr::Field { base: expr, .. } => {
-            rename_calls_in_expr(expr, rename);
-        }
-        Expr::Index { base, index, .. } => {
-            rename_calls_in_expr(base, rename);
-            rename_calls_in_expr(index, rename);
-        }
-        Expr::StructInit { fields, .. } => {
-            for (_, fe) in fields.iter_mut() {
-                rename_calls_in_expr(fe, rename);
-            }
-        }
-        Expr::ArrayLit(args) => {
-            for a in args.iter_mut() {
-                rename_calls_in_expr(a, rename);
-            }
-        }
-        Expr::MatchValue { scrutinee, arms } => {
-            rename_calls_in_expr(scrutinee, rename);
-            for arm in arms {
-                if let Some(guard) = &mut arm.guard {
-                    rename_calls_in_expr(guard, rename);
-                }
-                rename_calls_in_expr(&mut arm.value, rename);
-            }
-        }
-        Expr::Conditional {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
-            rename_calls_in_expr(cond, rename);
-            rename_calls_in_expr(then_expr, rename);
-            rename_calls_in_expr(else_expr, rename);
-        }
-        Expr::Block { body, result } => {
-            rename_calls_in_stmts(body, rename);
-            if let Some(result) = result {
-                rename_calls_in_expr(result, rename);
-            }
-        }
-        Expr::Closure { body, .. } => rename_calls_in_stmts(body, rename),
-        Expr::UnitLit
-        | Expr::IntLit(_)
-        | Expr::FloatLit(_)
-        | Expr::StringLit(_)
-        | Expr::BoolLit(_) => {}
     }
+    map_decl_exprs_mut(decls, &mut |expr| {
+        if let Expr::Ident(name) = expr {
+            if let Some(new) = rename.get(name) {
+                *name = new.clone();
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -3725,6 +3593,207 @@ mod tests {
     }
 
     // ─── detect_ptr_refs ──────────────────────────────────────────────
+
+    #[test]
+    fn hardened_symbol_names_follow_global_addresses_and_match_guards() {
+        let mut decls = vec![
+            make_fn("target", vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+            make_fn(
+                "main",
+                vec![Stmt::Match {
+                    scrutinee: Expr::IntLit(0),
+                    arms: vec![MatchArm {
+                        pattern: "_".into(),
+                        guard: Some(bin_expr("!=", ident("target"), Expr::IntLit(0))),
+                        body: vec![Stmt::FieldAssign {
+                            base: ident("target"),
+                            name: "value".into(),
+                            value: Expr::IntLit(0),
+                        }],
+                    }],
+                }],
+            ),
+            Decl::Global {
+                name: "pointer".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(ident("target"))),
+                mutable: false,
+                constant_value: false,
+            },
+        ];
+        harden_hash_symbols(&mut decls, Some("main"));
+        let Decl::Function { name: renamed, .. } = &decls[0] else {
+            panic!()
+        };
+        let renamed = renamed.clone();
+        assert!(renamed.starts_with("_H"));
+        let Decl::Global {
+            init: Some(init), ..
+        } = &decls[2]
+        else {
+            panic!()
+        };
+        assert_eq!(init.as_ref(), &ident(&renamed));
+        let Decl::Function { body, .. } = &decls[1] else {
+            panic!()
+        };
+        let Stmt::Match { arms, .. } = &body[0] else {
+            panic!()
+        };
+        let Some(Expr::Binary { lhs, .. }) = &arms[0].guard else {
+            panic!()
+        };
+        assert_eq!(lhs.as_ref(), &ident(&renamed));
+        let Stmt::FieldAssign { base, .. } = &arms[0].body[0] else {
+            panic!()
+        };
+        assert_eq!(base, &ident(&renamed));
+    }
+
+    #[test]
+    fn optimization_keeps_function_addresses_in_every_value_position() {
+        let cases = vec![
+            vec![
+                Stmt::Let("pointer".into(), Some(Typ::Int), ident("target")),
+                Stmt::Return(Some(ident("pointer"))),
+            ],
+            vec![Stmt::Return(Some(ident("target")))],
+            vec![
+                Stmt::Let(
+                    "items".into(),
+                    Some(Typ::Array(Box::new(Typ::Int))),
+                    Expr::ArrayLit(vec![ident("target")]),
+                ),
+                Stmt::Return(Some(Expr::Index {
+                    base: Box::new(ident("items")),
+                    index: Box::new(Expr::IntLit(0)),
+                })),
+            ],
+            vec![Stmt::If {
+                cond: bin_expr("!=", ident("target"), Expr::IntLit(0)),
+                then_body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                else_body: vec![Stmt::Return(Some(Expr::IntLit(0)))],
+            }],
+            vec![Stmt::Match {
+                scrutinee: Expr::IntLit(0),
+                arms: vec![
+                    MatchArm {
+                        pattern: "0".into(),
+                        guard: Some(bin_expr("!=", ident("target"), Expr::IntLit(0))),
+                        body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                    },
+                    MatchArm {
+                        pattern: "_".into(),
+                        guard: None,
+                        body: vec![Stmt::Return(Some(Expr::IntLit(0)))],
+                    },
+                ],
+            }],
+            vec![Stmt::Return(Some(call(
+                "invoke",
+                vec![Expr::Closure {
+                    params: vec![],
+                    ret: Typ::Int,
+                    captures: vec![],
+                    body: vec![Stmt::Return(Some(ident("target")))],
+                }],
+            )))],
+        ];
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for body in &cases {
+                let mut decls = vec![
+                    make_fn("target", vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+                    make_fn("main", body.clone()),
+                ];
+                optimize_with_profile(&mut decls, Some("main"), profile);
+                assert_eq!(
+                    decls
+                        .iter()
+                        .filter(|decl| matches!(decl, Decl::Function { .. }))
+                        .count(),
+                    2,
+                    "{profile:?} {body:?}"
+                );
+            }
+            let mut decls = vec![
+                make_fn("target", vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+                make_fn("main", vec![Stmt::Return(Some(Expr::IntLit(0)))]),
+                Decl::Global {
+                    name: "pointer".into(),
+                    typ: Typ::Int,
+                    init: Some(Box::new(ident("target"))),
+                    mutable: false,
+                    constant_value: false,
+                },
+            ];
+            optimize_with_profile(&mut decls, Some("main"), profile);
+            assert_eq!(
+                decls
+                    .iter()
+                    .filter(|decl| matches!(decl, Decl::Function { .. }))
+                    .count(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn shadowed_values_do_not_escape_functions_or_disable_direct_call_inlining() {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut decls = vec![
+                make_fn("target", vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+                make_fn(
+                    "main",
+                    vec![
+                        Stmt::Let("target".into(), Some(Typ::Int), Expr::IntLit(7)),
+                        Stmt::Return(Some(ident("target"))),
+                    ],
+                ),
+            ];
+            optimize_with_profile(&mut decls, Some("main"), profile);
+            assert_eq!(
+                decls
+                    .iter()
+                    .filter(|decl| matches!(decl, Decl::Function { .. }))
+                    .count(),
+                1
+            );
+            let mut decls = vec![
+                make_fn("target", vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+                make_fn("main", vec![Stmt::Return(Some(call("target", vec![])))]),
+            ];
+            optimize_with_profile(&mut decls, Some("main"), profile);
+            assert_eq!(
+                decls
+                    .iter()
+                    .filter(|decl| matches!(decl, Decl::Function { .. }))
+                    .count(),
+                1
+            );
+            let mut decls = vec![
+                make_fn("target", vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+                make_fn("main", vec![Stmt::Return(Some(Expr::IntLit(0)))]),
+                Decl::Global {
+                    name: "pointer".into(),
+                    typ: Typ::Int,
+                    init: Some(Box::new(Expr::Block {
+                        body: vec![Stmt::Let("target".into(), Some(Typ::Int), Expr::IntLit(7))],
+                        result: Some(Box::new(ident("target"))),
+                    })),
+                    mutable: false,
+                    constant_value: false,
+                },
+            ];
+            optimize_with_profile(&mut decls, Some("main"), profile);
+            assert_eq!(
+                decls
+                    .iter()
+                    .filter(|decl| matches!(decl, Decl::Function { .. }))
+                    .count(),
+                1
+            );
+        }
+    }
 
     #[test]
     fn detect_ptr_refs_finds_invoke_targets() {

@@ -17,11 +17,11 @@ pub struct ResolveResult {
     pub functions_added: usize,
 }
 
-/// Collect external function calls from a module.
+/// Collect unbound function names used as callees or address values.
 fn collect_externals(module: &UnifiedModule) -> Vec<String> {
     let mut locals: HashSet<String> = HashSet::new();
     for decl in &module.decls {
-        if let Decl::Function { name, .. } = decl {
+        if let Decl::Function { name, .. } | Decl::Global { name, .. } = decl {
             locals.insert(name.clone());
         }
     }
@@ -32,6 +32,11 @@ fn collect_externals(module: &UnifiedModule) -> Vec<String> {
             let mut scope = locals.clone();
             scope.extend(params.iter().map(|(name, _)| name.clone()));
             walk_stmts(body, &mut scope, &mut out);
+        } else if let Decl::Global {
+            init: Some(value), ..
+        } = decl
+        {
+            walk_expr(value, &locals, &mut out);
         }
     }
     out.sort();
@@ -129,12 +134,12 @@ fn walk_expr(expr: &Expr, locals: &HashSet<String>, out: &mut Vec<String>) {
         return;
     }
 
-    if let Expr::Call { callee, .. } = expr {
-        if let Expr::Ident(target) = callee.as_ref() {
-            if !locals.contains(target) && !target.starts_with("__inrt_") {
-                out.push(target.clone());
-            }
-        }
+    if let Expr::Ident(target) = expr
+        && !locals.contains(target)
+        && !target.starts_with("__inrt_")
+        && !crate::core_ir::is_compiler_callee(target)
+    {
+        out.push(target.clone());
     }
     crate::core_ir::for_each_expr_child(expr, &mut |child| walk_expr(child, locals, out));
 }
@@ -145,6 +150,7 @@ pub fn resolve_deps(module: &UnifiedModule, crate_db: &CrateDb) -> ResolveResult
     let mut files_parsed = 0;
     let mut functions_added = 0;
     let mut seen: HashSet<String> = HashSet::new();
+    let mut attempted = HashSet::new();
     // Seed with already-known functions
     for decl in &expanded.decls {
         if let Decl::Function { name, .. } = decl {
@@ -156,18 +162,23 @@ pub fn resolve_deps(module: &UnifiedModule, crate_db: &CrateDb) -> ResolveResult
         let externals = collect_externals(&expanded);
         let new: Vec<&String> = externals
             .iter()
-            .filter(|n| !seen.contains(n.as_str()))
+            .filter(|n| !seen.contains(n.as_str()) && !attempted.contains(n.as_str()))
             .collect();
         if new.is_empty() {
             break;
         }
         for target in &new {
-            seen.insert((*target).clone());
+            attempted.insert((*target).clone());
         }
 
         let mut resolved_modules = Vec::new();
         for target in &new {
-            if let Ok((_cname, _mpath, dep_mod)) = crate_db.resolve(target) {
+            if let Ok((_cname, _mpath, dep_mod)) = crate_db.resolve(target)
+                && dep_mod.decls.iter().any(|decl| {
+                    matches!(decl, Decl::Function { name, .. }
+                    if name == target.as_str() || target.rsplit("::").next() == Some(name.as_str()))
+                })
+            {
                 resolved_modules.push(dep_mod);
             }
         }
@@ -205,6 +216,87 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn function_addresses_resolve_without_confusing_attempted_and_loaded_symbols() {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root =
+            std::env::temp_dir().join(format!("resolve_addresses_{}_{}", std::process::id(), id));
+        let dir = root.join("dummy_crate/src/dummy_crate");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("foo.rs"),
+            "pub mod dummy_crate { pub mod foo { pub fn bar()->i64 {42} } }",
+        )
+        .unwrap();
+        let mut db = CrateDb::new();
+        db.search_roots = vec![root.clone()];
+        db.register_crate("dummy_crate", root.join("dummy_crate"));
+        let target = "dummy_crate::foo::bar";
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![
+                Stmt::Let("pointer".into(), None, Expr::Ident(target.into())),
+                Stmt::Return(Some(Expr::IntLit(42))),
+            ],
+        }]);
+        let resolved = resolve_deps(&module, &db);
+        assert_eq!(resolved.functions_added, 1);
+        assert!(
+            resolved
+                .module
+                .decls
+                .iter()
+                .any(|decl| matches!(decl, Decl::Function { name, .. } if name == target))
+        );
+        let mut missing = module.clone();
+        let Decl::Function { body, .. } = &mut missing.decls[0] else {
+            unreachable!()
+        };
+        body[0] = Stmt::Expr(Expr::Ident("dummy_crate::foo::NOT_A_FUNCTION".into()));
+        assert_eq!(resolve_deps(&missing, &db).functions_added, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn address_discovery_respects_globals_parameters_and_block_local_scope() {
+        let module = UnifiedModule::new(vec![
+            Decl::Global {
+                name: "global".into(),
+                typ: Typ::Int,
+                mutable: false,
+                constant_value: false,
+                init: Some(Box::new(Expr::Ident("dep::global_target".into()))),
+            },
+            Decl::Function {
+                name: "main".into(),
+                params: vec![("parameter".into(), Typ::Int)],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![
+                    Stmt::Expr(Expr::Ident("global".into())),
+                    Stmt::Expr(Expr::Ident("parameter".into())),
+                    Stmt::Expr(Expr::Block {
+                        body: vec![Stmt::Let(
+                            "inside".into(),
+                            None,
+                            Expr::Ident("dep::target".into()),
+                        )],
+                        result: Some(Box::new(Expr::Ident("inside".into()))),
+                    }),
+                    Stmt::Expr(Expr::Ident("inside".into())),
+                    Stmt::Return(Some(Expr::IntLit(42))),
+                ],
+            },
+        ]);
+        assert_eq!(
+            collect_externals(&module),
+            vec!["dep::global_target", "dep::target", "inside"]
+        );
+    }
 
     #[test]
     fn expression_block_dependencies_respect_sequential_local_scope() {

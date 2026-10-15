@@ -2917,3 +2917,129 @@ fn unresolved_identifier_values_are_rejected_by_raw_backends() {
         }
     }
 }
+
+#[test]
+fn function_address_relocations_validate_signed_adr_range() {
+    let kind = FunctionReferenceKind::Address { rd: 9 };
+    assert_eq!(
+        function_reference_insn(0, (1 << 20) - 1, kind).unwrap(),
+        aarch64::adr(9, (1 << 20) - 1)
+    );
+    assert_eq!(
+        function_reference_insn(1 << 20, 0, kind).unwrap(),
+        aarch64::adr(9, -(1 << 20))
+    );
+    assert!(function_reference_insn(0, 1 << 20, kind).is_err());
+    assert!(function_reference_insn((1 << 20) + 1, 0, kind).is_err());
+}
+
+#[test]
+fn indirect_calls_stage_addresses_arguments_and_forward_backward_references() {
+    for (source, expected) in [
+        (
+            "fn a_answer()->i64{42} fn main()->i64{invoke(a_answer)}",
+            42,
+        ),
+        (
+            "fn z_answer(n:i64)->i64{n+1} fn main()->i64{invoke1(z_answer,41)}",
+            42,
+        ),
+        (
+            "fn a_answer(a:i64,b:i64)->i64{a+b} fn main()->i64{invoke2(a_answer,20,22)}",
+            42,
+        ),
+        (
+            "static mut CALLS:i64=0; fn next()->i64{unsafe{CALLS+=1;CALLS}} fn answer(a:i64,b:i64)->i64{a*10+b+30} fn main()->i64{invoke2(answer,next(),next())}",
+            42,
+        ),
+        (
+            "fn answer(n:i64)->i64{n+1} fn main()->i64{let pointer=answer;invoke1(pointer,41)}",
+            42,
+        ),
+        (
+            "fn answer(a:i64,b:i64)->i64{a*10+b+30} fn pointer()->i64{if true{return answer;}answer} fn one()->i64{1} fn two()->i64{2} fn main()->i64{invoke2(pointer(),invoke(one),invoke(two))}",
+            42,
+        ),
+        (
+            "fn answer()->i64{42} fn main()->i64{let pointer=if true{answer}else{answer};invoke(pointer)}",
+            42,
+        ),
+        ("fn main()->i64{let pointer:i64=0;invoke(pointer)}", 1),
+    ] {
+        let module =
+            crate::compiler::rust_front::parse_rust_source(source).expect("parse callback source");
+        let arm =
+            lower_module(&module, "main", NativeLinkage::Executable).expect("ARM indirect code");
+        let x86 = crate::native_emit::x86_64_lower::lower_module(&module, "main")
+            .expect("x86 indirect code");
+        #[cfg(target_arch = "aarch64")]
+        let (code, relocations, offsets, data, globals) = (
+            &arm.code,
+            &arm.relocations,
+            arm.function_offsets
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect::<Vec<_>>(),
+            &arm.data,
+            &arm.global_relocs,
+        );
+        #[cfg(target_arch = "x86_64")]
+        let x86_relocations = x86
+            .relocations
+            .iter()
+            .map(|site| (*site, x86.codegen_base))
+            .collect::<Vec<_>>();
+        #[cfg(target_arch = "x86_64")]
+        let (code, relocations, offsets, data, globals) = (
+            &x86.code,
+            &x86_relocations,
+            x86.exports
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect::<Vec<_>>(),
+            &x86.data,
+            &x86.global_relocs,
+        );
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        {
+            let mut runtime = crate::jit_runtime::JitRuntime::new();
+            runtime
+                .load_with_globals(code, &offsets, relocations, data, globals)
+                .expect("load indirect code");
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]).expect("invoke indirect code") },
+                expected,
+                "{source}"
+            );
+        }
+        let _ = (arm, x86);
+    }
+}
+
+#[test]
+fn raw_indirect_calls_reject_wrong_arity_and_non_int_abi() {
+    for (target, args) in [
+        ("invoke", vec![]),
+        ("invoke1", vec![Expr::IntLit(0)]),
+        ("invoke2", vec![Expr::IntLit(0), Expr::IntLit(1)]),
+        ("invoke1", vec![Expr::IntLit(0), Expr::BoolLit(true)]),
+        ("invoke", vec![Expr::FloatLit(FloatVal(1.0))]),
+    ] {
+        let mut module = answer_module();
+        let Decl::Function { body, .. } = &mut module.decls[0] else {
+            unreachable!()
+        };
+        *body = vec![Stmt::Return(Some(Expr::Call {
+            callee: Box::new(Expr::Ident(target.into())),
+            args,
+        }))];
+        assert!(
+            lower_module(&module, "answer", NativeLinkage::Executable).is_err(),
+            "ARM {target}"
+        );
+        assert!(
+            crate::native_emit::x86_64_lower::lower_module(&module, "answer").is_err(),
+            "x86 {target}"
+        );
+    }
+}

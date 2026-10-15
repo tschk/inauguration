@@ -432,9 +432,38 @@ pub(crate) enum EntryReturn {
     VoidOrReference,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum FunctionReferenceKind {
+    Call,
+    Address { rd: u8 },
+}
+
 pub(crate) struct PendingCall {
     pub(crate) site: u32,
     pub(crate) target: String,
+    pub(crate) kind: FunctionReferenceKind,
+}
+
+fn function_reference_insn(
+    site: u32,
+    target: u32,
+    kind: FunctionReferenceKind,
+) -> Result<u32, String> {
+    let delta = i64::from(target) - i64::from(site);
+    match kind {
+        FunctionReferenceKind::Address { rd } => {
+            if !(-(1 << 20)..(1 << 20)).contains(&delta) {
+                return Err("native-lower: function address exceeds AArch64 ADR range".into());
+            }
+            Ok(aarch64::adr(rd, delta as i32))
+        }
+        FunctionReferenceKind::Call => {
+            if delta % 4 != 0 || !(-(1 << 27)..(1 << 27)).contains(&delta) {
+                return Err("native-lower: function call exceeds AArch64 BL range".into());
+            }
+            Ok(aarch64::bl(delta as i32))
+        }
+    }
 }
 
 pub(crate) struct PendingInrtCall {
@@ -790,8 +819,10 @@ pub fn lower_module_with_jobs(
                 }
             };
             let global_site = base + call.site;
-            let rel = target_offset as i32 - global_site as i32;
-            emitter.patch_u32(global_site, aarch64::bl(rel));
+            emitter.patch_u32(
+                global_site,
+                function_reference_insn(global_site, target_offset, call.kind)?,
+            );
         }
     }
 

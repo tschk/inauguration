@@ -22,6 +22,9 @@ fn normalize_members(decls: &mut [Decl], names: &HashSet<String>) {
         match decl {
             Decl::Function { params, body, .. } => normalize_function(params, body, names),
             Decl::Class { methods, .. } => normalize_members(methods, names),
+            Decl::Global {
+                init: Some(expr), ..
+            } => normalize_initializer_with_references(expr, names, &HashMap::new()),
             _ => {}
         }
     }

@@ -269,6 +269,13 @@ pub(crate) fn lower_expr_into(
                 } else {
                     emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
                 }
+            } else if functions.contains_key(name) {
+                let site = emitter.emit_insn(aarch64::adr(rd, 0));
+                pending_calls.push(PendingCall {
+                    site,
+                    target: name.clone(),
+                    kind: super::FunctionReferenceKind::Address { rd },
+                });
             } else {
                 return Err(format!(
                     "native-lower: unresolved identifier `{name}` in `{fn_name}`"
