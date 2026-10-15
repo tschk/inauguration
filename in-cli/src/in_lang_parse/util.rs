@@ -1,13 +1,51 @@
-pub(crate) fn brace_delta(line: &str) -> i32 {
-    let mut n = 0i32;
-    for ch in line.chars() {
-        match ch {
-            '{' => n += 1,
-            '}' => n -= 1,
-            _ => {}
+#[derive(Default)]
+pub(crate) struct SourceLineState {
+    in_string: bool,
+}
+
+pub(crate) struct ScannedLine<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) brace_delta: i32,
+    pub(crate) starts_in_string: bool,
+    pub(crate) ends_in_string: bool,
+}
+
+impl SourceLineState {
+    pub(crate) fn scan_line<'a>(&mut self, line: &'a str) -> ScannedLine<'a> {
+        let starts_in_string = self.in_string;
+        let mut escaped = false;
+        let mut brace_delta = 0;
+        let mut end = line.len();
+        for (index, ch) in line.char_indices() {
+            if self.in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    self.in_string = false;
+                }
+                continue;
+            }
+            match ch {
+                '"' => self.in_string = true,
+                '/' if line[index..].starts_with("//") => {
+                    end = index;
+                    break;
+                }
+                '{' => brace_delta += 1,
+                '}' => brace_delta -= 1,
+                _ => {}
+            }
+        }
+        // A source newline consumes an escape; it cannot escape the next line's first character.
+        ScannedLine {
+            text: &line[..end],
+            brace_delta,
+            starts_in_string,
+            ends_in_string: self.in_string,
         }
     }
-    n
 }
 
 /// Inlang identifiers use kebab-case: letters, digits, and internal `-`.
@@ -641,4 +679,37 @@ pub(crate) fn brace_content_bounds_after_open(s: &str, open_idx: usize) -> Optio
         }
     }
     None
+}
+
+#[cfg(test)]
+mod source_line_tests {
+    use super::*;
+    #[test]
+    fn quotes_and_comments_preserve_multiline_literal_contents() {
+        let mut state = SourceLineState::default();
+        let first = state.scan_line("fn main() { let text=\"{");
+        assert_eq!(first.brace_delta, 1);
+        assert!(!first.starts_in_string);
+        assert!(first.ends_in_string);
+        let middle = state.scan_line("  // literal }  ");
+        assert_eq!(middle.text, "  // literal }  ");
+        assert_eq!(middle.brace_delta, 0);
+        assert!(middle.starts_in_string && middle.ends_in_string);
+        let blank = state.scan_line("");
+        assert!(blank.starts_in_string && blank.ends_in_string);
+        let last = state.scan_line("}\"; } // } ignored");
+        assert_eq!(last.brace_delta, -1);
+        assert!(last.starts_in_string);
+        assert!(!last.ends_in_string);
+        assert_eq!(last.text, "}\"; } ");
+    }
+    #[test]
+    fn newline_consumes_escape_without_resetting_quote_state() {
+        let mut state = SourceLineState::default();
+        assert!(state.scan_line("\"text\\").ends_in_string);
+        let closing = state.scan_line("\"; }");
+        assert!(closing.starts_in_string);
+        assert!(!closing.ends_in_string);
+        assert_eq!(closing.brace_delta, -1);
+    }
 }

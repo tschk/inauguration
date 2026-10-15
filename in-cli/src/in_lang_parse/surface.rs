@@ -373,11 +373,17 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
     let mut info = InSurfaceInfo::default();
     let mut depth = 0i32;
     let lines: Vec<&str> = source.lines().collect();
+    let mut source_state = SourceLineState::default();
     for (idx, raw_line) in lines.iter().enumerate() {
-        let line = strip_line_comment_outside_strings(raw_line);
-        let line = trim(line);
+        let scanned = source_state.scan_line(raw_line);
+        let delta = scanned.brace_delta;
+        if scanned.starts_in_string {
+            depth = (depth + delta).max(0);
+            continue;
+        }
+        let line = trim(scanned.text);
         if line.is_empty() || line.starts_with("//") {
-            depth += brace_delta(raw_line);
+            depth += delta;
             if depth < 0 {
                 depth = 0;
             }
@@ -389,7 +395,7 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
                 if info.package.replace(package).is_some() {
                     return Err(".in: duplicate package declaration".into());
                 }
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
@@ -400,7 +406,7 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
                 if info.module.replace(module).is_some() {
                     return Err(".in: duplicate module declaration".into());
                 }
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
@@ -412,7 +418,7 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
                     return Err(".in: import path missing".into());
                 }
                 info.imports.push(import.to_string());
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
@@ -421,7 +427,7 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
             if let Some(rest) = line.strip_prefix("use ") {
                 let import = parse_package_or_module_name("use", rest)?;
                 info.semantic_imports.push(import);
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
@@ -430,7 +436,7 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
             if let Some(rest) = line.strip_prefix("bind ") {
                 let binding = parse_semantic_binding(rest)?;
                 info.semantic_bindings.push(binding);
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
@@ -442,7 +448,7 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
                     return Err(".in: capability name missing".into());
                 }
                 info.capabilities.push(capability.to_string());
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
@@ -456,7 +462,7 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
                 info.orchestration
                     .enabled_extensions
                     .push(extension.to_string());
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
@@ -468,7 +474,7 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
                 info.orchestration
                     .annotations
                     .push(InAnnotationFact { name, target });
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
@@ -477,7 +483,7 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
             if line.starts_with("distributed ") {
                 let name = parse_distributed_fn_name(line)?;
                 info.orchestration.distributed_functions.push(name);
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
@@ -494,7 +500,7 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
                 info.orchestration
                     .parallel_tasks
                     .extend(collect_parallel_tasks(&lines, idx, region));
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
@@ -502,14 +508,14 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
             }
             if line.starts_with("extern ") {
                 info.externs.push(parse_extern_fn_block(line)?);
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
                 continue;
             }
             if is_closed_world_topology_block(line) {
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
@@ -524,7 +530,7 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
                 || line.starts_with("var ")
                 || line.starts_with("const ")
             {
-                depth += brace_delta(raw_line);
+                depth += delta;
                 if depth < 0 {
                     depth = 0;
                 }
@@ -532,7 +538,7 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
             }
             return Err(format!(".in: unknown top-level syntax `{line}`"));
         }
-        depth += brace_delta(raw_line);
+        depth += delta;
         if depth < 0 {
             depth = 0;
         }

@@ -59,7 +59,23 @@ fn format_decl(decl: &Decl, out: &mut String) {
             out.push('}');
         }
         Decl::Class { .. } | Decl::Interface { .. } | Decl::Component { .. } => {}
-        Decl::Global { .. } => {}
+        Decl::Global {
+            name,
+            typ,
+            mutable,
+            init,
+            ..
+        } => {
+            out.push_str(if *mutable { "var " } else { "const " });
+            out.push_str(name);
+            out.push_str(": ");
+            out.push_str(&format_type(typ));
+            if let Some(value) = init {
+                out.push_str(" = ");
+                out.push_str(&format_expr(value));
+            }
+            out.push(';');
+        }
     }
 }
 
@@ -359,6 +375,24 @@ fn format_match(scrutinee: &Expr, arms: &[MatchArm], depth: usize, indent: &str,
 mod tests {
     use super::*;
     use crate::in_lang_parse::parse_in_source;
+
+    #[test]
+    fn canonical_globals_keep_mutability_types_and_initializers() {
+        let source =
+            "const base:Int=20;\nvar total:Int=22;\nfn main()->Int{total+=base;return total;}";
+        let before = parse_in_source(source).unwrap();
+        let canonical = canonicalize_in_source(source).unwrap();
+        let after = parse_in_source(&canonical).unwrap();
+        assert_eq!(before.decls, after.decls, "{canonical}");
+        assert_eq!(
+            after
+                .decls
+                .iter()
+                .filter(|decl| matches!(decl, Decl::Global { .. }))
+                .count(),
+            2
+        );
+    }
 
     #[test]
     fn canonicalizes_example_style_source() {

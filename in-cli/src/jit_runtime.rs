@@ -5031,6 +5031,35 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn multiline_string_bytes_survive_native_data_emission() {
+        let expected = "before  \n//inside\nprotocol:\n  λ\n\nend}";
+        let source = format!(
+            "fn main()->Int{{let text:String=\"{expected}\";if text=={expected:?}{{return 42;}}return 0;}}"
+        );
+        for source in [
+            &source,
+            &crate::in_canonical::canonicalize_in_source(&source).unwrap(),
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{report:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn in_struct_pattern_guards_and_bindings_execute_on_native_backends() {
         for body in [
             r#"match entry { Entry {value:x,text:"a,b{c}"} if false -> {return 0;} Entry {value:x,text:"a,b{c}"} if x==20 -> {return x+22;} _ {return 0;} }"#,

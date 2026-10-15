@@ -41,20 +41,22 @@ pub(crate) fn normalize_human_stmt(line: &str) -> String {
     if trimmed == "done" {
         return "return".to_string();
     }
+    if [
+        "return", "let", "var", "if", "while", "match", "throw", "try",
+    ]
+    .iter()
+    .any(|keyword| {
+        trimmed == *keyword
+            || trimmed
+                .strip_prefix(keyword)
+                .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    }) {
+        return trimmed.to_string();
+    }
     if let Some(call) = human_call_stmt(trimmed) {
         return call;
     }
-    if trimmed.contains('(')
-        || trimmed.contains('=')
-        || trimmed.starts_with("return")
-        || trimmed.starts_with("let ")
-        || trimmed.starts_with("var ")
-        || trimmed.starts_with("if ")
-        || trimmed.starts_with("while ")
-        || trimmed.starts_with("match ")
-        || trimmed.starts_with("throw ")
-        || trimmed.starts_with("try ")
-    {
+    if trimmed.contains('(') || trimmed.contains('=') {
         return trimmed.to_string();
     }
     if is_ident_name(trimmed) {
@@ -74,9 +76,13 @@ pub(crate) fn next_nonempty_line<'a>(lines: &'a [&'a str], start: usize) -> Opti
 /// Transform the "human-friendly" `.in` syntax into normalised brace form.
 pub fn normalize_human_in_source(source: &str) -> String {
     // If no line ends with `:`, this is brace-form source — return unchanged.
-    let has_human_fn = source
-        .lines()
-        .any(|l| l.trim().ends_with(':') && !l.trim().starts_with("//"));
+    let mut detection = SourceLineState::default();
+    let has_human_fn = source.lines().any(|line| {
+        let scanned = detection.scan_line(line);
+        !scanned.starts_in_string
+            && !scanned.ends_in_string
+            && scanned.text.trim_end().ends_with(':')
+    });
     if !has_human_fn {
         return source.to_string();
     }
@@ -90,8 +96,14 @@ pub fn normalize_human_in_source(source: &str) -> String {
         eprintln!("=== END INPUT ===");
     }
 
+    let mut lexical = SourceLineState::default();
     for (idx, raw_line) in lines.iter().enumerate() {
-        let raw_line = strip_line_comment_outside_strings(raw_line);
+        let scanned = lexical.scan_line(raw_line);
+        let raw_line = scanned.text;
+        if scanned.starts_in_string {
+            out.push(raw_line.to_string());
+            continue;
+        }
         if raw_line.trim().is_empty() {
             continue;
         }
@@ -105,6 +117,10 @@ pub fn normalize_human_in_source(source: &str) -> String {
             }
         }
 
+        if scanned.ends_in_string {
+            out.push(raw_line.to_string());
+            continue;
+        }
         let line = raw_line.trim();
         let next_line = next_nonempty_line(&lines, idx + 1).unwrap_or("");
         let next_trimmed = next_line.trim();
@@ -263,29 +279,36 @@ pub fn split_top_level_decl_blocks(source: &str) -> Vec<(usize, String)> {
     let mut depth = 0i32;
     let mut current: Option<Vec<(usize, String)>> = None;
     let mut out = Vec::new();
+    let mut lexical = SourceLineState::default();
     for (line_no, raw_line) in source.lines().enumerate() {
-        let raw_line = strip_line_comment_outside_strings(raw_line);
-        let t = raw_line.trim();
-        let delta = brace_delta(raw_line);
+        let scanned = lexical.scan_line(raw_line);
+        let literal = scanned.starts_in_string || scanned.ends_in_string;
+        let t = if literal {
+            scanned.text
+        } else {
+            scanned.text.trim()
+        };
+        let delta = scanned.brace_delta;
 
         if current.is_none() {
-            if t.is_empty() || t.starts_with("//") {
+            let header = t.trim_start();
+            if header.is_empty() || t.starts_with("//") {
                 continue;
             }
             if depth == 0
-                && (t.starts_with("fn ")
-                    || t.starts_with("interrupt fn ")
-                    || t.starts_with("struct ")
-                    || t.starts_with("extern ")
-                    || t.starts_with("class ")
-                    || t.starts_with("interface ")
-                    || t.starts_with("component ")
-                    || t.starts_with("var ")
-                    || t.starts_with("const "))
+                && (header.starts_with("fn ")
+                    || header.starts_with("interrupt fn ")
+                    || header.starts_with("struct ")
+                    || header.starts_with("extern ")
+                    || header.starts_with("class ")
+                    || header.starts_with("interface ")
+                    || header.starts_with("component ")
+                    || header.starts_with("var ")
+                    || header.starts_with("const "))
             {
                 current = Some(vec![(line_no + 1, t.to_string())]);
                 depth += delta;
-                if depth == 0 {
+                if depth == 0 && !scanned.ends_in_string {
                     let buf = current.take().expect("just set");
                     let text = buf
                         .into_iter()
@@ -299,7 +322,7 @@ pub fn split_top_level_decl_blocks(source: &str) -> Vec<(usize, String)> {
             continue;
         }
 
-        if !(t.is_empty() || t.starts_with("//")) {
+        if literal || !(t.is_empty() || t.starts_with("//")) {
             current
                 .as_mut()
                 .expect("inside decl")
@@ -309,7 +332,7 @@ pub fn split_top_level_decl_blocks(source: &str) -> Vec<(usize, String)> {
         if depth < 0 {
             depth = 0;
         }
-        if depth == 0 {
+        if depth == 0 && !scanned.ends_in_string {
             let buf = current.take().expect("inside decl");
             let start_line = buf.first().map(|(l, _)| *l).unwrap_or(1);
             let text = buf

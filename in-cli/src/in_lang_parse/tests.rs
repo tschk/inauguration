@@ -2348,3 +2348,81 @@ fn struct_match_arm_boundaries_round_trip_without_changing_identifier_arms() {
         }
     }
 }
+
+#[test]
+fn multiline_strings_preserve_exact_text_across_surface_parser_and_canonical_output() {
+    for (literal, expected) in [
+        (
+            "first\n  // literal comment { }\n\n  : literal colon\n  human: style\n  λ雪\nlast",
+            "first\n  // literal comment { }\n\n  : literal colon\n  human: style\n  λ雪\nlast",
+        ),
+        (
+            "first\nmodule fake.module;\npackage fake.package;\nimport std.io;\n@parallel\nfn fake():\nlast",
+            "first\nmodule fake.module;\npackage fake.package;\nimport std.io;\n@parallel\nfn fake():\nlast",
+        ),
+        (
+            "open\\\n  // still literal }\nclose",
+            "open\\\n  // still literal }\nclose",
+        ),
+        (r#"escaped\"{,}\ntext"#, "escaped\"{,}\ntext"),
+    ] {
+        for constant in [false, true] {
+            let source = if constant {
+                format!(
+                    "package actual.package;\nconst TEXT=\"{literal}\"; // actual comment\nmodule actual.module;\nfn main()->String {{return TEXT;}}\n"
+                )
+            } else {
+                format!(
+                    "package actual.package;\nfn main()->String {{return \"{literal}\";}} // actual comment\nmodule actual.module;\n"
+                )
+            };
+            let surface =
+                parse_in_surface_info(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            assert_eq!(surface.package.as_deref(), Some("actual.package"));
+            assert_eq!(surface.module.as_deref(), Some("actual.module"));
+            assert!(surface.imports.is_empty());
+            assert!(surface.orchestration.annotations.is_empty());
+            let before =
+                parse_in_source(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let actual = before
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Function { name, body, .. } if name == "main" => {
+                        body.iter().find_map(|stmt| match stmt {
+                            Stmt::Return(Some(Expr::StringLit(text))) => Some(text),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{before:?}"));
+            assert_eq!(actual, expected, "{source}");
+            let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+            let after =
+                parse_in_source(&canonical).unwrap_or_else(|error| panic!("{canonical}: {error}"));
+            assert_eq!(before.decls, after.decls, "{source}\n{canonical}");
+        }
+    }
+}
+
+#[test]
+fn human_statements_keep_keywords_and_distinguish_function_prefixes() {
+    for statement in [
+        "return 42",
+        "let value:Int=42",
+        "var value:Int=42",
+        "throw message",
+        "if condition {return 42;}",
+    ] {
+        assert_eq!(super::lexer::normalize_human_stmt(statement), statement);
+    }
+    assert_eq!(
+        super::lexer::normalize_human_stmt("returning value"),
+        "returning(value)"
+    );
+    assert_eq!(
+        super::lexer::normalize_human_stmt("send value = 1"),
+        "send(value = 1)"
+    );
+}

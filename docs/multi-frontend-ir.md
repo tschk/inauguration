@@ -49,6 +49,10 @@ Dependency lookup uses the registered crate root or existing source search roots
 
 Rust impl lowering resolves `Self` and `Self::…` against the owning type in signatures, constructors, closures, and patterns, including macro-lowered values. Nested modules preserve those identities without rewriting field names, string literals, generic parameters, or deferred crate paths. This does not add generic specialization or complete aggregate-vector runtime support. Pattern argument splitting respects quoted commas, brackets, and escaped quotes, so struct, tuple, and array patterns preserve their string values through normalization. The `.in` statement and value match parser balances struct-pattern fields before locating the arm body, preserving guards and optional separators.
 
+## Literal text across source lines
+
+The `.in` normalization, declaration, and surface passes share quote state across physical lines. Braces, comment-looking lines, colons, whitespace, and blank lines inside strings retain their literal meaning. Canonical output retains global declarations and their mutability, types, and initializers. Native global initializer support remains limited to its existing constant-data subset.
+
 ## Unit values
 
 `UnitLit` represents `()` with type `Void`, distinct from integer zero and an empty array. Rust, `.in`, canonical source, and `.icore` expression `kind: "unit"` retain this type through checking and lowering. Empty-tuple patterns match unit values, including the results of calls, and explicit unit returns evaluate their producers before returning.

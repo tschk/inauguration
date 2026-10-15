@@ -5633,3 +5633,52 @@ fn in_struct_patterns_execute_statement_value_and_guarded_arms() {
         fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn in_multiline_strings_preserve_exact_runtime_text_and_canonical_output() {
+    for expected in [
+        "{",
+        "}",
+        "before\n//inside\nend",
+        "before  \n  after\n\nend",
+        "first\nprotocol:\n//literal\nlast",
+        "first\\\n",
+        "π:\n  // λ\n🦀}",
+    ] {
+        let literal = expected.replace('"', "\\\"");
+        for source in [
+            format!("fn main()->String{{return \"{literal}\";}}\n"),
+            format!("fn main()->String{{\n let text:String=\"{literal}\";\n return text;\n}}\n"),
+            format!("fn main()->String:\n  let text:String=\"{literal}\";\n  return text;\n"),
+        ] {
+            let path = temp_path("multiline-string.in");
+            for text in [
+                &source,
+                &crate::in_canonical::canonicalize_in_source(&source).unwrap(),
+            ] {
+                fs::write(&path, text).unwrap();
+                for profile in [
+                    crate::emit_profile::EmitProfile::Default,
+                    crate::emit_profile::EmitProfile::Lean,
+                    crate::emit_profile::EmitProfile::Harden,
+                ] {
+                    let mut request =
+                        default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(report.success, "{source}: {profile:?}: {report:?}");
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Str(expected.into())),
+                        "{source}: {profile:?}: {report:?}"
+                    );
+                }
+            }
+            fs::remove_file(path).unwrap();
+        }
+    }
+}
