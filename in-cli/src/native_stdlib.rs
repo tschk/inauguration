@@ -117,6 +117,40 @@ pub unsafe extern "C" fn in_env_current_dir() -> *const u8 {
     }
 }
 
+fn is_safe_path(path_str: &str) -> bool {
+    let path = std::path::Path::new(path_str);
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        if let Some(parent) = ancestor.parent() {
+            if parent.as_os_str().is_empty() {
+                ancestor = std::path::Path::new(".");
+                break;
+            }
+            ancestor = parent;
+        } else {
+            return false;
+        }
+    }
+
+    let Ok(canonical_ancestor) = std::fs::canonicalize(ancestor) else {
+        return false;
+    };
+
+    if let Ok(c) = std::env::current_dir().and_then(std::fs::canonicalize) {
+        if canonical_ancestor.starts_with(c) {
+            return true;
+        }
+    }
+
+    if let Ok(t) = std::fs::canonicalize(std::env::temp_dir()) {
+        if canonical_ancestor.starts_with(t) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// `std::fs::read_to_string(path)` -> `io::Result<String>`
 ///
 /// # Safety
@@ -131,6 +165,9 @@ pub unsafe extern "C" fn in_fs_read_to_string(path_ptr: *const u8) -> *const u8 
             Ok(s) => s,
             Err(_) => return instring_empty(),
         };
+        if !is_safe_path(path_str) {
+            return instring_empty();
+        }
         match std::fs::read_to_string(path_str) {
             Ok(content) => instring_from_string(content),
             Err(_) => instring_empty(),
@@ -152,6 +189,9 @@ pub unsafe extern "C" fn in_fs_exists(path_ptr: *const u8) -> i64 {
             Ok(s) => s,
             Err(_) => return 0,
         };
+        if !is_safe_path(path_str) {
+            return 0;
+        }
         if std::path::Path::new(path_str).exists() {
             1
         } else {
@@ -178,6 +218,9 @@ pub unsafe extern "C" fn in_fs_write(path_ptr: *const u8, contents_ptr: *const u
             Ok(s) => s,
             Err(_) => return 0,
         };
+        if !is_safe_path(path_str) {
+            return 0;
+        }
         match std::fs::write(path_str, contents) {
             Ok(()) => 1,
             Err(_) => 0,
@@ -200,6 +243,9 @@ pub unsafe extern "C" fn in_fs_create_dir(path_ptr: *const u8) -> i64 {
             Ok(s) => s,
             Err(_) => return 0,
         };
+        if !is_safe_path(path_str) {
+            return 0;
+        }
         match std::fs::create_dir(path_str) {
             Ok(()) => 1,
             Err(_) => 0,
@@ -292,6 +338,9 @@ pub unsafe extern "C" fn in_fs_remove_file(path_ptr: *const u8) -> i64 {
             Ok(s) => s,
             Err(_) => return 0,
         };
+        if !is_safe_path(path_str) {
+            return 0;
+        }
         match std::fs::remove_file(path_str) {
             Ok(()) => 1,
             Err(_) => 0,
