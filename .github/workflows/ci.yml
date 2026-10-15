@@ -28,6 +28,8 @@ jobs:
       - name: Test
         run: cargo test --features extended --locked
         working-directory: in-cli
+      - name: Link and execute native ELF objects
+        run: PATH="$PWD/in-cli/target/debug:$PATH" bash scripts/check-native-linkable-objects.sh
 
   protocol-models:
     name: Protocol models
