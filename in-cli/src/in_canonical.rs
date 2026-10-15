@@ -108,7 +108,42 @@ fn format_decl(decl: &Decl, out: &mut String) {
             }
             out.push('}');
         }
-        Decl::Component { .. } => {}
+        Decl::Component {
+            name,
+            target,
+            deterministic,
+            checkpoint,
+            imports,
+            exports,
+            capabilities,
+        } => {
+            out.push_str(&format!("component {name} {{\n"));
+            if !target.is_empty() {
+                out.push_str(&format!(
+                    "  target {}\n",
+                    format_expr(&Expr::StringLit(target.clone()))
+                ));
+            }
+            out.push_str(&format!("  deterministic {deterministic}\n"));
+            if !checkpoint.is_empty() {
+                out.push_str(&format!("  checkpoint {checkpoint}\n"));
+            }
+            for import in imports {
+                out.push_str(&format!("  import {}: {}\n", import.name, import.interface));
+            }
+            for export in exports {
+                out.push_str(&format!("  export {}: {}\n", export.name, export.interface));
+            }
+            for capability in capabilities {
+                out.push_str(&format!(
+                    "  capability {}: {}({})\n",
+                    capability.name,
+                    capability.capability_type,
+                    capability.args.join(", ")
+                ));
+            }
+            out.push('}');
+        }
         Decl::Global {
             name,
             typ,
@@ -476,6 +511,40 @@ mod tests {
 
     use super::*;
     use crate::in_lang_parse::parse_in_source;
+
+    #[test]
+    fn canonical_components_preserve_defaults_and_target_strings() {
+        for source in [
+            "component Empty {\n}\n",
+            r#"component Bare {
+ target a"//"b
+ capability noop: Console()
+}"#,
+            r#"component Escaped {
+ target "path\\tail\\\"//{snow}雪";
+ deterministic false
+ checkpoint incremental;
+}"#,
+            r#"component Quoted {
+ target "'quoted'";
+}"#,
+        ] {
+            let source = format!("{source}\nfn main()->Int{{return 42;}}");
+            let before = parse_in_source(&source).unwrap();
+            let canonical = canonicalize_in_source(&source).unwrap();
+            assert_eq!(parse_in_source(&canonical).unwrap(), before, "{canonical}");
+            assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+        }
+        let module = parse_in_source(
+            r#"component Escaped {
+ target "a\\b\"c";
+}
+fn main()->Int{return 42;}
+"#,
+        )
+        .unwrap();
+        assert!(matches!(&module.decls[0], Decl::Component { target, .. } if target == "a\\b\"c"));
+    }
 
     #[test]
     fn canonical_closures_preserve_params_return_body_and_nested_scopes() {

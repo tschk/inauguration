@@ -214,13 +214,13 @@ pub(crate) fn parse_component_block(block: &str) -> Result<Decl, String> {
             continue;
         }
         if let Some(val) = line.strip_prefix("target ") {
-            let val = trim(val);
-            target = val
-                .trim_matches('"')
-                .trim_matches('\'')
-                .trim_end_matches(';')
-                .trim()
-                .to_string();
+            let val = trim(val).trim_end_matches(';').trim();
+            target = if val.starts_with('"') {
+                crate::core_ir::decode_string_literal(val)
+                    .ok_or_else(|| ".in: invalid component target string".to_string())?
+            } else {
+                val.trim_matches('\'').trim().to_string()
+            };
             if target.is_empty() {
                 return Err(".in: component target missing".into());
             }

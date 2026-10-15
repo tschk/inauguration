@@ -6809,3 +6809,104 @@ fn owned_scalar_array_struct_fields_preserve_layout_lifetime_and_effects() {
         }
     }
 }
+
+#[test]
+fn canonical_components_preserve_full_native_metadata_sidecars() {
+    let original = r#"component Services {
+ target "aarch64-unknown-none"
+ deterministic true
+ checkpoint full
+ import first: Reader
+ import second: Writer
+ export public-reader: Reader
+ export public-writer: Writer
+ capability console: DebugConsole(write)
+ capability memory: PhysicalMemory(discover, map, protect)
+}
+interface Reader {
+ fn read()->Int
+}
+interface Writer {
+ fn write(value:Int)->void
+}
+fn main()->Int{return 42;}
+"#;
+    let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+    let before = crate::in_lang_parse::parse_in_source(original).unwrap();
+    let after = crate::in_lang_parse::parse_in_source(&canonical).unwrap();
+    assert_eq!(before, after, "{canonical}");
+    assert!(
+        after
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Component { name, .. } if name == "Services"))
+    );
+    let mut baseline: Option<serde_json::Value> = None;
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for text in [original, canonical.as_str()] {
+            let source = temp_path("canonical-component.in");
+            let artifact = temp_path("canonical-component.o");
+            let metadata = artifact.with_extension("component-metadata.json");
+            fs::write(&source, text).unwrap();
+            let mut request = default_request(
+                source.clone(),
+                CompileTarget::Native,
+                Some("main"),
+                Some(artifact.clone()),
+            );
+            request.target_triple = Some("aarch64-unknown-none".into());
+            request.linkage = NativeLinkage::StaticLib;
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.degradations.is_empty(),
+                "{profile:?}: {report:?}"
+            );
+            let bytes = fs::read(&artifact).unwrap();
+            assert_eq!(&bytes[..4], b"\x7fELF");
+            assert_eq!(u16::from_le_bytes([bytes[16], bytes[17]]), 1);
+            assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 183);
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&metadata).expect("component metadata sidecar"))
+                    .unwrap();
+            assert_eq!(value["component"], "Services");
+            assert_eq!(value["target"], "aarch64-unknown-none");
+            assert_eq!(value["entry"], "main");
+            assert_eq!(value["deterministic"], true);
+            assert_eq!(value["checkpoint"], "full");
+            assert_eq!(
+                value["imports"],
+                serde_json::json!([
+                    {"name":"first", "interface":"Reader"},
+                    {"name":"second", "interface":"Writer"}
+                ])
+            );
+            assert_eq!(
+                value["exports"],
+                serde_json::json!([
+                    {"name":"public-reader", "interface":"Reader"},
+                    {"name":"public-writer", "interface":"Writer"}
+                ])
+            );
+            let capabilities = serde_json::json!([
+                {"name":"console", "capability_type":"DebugConsole", "args":["write"]},
+                {"name":"memory", "capability_type":"PhysicalMemory", "args":["discover","map","protect"]}
+            ]);
+            assert_eq!(value["capabilities_required"], capabilities);
+            assert_eq!(value["capabilities_exported"], capabilities);
+            if let Some(expected) = &baseline {
+                assert_eq!(&value, expected, "{profile:?}: {text}");
+            } else {
+                baseline = Some(value);
+            }
+            fs::remove_file(source).unwrap();
+            fs::remove_file(&artifact).unwrap();
+            fs::remove_file(metadata).unwrap();
+            let _ = fs::remove_file(artifact.with_extension("abi.json"));
+        }
+    }
+}

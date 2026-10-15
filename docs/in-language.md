@@ -188,7 +188,9 @@ component AppShell {
 }
 ```
 
-Interfaces are surface contracts; components declare exports, targets, and capability needs for `in agent` / SCI-style checks.
+Interfaces are surface contracts; components declare exports, targets, and capability needs for `in agent` / SCI-style checks. Canonical formatting preserves these declarations and their metadata.
+
+Double-quoted component targets use the same string escapes as ordinary string literals (`\\`, `\"`, `\n`, `\r`, `\t`); write `\\` for a literal backslash. Bare targets remain supported. A trailing semicolon is optional.
 
 ### Functions, control flow, calls
 

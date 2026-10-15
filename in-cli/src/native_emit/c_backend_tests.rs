@@ -848,6 +848,8 @@ fn in_index_compound_projection_preserves_place_and_read_order() {
 
 fn assert_inferred_c_executes(module: &UnifiedModule, entry_body: &str) {
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
     let original = module.clone();
     let emitted = emit_c_module(module).unwrap();
     assert_eq!(module, &original, "C emission mutated its input");
@@ -858,8 +860,10 @@ fn assert_inferred_c_executes(module: &UnifiedModule, entry_body: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    // Wall-clock resolution can repeat across concurrently running tests.
+    let serial = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "inauguration-c-local-types-{}-{stamp}",
+        "inauguration-c-local-types-{}-{stamp}-{serial}",
         std::process::id()
     ));
     std::fs::create_dir(&dir).unwrap();
