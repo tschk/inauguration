@@ -3,19 +3,19 @@ fn mark(value: Int) -> Int {
   return value;
 }
 fn read(index: Int) -> Int {
-  let values: [Int] = [42, 43];
+  let values = [42, 43];
   return values[index];
 }
 fn literal_negative() -> Int {
-  let values: [Int] = [42, 43];
+  let values = [42, 43];
   return 100 + values[-1];
 }
 fn literal_carrier() -> Int {
-  let values: [Int] = [42, 43];
+  let values = [42, 43];
   return 100 + values[0xffffffff];
 }
 fn write(index: Int) -> Int {
-  let values: [Int] = [42, 43];
+  let values = [42, 43];
   let value = mark(1);
   let at = mark(index);
   values[at] = value;
@@ -23,34 +23,34 @@ fn write(index: Int) -> Int {
   return values[0];
 }
 fn absorbed() -> Int {
-  let values: [Int] = [42, 43];
+  let values = [42, 43];
   return 42 + 0 * values[9];
 }
 fn absorbed_right() -> Int {
-  let values: [Int] = [42, 43];
+  let values = [42, 43];
   return 42 + values[9] * 0;
 }
 fn unused() -> Int {
-  let values: [Int] = [42, 43];
+  let values = [42, 43];
   let ignored = values[9];
   return 42;
 }
 fn immediate_store_negative() -> Int {
-  let values: [Int] = [42, 43];
+  let values = [42, 43];
   let value = mark(2);
   values[-1] = value;
   mark(3);
   return 100;
 }
 fn immediate_store_carrier() -> Int {
-  let values: [Int] = [42, 43];
+  let values = [42, 43];
   let value = mark(2);
   values[0xffffffff] = value;
   mark(3);
   return 100;
 }
 fn read_effect(index: Int) -> Int {
-  let values: [Int] = [42, 43];
+  let values = [42, 43];
   mark(1);
   let answer = values[mark(index)];
   mark(3);
@@ -64,6 +64,12 @@ fn empty_store() -> Int {
   let values: [Int] = [];
   values[0] = 9;
   return 100;
+}
+fn inferred_repeat() -> Int {
+  store32(0x38000000, 0);
+  let values = array-repeat(mark(2), 2);
+  if load32(0x38000000) != 2 { return 0; }
+  return 38 + values[0] + values[1];
 }
 fn main() -> Int {
   if read(0) != 42 {
@@ -129,7 +135,8 @@ fn main() -> Int {
   if absorbed_right() != 1 { return 31; }
   if empty_read() != 1 { return 32; }
   if empty_store() != 1 { return 33; }
-  let safe: [Int] = [42, 43];
+  if inferred_repeat() != 42 { return 34; }
+  let safe = [42, 43];
   if false && safe[9] == 0 {
     return 14;
   }

@@ -1,7 +1,8 @@
 # Thumb checked array indexing
 
 Run `python3 scripts/check-thumb-index.py --compiler /absolute/path/to/in`
-only with a compiler containing the checked-index fix (0.9.223 or later).
+with a compiler containing checked indexing and inferred-array support
+(0.9.224 or later).
 Do not execute these invalid-index cases on older Thumb compilers: their
 negative-index guard could use stale flags and access outside the array.
 
@@ -19,9 +20,10 @@ operand order, single evaluation, and skipped following statements. Multiplying
 an invalid read by zero and discarding an unused read must preserve the exit;
 unselected lazy branches must avoid invalid reads. Success returns42.
 
-The executable fixture uses explicitly typed multi-element arrays and stages
-store values before assignment. Current Thumb preparation separately refuses
-inferred array locals and direct call-bearing immediate-index stores (the latter
-can create a synthetic array local without a literal initializer). These are
-existing compilation limits, not successful runtime cases in this test. Typed
-empty arrays are supported and both their read and store failures are exercised.
+The nonempty locals intentionally omit type annotations, including an inferred
+`array-repeat` whose effectful element must execute once. Empty arrays retain
+explicit `[Int]` annotations because they have no element from which to infer a
+type. Store values are staged before assignment: direct call-bearing
+immediate-index stores currently can create a synthetic array local without a
+literal initializer and are a separate existing compilation limit. Array alias
+locals likewise remain unsupported by Thumb's literal-backed local storage.

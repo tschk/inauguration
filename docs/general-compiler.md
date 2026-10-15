@@ -49,6 +49,11 @@ indexing follows the same current-function failure contract for negative or
 out-of-range indices; optimization preserves those checks and their function
 boundaries too.
 
+Shared type preparation records concrete inferred fixed-array element types for
+native lowering, including Thumb `Int` and `Bool` array literals and
+`array-repeat` initializers. Empty arrays still need an explicit element type;
+Thumb array aliases and call-bearing store spills remain unsupported.
+
 AArch64 lowering branches `break` and `continue` to the innermost loop's exit
 and next iteration, including vector loops. `.in` range-loop expansion advances the
 binding before `continue` on both native backends. AArch64 rejects loop jumps

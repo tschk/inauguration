@@ -1011,6 +1011,16 @@ impl TypeChecker {
                     {
                         *item = element;
                     }
+                    // Preserve concrete inferred array layouts for all native backends.
+                    // Empty and unresolved arrays still need contextual element types;
+                    // leave other inferred bindings available to closure inference.
+                    if typ.is_none()
+                        && let Some(inferred @ Typ::Array(_)) =
+                            self.expr_type(expr, facts, env).map(|typ| typ.canonical())
+                        && resolved_closure_type(&inferred)
+                    {
+                        *typ = Some(inferred);
+                    }
                     if promote_c_bool && let Some(typ) = typ.as_ref() {
                         self.resolve_c_value(expr, typ, facts, env);
                     }
@@ -4619,6 +4629,90 @@ mod tests {
             assert!(!report.ok, "{expression}: {report:?}");
             assert_eq!(report.reason_code.as_deref(), Some("unresolved-symbol"));
         }
+    }
+    #[test]
+    fn inferred_fixed_array_types_persist_only_when_concrete() {
+        let checker = TypeChecker::new();
+        let facts = checker.collect_facts(&module(vec![]));
+        let mut env = HashMap::from([
+            ("unknown".into(), Typ::Generic("T".into())),
+            ("integer".into(), Typ::Int),
+        ]);
+        let cases = [
+            (
+                Expr::ArrayLit(vec![Expr::IntLit(20), Expr::IntLit(22)]),
+                Some(Typ::Array(Box::new(Typ::Int))),
+            ),
+            (
+                Expr::ArrayLit(vec![Expr::BoolLit(true)]),
+                Some(Typ::Array(Box::new(Typ::Bool))),
+            ),
+            (
+                Expr::ArrayLit(vec![Expr::FloatLit(crate::core_ir::FloatVal(1.0))]),
+                Some(Typ::Array(Box::new(Typ::Float))),
+            ),
+            (
+                Expr::ArrayLit(vec![Expr::StringLit("λ".into())]),
+                Some(Typ::Array(Box::new(Typ::String))),
+            ),
+            (
+                Expr::ArrayLit(vec![Expr::ArrayLit(vec![Expr::IntLit(42)])]),
+                Some(Typ::Array(Box::new(Typ::Array(Box::new(Typ::Int))))),
+            ),
+            (Expr::ArrayLit(vec![]), None),
+            (Expr::ArrayLit(vec![Expr::ArrayLit(vec![])]), None),
+            (Expr::ArrayLit(vec![Expr::Ident("unknown".into())]), None),
+        ];
+        for (index, (value, expected)) in cases.into_iter().enumerate() {
+            let mut body = vec![Stmt::Let(format!("array{index}"), None, value)];
+            checker.resolve_typed_body(&mut body, &facts, &mut env, None, false);
+            let Stmt::Let(_, actual, _) = &body[0] else {
+                panic!("expected binding")
+            };
+            assert_eq!(actual, &expected, "case {index}");
+        }
+    }
+
+    #[test]
+    fn inferred_fixed_arrays_preserve_annotations_and_other_inference() {
+        let checker = TypeChecker::new();
+        let facts = checker.collect_facts(&module(vec![function_with_ret(
+            "pending",
+            Typ::Void,
+            vec![],
+        )]));
+        let explicit = Typ::Array(Box::new(Typ::Int));
+        let mut body = vec![
+            Stmt::Let(
+                "empty".into(),
+                Some(explicit.clone()),
+                Expr::ArrayLit(vec![]),
+            ),
+            Stmt::Let(
+                "mismatch".into(),
+                Some(explicit.clone()),
+                Expr::ArrayLit(vec![Expr::BoolLit(true)]),
+            ),
+            Stmt::Let(
+                "pending_value".into(),
+                None,
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("pending".into())),
+                    args: vec![],
+                },
+            ),
+            Stmt::Let("flag".into(), None, Expr::BoolLit(true)),
+            Stmt::Let("integer".into(), Some(Typ::Int), Expr::BoolLit(true)),
+        ];
+        checker.resolve_typed_body(&mut body, &facts, &mut HashMap::new(), None, true);
+        for stmt in &body[..2] {
+            assert!(matches!(stmt, Stmt::Let(_, Some(typ), _) if typ == &explicit));
+        }
+        assert!(matches!(&body[2], Stmt::Let(_, None, _)));
+        assert!(matches!(&body[3], Stmt::Let(_, None, Expr::BoolLit(true))));
+        assert!(
+            matches!(&body[4], Stmt::Let(_, Some(Typ::Int), Expr::Unary { op, .. }) if op == "bool-to-int")
+        );
     }
 }
 

@@ -129,6 +129,8 @@ fn match_scrutinee_needs_storage(value: &Expr) -> bool {
 
 fn stmt_has_guard(stmt: &Stmt, whole_bindings: bool) -> bool {
     match stmt {
+        // Shared typed preparation records inferred fixed-array layouts.
+        Stmt::Let(_, None, Expr::ArrayLit(_)) => true,
         Stmt::Let(_, _, expr)
         | Stmt::Assign(_, expr)
         | Stmt::Expr(expr)
@@ -1225,6 +1227,32 @@ mod whole_struct_binding_tests {
             .is_ok()
         );
         assert!(crate::native_emit::x86_64_lower::lower_module(&module, "main").is_ok());
+    }
+
+    #[test]
+    fn inferred_array_literals_receive_shared_types_before_native_lowering() {
+        for source in [
+            "fn main()->Int{let values=[20,22];return values[0]+values[1];}",
+            "fn main()->Int{let flags=[true,false];if flags[0]{return 42;}return 0;}",
+            "fn main()->Int{if true{let values=[42];return values[0];}return 0;}",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            let prepared = prepared_native_module(&module);
+            assert!(matches!(prepared, Cow::Owned(_)));
+            assert!(
+                crate::native_emit::thumb_lower::lower_module(&module, "main").is_ok(),
+                "{source}"
+            );
+            assert!(
+                crate::native_emit::x86_64_lower::lower_module(&module, "main").is_ok(),
+                "{source}"
+            );
+        }
+        let ambiguous = crate::in_lang_parse::parse_in_source(
+            "fn main()->Int{let values=[];return values[0];}",
+        )
+        .unwrap();
+        assert!(crate::native_emit::thumb_lower::lower_module(&ambiguous, "main").is_err());
     }
 
     #[test]
