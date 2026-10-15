@@ -5959,3 +5959,40 @@ fn rust_static_string_globals_use_native_data_storage() {
     }
     fs::remove_file(source).unwrap();
 }
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_explicit_global_receiver_methods_respect_parameter_and_local_shadows() {
+    for (original, expected) in [
+        (
+            "var number:Int=42;\nfn main()->String{return number.toStr();}",
+            "42",
+        ),
+        (
+            "const number:Int=42;\nstruct Item{Int x}\nfn Item-toStr(value:Item)->String{return \"item\";}\nfn parameter(number:Item)->String{return number.toStr();}\nfn local()->String{let number:Item=Item{x:1};return number.toStr();}\nfn main()->String{if parameter(Item{x:2})!=\"item\" || local()!=\"item\"{return \"wrong shadow\";}return number.toStr();}",
+            "42",
+        ),
+    ] {
+        let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+        for text in [original, canonical.as_str()] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let source = temp_path("explicit-global-receiver.in");
+                fs::write(&source, text).unwrap();
+                let mut request =
+                    default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{profile:?} {text}: {report:?}");
+                assert_eq!(report.eval_result, Some(EvalValue::Str(expected.into())));
+                fs::remove_file(source).unwrap();
+            }
+        }
+    }
+}

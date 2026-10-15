@@ -2546,3 +2546,180 @@ fn conditional_headers_preserve_quoted_and_nested_braces_in_canonical_roundtrips
         }
     }
 }
+
+#[test]
+fn explicit_global_receiver_methods_use_global_types_and_lexical_shadows() {
+    let source = "var number:Int=42;\nstruct Item{Int x}\nfn Item-toStr(value:Item)->String{return \"item\";}\nfn parameter(number:Item)->String{return number.toStr();}\nfn local()->String{let number:Item=Item{x:1};return number.toStr();}\nfn main()->String{return number.toStr();}";
+    let module = parse_in_source(source).unwrap();
+    for (function, expected) in [
+        ("main", "to-string"),
+        ("parameter", "Item-toStr"),
+        ("local", "Item-toStr"),
+    ] {
+        let body = module
+            .decls
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Function { name, body, .. } if name == function => Some(body),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            matches!(body.last(), Some(Stmt::Return(Some(Expr::Call { callee, .. })))
+            if matches!(callee.as_ref(), Expr::Ident(name) if name == expected)),
+            "{function}: {body:?}"
+        );
+    }
+    let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+    assert!(report.ok, "{report:?}");
+    assert!(
+        crate::typecheck::TypeChecker::new()
+            .check_module(&module)
+            .is_ok()
+    );
+}
+
+#[test]
+fn explicit_global_initializer_receiver_methods_are_desugared() {
+    let module = parse_in_source(
+        "var number:Int=42;\nvar text:String=number.toStr();\nfn main()->Int{return 42;}",
+    )
+    .unwrap();
+    assert!(module.decls.iter().any(|decl| matches!(decl,
+        Decl::Global { name, init: Some(init), .. }
+        if name == "text" && matches!(init.as_ref(), Expr::Call { callee, .. }
+            if matches!(callee.as_ref(), Expr::Ident(name) if name == "to-string")))));
+    let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+    assert!(report.ok, "{report:?}");
+    assert!(
+        crate::typecheck::TypeChecker::new()
+            .check_module(&module)
+            .is_ok()
+    );
+}
+
+#[test]
+fn global_receiver_method_lookup_does_not_escape_local_or_closure_shadows() {
+    use std::collections::HashMap;
+    let globals = HashMap::from([("number".into(), Typ::Int)]);
+    let mut env = globals.clone();
+    let mut body = vec![
+        Stmt::Let("number".into(), None, Expr::Ident("unknown".into())),
+        Stmt::Return(Some(parse_expr("number.toStr()"))),
+    ];
+    super::validate::desugar_method_calls_in_body(
+        &mut body,
+        &mut env,
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    assert!(!env.contains_key("number"));
+    assert!(
+        matches!(body.last(), Some(Stmt::Return(Some(Expr::Call { callee, .. })))
+        if matches!(callee.as_ref(), Expr::Ident(name) if name == "__method__toStr"))
+    );
+    let mut closure = Expr::Closure {
+        params: vec![("number".into(), Typ::Named("Item".into()))],
+        ret: Typ::String,
+        body: vec![Stmt::Return(Some(parse_expr("number.toStr()")))],
+        captures: vec![],
+    };
+    super::validate::desugar_method_calls_in_expr(
+        &mut closure,
+        &globals,
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    assert!(matches!(closure, Expr::Closure { body, .. }
+        if matches!(body.last(), Some(Stmt::Return(Some(Expr::Call { callee, .. })))
+            if matches!(callee.as_ref(), Expr::Ident(name) if name == "Item-toStr"))));
+}
+
+#[test]
+fn imported_explicit_global_receiver_methods_are_resolved_after_merge() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-global-method-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("values.in"), "var number:Int=42;\n").unwrap();
+    fs::write(
+        dir.join("main.in"),
+        "import \"./values.in\";\nfn main()->String{return number.toStr();}\n",
+    )
+    .unwrap();
+    let module = parse_in_file(&dir.join("main.in")).unwrap();
+    let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+    assert!(report.ok, "{report:?}");
+    assert!(
+        crate::typecheck::TypeChecker::new()
+            .check_module(&module)
+            .is_ok()
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn global_receiver_methods_respect_statement_pattern_bindings_and_guards() {
+    use std::collections::HashMap;
+    let mut env = HashMap::from([("number".into(), Typ::Int)]);
+    let mut body = vec![Stmt::Match {
+        scrutinee: Expr::StructInit {
+            name: "Item".into(),
+            fields: vec![],
+        },
+        arms: vec![crate::core_ir::MatchArm {
+            pattern: "number".into(),
+            guard: Some(parse_expr("number.toStr()==\"item\"")),
+            body: vec![Stmt::Return(Some(parse_expr("number.toStr()")))],
+        }],
+    }];
+    super::validate::desugar_method_calls_in_body(
+        &mut body,
+        &mut env,
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    let Stmt::Match { arms, .. } = &body[0] else {
+        panic!("match");
+    };
+    assert!(matches!(&arms[0].guard, Some(Expr::Binary { lhs, .. })
+        if matches!(lhs.as_ref(), Expr::Call { callee, .. }
+            if matches!(callee.as_ref(), Expr::Ident(name) if name == "Item-toStr"))));
+    assert!(
+        matches!(arms[0].body.last(), Some(Stmt::Return(Some(Expr::Call { callee, .. })))
+        if matches!(callee.as_ref(), Expr::Ident(name) if name == "Item-toStr"))
+    );
+    assert_eq!(env.get("number"), Some(&Typ::Int));
+}
+
+#[test]
+fn global_receiver_method_lookup_does_not_escape_catch_bindings() {
+    use std::collections::HashMap;
+    let mut env = HashMap::from([("number".into(), Typ::Int)]);
+    let mut body = vec![Stmt::Try {
+        body: vec![],
+        catches: vec![crate::core_ir::CatchArm {
+            pattern: "number".into(),
+            body: vec![Stmt::Return(Some(parse_expr("number.toStr()")))],
+        }],
+    }];
+    super::validate::desugar_method_calls_in_body(
+        &mut body,
+        &mut env,
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    let Stmt::Try { catches, .. } = &body[0] else {
+        panic!("try");
+    };
+    assert!(
+        matches!(catches[0].body.last(), Some(Stmt::Return(Some(Expr::Call { callee, .. })))
+        if matches!(callee.as_ref(), Expr::Ident(name) if name == "__method__toStr"))
+    );
+    assert_eq!(env.get("number"), Some(&Typ::Int));
+}

@@ -6,6 +6,102 @@ mod value_scope_tests {
     use super::*;
 
     #[test]
+    fn constants_respect_body_bindings_and_restore_branch_scopes() {
+        let ident = || Expr::Ident("answer".into());
+        let mut body = vec![
+            Stmt::If {
+                cond: Expr::BoolLit(true),
+                then_body: vec![
+                    Stmt::Let("answer".into(), None, ident()),
+                    Stmt::Return(Some(ident())),
+                ],
+                else_body: vec![Stmt::Return(Some(ident()))],
+            },
+            Stmt::Expr(ident()),
+            Stmt::Let("answer".into(), None, ident()),
+            Stmt::Return(Some(ident())),
+        ];
+        let mut consts = HashMap::from([("answer".into(), Expr::IntLit(42))]);
+        replace_body_idents(&mut body, &mut consts);
+        let Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } = &body[0]
+        else {
+            panic!("if")
+        };
+        assert!(matches!(&then_body[0], Stmt::Let(_, _, Expr::IntLit(42))));
+        assert!(matches!(&then_body[1], Stmt::Return(Some(Expr::Ident(name))) if name == "answer"));
+        assert!(matches!(
+            &else_body[0],
+            Stmt::Return(Some(Expr::IntLit(42)))
+        ));
+        assert!(matches!(&body[1], Stmt::Expr(Expr::IntLit(42))));
+        assert!(matches!(&body[2], Stmt::Let(_, _, Expr::IntLit(42))));
+        assert!(matches!(&body[3], Stmt::Return(Some(Expr::Ident(name))) if name == "answer"));
+    }
+
+    #[test]
+    fn constants_respect_parameters_closures_patterns_and_catches() {
+        let mut module = UnifiedModule::new(vec![
+            Decl::Global {
+                name: "answer".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(Expr::IntLit(42))),
+                mutable: false,
+                constant_value: true,
+            },
+            Decl::Function {
+                name: "parameter".into(),
+                params: vec![("answer".into(), Typ::Int)],
+                ret: Typ::Int,
+                body: vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
+                type_params: vec![],
+            },
+        ]);
+        inline_const_values(&mut module);
+        assert!(matches!(&module.decls[1], Decl::Function { body, .. }
+            if matches!(&body[0], Stmt::Return(Some(Expr::Ident(name))) if name == "answer")));
+        let consts = HashMap::from([("answer".into(), Expr::IntLit(42))]);
+        let mut closure = Expr::Closure {
+            params: vec![("answer".into(), Typ::Int)],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
+            captures: vec![],
+        };
+        let expected = closure.clone();
+        replace_idents(&mut closure, &consts);
+        assert_eq!(closure, expected);
+        let mut body = vec![
+            Stmt::Match {
+                scrutinee: Expr::Ident("answer".into()),
+                arms: vec![crate::core_ir::MatchArm {
+                    pattern: "answer".into(),
+                    guard: Some(Expr::Ident("answer".into())),
+                    body: vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
+                }],
+            },
+            Stmt::Try {
+                body: vec![Stmt::Expr(Expr::Ident("answer".into()))],
+                catches: vec![crate::core_ir::CatchArm {
+                    pattern: "answer".into(),
+                    body: vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
+                }],
+            },
+        ];
+        replace_body_idents(&mut body, &mut consts.clone());
+        assert!(
+            matches!(&body[0], Stmt::Match { scrutinee: Expr::IntLit(42), arms }
+            if matches!(&arms[0].guard, Some(Expr::Ident(name)) if name == "answer")
+                && matches!(&arms[0].body[0], Stmt::Return(Some(Expr::Ident(name))) if name == "answer"))
+        );
+        assert!(matches!(&body[1], Stmt::Try { body, catches, .. }
+            if matches!(&body[0], Stmt::Expr(Expr::IntLit(42)))
+                && matches!(&catches[0].body[0], Stmt::Return(Some(Expr::Ident(name))) if name == "answer")));
+    }
+
+    #[test]
     fn block_values_keep_inference_and_constants_in_local_scope() {
         let mut value = Expr::Block {
             body: vec![Stmt::Let(
@@ -381,10 +477,27 @@ pub(crate) fn desugar_method_calls(module: &mut UnifiedModule) {
         })
         .collect();
 
+    let globals: HashMap<String, Typ> = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global { name, typ, .. } => Some((name.clone(), typ.clone())),
+            _ => None,
+        })
+        .collect();
     for decl in &mut module.decls {
-        if let Decl::Function { params, body, .. } = decl {
-            let mut env: HashMap<String, Typ> = params.iter().cloned().collect();
-            desugar_method_calls_in_body(body, &mut env, &struct_fields, &fn_rets);
+        match decl {
+            Decl::Function { params, body, .. } => {
+                let mut env = globals.clone();
+                env.extend(params.iter().cloned());
+                desugar_method_calls_in_body(body, &mut env, &struct_fields, &fn_rets);
+            }
+            Decl::Global {
+                init: Some(init), ..
+            } => {
+                desugar_method_calls_in_expr(init, &globals, &struct_fields, &fn_rets);
+            }
+            _ => {}
         }
     }
 }
@@ -399,10 +512,13 @@ pub(crate) fn desugar_method_calls_in_body(
         match stmt {
             Stmt::Let(name, typ, expr) => {
                 desugar_method_calls_in_expr(expr, env, structs, fn_rets);
-                if let Some(typ) = typ
+                let value_type = typ
                     .clone()
-                    .or_else(|| infer_in_expr_type(expr, env, structs, fn_rets))
-                {
+                    .or_else(|| infer_in_expr_type(expr, env, structs, fn_rets));
+                // The initializer sees the outer binding; the new local shadows it
+                // even when its type cannot yet be inferred.
+                env.remove(name);
+                if let Some(typ) = value_type {
                     env.insert(name.clone(), typ);
                 }
             }
@@ -440,8 +556,23 @@ pub(crate) fn desugar_method_calls_in_body(
             }
             Stmt::Match { scrutinee, arms } => {
                 desugar_method_calls_in_expr(scrutinee, env, structs, fn_rets);
+                let scrutinee_type = infer_in_expr_type(scrutinee, env, structs, fn_rets);
                 for arm in arms {
-                    let mut arm_env = env.clone();
+                    let mut arm_env = scrutinee_type
+                        .as_ref()
+                        .and_then(|typ| value_arm_environment(&arm.pattern, typ, env, structs))
+                        .unwrap_or_else(|| {
+                            let mut inner = env.clone();
+                            let mut bindings = HashSet::new();
+                            crate::core_bindings::reserve_pattern(&arm.pattern, &mut bindings);
+                            for binding in bindings {
+                                inner.remove(&binding);
+                            }
+                            inner
+                        });
+                    if let Some(guard) = &mut arm.guard {
+                        desugar_method_calls_in_expr(guard, &arm_env, structs, fn_rets);
+                    }
                     desugar_method_calls_in_body(&mut arm.body, &mut arm_env, structs, fn_rets);
                 }
             }
@@ -455,6 +586,11 @@ pub(crate) fn desugar_method_calls_in_body(
                 desugar_method_calls_in_body(body, &mut try_env, structs, fn_rets);
                 for catch in catches {
                     let mut catch_env = env.clone();
+                    let mut bindings = HashSet::new();
+                    crate::core_bindings::reserve_pattern(&catch.pattern, &mut bindings);
+                    for binding in bindings {
+                        catch_env.remove(&binding);
+                    }
                     desugar_method_calls_in_body(&mut catch.body, &mut catch_env, structs, fn_rets);
                 }
             }
@@ -544,8 +680,9 @@ pub(crate) fn desugar_method_calls_in_expr(
         | Expr::StringLit(_)
         | Expr::BoolLit(_)
         | Expr::Ident(_) => {}
-        Expr::Closure { body, .. } => {
+        Expr::Closure { params, body, .. } => {
             let mut closure_env = env.clone();
+            closure_env.extend(params.iter().cloned());
             desugar_method_calls_in_body(body, &mut closure_env, structs, fn_rets);
         }
     }
@@ -665,12 +802,7 @@ fn replace_idents(expr: &mut Expr, consts: &std::collections::HashMap<String, Ex
         Expr::MatchValue { scrutinee, arms } => {
             replace_idents(scrutinee, consts);
             for arm in arms {
-                let mut names = HashSet::new();
-                crate::core_bindings::reserve_pattern(&arm.pattern, &mut names);
-                let mut inner = consts.clone();
-                for name in names {
-                    inner.remove(&name);
-                }
+                let inner = pattern_constants(&arm.pattern, consts);
                 if let Some(guard) = &mut arm.guard {
                     replace_idents(guard, &inner);
                 }
@@ -688,12 +820,7 @@ fn replace_idents(expr: &mut Expr, consts: &std::collections::HashMap<String, Ex
         }
         Expr::Block { body, result } => {
             let mut inner = consts.clone();
-            for stmt in body {
-                replace_stmt_idents(stmt, &inner);
-                if let Stmt::Let(name, _, _) = stmt {
-                    inner.remove(name);
-                }
-            }
+            replace_body_idents(body, &mut inner);
             if let Some(result) = result {
                 replace_idents(result, &inner);
             }
@@ -729,10 +856,12 @@ fn replace_idents(expr: &mut Expr, consts: &std::collections::HashMap<String, Ex
             replace_idents(base, consts);
             replace_idents(index, consts);
         }
-        Expr::Closure { body, .. } => {
-            for stmt in body {
-                replace_stmt_idents(stmt, consts);
+        Expr::Closure { params, body, .. } => {
+            let mut inner = consts.clone();
+            for (name, _) in params {
+                inner.remove(name);
             }
+            replace_body_idents(body, &mut inner);
         }
         Expr::UnitLit
         | Expr::IntLit(_)
@@ -740,6 +869,26 @@ fn replace_idents(expr: &mut Expr, consts: &std::collections::HashMap<String, Ex
         | Expr::StringLit(_)
         | Expr::BoolLit(_) => {}
     }
+}
+
+fn replace_body_idents(body: &mut [Stmt], consts: &mut HashMap<String, Expr>) {
+    for stmt in body {
+        replace_stmt_idents(stmt, consts);
+        // A local initializer sees the outer binding before its name is shadowed.
+        if let Stmt::Let(name, _, _) = stmt {
+            consts.remove(name);
+        }
+    }
+}
+
+fn pattern_constants(pattern: &str, consts: &HashMap<String, Expr>) -> HashMap<String, Expr> {
+    let mut inner = consts.clone();
+    let mut names = HashSet::new();
+    crate::core_bindings::reserve_pattern(pattern, &mut names);
+    for name in names {
+        inner.remove(&name);
+    }
+    inner
 }
 
 fn replace_stmt_idents(stmt: &mut Stmt, consts: &std::collections::HashMap<String, Expr>) {
@@ -766,12 +915,8 @@ fn replace_stmt_idents(stmt: &mut Stmt, consts: &std::collections::HashMap<Strin
             else_body,
         } => {
             replace_idents(cond, consts);
-            for s in then_body {
-                replace_stmt_idents(s, consts);
-            }
-            for s in else_body {
-                replace_stmt_idents(s, consts);
-            }
+            replace_body_idents(then_body, &mut consts.clone());
+            replace_body_idents(else_body, &mut consts.clone());
         }
         Stmt::Loop {
             cond: Some(cond),
@@ -779,33 +924,28 @@ fn replace_stmt_idents(stmt: &mut Stmt, consts: &std::collections::HashMap<Strin
             ..
         } => {
             replace_idents(cond, consts);
-            for s in body {
-                replace_stmt_idents(s, consts);
-            }
+            replace_body_idents(body, &mut consts.clone());
         }
         Stmt::Loop {
             cond: None, body, ..
         } => {
-            for s in body {
-                replace_stmt_idents(s, consts);
-            }
+            replace_body_idents(body, &mut consts.clone());
         }
         Stmt::Match { scrutinee, arms } => {
             replace_idents(scrutinee, consts);
             for arm in arms {
-                for s in &mut arm.body {
-                    replace_stmt_idents(s, consts);
+                let mut inner = pattern_constants(&arm.pattern, consts);
+                if let Some(guard) = &mut arm.guard {
+                    replace_idents(guard, &inner);
                 }
+                replace_body_idents(&mut arm.body, &mut inner);
             }
         }
         Stmt::Try { body, catches, .. } => {
-            for s in body {
-                replace_stmt_idents(s, consts);
-            }
+            replace_body_idents(body, &mut consts.clone());
             for catch in catches {
-                for s in &mut catch.body {
-                    replace_stmt_idents(s, consts);
-                }
+                let mut inner = pattern_constants(&catch.pattern, consts);
+                replace_body_idents(&mut catch.body, &mut inner);
             }
         }
         Stmt::Return(None) => {}
@@ -835,10 +975,12 @@ pub fn inline_const_values(module: &mut UnifiedModule) {
 
     // Walk all function bodies and replace const references
     for decl in &mut module.decls {
-        if let Decl::Function { body, .. } = decl {
-            for stmt in body.iter_mut() {
-                replace_stmt_idents(stmt, &consts);
+        if let Decl::Function { params, body, .. } = decl {
+            let mut inner = consts.clone();
+            for (name, _) in params {
+                inner.remove(name);
             }
+            replace_body_idents(body, &mut inner);
         }
     }
 }

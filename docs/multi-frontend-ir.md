@@ -53,6 +53,8 @@ Rust impl lowering resolves `Self` and `Self::…` against the owning type in si
 
 The `.in` normalization, declaration, and surface passes share quote state across physical lines. Braces, comment-looking lines, colons, whitespace, and blank lines inside strings retain their literal meaning. Canonical output retains global declarations and their mutability, types, and initializers. Typed String globals store pointers to aligned literal payloads in the writable data section. Data-to-data relocation metadata rebases these pointers for independent JIT mappings and native assembly; SCI retains its NUL-terminated payload layout. String equality compares contents across distinct payloads, including embedded NUL bytes in the hosted length-prefixed layout. Dynamic String concatenation uses the existing allocating runtime in the hosted 64-bit x86 JIT; freestanding, CString, 32-bit, and interrupt contexts reject it. Runtime-call initializers, struct-array storage, and inference for unannotated globals remain separate limitations.
 
+Method lookup uses declared global types alongside parameter, local, closure, and pattern bindings, and retries unresolved methods after local imports merge. Constant substitution respects the same lexical shadows so an outer constant cannot replace a receiver bound in an inner scope.
+
 ## Unit values
 
 `UnitLit` represents `()` with type `Void`, distinct from integer zero and an empty array. Rust, `.in`, canonical source, and `.icore` expression `kind: "unit"` retain this type through checking and lowering. Empty-tuple patterns match unit values, including the results of calls, and explicit unit returns evaluate their producers before returning.

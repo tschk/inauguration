@@ -182,8 +182,7 @@ pub(crate) fn parse_in_module_without_validation(
     let blocks = split_top_level_decl_blocks(source);
     let mut module = parse_module_from_blocks(&blocks)?;
     module.identity = identity;
-    desugar_method_calls(&mut module);
-    // Inline const values: replace all Expr::Ident references to consts with their init expressions.
+    // Inline constant references in function bodies while preserving lexical shadows.
     // This avoids type-checking and lowering complications for compile-time constants.
     inline_const_values(&mut module);
     let mut std_decls = Vec::new();
@@ -225,6 +224,7 @@ pub(crate) fn parse_in_module_without_validation(
     }
     std_decls.extend(module.decls);
     module.decls = std_decls;
+    desugar_method_calls(&mut module);
     Ok(module)
 }
 
@@ -390,6 +390,8 @@ pub(crate) fn parse_in_file_inner(
     let identity = module.identity.clone();
     decls.extend(module.decls);
     let mut merged = UnifiedModule::with_identity(decls, identity);
+    // Imported globals and receiver types are available only after merging.
+    desugar_method_calls(&mut merged);
     // Re-inline constants after merging imported modules so that constants
     // from imported files are available to functions in the current file.
     inline_const_values(&mut merged);
