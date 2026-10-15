@@ -1466,58 +1466,45 @@ fn lower_stmt(
         Stmt::FieldAssign {
             base, name, value, ..
         } => {
-            // s.x = value → compute addr = &s + field_offset, store value
-            let Expr::Ident(base_name) = base else {
-                // Pointer/reference field bases are opaque in the owned
-                // scalar ABI. Keep lowering by evaluating the RHS; this is
-                // the same conservative fallback used for other unsupported
-                // aggregate writes.
-                lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
-                return Ok(());
+            let (base_name, prefix) =
+                crate::native_emit::lower::field_path(base).ok_or_else(|| {
+                    format!("x86_64-lower: unsupported field assignment base for `{name}`")
+                })?;
+            let field = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}.{name}")
             };
-            if let Some((pointer, offset)) = ctx.receiver_field(base_name, name) {
+            if let Some((pointer, offset)) = ctx.receiver_field(base_name, &field) {
                 lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
                 emitter.emit_insns(&x86_64::ldr64(RCX, pointer as u16));
                 emitter.emit_insns(&x86_64::mov_m_r(RCX, offset, RAX));
                 return Ok(());
             }
             if !ctx.locals.contains_key(base_name) {
-                // Global struct: collect_globals maps `{base}.{field}` to a
-                // data-section slot, so store through the pending-global path
-                // instead of the evaluate-and-discard fallback below.
-                let field_key = format!("{base_name}.{name}");
-                if let Some(&offset) = ctx.globals.get(&field_key) {
-                    lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
-                    let addr_offset = if x86_64::is_32bit() { 1 } else { 2 };
-                    let site = emitter.len() + addr_offset;
-                    emitter.emit_insns(&x86_64::mov_abs_from_rax(0));
-                    ctx.pending_globals.push(PendingGlobal {
-                        site,
-                        width: if x86_64::is_32bit() { 4 } else { 8 },
-                        offset,
-                    });
-                    return Ok(());
-                }
-                // The typed subset may not materialize bindings introduced by
-                // destructuring patterns (for example `let Some(state) = …`).
-                // Preserve evaluation of the assigned value and continue with
-                // the scalar fallback rather than rejecting the whole module.
+                let field_key = format!("{base_name}.{field}");
+                let offset = ctx.globals.get(&field_key).copied().ok_or_else(|| {
+                    format!("x86_64-lower: unknown field assignment target `{field_key}`")
+                })?;
                 lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                let addr_offset = if x86_64::is_32bit() { 1 } else { 2 };
+                let site = emitter.len() + addr_offset;
+                emitter.emit_insns(&x86_64::mov_abs_from_rax(0));
+                ctx.pending_globals.push(PendingGlobal {
+                    site,
+                    width: if x86_64::is_32bit() { 4 } else { 8 },
+                    offset,
+                });
                 return Ok(());
             }
-            let field_offset = match ctx.locals.get(base_name) {
-                Some(StackSlot::Struct { fields, .. }) => fields
-                    .get(name)
-                    .copied()
-                    .ok_or_else(|| format!("field `{name}` not found in struct"))?,
-                _ => {
-                    // Unknown/opaque values have no representable field
-                    // layout in the owned ABI; evaluate-and-discard matches
-                    // the existing scalar fallback for field reads.
-                    lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
-                    return Ok(());
-                }
+            let Some(StackSlot::Struct { fields }) = ctx.locals.get(base_name) else {
+                return Err(format!(
+                    "x86_64-lower: field assignment source `{base_name}` has no struct layout"
+                ));
             };
+            let field_offset = fields.get(&field).copied().ok_or_else(|| {
+                format!("x86_64-lower: field `{field}` missing on assignment source `{base_name}`")
+            })?;
             lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
             emitter.emit_insns(&x86_64::str64(RAX, field_offset as u16));
             Ok(())

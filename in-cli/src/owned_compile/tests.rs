@@ -6992,3 +6992,69 @@ fn owned_structured_producer_field_projections_preserve_values_and_effects() {
         }
     }
 }
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_nested_scalar_leaf_stores_preserve_receivers_types_and_effects() {
+    for original in [
+        "struct Inner{Int value}\nstruct Outer{Int before;Inner inner;Int after}\nfn main()->Int{let value=Outer{before:10,inner:Inner{value:0},after:12};value.inner.value=20;return value.before+value.inner.value+value.after;}",
+        // Implicit receiver field roots must retain the complete nested path.
+        "struct Inner{Int value}\nclass Outer{before:Int;inner:Inner;after:Int;fn change()->Int{inner.value=20;return 0;}}\nfn main()->Int{let value=Outer{before:10,inner:Inner{value:0},after:12};value.change();return value.before+value.inner.value+value.after;}",
+        "struct Inner{Bool ready;Float weight;String text}\nstruct Outer{Int before;Inner inner;Int after}\nfn main()->Int{let value=Outer{before:20,inner:Inner{ready:false,weight:0.0,text:\"wrong\"},after:22};value.inner.ready=true;value.inner.weight=1.5;value.inner.text=\"λ雪\";if value.inner.ready && value.inner.weight==1.5 && value.inner.text==\"λ雪\"{return value.before+value.after;}return 0;}",
+        "struct Inner{Int value}\nstruct Outer{Inner inner}\nvar calls:Int=0;\nfn next()->Int{calls+=1;return 41;}\nfn main()->Int{let value=Outer{inner:Inner{value:0}};value.inner.value=next();return value.inner.value+calls;}",
+        "struct Inner{Int value}\nstruct Outer{Inner inner}\nfn fail()->Int{throw 9;return 0;}\nfn main()->Int{let value=Outer{inner:Inner{value:42}};try{value.inner.value=fail();return 0;}catch 9{return value.inner.value;}return 0;}",
+        "struct Inner{Int value}\nstruct Outer{Inner inner}\nvar value:Int=999;\nfn original()->Int{return value;}\nfn main()->Int{let value=Outer{inner:Inner{value:0}};value.inner.value=42;if original()!=999{return 0;}return value.inner.value;}",
+    ] {
+        let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+        for text in [original, canonical.as_str()] {
+            let source = temp_path("nested-leaf-store.in");
+            fs::write(&source, text).unwrap();
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut request =
+                    default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{profile:?}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{profile:?}: {text}"
+                );
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    let artifact = temp_path("nested-leaf-store-native");
+                    request.target = CompileTarget::Native;
+                    request.out = Some(artifact.clone());
+                    let report = compile_owned(&request);
+                    assert!(
+                        report.success && report.degradations.is_empty(),
+                        "{profile:?}: {report:?}"
+                    );
+                    assert_eq!(
+                        std::process::Command::new(&artifact)
+                            .status()
+                            .unwrap()
+                            .code(),
+                        Some(42)
+                    );
+                    fs::remove_file(&artifact).unwrap();
+                    let _ = fs::remove_file(artifact.with_extension("abi.json"));
+                }
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
