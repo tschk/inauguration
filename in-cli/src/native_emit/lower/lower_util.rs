@@ -266,19 +266,6 @@ pub(crate) fn native_struct_fields(
     Ok(cleaned)
 }
 
-/// Check if an expression tree contains a function call.
-pub(crate) fn contains_call(expr: &Expr) -> bool {
-    match expr {
-        Expr::Call { .. } => true,
-        Expr::Binary { lhs, rhs, .. } => contains_call(lhs) || contains_call(rhs),
-        Expr::Unary { expr: inner, .. } => contains_call(inner),
-        Expr::Field { base, .. } => contains_call(base),
-        Expr::StructInit { fields, .. } => fields.iter().any(|(_, e)| contains_call(e)),
-        Expr::ArrayLit(items) => items.iter().any(contains_call),
-        _ => false,
-    }
-}
-
 pub(crate) fn is_native_scalar_type(typ: &Typ) -> bool {
     matches!(
         canonical_type(typ),

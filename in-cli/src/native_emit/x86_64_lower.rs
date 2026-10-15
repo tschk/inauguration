@@ -1926,6 +1926,25 @@ fn lower_binary_expr(
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
     lower_expr_into(emitter, ctx, lhs, RAX, pending_calls)?;
+    if matches!(op, "&&" | "||") {
+        emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+        // Materialize using moves (which preserve flags); do not use zero_reg here.
+        emitter.emit_insns(&x86_64::mov_ri64(RAX, 0));
+        emitter.emit_insns(&x86_64::setcc(0x95, RAX)); // setne al
+        emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+        let skip_rhs = emitter.len();
+        emitter.emit_insns(&x86_64::jcc_near(if op == "&&" { 0x04 } else { 0x05 }, 0));
+        lower_expr_into(emitter, ctx, rhs, RAX, pending_calls)?;
+        emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+        emitter.emit_insns(&x86_64::mov_ri64(RAX, 0));
+        emitter.emit_insns(&x86_64::setcc(0x95, RAX)); // setne al
+        let delta = emitter.len() as i32 - (skip_rhs as i32 + 6);
+        emitter.patch_u32(skip_rhs + 2, delta as u32);
+        if target_reg != RAX {
+            emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+        }
+        return Ok(());
+    }
     emitter.emit_insns(&x86_64::push_r(RAX));
     lower_expr_into(emitter, ctx, rhs, RAX, pending_calls)?;
     emitter.emit_insns(&x86_64::pop_r(RBX));
@@ -1951,28 +1970,6 @@ fn lower_binary_expr(
             emitter.emit_insns(&x86_64::cmp_rr(RBX, RAX));
             emitter.emit_insns(&x86_64::setcc(0x9D, RAX)); // setge al
             emitter.emit_insns(&x86_64::movzx_r8(RAX, RAX));
-        }
-        "&&" => {
-            emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
-            emitter.emit_insns(&x86_64::setcc(0x95, RAX)); // setne al
-            emitter.emit_insns(&x86_64::movzx_r8(RAX, RAX));
-            emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
-            emitter.emit_insns(&x86_64::test_rr(RBX, RBX));
-            emitter.emit_insns(&x86_64::setcc(0x95, RBX)); // setne bl
-            emitter.emit_insns(&x86_64::movzx_r8(RBX, RBX));
-            emitter.emit_insns(&x86_64::and_rr(RCX, RBX));
-            emitter.emit_insns(&x86_64::mov_rr(RAX, RCX));
-        }
-        "||" => {
-            emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
-            emitter.emit_insns(&x86_64::setcc(0x95, RAX)); // setne al
-            emitter.emit_insns(&x86_64::movzx_r8(RAX, RAX));
-            emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
-            emitter.emit_insns(&x86_64::test_rr(RBX, RBX));
-            emitter.emit_insns(&x86_64::setcc(0x95, RBX)); // setne bl
-            emitter.emit_insns(&x86_64::movzx_r8(RBX, RBX));
-            emitter.emit_insns(&x86_64::or_rr(RCX, RBX));
-            emitter.emit_insns(&x86_64::mov_rr(RAX, RCX));
         }
         "<=" => {
             emitter.emit_insns(&x86_64::cmp_rr(RBX, RAX));
