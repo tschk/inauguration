@@ -416,8 +416,26 @@ impl TypeChecker {
         facts: &Facts,
         env: &HashMap<String, Typ>,
     ) {
+        if let Typ::Named(name) = expected
+            && let Some(target) = crate::core_ir::integer_type_name(name)
+            && matches!(
+                self.expr_type(expr, facts, env).map(|typ| typ.canonical()),
+                Some(Typ::Int | Typ::Float | Typ::Bool)
+            )
+        {
+            let mut value = expr.clone();
+            self.resolve_c_value(&mut value, &Typ::Int, facts, env);
+            if let Some(value) =
+                crate::core_ir::integer_cast_expr(value, &format!("int-cast-{target}"))
+            {
+                *expr = value;
+            }
+            return;
+        }
         let actual = self.expr_type(expr, facts, env);
-        if expected == &Typ::Bool && matches!(actual, Some(Typ::Named(_))) {
+        if expected == &Typ::Bool
+            && matches!(&actual, Some(Typ::Named(name)) if crate::core_ir::integer_type_name(name).is_none())
+        {
             *expr = Expr::Call {
                 callee: Box::new(Expr::Ident("unsupported-c-boolean-conversion".into())),
                 args: vec![expr.clone()],
@@ -887,24 +905,10 @@ impl TypeChecker {
             && matches!(callee.as_ref(), Expr::Ident(name) if name == "c-numeric-cast")
         {
             if let [value, Expr::StringLit(target)] = args.as_slice() {
-                if matches!(target.as_str(), "i8" | "u8" | "i16" | "u16" | "i32" | "u32")
-                    && matches!(
-                        self.expr_type(value, facts, env).map(|typ| typ.canonical()),
-                        Some(Typ::Int | Typ::Float | Typ::Bool)
-                    )
-                {
-                    let mut value = value.clone();
-                    self.resolve_c_value(&mut value, &Typ::Int, facts, env);
-                    // Reuse the existing single-evaluation mask/sign-extension
-                    // lowering rather than adding a backend-specific cast.
-                    if let Some(cast) =
-                        crate::core_ir::integer_cast_expr(value, &format!("int-cast-{target}"))
-                    {
-                        *expr = cast;
-                    }
-                    return;
-                }
                 let expected = match target.as_str() {
+                    name if c_fixed_integer_name(name) => {
+                        Some(Typ::Named(format!("#integer-{name}")))
+                    }
                     "Int" => Some(Typ::Int),
                     "Float" => Some(Typ::Float),
                     "Bool" => Some(Typ::Bool),
@@ -925,6 +929,17 @@ impl TypeChecker {
         }
         if promote_c_bool {
             match expr {
+                Expr::StructInit { name, fields } => {
+                    if let Some(schema) = facts.structs.get(name) {
+                        for (field, value) in fields {
+                            if let Some((_, expected)) =
+                                schema.iter().find(|(name, _)| name == field)
+                            {
+                                self.resolve_c_value(value, expected, facts, env);
+                            }
+                        }
+                    }
+                }
                 Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&&" | "||") => {
                     self.resolve_c_value(lhs, &Typ::Bool, facts, env);
                     self.resolve_c_value(rhs, &Typ::Bool, facts, env);
@@ -2745,6 +2760,11 @@ pub fn normalize_module_with_semantics(
         ParserId::C | ParserId::Cpp | ParserId::ObjC | ParserId::ObjCpp
     ) {
         TypeChecker::new().resolve_c_value_promotions(&mut normalized);
+        // Keep destination widths through conversion insertion, then give all
+        // native consumers the same canonical carriers as other frontends.
+        crate::core_bindings::rewrite_named_types(&mut normalized.decls, &|name| {
+            crate::core_ir::integer_type_name(name).map(|_| Typ::Int)
+        });
     }
     if parser_id == ParserId::Rust {
         crate::lower_core::lower_inline_constants_with_semantics(&mut normalized.decls, semantics);
@@ -2961,12 +2981,19 @@ fn normalize_type(typ: &Typ) -> Typ {
     }
 }
 
+fn c_fixed_integer_name(name: &str) -> bool {
+    matches!(name, "i8" | "u8" | "i16" | "u16" | "i32" | "u32")
+}
+
 fn normalize_parser_type(parser_id: ParserId, typ: &Typ) -> Typ {
     if matches!(
         parser_id,
         ParserId::C | ParserId::Cpp | ParserId::ObjC | ParserId::ObjCpp
     ) && let Typ::Named(name) = typ
     {
+        if crate::core_ir::integer_type_name(name).is_some() {
+            return typ.clone();
+        }
         return crate::compiler::tree_front::normalize_c_type(name);
     }
     if matches!(
@@ -3043,6 +3070,88 @@ mod tests {
         )
         .unwrap();
         assert!(!crate::core_ir_verifier::verify_for_entry(&strict, "main").ok);
+    }
+
+    #[test]
+    fn c_destination_widths_convert_before_all_type_aliases_are_erased() {
+        let parsed = UnifiedModule::new(vec![
+            Decl::Struct {
+                name: "Box".into(),
+                fields: vec![("small".into(), Typ::Named("#integer-u8".into()))],
+                type_params: vec![],
+            },
+            Decl::Global {
+                name: "global".into(),
+                typ: Typ::Named("#integer-u16".into()),
+                init: Some(Box::new(Expr::IntLit(65578))),
+                mutable: true,
+                constant_value: false,
+            },
+            Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![
+                    Stmt::Let(
+                        "box".into(),
+                        Some(Typ::Named("Box".into())),
+                        Expr::StructInit {
+                            name: "Box".into(),
+                            fields: vec![("small".into(), Expr::IntLit(298))],
+                        },
+                    ),
+                    Stmt::FieldAssign {
+                        base: Expr::Ident("box".into()),
+                        name: "small".into(),
+                        value: Expr::IntLit(554),
+                    },
+                    Stmt::Return(Some(Expr::Field {
+                        base: Box::new(Expr::Ident("box".into())),
+                        name: "small".into(),
+                    })),
+                ],
+            },
+        ]);
+        let mut normalized = super::normalize_module(ParserId::C, &parsed);
+        let report = crate::core_ir_verifier::verify_for_entry(&normalized, "main");
+        assert!(report.ok, "{report:?}");
+        let remaining = std::cell::Cell::new(0);
+        crate::core_bindings::rewrite_named_types(&mut normalized.decls, &|name| {
+            if crate::core_ir::integer_type_name(name).is_some() {
+                remaining.set(remaining.get() + 1);
+            }
+            None
+        });
+        assert_eq!(remaining.get(), 0);
+        assert_eq!(
+            normalized,
+            super::normalize_module(ParserId::C, &normalized)
+        );
+        crate::core_opt::map_decl_exprs_mut(&mut normalized.decls, &mut |expr| {
+            *expr = crate::core_opt::fold_expr(expr.clone());
+        });
+        assert!(
+            matches!(&normalized.decls[1], Decl::Global { typ: Typ::Int, init: Some(value), .. } if **value == Expr::IntLit(42))
+        );
+        let mut checked = 0;
+        crate::core_opt::map_decl_exprs_mut(&mut normalized.decls, &mut |expr| {
+            if let Expr::StructInit { fields, .. } = expr {
+                assert_eq!(fields[0].1, Expr::IntLit(42));
+                checked += 1;
+            }
+        });
+        assert_eq!(checked, 1);
+        let Decl::Function { body, .. } = &normalized.decls[2] else {
+            panic!("main")
+        };
+        assert!(matches!(
+            &body[1],
+            Stmt::FieldAssign {
+                value: Expr::IntLit(42),
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -5194,6 +5194,7 @@ fn owned_cpp_scalar_conversion_does_not_guess_objects_or_references() {
         "struct Painting { operator bool() { return true; } }; Painting value; int main() { if (value) return 42; return 0; }",
         "struct Double { operator bool() { return true; } }; Double value; int main() { if (value) return 42; return 0; }",
         "struct Bool { operator bool() { return true; } }; Bool value; int main() { if (value) return 42; return 0; }",
+        "struct u8 { operator bool() { return true; } }; u8 value; int main() { if (value) return 42; return 0; }",
         "void clear(bool &value) { value = false; } int main() { bool value = true; clear(value); return value; }",
         "long double value = 1; int main() { if (value / 2) return 42; return 0; }",
     ] {
@@ -5498,6 +5499,25 @@ fn owned_c_numeric_casts_preserve_value_and_effects() {
     }
     for extension in ["c", "cpp"] {
         for source in [
+            "unsigned char value = 298; int main() { return value; }",
+            "unsigned char callback(int value) { return 42; } int check(unsigned char (*cb)(int)) { if (cb == callback) return 42; return 7; } int main() { return check(callback); }",
+            "unsigned char callback(int value) { return 42; } int check(unsigned char cb(int)) { if (cb == callback) return 42; return 7; } int main() { return check(callback); }",
+            "unsigned char callback(int value) { return 42; } unsigned char (*factory(void))(int) { return callback; } int main() { if (factory() == callback) return 42; return 7; }",
+            "unsigned char (answer)(int *pointer) { return 298; } int main() { return answer(0); }",
+            "int main() { unsigned char value = 298; return value; }",
+            "int main() { unsigned short value = 65578; return value; }",
+            "int main() { unsigned char value = 0; value = 298; return value; }",
+            "int main() { unsigned char value = 255; value += 43; return value; }",
+            "int main() { unsigned char value = 255; value++; return value + 42; }",
+            "int answer(unsigned char value) { return value; } int main() { return answer(298); }",
+            "unsigned char answer() { return 298; } int main() { return answer(); }",
+            "int answer(unsigned char); int main() { return answer(298); } int answer(unsigned char value) { return value; }",
+            "int calls = 0; int next() { calls++; return 298; } int main() { unsigned char value = next(); if (calls != 1) return 0; return value; }",
+            "int calls = 0; int next() { calls++; return 298; } int main() { unsigned char value = 0; value = next(); if (calls != 1) return 0; return value; }",
+            "int calls = 0; int next() { calls++; return 298; } int answer(unsigned char value) { return value; } int main() { int value = answer(next()); if (calls != 1) return 0; return value; }",
+            "int calls = 0; int next() { calls++; return 298; } unsigned char answer() { return next(); } int main() { int value = answer(); if (calls != 1) return 0; return value; }",
+            "int main() { int value = 298; { unsigned char value = 298; if (value != 42) return 0; } if (value != 298) return 0; return 42; }",
+            "int main() { unsigned char value = 298; { int value = 298; if (value != 298) return 0; } return value; }",
             "int main() { int value = 298; return (unsigned char)value; }",
             "int main() { int value = 298; return (unsigned /* width */ char)value; }",
             "int main() { int value = -214; return (unsigned char)value; }",
@@ -5522,6 +5542,11 @@ fn owned_c_numeric_casts_preserve_value_and_effects() {
             "int calls = 0; double next() { calls++; return 2.5; } int main() { return (int)(_Bool)next() + calls + 40; }",
             "int main() { double value = -0.0; return (int)(_Bool)value + 42; }",
         ] {
+            let source = if extension == "cpp" {
+                format!("struct u8 {{}}; {source}")
+            } else {
+                source.to_owned()
+            };
             let source = source.replace("_Bool", if extension == "cpp" { "bool" } else { "_Bool" });
             for profile in [
                 crate::emit_profile::EmitProfile::Default,

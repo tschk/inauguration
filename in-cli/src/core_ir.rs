@@ -99,10 +99,17 @@ pub enum Typ {
     Generic(String),
 }
 
+/// Reserved frontend destination-width metadata; source nominal names are not metadata.
+pub(crate) fn integer_type_name(name: &str) -> Option<&str> {
+    let width = name.strip_prefix("#integer-")?;
+    matches!(width, "i8" | "u8" | "i16" | "u16" | "i32" | "u32").then_some(width)
+}
+
 impl Typ {
     /// Normalize language-specific named types to canonical Core IR primitives.
     pub fn canonical(&self) -> Typ {
         match self {
+            Typ::Named(name) if integer_type_name(name).is_some() => Typ::Int,
             Typ::Named(name) => match name.trim() {
                 "Int" | "int" | "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" => {
                     Typ::Int
@@ -1236,6 +1243,31 @@ pub(crate) fn for_each_expr_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reserved_integer_destination_metadata_has_exact_supported_widths() {
+        for width in ["i8", "u8", "i16", "u16", "i32", "u32"] {
+            let name = format!("#integer-{width}");
+            assert_eq!(super::integer_type_name(&name), Some(width));
+            assert_eq!(super::Typ::Named(name).canonical(), super::Typ::Int);
+            assert_eq!(super::integer_type_name(width), None);
+            // Existing public canonical aliases retain their previous behavior.
+            assert_eq!(super::Typ::Named(width.into()).canonical(), super::Typ::Int);
+        }
+        for name in [
+            "#integer-u7",
+            "#integer-i64",
+            "#integer-",
+            "#integer-u8-extra",
+            "prefix#integer-u8",
+            "u7",
+            "Widget",
+        ] {
+            assert_eq!(super::integer_type_name(name), None);
+            let typ = super::Typ::Named(name.into());
+            assert_eq!(typ.canonical(), typ);
+        }
+    }
+
     #[test]
     fn radix_patterns_share_signed_literal_bounds() {
         for (literal, expected) in [

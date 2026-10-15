@@ -17,13 +17,41 @@ pub(super) fn extract_c(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String>
     Ok(decls)
 }
 
+// Follow only the declared name, never a parameter's declarator subtree.
+fn c_declarator_spine(mut node: Node<'_>) -> Vec<Node<'_>> {
+    let mut spine = vec![node];
+    loop {
+        let next = node.child_by_field_name("declarator").or_else(|| {
+            if matches!(
+                node.kind(),
+                "parenthesized_declarator" | "reference_declarator"
+            ) {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor)
+                    .find(|child| child.kind() != "comment")
+            } else {
+                None
+            }
+        });
+        let Some(next) = next else { break };
+        spine.push(next);
+        node = next;
+    }
+    spine
+}
+
+fn c_actual_function_declarator(definition: Node<'_>) -> Option<Node<'_>> {
+    c_declarator_spine(definition.child_by_field_name("declarator")?)
+        .into_iter()
+        .rev()
+        .find(|node| node.kind() == "function_declarator")
+}
+
 // Parameter extraction models fixed arity only. Validate before extraction so
 // unsupported source signatures cannot silently lose parameters.
 fn validate_c_definition_parameters(src: &[u8], definition: Node<'_>) -> Result<(), String> {
     let name = c_like_fn_name(src, definition).unwrap_or_else(|| "<anonymous>".into());
-    let function = definition
-        .child_by_field_name("declarator")
-        .and_then(|declarator| named_descendant(declarator, "function_declarator"))
+    let function = c_actual_function_declarator(definition)
         .ok_or_else(|| format!("unsupported C-like definition declarator `{name}`"))?;
     let parameters = function
         .child_by_field_name("parameters")
@@ -75,7 +103,7 @@ fn c_globals(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {
         let mutable = !modifiers
             .iter()
             .any(|modifier| matches!(*modifier, "const" | "constexpr"));
-        let typ = c_typ_from_decl_specifier_text(node_txt(src, type_node));
+        let typ = c_destination_typ(src, type_node);
         let mut children = declaration.walk();
         for child in declaration.named_children(&mut children) {
             let (declarator, value) = if child.kind() == "init_declarator" {
@@ -199,11 +227,19 @@ fn cpp_class_body<'a>(src: &[u8], class_node: Node<'a>) -> (Vec<(String, Typ)>, 
     let mut field_nodes = Vec::new();
     collect_kinds(body, &["field_declaration"], &mut field_nodes);
     for f in field_nodes {
+        let decl = f.child_by_field_name("declarator");
         let field_type = f
             .child_by_field_name("type")
-            .map(|t| Typ::Named(node_txt(src, t).trim().to_string()))
+            .map(|specifier| {
+                if decl.is_some_and(|declarator| declarator.kind() == "field_identifier") {
+                    c_destination_typ(src, specifier)
+                } else {
+                    // Keep existing indirect/array field representation; its
+                    // element spelling is not a scalar destination width.
+                    Typ::Named(node_txt(src, specifier).trim().to_string())
+                }
+            })
             .unwrap_or(Typ::Named("int".into()));
-        let decl = f.child_by_field_name("declarator");
         if let Some(decl) = decl {
             let name_node = named_descendant(decl, "field_identifier")
                 .or_else(|| named_descendant(decl, "identifier"));
@@ -227,9 +263,16 @@ fn cpp_class_body<'a>(src: &[u8], class_node: Node<'a>) -> (Vec<(String, Typ)>, 
 }
 
 fn c_like_fn_name<'a>(src: &[u8], func_def: Node<'a>) -> Option<String> {
-    let declarator = named_descendant(func_def, "function_declarator")?;
-    let id = named_descendant(declarator, "field_identifier")
-        .or_else(|| named_descendant(declarator, "identifier"))?;
+    let declarator = func_def.child_by_field_name("declarator")?;
+    let id = c_declarator_spine(declarator)
+        .into_iter()
+        .rev()
+        .find_map(|node| match node.kind() {
+            "identifier" | "field_identifier" => Some(node),
+            "qualified_identifier" => named_descendant(node, "field_identifier")
+                .or_else(|| named_descendant(node, "identifier")),
+            _ => None,
+        })?;
     Some(normalize_entry(node_txt(src, id).trim()))
 }
 
@@ -324,25 +367,30 @@ fn c_coarse_return_typ(src: &[u8], func_def: Node<'_>) -> Typ {
     let Some(decl) = func_def.child_by_field_name("declarator") else {
         return Typ::Void;
     };
-    if decl.kind() == "pointer_declarator" {
-        return Typ::Int;
-    }
-    if decl.kind() == "reference_declarator" {
+    let spine = c_declarator_spine(decl);
+    if spine
+        .iter()
+        .any(|node| node.kind() == "reference_declarator")
+    {
         return Typ::Named("reference return".into());
     }
-    let head = src
-        .get(func_def.start_byte()..decl.start_byte())
-        .and_then(|b| std::str::from_utf8(b).ok())
-        .unwrap_or("")
-        .trim();
-    c_typ_from_decl_specifier_text(head)
+    if spine.iter().any(|node| node.kind() == "pointer_declarator") {
+        return Typ::Int;
+    }
+    func_def
+        .child_by_field_name("type")
+        .map(|specifier| c_destination_typ(src, specifier))
+        .unwrap_or(Typ::Void)
 }
 
 fn c_parameter_list<'a>(src: &[u8], func_def: Node<'a>) -> Vec<(String, Typ)> {
-    let Some(decl) = func_def.child_by_field_name("declarator") else {
+    let Some(function) = c_actual_function_declarator(func_def) else {
         return vec![];
     };
-    let Some(plist) = named_descendant(decl, "parameter_list") else {
+    let Some(plist) = function
+        .child_by_field_name("parameters")
+        .or_else(|| first_named(function, "parameter_list"))
+    else {
         return vec![];
     };
     let mut out = Vec::new();
@@ -360,27 +408,37 @@ fn c_parameter_list<'a>(src: &[u8], func_def: Node<'a>) -> Vec<(String, Typ)> {
 
 fn c_one_parameter(src: &[u8], pd: Node<'_>, idx: usize) -> Option<(String, Typ)> {
     let decl = pd.child_by_field_name("declarator");
-    let ty_end = decl.map(|d| d.start_byte()).unwrap_or(pd.end_byte());
-    let ty_src = src.get(pd.start_byte()..ty_end)?;
-    let ty_text = std::str::from_utf8(ty_src).ok()?.trim();
+    let specifier = pd.child_by_field_name("type")?;
+    let ty_text = c_type_specifier_text(src, specifier);
+    let ty_text = ty_text.trim();
     if ty_text.is_empty() {
         return None;
     }
     if ty_text == "void" && decl.is_none() {
         return None;
     }
-    let ty = if decl.is_some_and(|decl| decl.kind() == "reference_declarator") {
-        Typ::Named(format!("reference {ty_text}"))
-    } else if decl
-        .is_some_and(|decl| matches!(decl.kind(), "pointer_declarator" | "array_declarator"))
+    let spine = decl.map(c_declarator_spine).unwrap_or_default();
+    let ty = if spine
+        .iter()
+        .any(|node| node.kind() == "reference_declarator")
     {
+        Typ::Named(format!("reference {}", node_txt(src, specifier).trim()))
+    } else if spine.iter().any(|node| {
+        matches!(
+            node.kind(),
+            "pointer_declarator" | "array_declarator" | "function_declarator"
+        )
+    }) {
         Typ::Int
     } else {
-        c_typ_from_decl_specifier_text(ty_text)
+        c_destination_typ(src, specifier)
     };
     let name = decl
         .and_then(|d| {
-            named_descendant(d, "field_identifier").or_else(|| named_descendant(d, "identifier"))
+            c_declarator_spine(d)
+                .into_iter()
+                .rev()
+                .find(|node| matches!(node.kind(), "field_identifier" | "identifier"))
         })
         .map(|id| node_txt(src, id).trim().to_string())
         .filter(|n| !n.is_empty())
@@ -511,8 +569,7 @@ fn c_return_expr(src: &[u8], ret: Node<'_>) -> Option<Option<Expr>> {
 }
 
 fn c_declarations(src: &[u8], declaration: Node<'_>) -> Option<Vec<Stmt>> {
-    let typ =
-        c_typ_from_decl_specifier_text(node_txt(src, declaration.child_by_field_name("type")?));
+    let typ = c_destination_typ(src, declaration.child_by_field_name("type")?);
     let mut out = Vec::new();
     let mut cursor = declaration.walk();
     for (index, child) in declaration.children(&mut cursor).enumerate() {
@@ -769,6 +826,32 @@ fn c_type_specifier_text(src: &[u8], node: Node<'_>) -> String {
         .join(" ")
 }
 
+// Preserve only widths shared by the supported native targets. Plain char
+// signedness and long width still require target-specific metadata.
+fn c_fixed_integer_name(raw: &str) -> Option<&'static str> {
+    let spelling = c_strip_decl_storage(raw);
+    let mut words: Vec<_> = spelling.split_whitespace().collect();
+    words.sort_unstable();
+    match words.as_slice() {
+        ["char", "signed"] => Some("i8"),
+        ["char", "unsigned"] => Some("u8"),
+        ["short"] | ["int", "short"] | ["short", "signed"] | ["int", "short", "signed"] => {
+            Some("i16")
+        }
+        ["short", "unsigned"] | ["int", "short", "unsigned"] => Some("u16"),
+        ["int"] | ["signed"] | ["int", "signed"] => Some("i32"),
+        ["unsigned"] | ["int", "unsigned"] => Some("u32"),
+        _ => None,
+    }
+}
+
+fn c_destination_typ(src: &[u8], specifier: Node<'_>) -> Typ {
+    let text = c_type_specifier_text(src, specifier);
+    c_fixed_integer_name(&text)
+        .map(|name| Typ::Named(format!("#integer-{name}")))
+        .unwrap_or_else(|| c_typ_from_decl_specifier_text(node_txt(src, specifier)))
+}
+
 fn c_cast_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
     let descriptor = expr.child_by_field_name("type")?;
     if descriptor.child_by_field_name("declarator").is_some() {
@@ -781,22 +864,7 @@ fn c_cast_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
     {
         return None;
     }
-    // These explicit spellings have the same widths on supported native
-    // targets. Plain char signedness and long width require target metadata.
-    let spelling = c_strip_decl_storage(&c_type_specifier_text(src, specifier));
-    let mut words: Vec<_> = spelling.split_whitespace().collect();
-    words.sort_unstable();
-    let narrow = match words.as_slice() {
-        ["char", "signed"] => Some("i8"),
-        ["char", "unsigned"] => Some("u8"),
-        ["short"] | ["int", "short"] | ["short", "signed"] | ["int", "short", "signed"] => {
-            Some("i16")
-        }
-        ["short", "unsigned"] | ["int", "short", "unsigned"] => Some("u16"),
-        ["int"] | ["signed"] | ["int", "signed"] => Some("i32"),
-        ["unsigned"] | ["int", "unsigned"] => Some("u32"),
-        _ => None,
-    };
+    let narrow = c_fixed_integer_name(&c_type_specifier_text(src, specifier));
     let target = if let Some(narrow) = narrow {
         narrow
     } else {
@@ -1181,6 +1249,167 @@ mod definition_parameter_tests {
         } else {
             extract_c(source.as_bytes(), tree.root_node())
         }
+    }
+
+    #[test]
+    fn destination_width_parsing_preserves_qualified_nominal_names() {
+        let decls = parse("class Holder { public: Ns::Widget value; }; Ns::Widget answer(Ns::Widget value) { Ns::Widget local = value; return local; }", true).unwrap();
+        let expected = Typ::Named("Ns::Widget".into());
+        let Decl::Class { fields, .. } = &decls[0] else {
+            panic!("Holder")
+        };
+        assert_eq!(fields[0].1, expected);
+        let Decl::Function {
+            params, ret, body, ..
+        } = &decls[1]
+        else {
+            panic!("answer")
+        };
+        assert_eq!(params[0].1, expected);
+        assert_eq!(*ret, expected);
+        assert!(matches!(&body[0], Stmt::Let(_, Some(typ), _) if typ == &expected));
+        let qualified = parse("int Ns::answer(int value) { return value; }", true).unwrap();
+        assert!(
+            matches!(&qualified[0], Decl::Function { name, params, .. } if name == "answer" && params.len() == 1)
+        );
+        let reference = parse(
+            "unsigned char *&answer(unsigned char *value) { return value; }",
+            true,
+        )
+        .unwrap();
+        assert!(
+            matches!(&reference[0], Decl::Function { ret: Typ::Named(name), .. } if name == "reference return")
+        );
+    }
+
+    #[test]
+    fn function_pointer_declarators_keep_address_carriers_and_actual_parameters() {
+        for cpp in [false, true] {
+            for source in [
+                "long long answer(unsigned char cb(int value)) {return 42;}",
+                "long long answer(unsigned char (*cb)(int value)) {return 42;}",
+            ] {
+                let decls = parse(source, cpp).unwrap();
+                assert!(
+                    matches!(&decls[0], Decl::Function {params,..} if params == &vec![("cb".into(),Typ::Int)]),
+                    "{source}: {decls:?}"
+                );
+            }
+            let decls =
+                parse("unsigned char (*factory(void))(int value) {return 0;}", cpp).unwrap();
+            assert!(
+                matches!(&decls[0], Decl::Function {name,params,ret,..} if name == "factory" && params.is_empty() && *ret == Typ::Int),
+                "{decls:?}"
+            );
+            let decls = parse("unsigned char (scalar)(int *pointer) {return 42;}", cpp).unwrap();
+            assert!(
+                matches!(&decls[0], Decl::Function {name,params,ret,..} if name == "scalar" && params == &vec![("pointer".into(),Typ::Int)] && *ret == Typ::Named("#integer-u8".into())),
+                "{decls:?}"
+            );
+            assert!(
+                parse(
+                    "unsigned char (*factory(int count, ...))(int value) {return 0;}",
+                    cpp
+                )
+                .is_err()
+            );
+            assert!(
+                parse(
+                    "unsigned char (*factory(void))(int count, ...) {return 0;}",
+                    cpp
+                )
+                .is_ok()
+            );
+        }
+        let decls = parse("long long answer(Ns::Widget &value) {return 42;}", true).unwrap();
+        assert!(
+            matches!(&decls[0], Decl::Function {params,..} if params[0].1 == Typ::Named("reference Ns::Widget".into())),
+            "{decls:?}"
+        );
+    }
+
+    #[test]
+    fn declared_fixed_widths_survive_all_scalar_destination_boundaries() {
+        for cpp in [false, true] {
+            for (spelling, expected) in [
+                ("unsigned char", "u8"),
+                ("signed char", "i8"),
+                ("short unsigned int", "u16"),
+                ("signed short", "i16"),
+                ("unsigned int", "u32"),
+                ("signed int", "i32"),
+            ] {
+                let source = format!(
+                    "const {spelling} global=0; {spelling} answer({spelling} value) {{{spelling} local=0; return value;}}"
+                );
+                let decls = parse(&source, cpp).unwrap();
+                let alias = Typ::Named(format!("#integer-{expected}"));
+                assert!(
+                    matches!(&decls[0], Decl::Global {typ,..} if typ == &alias),
+                    "{source}: {decls:?}"
+                );
+                let Decl::Function {
+                    params, ret, body, ..
+                } = &decls[1]
+                else {
+                    panic!("answer")
+                };
+                assert_eq!(ret, &alias, "{source}");
+                assert_eq!(params[0].1, alias, "{source}");
+                assert!(
+                    matches!(&body[0], Stmt::Let(_,Some(typ),_) if typ == &alias),
+                    "{source}: {body:?}"
+                );
+            }
+            let decls = parse("unsigned char *answer(unsigned char *pointer, unsigned short values[]) {return pointer;}", cpp).unwrap();
+            let Decl::Function { params, ret, .. } = &decls[0] else {
+                panic!("answer")
+            };
+            assert_eq!(ret, &Typ::Int);
+            assert!(params.iter().all(|(_, typ)| *typ == Typ::Int));
+        }
+        // Public nominal normalization remains a carrier operation.
+        assert_eq!(c_typ_from_decl_specifier_text("unsigned char"), Typ::Int);
+        assert_eq!(
+            c_typ_from_decl_specifier_text("struct Example"),
+            Typ::Named("struct Example".into())
+        );
+    }
+
+    #[test]
+    fn class_scalar_fields_preserve_width_without_narrowing_indirect_fields() {
+        let decls = parse("class Example { public: unsigned char byte; signed short word; unsigned char *pointer; unsigned short array[2]; };", true).unwrap();
+        let Decl::Class { fields, .. } = &decls[0] else {
+            panic!("Example")
+        };
+        assert_eq!(
+            fields,
+            &vec![
+                ("byte".into(), Typ::Named("#integer-u8".into())),
+                ("word".into(), Typ::Named("#integer-i16".into())),
+                ("pointer".into(), Typ::Named("unsigned char".into())),
+                ("array".into(), Typ::Named("unsigned short".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn user_nominal_integer_alias_name_stays_distinct_from_primitive_metadata() {
+        let decls = parse("class u8 {}; u8 identity(u8 value) {return value;} unsigned char primitive(unsigned char value) {return value;}", true).unwrap();
+        let nominal = decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function {name,..} if name == "identity"))
+            .unwrap();
+        assert!(
+            matches!(nominal, Decl::Function {params,ret,..} if *ret == Typ::Named("u8".into()) && params[0].1 == Typ::Named("u8".into()))
+        );
+        let primitive = decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function {name,..} if name == "primitive"))
+            .unwrap();
+        assert!(
+            matches!(primitive, Decl::Function {params,ret,..} if *ret == Typ::Named("#integer-u8".into()) && params[0].1 == Typ::Named("#integer-u8".into()))
+        );
     }
 
     #[test]

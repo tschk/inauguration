@@ -3080,7 +3080,7 @@ int main(void) {
             Decl::Function { body, .. } => {
                 assert!(matches!(
                     &body[0],
-                    Stmt::Let(name, Some(Typ::Int), Expr::IntLit(1)) if name == "value"
+                    Stmt::Let(name, Some(Typ::Named(typ)), Expr::IntLit(1)) if name == "value" && typ == "#integer-i32"
                 ));
                 assert!(matches!(
                     &body[1],
@@ -3125,10 +3125,10 @@ int main(void) {
             Decl::Function { body, .. } => assert!(matches!(
                 body.as_slice(),
                 [
-                    Stmt::Let(name, Some(Typ::Int), Expr::IntLit(1)),
+                    Stmt::Let(name, Some(Typ::Named(typ)), Expr::IntLit(1)),
                     Stmt::Assign(assign_name, Expr::Binary { op, .. }),
                     Stmt::Return(Some(Expr::Ident(ret_name))),
-                ] if name == "value" && assign_name == "value" && op == "+" && ret_name == "value"
+                ] if name == "value" && typ == "#integer-i32" && assign_name == "value" && op == "+" && ret_name == "value"
             )),
             _ => panic!("expected function"),
         }
@@ -3385,7 +3385,10 @@ public:
             })
             .expect("Calculator class");
         let (fields, methods) = class;
-        assert_eq!(fields, vec![("value".into(), Typ::Named("int".into()))]);
+        assert_eq!(
+            fields,
+            vec![("value".into(), Typ::Named("#integer-i32".into()))]
+        );
         assert_eq!(methods.len(), 2);
         assert!(
             methods

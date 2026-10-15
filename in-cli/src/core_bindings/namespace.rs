@@ -91,7 +91,7 @@ pub(crate) fn qualify_module_decls(decls: &mut [Decl], module: &str) {
             }
             _ => {}
         }
-        let type_name = |name: &str| resolve(name, &scope, root, &types);
+        let type_name = |name: &str| resolve(name, &scope, root, &types).map(Typ::Named);
         let names = NominalNames {
             type_name: &type_name,
             value_name: &|_| None,
@@ -153,7 +153,7 @@ fn references(
         .collect()
 }
 struct NominalNames<'a> {
-    type_name: &'a dyn Fn(&str) -> Option<String>,
+    type_name: &'a dyn Fn(&str) -> Option<Typ>,
     value_name: &'a dyn Fn(&str) -> Option<String>,
 }
 
@@ -165,8 +165,20 @@ pub(crate) fn rewrite_nominal_names(
     resolve_value: &impl Fn(&str) -> Option<String>,
 ) {
     let names = NominalNames {
-        type_name: resolve_type,
+        type_name: &|name| resolve_type(name).map(Typ::Named),
         value_name: resolve_value,
+    };
+    for decl in decls {
+        declaration(decl, &names, &HashSet::new());
+    }
+}
+
+/// Rewrite named type occurrences using the existing scope-aware type walker.
+/// Declaration, member and value names are preserved.
+pub(crate) fn rewrite_named_types(decls: &mut [Decl], resolve_type: &impl Fn(&str) -> Option<Typ>) {
+    let names = NominalNames {
+        type_name: resolve_type,
+        value_name: &|_| None,
     };
     for decl in decls {
         declaration(decl, &names, &HashSet::new());
@@ -185,7 +197,7 @@ fn typ(value: &mut Typ, names: &NominalNames<'_>, generics: &HashSet<String>) {
                 return;
             }
             if let Some(target) = (names.type_name)(name) {
-                *name = target;
+                *value = target;
             }
         }
         Typ::Array(item) | Typ::Vector(item) => typ(item, names, generics),
@@ -369,7 +381,9 @@ fn declaration(decl: &mut Decl, names: &NominalNames<'_>, outer: &HashSet<String
                 declaration(method, names, &generics);
             }
             for name in extends.iter_mut().chain(implements) {
-                if let Some(target) = (names.type_name)(name) {
+                if !generics.contains(name)
+                    && let Some(Typ::Named(target)) = (names.type_name)(name)
+                {
                     *name = target;
                 }
             }
@@ -791,7 +805,7 @@ mod tests {
         pattern(
             &mut source,
             &NominalNames {
-                type_name: &|name| (name == "Pair").then(|| "dep::Pair".into()),
+                type_name: &|name| (name == "Pair").then(|| Typ::Named("dep::Pair".into())),
                 value_name: &|_| None,
             },
             &HashSet::new(),
@@ -854,5 +868,93 @@ mod tests {
         let once = decls.clone();
         qualify_module_decls(&mut decls, "dep");
         assert_eq!(decls, once);
+    }
+    #[test]
+    fn named_type_rewrite_reaches_scoped_type_positions_without_renaming_values() {
+        fn fixture(t: Typ) -> Vec<Decl> {
+            let function = Decl::Function {
+                name: "Alias".into(),
+                params: vec![("Alias".into(), t.clone())],
+                ret: crate::core_ir::tuples::typ(&[t.clone(), Typ::Array(Box::new(t.clone()))]),
+                type_params: vec![],
+                body: vec![
+                    Stmt::Let(
+                        "Alias".into(),
+                        Some(Typ::Vector(Box::new(t.clone()))),
+                        Expr::Ident("Alias".into()),
+                    ),
+                    Stmt::Expr(Expr::Block {
+                        body: vec![Stmt::Let("inner".into(), Some(t.clone()), Expr::IntLit(0))],
+                        result: Some(Box::new(Expr::Closure {
+                            params: vec![("p".into(), t.clone())],
+                            ret: t.clone(),
+                            captures: vec![],
+                            body: vec![Stmt::Return(Some(Expr::Ident("Alias".into())))],
+                        })),
+                    }),
+                ],
+            };
+            vec![
+                Decl::Global {
+                    name: "Alias".into(),
+                    typ: t.clone(),
+                    init: Some(Box::new(Expr::StringLit("Alias".into()))),
+                    mutable: true,
+                    constant_value: false,
+                },
+                Decl::Struct {
+                    name: "Record".into(),
+                    fields: vec![("Alias".into(), t.clone())],
+                    type_params: vec![],
+                },
+                function.clone(),
+                Decl::Class {
+                    name: "Class".into(),
+                    fields: vec![("field".into(), t.clone())],
+                    methods: vec![function],
+                    visibility: crate::core_ir::Visibility::Pub,
+                    extends: Some("Base".into()),
+                    implements: vec!["Interface".into()],
+                    type_params: vec![],
+                },
+                Decl::Interface {
+                    name: "Interface".into(),
+                    methods: vec![crate::core_ir::MethodSig {
+                        name: "Alias".into(),
+                        params: vec![("arg".into(), t.clone())],
+                        ret: t,
+                    }],
+                    visibility: crate::core_ir::Visibility::Pub,
+                    type_params: vec![],
+                },
+            ]
+        }
+        let mut actual = fixture(Typ::Named("Alias".into()));
+        rewrite_named_types(&mut actual, &|name| (name == "Alias").then_some(Typ::Int));
+        assert_eq!(actual, fixture(Typ::Int));
+
+        let mut generic = Decl::Function {
+            name: "generic".into(),
+            params: vec![("value".into(), Typ::Named("Alias".into()))],
+            ret: Typ::Named("Alias".into()),
+            body: vec![Stmt::Let(
+                "local".into(),
+                Some(Typ::Array(Box::new(Typ::Named("Alias".into())))),
+                Expr::Ident("value".into()),
+            )],
+            type_params: vec!["Alias".into()],
+        };
+        let original = generic.clone();
+        rewrite_named_types(std::slice::from_mut(&mut generic), &|_| Some(Typ::Bool));
+        assert_eq!(generic, original);
+        let mut classes = fixture(Typ::Named("Alias".into()));
+        let class = &mut classes[3];
+        let Decl::Class { type_params, .. } = class else {
+            panic!("class fixture")
+        };
+        type_params.push("Alias".into());
+        let original = class.clone();
+        rewrite_named_types(std::slice::from_mut(class), &|_| Some(Typ::Bool));
+        assert_eq!(*class, original);
     }
 }
