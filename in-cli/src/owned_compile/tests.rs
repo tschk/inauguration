@@ -6635,3 +6635,65 @@ fn main()->Int{let sum=0;for value in values("λ\"{雪}") {sum=sum+value;}if cal
         }
     }
 }
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_whole_struct_matches_copy_values_and_preserve_guard_scopes() {
+    for original in [
+        r#"struct Packet{Int x;Float weight;Bool ready;String label}
+fn main()->Int{let p:Packet=Packet{x:20,weight:1.5,ready:true,label:"λ雪"};match p {whole {p.x=0;p.label="changed";if whole.x==20 && whole.weight==1.5 && whole.ready && whole.label=="λ雪"{return whole.x+22;}return 0;}}return 0;}"#,
+        r#"struct Packet{Int x;Float weight;Bool ready;String label}
+var calls:Int=0;
+fn make()->Packet{calls+=1;return Packet{x:20,weight:1.5,ready:true,label:"λ雪"};}
+fn reject(value:Packet)->Bool{calls+=10;return false;}
+fn main()->Int{let whole:Int=999;let result:Int=0;match make(){whole if reject(whole){return 0;}whole {if whole.weight==1.5 && whole.ready && whole.label=="λ雪"{result=whole.x+22;}}}if whole!=999 || calls!=11{return 0;}return result;}"#,
+    ] {
+        let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+        for text in [original, canonical.as_str()] {
+            let source = temp_path("whole-struct-match.in");
+            fs::write(&source, text).unwrap();
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut request =
+                    default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{profile:?}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{profile:?}: {text}"
+                );
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    let binary = temp_path("whole-struct-match-native");
+                    request.target = CompileTarget::Native;
+                    request.out = Some(binary.clone());
+                    let report = compile_owned(&request);
+                    assert!(
+                        report.success && report.degradations.is_empty(),
+                        "{profile:?}: {report:?}"
+                    );
+                    assert_eq!(
+                        std::process::Command::new(&binary).status().unwrap().code(),
+                        Some(42)
+                    );
+                    fs::remove_file(binary).unwrap();
+                }
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
