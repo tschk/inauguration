@@ -169,15 +169,19 @@ pub(crate) fn resolve_module_dependencies(
     Ok(expanded)
 }
 
+pub(super) fn host_supports_jit() -> bool {
+    lower::host_supports_native_subset() || cfg!(all(target_os = "macos", target_arch = "x86_64"))
+}
+
 /// JIT compile: lower to native machine code, load into JitRuntime, invoke entry.
 pub fn compile_jit(
     module: &UnifiedModule,
     _module_id: &str,
     request: &OwnedCompileRequest,
 ) -> Result<NativeCompileResult, String> {
-    if !lower::host_supports_native_subset() {
+    if !host_supports_jit() {
         return Err(
-            "jit-host-unsupported: JIT currently requires macOS AArch64 or Linux x86_64"
+            "jit-host-unsupported: JIT requires macOS AArch64/x86_64 or Linux AArch64/x86_64"
                 .to_string(),
         );
     }

@@ -268,3 +268,5 @@ All 37 languages now route through Core IR. Swift was unified into the Tree-sitt
 - [README · Core Commands](../../README.md#core-commands) — CLI flags and sample commands (no duplicate install steps here).
 
 Local `.in` file imports retain canonical file identity until merging completes. Shared dependencies and path aliases contribute declarations once, in deterministic import order; cycles terminate across parallel parser workers. Distinct files with colliding declaration names still fail validation.
+
+The public JIT accepts macOS AArch64 and x86_64 hosts independently of native artifact support. Hosted x86 JIT calls resolve explicit bodyless stdlib declarations through the same wrapper table as undeclared builtin spellings; user-defined function bodies retain precedence. Native emission retains external import records.

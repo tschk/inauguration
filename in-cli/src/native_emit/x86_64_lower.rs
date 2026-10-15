@@ -3668,7 +3668,10 @@ fn lower_call_expr(
             .next()
             .unwrap_or(&target_name)
             .replace('_', "-");
-        if !ctx.functions.contains_key(&target_name)
+        if ctx
+            .functions
+            .get(&target_name)
+            .is_none_or(|function| function.body.is_empty())
             && matches!(
                 base.as_str(),
                 "push"
@@ -3686,7 +3689,10 @@ fn lower_call_expr(
         {
             return Err("x86_64-lower: vector mutation cannot use fixed array storage".into());
         }
-        if !ctx.functions.contains_key(&target_name)
+        if ctx
+            .functions
+            .get(&target_name)
+            .is_none_or(|function| function.body.is_empty())
             && let Some(wrapper) = jit_stdlib_wrapper(&base)
             && let Some(ptr) = crate::native_emit::native_link::resolve_native_fn(wrapper)
         {
@@ -3694,6 +3700,35 @@ fn lower_call_expr(
                 return Err(
                     "x86_64-lower: JIT stdlib wrappers require 64-bit register arguments".into(),
                 );
+            }
+            let params = crate::core_ir_verifier::intrinsic_param_types(&base);
+            if let Some(declared) = ctx.functions.get(&target_name)
+                && (params.is_none_or(|params| {
+                    declared.params.len() != params.len()
+                        || declared
+                            .params
+                            .iter()
+                            .zip(params)
+                            .any(|((_, actual), expected)| {
+                                actual.canonical() != expected.canonical()
+                            })
+                }) || crate::core_ir_verifier::intrinsic_return_type(&base)
+                    .is_none_or(|expected| declared.ret.canonical() != expected.canonical()))
+            {
+                return Err(format!(
+                    "x86_64-lower: incompatible JIT stdlib declaration `{target_name}`"
+                ));
+            }
+            if let Some(params) = params
+                && (args.len() != params.len()
+                    || args.iter().zip(params).any(|(arg, expected)| {
+                        scalar_expr_type(arg, ctx)
+                            .is_none_or(|actual| actual.canonical() != expected.canonical())
+                    }))
+            {
+                return Err(format!(
+                    "x86_64-lower: incompatible JIT stdlib arguments for `{target_name}`"
+                ));
             }
             lower_call_args(emitter, ctx, args, &target_name, pending_calls)?;
             emit_aligned_host_call(emitter, ptr);
@@ -4969,18 +5004,80 @@ fn main() -> void { return }
 
     #[test]
     fn jit_string_return_and_stdlib_extern_lower_together() {
-        let src = "import std.process;\ncapability process.spawn;\nfn main() -> String { return process_run(\"true\"); }\n";
-        let module = crate::in_lang_parse::parse_in_source(src).expect("parse");
+        for name in ["process-run", "process_run"] {
+            let src = format!(
+                "import std.process;\ncapability process.spawn;\nfn main() -> String {{ return {name}(\"true\"); }}\n"
+            );
+            let module = crate::in_lang_parse::parse_in_source(&src).expect("parse");
+            crate::native_emit::native_link::bootstrap_jit_native();
+            let result = lower_module(&module, "main").expect("lower");
+            let native = lower_native_module(&module, "main").expect("native lower");
+            assert_eq!(native.externs, [name]);
+            let has_call_rax = result.code.windows(2).any(|w| w == [0xFF, 0xD0]);
+            let has_unresolved_rel32 = result.code.windows(5).any(|w| w == [0xE8, 0, 0, 0, 0]);
+            assert!(has_call_rax, "stdlib extern must lower to call rax");
+            assert!(
+                !has_unresolved_rel32,
+                "stdlib extern must not stay an unresolved rel32 call"
+            );
+            result
+                .require_resolved_imports()
+                .expect("resolved stdlib import");
+        }
+    }
+
+    #[test]
+    fn jit_stdlib_rejects_incompatible_extern_signatures_and_keeps_defined_overrides() {
         crate::native_emit::native_link::bootstrap_jit_native();
-        let result = lower_module(&module, "main").expect("lower");
-        let native = lower_native_module(&module, "main").expect("native lower");
-        assert_eq!(native.externs, ["process_run"]);
-        let has_call_rax = result.code.windows(2).any(|w| w == [0xFF, 0xD0]);
-        let has_unresolved_rel32 = result.code.windows(5).any(|w| w == [0xE8, 0, 0, 0, 0]);
-        assert!(has_call_rax, "stdlib extern must lower to call rax");
+        for (name, params, ret, args) in [
+            ("env-temp-dir", vec![], Typ::Float, vec![]),
+            (
+                "process-run",
+                vec![("command".into(), Typ::Int)],
+                Typ::Int,
+                vec![Expr::IntLit(1)],
+            ),
+        ] {
+            let module = UnifiedModule::new(vec![
+                Decl::Function {
+                    name: name.into(),
+                    params,
+                    ret: ret.clone(),
+                    body: vec![],
+                    type_params: vec![],
+                },
+                Decl::Function {
+                    name: "main".into(),
+                    params: vec![],
+                    ret,
+                    body: vec![Stmt::Return(Some(Expr::Call {
+                        callee: Box::new(Expr::Ident(name.into())),
+                        args,
+                    }))],
+                    type_params: vec![],
+                },
+            ]);
+            assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+            let error = lower_module(&module, "main")
+                .err()
+                .expect("incompatible wrapper must refuse");
+            assert!(
+                error.contains("incompatible JIT stdlib declaration"),
+                "{error}"
+            );
+        }
+        let module = crate::in_lang_parse::parse_in_source("fn process-run(command:Int)->Int{return command;}\nfn main()->Int{return process-run(42);}").unwrap();
+        let result = lower_module(&module, "main").unwrap();
+        result.require_resolved_imports().unwrap();
+        let module =
+            crate::in_lang_parse::parse_in_source("fn main()->String{return process-run(1);}")
+                .unwrap();
+        let error = lower_module(&module, "main")
+            .err()
+            .expect("invalid low-level argument must refuse");
         assert!(
-            !has_unresolved_rel32,
-            "stdlib extern must not stay an unresolved rel32 call"
+            error.contains("incompatible JIT stdlib arguments"),
+            "{error}"
         );
     }
 

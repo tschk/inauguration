@@ -42,7 +42,10 @@ fn default_request(
 
 #[test]
 #[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 fn owned_dynamic_string_concat_preserves_payloads_and_operand_order() {
@@ -1277,7 +1280,7 @@ fn jit_executes_stdlib_process_run_with_string_result() {
             None,
         ));
         fs::remove_file(source_path).unwrap();
-        if !crate::native_emit::lower::host_supports_native_subset() {
+        if !super::jit::host_supports_jit() {
             assert!(!report.success, "{report:?}");
             assert!(
                 report
@@ -2290,7 +2293,7 @@ fn compilation_restores_the_callers_emission_profile() {
     let actual = antidecomp::current_profile();
     antidecomp::set_profile(previous);
     assert_eq!(actual, EmitProfile::Lean);
-    if crate::native_emit::lower::host_supports_native_subset() {
+    if super::jit::host_supports_jit() {
         for entry in ["main", "absent"] {
             antidecomp::set_profile(EmitProfile::Lean);
             let request = default_request(
@@ -3020,7 +3023,7 @@ fn owned_jit_preserves_error_type_through_calls_and_rethrows() {
 
 #[test]
 fn owned_jit_selects_catches_and_reports_unmatched_errors() {
-    if !native_backend::native_subset_host_available() {
+    if !super::jit::host_supports_jit() {
         return;
     }
     for profile in [
@@ -3101,7 +3104,7 @@ fn native_backends_reject_dynamic_call_targets() {
 
 #[test]
 fn owned_jit_reports_uncaught_errors_before_decoding_results() {
-    if !native_backend::native_subset_host_available() {
+    if !super::jit::host_supports_jit() {
         return;
     }
     for profile in [
@@ -3344,7 +3347,7 @@ fn harden_native_preserves_host_target_and_executes_at_runtime() {
 
 #[test]
 fn owned_rust_jit_executes_primitive_entries() {
-    if !native_backend::native_subset_host_available() {
+    if !super::jit::host_supports_jit() {
         return;
     }
     for (source, expected) in [
@@ -3384,7 +3387,7 @@ fn owned_rust_jit_executes_primitive_entries() {
 
 #[test]
 fn owned_rust_jit_retains_compile_only_for_uninvocable_entries() {
-    if !native_backend::native_subset_host_available() {
+    if !super::jit::host_supports_jit() {
         return;
     }
     for source in [
@@ -6066,7 +6069,10 @@ fn native_integer_strings_preserve_extremes_lifetimes_and_print_digits() {
 
 #[test]
 #[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 fn owned_inferred_globals_preserve_values_and_constant_chains() {
@@ -6114,4 +6120,63 @@ fn owned_inferred_globals_preserve_values_and_constant_chains() {
             fs::remove_file(source).unwrap();
         }
     }
+}
+
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn owned_macos_x86_jit_decodes_results_and_recreates_runtime_state() {
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for (extension, text, expected) in [
+            (
+                "in",
+                "var state:Int=41;\nfn main()->Int{state=state+1;return state;}",
+                Some(EvalValue::Int(42)),
+            ),
+            ("in", "fn main()->Int{return 43;}", Some(EvalValue::Int(43))),
+            (
+                "in",
+                "var state:Int=41;\nfn main()->Int{state=state+1;return state;}",
+                Some(EvalValue::Int(42)),
+            ),
+            (
+                "in",
+                "fn main()->Bool{return true;}",
+                Some(EvalValue::Bool(true)),
+            ),
+            (
+                "in",
+                "fn main()->Float{return 1.25+2.5;}",
+                Some(EvalValue::Float(3.75)),
+            ),
+            ("in", "fn main()->void{return;}", None),
+            (
+                "rs",
+                "struct Point{x:i64} fn make()->Point{Point{x:42}} fn main()->i64{make().x}",
+                Some(EvalValue::Int(42)),
+            ),
+        ] {
+            let path = temp_path(&format!("macos-x86-public-jit.{extension}"));
+            fs::write(&path, text).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            fs::remove_file(path).unwrap();
+            assert!(report.success, "{profile:?}/{text}: {report:?}");
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("jit-executed"),
+                "{report:?}"
+            );
+            assert_eq!(
+                report.eval_result, expected,
+                "{profile:?}/{text}: {report:?}"
+            );
+        }
+    }
+    // Enabling in-memory execution must not advertise native artifact support.
+    assert!(!crate::native_emit::lower::host_supports_native_subset());
 }

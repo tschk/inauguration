@@ -346,7 +346,7 @@ pub(crate) fn invoke_signature_error(
     }
 }
 
-fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
+pub(crate) fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
     if let Some(params) = invoke_param_types(name) {
         return Some(params);
     }
