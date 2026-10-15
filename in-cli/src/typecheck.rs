@@ -1182,6 +1182,17 @@ impl TypeChecker {
         self.collect_decl_facts(&module.decls)
     }
 
+    pub(crate) fn constant_value_is_typed(
+        &self,
+        value: &Expr,
+        facts: &Facts,
+        constants: &HashMap<String, Typ>,
+    ) -> bool {
+        let mut errors = Vec::new();
+        self.check_expr("#inline-constant", value, facts, constants, &mut errors);
+        errors.is_empty()
+    }
+
     pub(crate) fn collect_decl_facts(&self, decls: &[Decl]) -> Facts {
         let mut functions: HashMap<String, (Vec<(String, Typ)>, Typ)> = HashMap::new();
         let mut structs: HashMap<String, Vec<(String, Typ)>> = HashMap::new();
@@ -1588,6 +1599,33 @@ impl TypeChecker {
         env: &HashMap<String, Typ>,
         errors: &mut Vec<TypeError>,
     ) {
+        if let Expr::Call { callee, args } = expr {
+            if matches!(callee.as_ref(),Expr::Ident(name) if name=="index-assign-value-first" && !facts.functions.contains_key(name) && !env.contains_key(name))
+            {
+                let [base, index, value] = args.as_slice() else {
+                    errors.push(TypeError::ArityMismatch {
+                        caller: fn_name.into(),
+                        fn_name: "index-assign-value-first".into(),
+                        expected: 3,
+                        got: args.len(),
+                    });
+                    return;
+                };
+                self.check_stmts(
+                    fn_name,
+                    &Typ::Void,
+                    &[Stmt::IndexAssign {
+                        base: base.clone(),
+                        index: index.clone(),
+                        value: value.clone(),
+                    }],
+                    facts,
+                    &mut env.clone(),
+                    errors,
+                );
+                return;
+            }
+        }
         match expr {
             Expr::MatchValue { scrutinee, arms } => {
                 self.check_expr(fn_name, scrutinee, facts, env, errors);
@@ -2576,6 +2614,7 @@ pub fn normalize_module(parser_id: ParserId, module: &UnifiedModule) -> UnifiedM
         TypeChecker::new().resolve_c_value_promotions(&mut normalized);
     }
     if parser_id == ParserId::Rust {
+        crate::lower_core::lower_inline_constants(&mut normalized.decls);
         TypeChecker::new().resolve_complements(&mut normalized);
     }
     normalized

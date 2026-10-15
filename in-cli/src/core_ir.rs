@@ -2,11 +2,13 @@
 
 pub(crate) mod tuples;
 
+pub(crate) const INLINE_CONST: &str = "#rust-inline-const";
 pub(crate) const VECTOR_ALLOCATION: &str = "#vector-with-capacity";
 pub(crate) const BORROW: &str = "#rust-borrow";
 pub(crate) const METHOD_PREFIX: &str = "#receiver-method:";
 pub(crate) fn is_compiler_callee(name: &str) -> bool {
     tuples::is_marker(name)
+        || name == INLINE_CONST
         || name == BORROW
         || name == VECTOR_ALLOCATION
         || name.starts_with(METHOD_PREFIX)

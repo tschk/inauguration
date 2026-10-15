@@ -4837,6 +4837,42 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn inline_constants_execute_only_folded_values() {
+        for source in [
+            "fn main()->i64{let value=const {let base=20;base+22};value}",
+            "fn main()->i64{let value=const{let mut x=20;let y={x+=1;x};x+y};value}",
+            "fn main()->i64{let value=const {let mut sum=0;let mut i=0;while i<7{sum+=i;i+=1;}sum*2};value}",
+            "const BASE:i64=20;fn main()->i64{let value=const{BASE+22};value}",
+            "fn main()->i64{let value=const{if true{42}else{0}};value}",
+            "fn main()->i64{let value=const{let a=[20,22];a[0]+a[1]};value}",
+            "struct Pair{x:i64,y:i64}fn main()->i64{let value=const{Pair{x:20,y:22}};value.x+value.y}",
+            "fn main()->i64{let value=const{(const{20})+22};value}",
+            "fn main()->i64{let value=const{let yes=true;yes && true};if value{42}else{0}}",
+            "fn main()->i64{let value=const{\"answer\"};if value==\"answer\"{42}else{0}}",
+            "fn main()->i64{let value=const{let mut a=[20,0];a[1]=22;a};value[0]+value[1]}",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{source}: {report:?}; {module:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn match_values_preserve_selected_effects_bindings_and_control_flow() {
         for source in [
             "fn main()->i64{let tag=1;let value=match tag{0=>20,1=>42,_=>0};value}",

@@ -326,6 +326,12 @@ impl Lower {
     }
 
     fn expr(&mut self, expr: &mut Expr, out: &mut Vec<Stmt>) {
+        // Failed compile-time evaluation must remain a refusal, never runtime work.
+        if matches!(expr,Expr::Call {callee,..} if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::INLINE_CONST))
+        {
+            return;
+        }
+
         if let Expr::MatchValue { scrutinee, arms } = expr {
             self.expr(scrutinee, out);
             let typ = self.expr_type(scrutinee);

@@ -11,6 +11,7 @@ mod static_initializers;
 #[path = "lower_core/value_spills.rs"]
 mod value_spills;
 pub(crate) use constant_values::lower_named_constants;
+pub(crate) use static_initializers::lower_inline_constants;
 #[path = "lower_core/match_guards.rs"]
 mod match_guards;
 pub(crate) use match_guards::{lower_guarded_decls, prepared_native_module, value_pattern_test};
@@ -80,6 +81,7 @@ pub fn desugar_module(module: &mut UnifiedModule) {
             }
         }
     }
+    lower_inline_constants(&mut new_decls);
     static_initializers::fold_static_initializers(&mut new_decls);
     lower_named_constants(&mut new_decls);
     lower_value_spills(&mut new_decls);

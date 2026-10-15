@@ -2588,11 +2588,9 @@ fn lower_expr_with_types_inner(
                 .collect(),
         },
         syn::Expr::Group(g) => lower_expr_with_types(&g.expr, local_types),
-        syn::Expr::Const(c) => Expr::Closure {
-            params: vec![],
-            ret: Typ::Generic("_".into()),
-            body: lower_block_with_types(&c.block, local_types),
-            captures: vec![],
+        syn::Expr::Const(c) => Expr::Call {
+            callee: Box::new(Expr::Ident(crate::core_ir::INLINE_CONST.into())),
+            args: vec![lower_block_value(&c.block, &HashMap::new())],
         },
         syn::Expr::Return(r) => r
             .expr
@@ -3076,6 +3074,37 @@ fn main() {
             .expect("main");
         let src = format!("{body:?}");
         assert!(src.contains("Break"), "expected Stmt::Break: {src}");
+    }
+
+    #[test]
+    fn inline_constants_keep_a_reserved_scoped_evaluation_boundary() {
+        for source in [
+            "const { 40 + 2 }",
+            "const { return 42; }",
+            "const { break; }",
+            "const { runtime }",
+        ] {
+            let parsed: syn::Expr = syn::parse_str(source).unwrap();
+            let value = lower_expr_with_types(
+                &parsed,
+                &mut HashMap::from([("runtime".into(), "Int".into())]),
+            );
+            let Expr::Call { callee, args } = value else {
+                panic!("expected inline constant marker");
+            };
+            assert_eq!(*callee, Expr::Ident(crate::core_ir::INLINE_CONST.into()));
+            assert!(matches!(args.as_slice(), [Expr::Block { .. }]));
+            if source.contains("return") {
+                assert!(
+                    matches!(&args[0], Expr::Block { body, result: None } if matches!(body.as_slice(), [Stmt::Return(Some(Expr::IntLit(42)))]))
+                );
+            }
+            if source.contains("runtime") {
+                assert!(
+                    matches!(&args[0], Expr::Block { result: Some(result), .. } if matches!(result.as_ref(), Expr::Ident(name) if name == "runtime"))
+                );
+            }
+        }
     }
 
     #[test]

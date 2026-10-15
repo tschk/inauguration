@@ -31,6 +31,12 @@ Value matches require compatible arm types and proven exhaustiveness. An unguard
 
 Rust expression `match` and value-position `if let`, brace-form `.in` matches, and `.icore` v2/v3 `kind: "match-value"` use this representation. The JSON form contains `scrutinee` and `arms`; each arm has `pattern`, optional `guard`, and `value`. C/Go source projection, Thumb, and INISA refuse match values until those emitters preserve the same semantics.
 
+## Rust inline constants
+
+Rust `const { ... }` lowers to the reserved `#rust-inline-const` call with one scoped `Block` argument. It must be evaluated within the bounded constant evaluator before native lowering; it is neither a closure nor a runtime block. Its environment contains constant globals and its own locals, never captured runtime bindings. Unsupported evaluation remains an explicit refusal.
+
+Inline constants have their own control-flow boundary: `return` is invalid, and `break` or `continue` cannot target an enclosing runtime loop. A loop declared inside the constant block has its own jump targets, though executing such loops still requires constant-evaluator support. General Rust const-function evaluation remains outside this subset.
+
 ## Historical textual SIL merge behavior (`hybrid_sil`)
 
 `parse_textual_sil` keeps the legacy top-level **`function_id`** as whichever **`sil @name`** line appeared **last** in the input, and still exposes flattened block / instruction vectors for existing callers. It also records explicit per-function entries in **`SilArtifact::functions`**, each with its own blocks and instructions. **`extract_call_graph`** prefers those per-function records, then falls back to **`instruction_callers`**, then to the legacy **`function_id`** behavior for old artifacts. Emitters still typically place **`sil @main` last** so single-function views line up with `main`. For full detail see [in-language.md](in-language.md#hybrid_sil-and-merged-textual-sil).
@@ -64,7 +70,7 @@ Rust indexed assignment uses `index-assign-value-first(base, index, value)` in s
 
 Rust `[value; count]` lowers to the reserved Core IR operation `array-repeat(value, count)`. The shared pass evaluates an ordinary value expression once, including when the count is zero, and copies that value into an array. It preserves surrounding argument order, short-circuit branches, and repeated while-condition evaluation. Generated bindings avoid source names. Empty arrays retain the element type for checking unreachable loop bodies.
 
-Counts currently support checked integer constant arithmetic and immutable integer globals. Expansion is bounded to 4096 items; backend frame and element-layout limits still apply. Unresolved, negative, and larger counts are refused. Inferred counts, const blocks, general const-function evaluation, and Rust `Copy` trait checking remain outside this subset.
+Counts currently support checked integer constant arithmetic and immutable integer globals. Expansion is bounded to 4096 items; backend frame and element-layout limits still apply. Unresolved, negative, and larger counts are refused. Inline constants must first resolve under the bounded constant evaluator described above. Inferred counts, general const-function evaluation, and Rust `Copy` trait checking remain outside this subset.
 
 `.in` collection loops use the same lowering as Rust collection loops, alongside existing bounded and open ranges. `conformance/control-flow/array-repeat-effects.in` covers single evaluation, zero length, short-circuit effects, and conditions reevaluated after `continue`.
 

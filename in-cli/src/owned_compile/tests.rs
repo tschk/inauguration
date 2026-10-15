@@ -45,6 +45,94 @@ fn default_request(
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
+fn inline_constants_refuse_runtime_dependencies_and_invalid_unused_values() {
+    for text in [
+        "fn main()->i64{let runtime=42;let value=const{runtime};value}",
+        "fn runtime()->i64{42}fn main()->i64{let value=const{runtime()};value}",
+        "static VALUE:i64=42;fn main()->i64{let value=const{VALUE};value}",
+        "fn runtime()->i64{0}fn main()->i64{let value=const{if true{42}else{runtime()}};value}",
+        "fn main()->i64{let value=const{let invalid:i64=false;42};value}",
+        "struct Pair{x:i64}fn main()->i64{let value=const{let invalid=Pair{x:false};42};value}",
+        "fn main()->i64{let value=const{9223372036854775807+1};value}",
+        "fn main()->i64{let value=const{return 42;};value}",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("inline-const-refused.rs");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(!report.success, "{text} {profile:?}: {report:?}");
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_inline_constants_execute_only_folded_values() {
+    for text in [
+        "fn main()->i64{let value=const {let base=20;base+22};value}",
+        "fn main()->i64{let value=const{let mut x=20;let y={x+=1;x};x+y};value}",
+        "fn main()->i64{let value=const {let mut sum=0;let mut i=0;while i<7{sum+=i;i+=1;}sum*2};value}",
+        "const BASE:i64=20;fn main()->i64{let value=const{BASE+22};value}",
+        "fn main()->i64{let value=const{if true{42}else{0}};value}",
+        "fn main()->i64{let value=const{let a=[20,22];a[0]+a[1]};value}",
+        "struct Pair{x:i64,y:i64}fn main()->i64{let value=const{Pair{x:20,y:22}};value.x+value.y}",
+        "fn main()->i64{let value=const{(const{20})+22};value}",
+        "fn main()->i64{let value=const{let yes=true;yes && true};if value{42}else{0}}",
+        "fn main()->i64{let value=const{\"answer\"};if value==\"answer\"{42}else{0}}",
+        "fn main()->i64{let value=const{let mut a=[20,0];a[1]=22;a};value[0]+value[1]}",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("inline-const.rs");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{text} {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{text} {profile:?}"
+            );
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("inline-const-native");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(report.success, "{text} {profile:?}: {report:?}");
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42),
+                    "{text} {profile:?}"
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
 fn owned_match_values_preserve_selected_effects_bindings_and_control_flow() {
     for text in [
         "fn main()->i64{let tag=1;let value=match tag{0=>20,1=>42,_=>0};value}",
