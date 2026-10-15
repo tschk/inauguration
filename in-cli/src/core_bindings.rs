@@ -1,4 +1,8 @@
 //! Give shadowing bindings distinct names before name-keyed optimization and lowering.
+#[path = "core_bindings/namespace.rs"]
+mod namespace;
+pub(crate) use namespace::qualify_module_decls;
+
 use crate::core_ir::{Decl, Expr, LoopKind, MatchPattern, Stmt, Typ};
 use std::collections::{HashMap, HashSet};
 
@@ -199,11 +203,19 @@ pub(crate) fn reserve_pattern(source: &str, names: &mut HashSet<String>) {
     }
 }
 
-fn render_pattern(pattern: &MatchPattern) -> String {
+pub(crate) fn render_pattern(pattern: &MatchPattern) -> String {
     match pattern {
         MatchPattern::IntPat(value) => value.to_string(),
         MatchPattern::BoolPat(value) => value.to_string(),
-        MatchPattern::StringPat(value) => format!("\"{value}\""),
+        MatchPattern::StringPat(value) => format!(
+            "\"{}\"",
+            value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t")
+        ),
         MatchPattern::IdentPat(name) => name.clone(),
         MatchPattern::WildPat => "_".into(),
         MatchPattern::RestPat => "..".into(),

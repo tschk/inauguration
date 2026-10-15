@@ -5974,6 +5974,68 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn resolved_rust_modules_keep_private_helpers_globals_structs_and_addresses_distinct() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "inauguration-resolved-jit-{}-{nonce}",
+            std::process::id()
+        ));
+        let sources = root.join("callback_dep/src");
+        std::fs::create_dir_all(&sources).unwrap();
+        std::fs::write(sources.join("lib.rs"), "pub mod alpha; pub mod beta;").unwrap();
+        for (name, value) in [("alpha", 20), ("beta", 22)] {
+            std::fs::write(sources.join(format!("{name}.rs")), format!(
+                "static VALUE:i64={value}; pub struct Entry{{pub value:i64}} fn helper(value:i64)->i64{{if value>0{{return value;}}0}} impl Entry{{fn read(&self)->i64{{helper(self.value)}}}} fn make()->Entry{{Entry{{value:VALUE}}}} pub fn answer()->i64{{let entry=make();Entry::read(&entry)}}"
+            )).unwrap();
+        }
+        let mut db = crate::crate_db::CrateDb::new();
+        db.search_roots = vec![root.clone()];
+        db.register_crate("callback_dep", root.join("callback_dep"));
+        for source in [
+            "fn main()->i64{callback_dep::alpha::answer()+callback_dep::beta::answer()}",
+            "fn main()->i64{let first=callback_dep::alpha::answer;let second=callback_dep::beta::answer;invoke(first)+invoke(second)}",
+            "fn main()->i64{invoke(callback_dep::alpha::answer)+invoke(callback_dep::beta::answer)}",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let resolved = crate::dep_resolver::resolve_deps(&parsed, &db)
+                .expect("resolve local module dependencies");
+            for prefix in ["callback_dep::alpha", "callback_dep::beta"] {
+                for suffix in ["answer", "helper"] {
+                    let expected = format!("{prefix}::{suffix}");
+                    assert!(resolved.module.decls.iter().any(|decl| matches!(decl, crate::core_ir::Decl::Function { name, .. } if name == &expected)), "missing {expected}: {:?}", resolved.module);
+                }
+            }
+            let mut normalized = crate::typecheck::normalize_module(
+                crate::parser_registry::ParserId::Rust,
+                &resolved.module,
+            );
+            crate::lower_core::desugar_module(&mut normalized);
+            let report = crate::core_ir_verifier::verify_for_entry(&normalized, "main");
+            assert!(report.ok, "{source}: {report:?}; {normalized:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut optimized = normalized.clone();
+                crate::core_opt::optimize_with_profile(&mut optimized.decls, Some("main"), profile);
+                let report = crate::core_ir_verifier::verify_for_entry(&optimized, "main");
+                assert!(report.ok, "{source} {profile:?}: {report:?}; {optimized:?}");
+                assert_eq!(
+                    invoke_module(&optimized, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn jit_runtime_new_is_empty() {
         let rt = JitRuntime::new();
         assert_eq!(rt.function_count(), 0);

@@ -77,6 +77,12 @@ impl CrateDb {
     /// Resolve a fully-qualified name like "std::fs::read_to_string".
     /// Returns (crate, module_path, parsed_module).
     pub fn resolve(&self, fq_name: &str) -> Result<(String, String, Arc<UnifiedModule>), String> {
+        if !fq_name
+            .split("::")
+            .all(|part| syn::parse_str::<syn::Ident>(part).is_ok())
+        {
+            return Err(format!("invalid qualified dependency name `{fq_name}`"));
+        }
         // Check cache
         {
             let idx = self.symbol_index.read().unwrap();
@@ -143,23 +149,22 @@ impl CrateDb {
             .ok_or_else(|| format!("source not found for `{crate_name}::{module_path}`"))?;
 
         // Parse via standard pipeline
-        let parser_id = if source_file.extension().and_then(|e| e.to_str()) == Some("rs") {
-            ParserId::Rust
-        } else {
-            ParserId::Rust
-        };
-        let resolved = ResolvedBuildParser::CoreIr(parser_id);
-        let parsed = crate::parser_registry::parse_with_resolved(resolved, &source_file)
+        let resolved = ResolvedBuildParser::CoreIr(ParserId::Rust);
+        let mut parsed = crate::parser_registry::parse_with_resolved(resolved, &source_file)
             .map_err(|e| format!("parse error {source_file:?}: {e}"))?
             .ok_or_else(|| format!("no module from {source_file:?}"))?;
+        crate::core_bindings::qualify_module_decls(&mut parsed.decls, module_path);
 
         let exports: Vec<String> = parsed
             .decls
             .iter()
             .filter_map(|d| match d {
-                Decl::Function { name, .. } => Some(name.clone()),
-                Decl::Struct { name, .. } => Some(name.clone()),
-                _ => None,
+                Decl::Function { name, .. }
+                | Decl::Struct { name, .. }
+                | Decl::Global { name, .. }
+                | Decl::Class { name, .. }
+                | Decl::Interface { name, .. }
+                | Decl::Component { name, .. } => Some(name.clone()),
             })
             .collect();
 
@@ -196,16 +201,32 @@ impl CrateDb {
     }
 
     fn find_source(&self, crate_name: &str, rel: &str) -> Option<PathBuf> {
-        for root in &self.search_roots {
-            let crate_root = root.join(crate_name);
-            let candidates = [
-                crate_root.join("src").join(rel).with_extension("rs"),
-                crate_root.join("src").join(rel).join("mod.rs"),
-            ];
-            for c in &candidates {
-                if c.exists() {
-                    return Some(c.clone());
-                }
+        let relative = if rel == crate_name {
+            ""
+        } else {
+            rel.strip_prefix(&format!("{crate_name}/"))?
+        };
+        let relative = relative
+            .split('/')
+            .map(|part| part.strip_prefix("r#").unwrap_or(part))
+            .collect::<Vec<_>>()
+            .join("/");
+        let mut roots = Vec::new();
+        if let Some(info) = self.crates.read().unwrap().get(crate_name) {
+            roots.push(info.root.clone());
+        }
+        roots.extend(self.search_roots.iter().map(|root| root.join(crate_name)));
+        for root in roots {
+            let candidates = if relative.is_empty() {
+                vec![root.join("src/lib.rs"), root.join("src/main.rs")]
+            } else {
+                vec![
+                    root.join("src").join(&relative).with_extension("rs"),
+                    root.join("src").join(&relative).join("mod.rs"),
+                ]
+            };
+            if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
+                return Some(path);
             }
         }
         None
@@ -221,6 +242,50 @@ impl Default for CrateDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registered_roots_follow_cargo_paths_and_cache_canonical_modules() {
+        let root = std::env::temp_dir().join(format!("crate_db_namespace_{}", std::process::id()));
+        let src = root.join("src");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        std::fs::write(src.join("lib.rs"), "pub fn root()->i64{42}").unwrap();
+        std::fs::write(src.join("foo.rs"), "pub fn answer()->i64{42}").unwrap();
+        std::fs::write(src.join("a\u{301}.rs"), "pub fn answer()->i64{42}").unwrap();
+        std::fs::write(src.join("type.rs"), "pub fn answer()->i64{42}").unwrap();
+        std::fs::write(src.join("nested/mod.rs"), "pub fn answer()->i64{42}").unwrap();
+        let mut db = CrateDb::new();
+        db.search_roots.clear();
+        db.register_crate("sample", root.clone());
+        for name in [
+            "sample::root",
+            "sample::foo::answer",
+            "sample::nested::answer",
+            "sample::a\u{301}::answer",
+            "sample::r#type::answer",
+        ] {
+            let (_, _, module) = db.resolve(name).unwrap();
+            assert!(
+                module.decls.iter().any(
+                    |decl| matches!(decl, Decl::Function { name: found, .. } if found == name)
+                )
+            );
+        }
+        let (_, _, before) = db.resolve("sample::foo::answer").unwrap();
+        std::fs::write(src.join("foo.rs"), "invalid Rust source").unwrap();
+        assert_eq!(
+            db.resolve("sample::foo::answer").unwrap().2.as_ref(),
+            before.as_ref()
+        );
+        for name in [
+            "sample::../escape::answer",
+            "sample::::answer",
+            "sample::foo/bar::answer",
+            "sample::foo\\bar::answer",
+        ] {
+            assert!(db.resolve(name).is_err(), "{name}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn test_cratedb_new_initialization() {

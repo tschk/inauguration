@@ -195,41 +195,9 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
             }
         }
     };
-    let frontend_hash = compile_cache::source_frontend_hash(&request.path, &source);
+    let mut frontend_hash = compile_cache::source_frontend_hash(&request.path, &source);
     let reuse_cache =
         request.target != CompileTarget::Jit && request.profile == EmitProfile::Default;
-    if reuse_cache && let Some(mut cached) = compile_cache::read_cached_report(&cwd, &frontend_hash)
-    {
-        let requested_out = request.out.as_ref().map(|path| path.display().to_string());
-        let cached_out = cached
-            .executable_path
-            .clone()
-            .or_else(|| cached.artifact_path.clone());
-        if cached.target == target_label(request.target)
-            && cached.entry == request.entry
-            && cached.target_triple == request.target_triple
-            && cached.module_id == request.module_id
-            && cached.linkage == linkage_label(request.linkage)
-            && emit_label(request.emit.as_ref()) == emit_label(None)
-            && requested_out == cached_out
-        {
-            // Report-only cache must still materialize artifacts; missing out files
-            // force a full rebuild so product link steps don't see a green phantom.
-            let artifact_present = requested_out
-                .as_ref()
-                .map(|p| std::path::Path::new(p).is_file())
-                .unwrap_or(true);
-            if artifact_present {
-                cached.cache_hit = true;
-                cached.jobs = jobs;
-                cached.timing_micros = started.elapsed().as_micros();
-                cached.timing_waves_us = Some(timing_waves_for_jobs(jobs, cached.timing_micros));
-                cached.frontend_hash = Some(frontend_hash);
-                return cached;
-            }
-        }
-    }
-
     let _guard = ExternalInvocationGuard::enter();
 
     let mut report = base_report(request, jobs, started);
@@ -448,12 +416,43 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         }
     }
 
+    if crate::dep_resolver::requires_source_resolution(&module) {
+        let dependency_entry = request
+            .entry
+            .as_deref()
+            .or(pkg_entry.as_deref())
+            .or_else(|| {
+                ((request.target == CompileTarget::Jit
+                    || request.linkage == NativeLinkage::Executable)
+                    && module_has_function(&module, "main"))
+                .then_some("main")
+            });
+        match jit::resolve_module_dependencies(&module, dependency_entry, request.target) {
+            Ok(expanded) => module = expanded,
+            Err(error) => {
+                report.reason_code = Some("dependency-resolution-failed".into());
+                report.reason = Some(error.clone());
+                report.error = Some(error);
+                return finalize_report(report, started, &cwd, &frontend_hash);
+            }
+        }
+    }
+
     // Lower module: desugar classes to structs before typecheck
     crate::lower_core::desugar_module(&mut module);
     if let parser_registry::ResolvedBuildParser::CoreIr(parser_id) = resolved
         && crate::typecheck::uses_family_typecheck(parser_id)
     {
         module = crate::typecheck::normalize_module(parser_id, &module);
+    }
+
+    if request.target != CompileTarget::Jit {
+        let context = format!(
+            "{frontend_hash}:{:?}:{:?}:{:?}",
+            request.profile, request.emit, request.base
+        );
+        frontend_hash = compile_cache::resolved_frontend_hash(&context, &module);
+        report.frontend_hash = Some(frontend_hash.clone());
     }
 
     report.frontend_level = "core-ir-direct".to_string();
@@ -496,6 +495,38 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
             return finalize_report(report, started, &cwd, &frontend_hash);
         }
         report.call_edge_count = verify_report.call_edges.len();
+    }
+
+    if reuse_cache && let Some(mut cached) = compile_cache::read_cached_report(&cwd, &frontend_hash)
+    {
+        let requested_out = request.out.as_ref().map(|path| path.display().to_string());
+        let cached_out = cached
+            .executable_path
+            .clone()
+            .or_else(|| cached.artifact_path.clone());
+        if cached.target == target_label(request.target)
+            && cached.entry == request.entry
+            && cached.target_triple == request.target_triple
+            && cached.module_id == request.module_id
+            && cached.linkage == linkage_label(request.linkage)
+            && emit_label(request.emit.as_ref()) == emit_label(None)
+            && requested_out == cached_out
+        {
+            // Report-only cache must still materialize artifacts; missing out files
+            // force a full rebuild so product link steps don't see a green phantom.
+            let artifact_present = requested_out
+                .as_ref()
+                .map(|p| std::path::Path::new(p).is_file())
+                .unwrap_or(true);
+            if artifact_present {
+                cached.cache_hit = true;
+                cached.jobs = jobs;
+                cached.timing_micros = started.elapsed().as_micros();
+                cached.timing_waves_us = Some(timing_waves_for_jobs(jobs, cached.timing_micros));
+                cached.frontend_hash = Some(frontend_hash);
+                return cached;
+            }
+        }
     }
 
     report.semantic_level = "typed-subset".to_string();

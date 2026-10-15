@@ -2,7 +2,7 @@ use crate::owned_compile::OwnedCompileReport;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const CACHE_SCHEMA_VERSION: u32 = 1;
+const CACHE_SCHEMA_VERSION: u32 = 2;
 
 fn default_cached_linkage() -> String {
     "executable".to_string()
@@ -136,6 +136,7 @@ struct CompileCacheMetadata {
     schema_version: u32,
     frontend_hash: String,
     report: CachedOwnedCompileReport,
+    output_fingerprints: Vec<(String, u64)>,
 }
 
 pub fn fnv1a_hash(data: &[u8]) -> u64 {
@@ -177,6 +178,36 @@ pub fn source_frontend_hash(path: &Path, content: &str) -> String {
     format!("{hash:016x}")
 }
 
+pub fn resolved_frontend_hash(
+    source_fingerprint: &str,
+    module: &crate::core_ir::UnifiedModule,
+) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    "resolved-core-ir-v2".hash(&mut hash);
+    source_fingerprint.hash(&mut hash);
+    module.hash(&mut hash);
+    format!("{:016x}", hash.finish())
+}
+
+fn output_fingerprints(report: &OwnedCompileReport) -> Result<Vec<(String, u64)>, String> {
+    [
+        &report.artifact_path,
+        &report.executable_path,
+        &report.abi_path,
+    ]
+    .into_iter()
+    .filter_map(|path| path.as_ref())
+    .collect::<std::collections::BTreeSet<_>>()
+    .into_iter()
+    .map(|path| {
+        let bytes =
+            fs::read(path).map_err(|error| format!("read cached output `{path}`: {error}"))?;
+        Ok((path.clone(), fnv1a_hash(&bytes)))
+    })
+    .collect()
+}
+
 pub fn cache_root(cwd: &Path) -> PathBuf {
     cwd.join("target").join("in").join("cache")
 }
@@ -195,7 +226,11 @@ pub fn read_cached_report(cwd: &Path, frontend_hash: &str) -> Option<OwnedCompil
     if metadata.frontend_hash != frontend_hash {
         return None;
     }
-    Some(metadata.report.into())
+    let report = metadata.report.into();
+    if output_fingerprints(&report).ok()? != metadata.output_fingerprints {
+        return None;
+    }
+    Some(report)
 }
 
 pub fn write_cached_report(
@@ -203,12 +238,25 @@ pub fn write_cached_report(
     frontend_hash: &str,
     report: &OwnedCompileReport,
 ) -> Result<(), String> {
+    // Directory bundles are rebuilt; this cache validates individual file outputs.
+    if [
+        &report.artifact_path,
+        &report.executable_path,
+        &report.abi_path,
+    ]
+    .into_iter()
+    .filter_map(|path| path.as_ref())
+    .any(|path| Path::new(path).is_dir())
+    {
+        return Ok(());
+    }
     let dir = cache_dir_for_hash(cwd, frontend_hash);
     fs::create_dir_all(&dir).map_err(|err| format!("create compile cache dir: {err}"))?;
     let metadata = CompileCacheMetadata {
         schema_version: CACHE_SCHEMA_VERSION,
         frontend_hash: frontend_hash.to_string(),
         report: report.into(),
+        output_fingerprints: output_fingerprints(report)?,
     };
     let raw =
         serde_json::to_string_pretty(&metadata).map_err(|err| format!("serialize cache: {err}"))?;
@@ -248,6 +296,74 @@ mod tests {
     }
 
     #[test]
+    fn resolved_module_changes_invalidate_the_frontend_key() {
+        use crate::core_ir::{Decl, Expr, Typ, UnifiedModule};
+        let first = UnifiedModule::new(vec![Decl::Global {
+            name: "dependency::VALUE".into(),
+            typ: Typ::Int,
+            mutable: false,
+            constant_value: true,
+            init: Some(Box::new(Expr::IntLit(22))),
+        }]);
+        let mut changed = first.clone();
+        let Decl::Global { init, .. } = &mut changed.decls[0] else {
+            unreachable!()
+        };
+        *init = Some(Box::new(Expr::IntLit(24)));
+        let source_hash = source_frontend_hash(
+            Path::new("unchanged.in"),
+            "fn main()->Int{return dependency::VALUE;}",
+        );
+        let initial = resolved_frontend_hash(&source_hash, &first);
+        assert_eq!(
+            initial,
+            resolved_frontend_hash(&source_hash, &first.clone())
+        );
+        assert_ne!(initial, resolved_frontend_hash(&source_hash, &changed));
+        assert_ne!(
+            initial,
+            resolved_frontend_hash(&format!("{source_hash}:Lean"), &first)
+        );
+    }
+
+    #[test]
+    fn resolved_keys_include_bodies_schemas_and_float_bits() {
+        use crate::core_ir::{Decl, Expr, FloatVal, Stmt, Typ, UnifiedModule};
+        let module = |value| {
+            UnifiedModule::new(vec![
+                Decl::Function {
+                    name: "dependency::answer".into(),
+                    params: vec![],
+                    ret: Typ::Float,
+                    body: vec![Stmt::Return(Some(Expr::FloatLit(FloatVal(value))))],
+                    type_params: vec![],
+                },
+                Decl::Struct {
+                    name: "dependency::Entry".into(),
+                    fields: vec![("value".into(), Typ::Int)],
+                    type_params: vec![],
+                },
+            ])
+        };
+        let first = module(22.0);
+        let key = resolved_frontend_hash("same-source", &first);
+        assert_ne!(key, resolved_frontend_hash("same-source", &module(24.0)));
+        let mut schema = first.clone();
+        let Decl::Struct { fields, .. } = &mut schema.decls[1] else {
+            unreachable!()
+        };
+        fields[0].1 = Typ::Bool;
+        assert_ne!(key, resolved_frontend_hash("same-source", &schema));
+        let nan_a = module(f64::from_bits(0x7ff8_0000_0000_0001));
+        let nan_b = module(f64::from_bits(0x7ff8_0000_0000_0002));
+        assert_eq!(format!("{nan_a:?}"), format!("{nan_b:?}"));
+        assert_ne!(
+            resolved_frontend_hash("same-source", &nan_a),
+            resolved_frontend_hash("same-source", &nan_b)
+        );
+    }
+
+    #[test]
     fn hash_is_stable_for_same_path_and_content() {
         let path = Path::new("apps/sample.in");
         let a = source_frontend_hash(path, "fn main() -> void { return; }\n");
@@ -260,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_cache_metadata() {
+    fn roundtrip_cache_metadata_rejects_changed_or_missing_outputs() {
         let cwd = temp_dir("cwd");
         fs::create_dir_all(&cwd).unwrap();
         let hash = "abc123deadbeef00";
@@ -322,6 +438,29 @@ mod tests {
                 .map(|identity| identity.effective_module_id.as_str()),
             Some("agents.video.main")
         );
+        let output = cwd.join("app.native");
+        let abi = cwd.join("app.abi.json");
+        fs::write(&output, b"initial executable").unwrap();
+        fs::write(&abi, b"initial ABI").unwrap();
+        let mut report = report;
+        report.artifact_path = Some(output.display().to_string());
+        report.executable_path = report.artifact_path.clone();
+        report.abi_path = Some(abi.display().to_string());
+        assert_eq!(output_fingerprints(&report).unwrap().len(), 2);
+        write_cached_report(&cwd, hash, &report).unwrap();
+        assert!(read_cached_report(&cwd, hash).is_some());
+        fs::write(&output, b"another profile overwrote the executable").unwrap();
+        assert!(read_cached_report(&cwd, hash).is_none());
+        fs::write(&output, b"initial executable").unwrap();
+        assert!(read_cached_report(&cwd, hash).is_some());
+        fs::write(&abi, b"modified ABI").unwrap();
+        assert!(read_cached_report(&cwd, hash).is_none());
+        fs::write(&abi, b"initial ABI").unwrap();
+        fs::remove_file(&output).unwrap();
+        assert!(read_cached_report(&cwd, hash).is_none());
+        fs::create_dir(&output).unwrap();
+        write_cached_report(&cwd, "directory-output", &report).unwrap();
+        assert!(read_cached_report(&cwd, "directory-output").is_none());
         let _ = fs::remove_dir_all(cwd);
     }
 }

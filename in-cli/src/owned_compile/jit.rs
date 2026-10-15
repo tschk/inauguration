@@ -42,21 +42,19 @@ pub fn resolve_jit_entry(module: &UnifiedModule, entry: &str) -> String {
         .unwrap_or_else(|| entry.to_string())
 }
 
-/// JIT compile: lower to native machine code, load into JitRuntime, invoke entry.
-pub fn compile_jit(
+pub(crate) fn resolve_module_dependencies(
     module: &UnifiedModule,
-    _module_id: &str,
-    request: &OwnedCompileRequest,
-) -> Result<NativeCompileResult, String> {
-    if !lower::host_supports_native_subset() {
-        return Err(
-            "jit-host-unsupported: JIT currently requires macOS AArch64 or Linux x86_64"
-                .to_string(),
-        );
-    }
-
-    let _profile_guard = antidecomp::ProfileGuard::new(request.profile);
-
+    entry: Option<&str>,
+    target: super::CompileTarget,
+) -> Result<UnifiedModule, String> {
+    let selected_entry = entry.map(|entry| {
+        if target == super::CompileTarget::Jit {
+            resolve_jit_entry(module, entry)
+        } else {
+            entry.to_string()
+        }
+    });
+    let entry = selected_entry.as_deref();
     // Lazy dependency resolution: before lowering, resolve external
     // function calls by loading their source crates.
     let crate_db = crate_db::CrateDb::new();
@@ -85,8 +83,13 @@ pub fn compile_jit(
         });
     });
 
-    let resolved_module = dep_resolver::resolve_deps(module, &crate_db);
-    let expanded_module = &resolved_module.module;
+    let resolved_module = dep_resolver::resolve_deps_for_entry(module, &crate_db, entry)?;
+
+    // Existing caller modules retain their frontend's validation/compile-only policy.
+    // This Rust validation view is needed only when lazy resolution adds source declarations.
+    if resolved_module.module.decls.len() == module.decls.len() {
+        return Ok(module.clone());
+    }
 
     // Debug log how many deps were resolved
     if resolved_module.files_parsed > 0 {
@@ -96,26 +99,111 @@ pub fn compile_jit(
         );
     }
 
+    let original_count = module.decls.len();
+    let mut normalized = crate::typecheck::normalize_module(
+        crate::parser_registry::ParserId::Rust,
+        &resolved_module.module,
+    );
+    let mut caller_shapes = module.clone();
+    crate::lower_core::desugar_module(&mut caller_shapes);
+    let caller_functions: std::collections::HashSet<_> = caller_shapes
+        .decls
+        .iter()
+        .filter_map(|decl| {
+            if let Decl::Function { name, .. } = decl {
+                Some(name.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let caller_globals: std::collections::HashSet<_> = caller_shapes
+        .decls
+        .iter()
+        .filter_map(|decl| {
+            if let Decl::Global { name, .. } = decl {
+                Some(name.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut validation = normalized.clone();
+    crate::lower_core::desugar_module(&mut validation);
+    if let Some(entry) = entry {
+        validation = super::native::native_entry_module(&validation, entry);
+    }
+    for decl in &mut validation.decls {
+        match decl {
+            Decl::Function { name, body, .. } if caller_functions.contains(name) => body.clear(),
+            Decl::Global {
+                name,
+                init,
+                constant_value,
+                ..
+            } if caller_globals.contains(name) => {
+                *init = None;
+                *constant_value = false;
+            }
+            _ => {}
+        }
+    }
+    let report = crate::core_ir_verifier::verify_module(
+        &validation,
+        &crate::core_ir_verifier::VerifyOptions {
+            entry: None,
+            require_entry: false,
+        },
+    );
+    if !report.ok {
+        return Err(format!(
+            "Rust dependency validation failed: {}",
+            report
+                .reason
+                .unwrap_or_else(|| "invalid imported source".into())
+        ));
+    }
+    let imports = normalized.decls.split_off(original_count);
+    let mut expanded = module.clone();
+    expanded.decls.extend(imports);
+    Ok(expanded)
+}
+
+/// JIT compile: lower to native machine code, load into JitRuntime, invoke entry.
+pub fn compile_jit(
+    module: &UnifiedModule,
+    _module_id: &str,
+    request: &OwnedCompileRequest,
+) -> Result<NativeCompileResult, String> {
+    if !lower::host_supports_native_subset() {
+        return Err(
+            "jit-host-unsupported: JIT currently requires macOS AArch64 or Linux x86_64"
+                .to_string(),
+        );
+    }
+
+    let _profile_guard = antidecomp::ProfileGuard::new(request.profile);
+
     let entry = request
         .entry
         .as_deref()
         .filter(|name| !name.is_empty())
         .unwrap_or("main");
-    let resolved_entry = resolve_jit_entry(expanded_module, entry);
+    let resolved_entry = resolve_jit_entry(module, entry);
 
     // Rust aggregate ABIs are not consistently represented by every native backend.
     let compile_only = request
         .path
         .extension()
         .is_some_and(|extension| extension == "rs")
-        && !rust_entry_can_execute(expanded_module, &resolved_entry, entry);
+        && !rust_entry_can_execute(module, &resolved_entry, entry);
     if !compile_only
         && request
             .path
             .extension()
             .is_some_and(|extension| extension == "rs")
     {
-        let reachable = super::native::native_entry_module(expanded_module, &resolved_entry);
+        let reachable = super::native::native_entry_module(module, &resolved_entry);
         let verification = crate::core_ir_verifier::verify_module(
             &reachable,
             &crate::core_ir_verifier::VerifyOptions {
@@ -137,7 +225,7 @@ pub fn compile_jit(
 
     // Scalar results arrive in the integer result register; Float uses its bits
     // and String points to an instring. The declared return type selects decoding.
-    let entry_result_kind = expanded_module
+    let entry_result_kind = module
         .decls
         .iter()
         .find_map(|decl| match decl {
@@ -158,7 +246,7 @@ pub fn compile_jit(
 
     // Select lowering based on host architecture.
     let lowered = if cfg!(target_arch = "x86_64") {
-        x86_64_lower::lower_module(expanded_module, &resolved_entry).map(|result| {
+        x86_64_lower::lower_module(module, &resolved_entry).map(|result| {
             native_emit::lower::LoweredModule {
                 code: result.code,
                 data: result.data,
@@ -178,7 +266,7 @@ pub fn compile_jit(
         })
     } else {
         lower::lower_module_with_jobs(
-            expanded_module,
+            module,
             &resolved_entry,
             NativeLinkage::Executable,
             jobs_for_request(request),
@@ -383,9 +471,38 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
             _ => None,
         }
     }
+    let return_structs = structs
+        .iter()
+        .map(|(name, fields)| ((*name).to_string(), fields.to_vec()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let supported_return = |ret: &Typ| {
+        if internal_type(ret) {
+            return true;
+        }
+        let Typ::Named(name) = ret.canonical() else {
+            return false;
+        };
+        let layout = if cfg!(target_arch = "x86_64") {
+            crate::native_emit::struct_layout::x86_fields(&return_structs, &name)
+        } else {
+            crate::native_emit::struct_layout::scalar_fields(&return_structs, &name)
+        };
+        layout.is_ok_and(|fields| {
+            // ARM returns words in x0..x7; x86 stages words in a u16-offset frame.
+            let max_words = if cfg!(target_arch = "x86_64") {
+                usize::from(u16::MAX) / 8
+            } else {
+                8
+            };
+            fields.len() <= max_words
+                && fields
+                    .iter()
+                    .all(|(_, typ)| scalar(typ) && typ.canonical() != Typ::Void)
+        })
+    };
     reachable.decls.iter().all(|decl| match decl {
         Decl::Function { params, ret, .. } => {
-            if !internal_type(ret) {
+            if !supported_return(ret) {
                 return false;
             }
             if params.iter().all(|(_, typ)| internal_type(typ)) {
@@ -516,10 +633,237 @@ mod tests {
     }
 
     #[test]
+    fn helper_struct_returns_require_known_bounded_scalar_layouts() {
+        use crate::core_ir::Typ;
+        let source = "struct Entry{value:i64} fn make()->Entry{Entry{value:42}} fn main()->i64{make().value}";
+        let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        assert!(rust_entry_can_execute(&parsed, "main", "main"));
+        let nested = crate::compiler::rust_front::parse_rust_source("struct Inner{value:i64} struct Entry{inner:Inner} fn make()->Entry{Entry{inner:Inner{value:42}}} fn main()->i64{make().inner.value}").unwrap();
+        assert!(rust_entry_can_execute(&nested, "main", "main"));
+        for unsupported in [
+            Typ::Void,
+            Typ::Array(Box::new(Typ::Int)),
+            Typ::Named("Unknown".into()),
+            Typ::Named("Entry".into()),
+            Typ::Generic("T".into()),
+        ] {
+            let mut changed = parsed.clone();
+            let Decl::Struct { fields, .. } = &mut changed.decls[0] else {
+                unreachable!()
+            };
+            fields[0].1 = unsupported.clone();
+            assert!(
+                !rust_entry_can_execute(&changed, "main", "main"),
+                "{unsupported:?}"
+            );
+        }
+        for words in [8, 9] {
+            let mut changed = parsed.clone();
+            let Decl::Struct { fields, .. } = &mut changed.decls[0] else {
+                unreachable!()
+            };
+            *fields = (0..words)
+                .map(|index| (format!("field{index}"), Typ::Int))
+                .collect();
+            assert_eq!(
+                rust_entry_can_execute(&changed, "main", "main"),
+                words <= 8 || cfg!(target_arch = "x86_64"),
+                "{words} scalar return words"
+            );
+        }
+        let mut aggregate_entry = parsed.clone();
+        let Decl::Function { ret, .. } = aggregate_entry
+            .decls
+            .iter_mut()
+            .find(|decl| matches!(decl, Decl::Function { name, .. } if name == "main"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        *ret = Typ::Named("Entry".into());
+        assert!(!rust_entry_can_execute(&aggregate_entry, "main", "main"));
+    }
+
+    #[test]
     fn jit_string_decode_rejects_invalid_references() {
         assert_eq!(decode_jit_string(0), Some(String::new()));
         assert_eq!(decode_jit_string(1), None);
         let oversized = u64::MAX;
         assert_eq!(decode_jit_string((&oversized as *const u64) as i64), None);
+    }
+}
+
+#[cfg(test)]
+mod imported_rust_validation_tests {
+    use super::*;
+
+    #[test]
+    fn dependency_resolution_without_imports_preserves_caller_validation_policy() {
+        let module = crate::compiler::rust_front::parse_rust_source(
+            "#[cfg(feature=\"one\")] const VALUE:i64=1; #[cfg(not(feature=\"one\"))] const VALUE:i64=2; fn main()->i64{42}"
+        ).unwrap();
+        assert_eq!(
+            module
+                .decls
+                .iter()
+                .filter(|decl| matches!(decl, Decl::Global {name, ..} if name == "VALUE"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            resolve_module_dependencies(&module, Some("main"), super::super::CompileTarget::Jit)
+                .unwrap(),
+            module
+        );
+    }
+
+    use crate::owned_compile::{CompileTarget, EvalValue, compile_owned};
+    use crate::parser_registry::ParserCli;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct Fixture {
+        vendor: std::path::PathBuf,
+        caller: std::path::PathBuf,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.vendor);
+            let _ = fs::remove_dir_all(&self.caller);
+        }
+    }
+
+    #[test]
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    ))]
+    fn cpp_callers_cannot_reinterpret_invalid_rust_dependency_values() {
+        let id = format!(
+            "codex_cross_front_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let vendor_parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor");
+        fs::create_dir_all(&vendor_parent).unwrap();
+        let vendor = vendor_parent.join(&id);
+        let caller = std::env::temp_dir().join(&id);
+        fs::create_dir(&vendor).unwrap();
+        if let Err(error) = fs::create_dir(&caller) {
+            fs::remove_dir_all(&vendor).unwrap();
+            panic!("create caller fixture: {error}");
+        }
+        let fixture = Fixture { vendor, caller };
+        fs::create_dir(fixture.vendor.join("src")).unwrap();
+        fs::write(fixture.vendor.join("src/lib.rs"), "").unwrap();
+        for (case, source, valid, promote_caller) in [
+            (
+                "bad_local",
+                "pub fn answer()->i64{let bad:i64=false;bad+42}",
+                false,
+                false,
+            ),
+            (
+                "bad_condition",
+                "pub fn answer()->i64{if 1{42}else{0}}",
+                false,
+                false,
+            ),
+            (
+                "complement",
+                "pub fn answer()->i64{let value:i64=1;!value+44}",
+                true,
+                false,
+            ),
+            (
+                "bool_not",
+                "pub fn answer()->i64{let flag:bool=false;if !flag{42}else{0}}",
+                true,
+                false,
+            ),
+            ("caller_promotion", "pub fn answer()->i64{42}", true, true),
+        ] {
+            let source =
+                format!("{source} pub fn unsupported_unused()->usize{{format!(\"unused\").len()}}");
+            fs::write(fixture.vendor.join(format!("src/{case}.rs")), source).unwrap();
+            let path = fixture.caller.join(format!("{case}.cpp"));
+            let body = if promote_caller {
+                format!("bool flag=false; long bias=flag; return {id}::{case}::answer()+bias;")
+            } else {
+                format!("return {id}::{case}::answer();")
+            };
+            fs::write(&path, format!("namespace {id} {{ namespace {case} {{ long answer(); }} }} int main() {{{body}}}")).unwrap();
+            let report = compile_owned(&OwnedCompileRequest {
+                path,
+                module_id: "cross_front".into(),
+                parser: ParserCli::Auto,
+                target: CompileTarget::Jit,
+                entry: Some("main".into()),
+                out: None,
+                linkage: NativeLinkage::Executable,
+                target_triple: None,
+                jobs: 1,
+                debug: false,
+                profile: crate::emit_profile::EmitProfile::Default,
+                emit: None,
+                base: None,
+            });
+            assert_eq!(report.success, valid, "{case}: {report:?}");
+            if valid {
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{case}: {report:?}"
+                );
+            } else {
+                assert_eq!(
+                    report.reason_code.as_deref(),
+                    Some("dependency-resolution-failed"),
+                    "{case}: {report:?}"
+                );
+            }
+        }
+        let library = crate::compiler::rust_front::parse_rust_source(&format!(
+            "pub fn exported()->i64{{{id}::bad_local::answer()}}"
+        ))
+        .unwrap();
+        assert!(
+            resolve_module_dependencies(&library, None, super::super::CompileTarget::Jit)
+                .err()
+                .unwrap()
+                .contains("Rust dependency validation failed")
+        );
+        for (name, requested) in [("namespace.entry", "entry"), ("fallback", "missing")] {
+            let mut selected = library.clone();
+            let Decl::Function { name: actual, .. } = &mut selected.decls[0] else {
+                unreachable!()
+            };
+            *actual = name.into();
+            assert!(
+                resolve_module_dependencies(
+                    &selected,
+                    Some(requested),
+                    super::super::CompileTarget::Jit
+                )
+                .err()
+                .unwrap()
+                .contains("Rust dependency validation failed"),
+                "{name}"
+            );
+            // Native explicit missing entries must not acquire JIT's first-function fallback.
+            assert!(
+                resolve_module_dependencies(
+                    &selected,
+                    Some(requested),
+                    super::super::CompileTarget::Native
+                )
+                .is_ok(),
+                "{name}"
+            );
+        }
     }
 }

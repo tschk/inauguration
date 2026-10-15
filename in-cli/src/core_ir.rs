@@ -31,7 +31,7 @@ pub fn is_interrupt_fn(name: &str) -> bool {
 }
 
 /// Source position span.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
     pub line: u32,
     pub col: u32,
@@ -80,7 +80,13 @@ impl PartialEq for FloatVal {
 }
 impl Eq for FloatVal {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::hash::Hash for FloatVal {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.0.to_bits(), state);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Typ {
     Int,
     String,
@@ -431,7 +437,7 @@ pub(crate) fn integer_cast_expr(value: Expr, op: &str) -> Option<Expr> {
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     UnitLit,
     IntLit(i64),
@@ -486,7 +492,7 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Stmt {
     Let(String, Option<Typ>, Expr),
     Assign(String, Expr),
@@ -531,14 +537,14 @@ pub enum Stmt {
     Continue,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LoopKind {
     For { binding: String },
     While,
     Infinite,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MatchPattern {
     IntPat(i64),
     StringPat(String),
@@ -687,7 +693,18 @@ impl MatchPattern {
             && s.ends_with('}')
         {
             let name = trim_match_pat(&s[..open]);
-            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            let valid_path = name.split("::").all(|segment| {
+                // Rust's identifier parser includes Unicode XID and raw identifiers.
+                syn::parse_str::<syn::Ident>(segment).is_ok()
+                    || (segment
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_alphabetic())
+                        && segment
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
+            });
+            if valid_path {
                 let inner = &s[open + 1..s.len() - 1];
                 let field_strs = split_match_pat_args(inner);
                 let mut fields = Vec::new();
@@ -880,14 +897,14 @@ impl MatchPattern {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MatchValueArm {
     pub pattern: String,
     pub guard: Option<Expr>,
     pub value: Expr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MatchArm {
     pub pattern: String,
     /// Evaluated after a pattern matches; false proceeds to the next arm.
@@ -895,26 +912,26 @@ pub struct MatchArm {
     pub body: Vec<Stmt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CatchArm {
     pub pattern: String,
     pub body: Vec<Stmt>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Visibility {
     Pub,
     Private,
     Internal,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Import {
     pub path: String,
     pub alias: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MethodSig {
     pub name: String,
     pub params: Vec<(String, Typ)>,
@@ -922,19 +939,19 @@ pub struct MethodSig {
 }
 
 /// Single-module view produced by language fronts before lowering to textual SIL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnifiedModule {
     pub identity: CoreModuleIdentity,
     pub decls: Vec<Decl>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CoreModuleIdentity {
     pub package: Option<String>,
     pub module: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModuleIdentityReport {
     pub package: Option<String>,
     pub module: Option<String>,
@@ -979,26 +996,26 @@ impl UnifiedModule {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComponentImport {
     pub name: String,
     pub interface: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComponentExport {
     pub name: String,
     pub interface: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComponentCapability {
     pub name: String,
     pub capability_type: String,
     pub args: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Decl {
     Struct {
         name: String,
@@ -1553,6 +1570,45 @@ mod tests {
             pat,
             MatchPattern::ArrayPat(vec![MatchPattern::IntPat(1), MatchPattern::IntPat(2)])
         );
+    }
+
+    #[test]
+    fn qualified_struct_patterns_preserve_names_and_typed_bindings() {
+        for name in [
+            "dep::Entry",
+            "dep_name::Entry_type",
+            "依存::回答",
+            "dep::Cafe\u{301}",
+            "dep-name::Entry-type",
+        ] {
+            let source = format!("{name}{{value: answer}}");
+            let pattern = MatchPattern::parse(&source).expect("qualified struct pattern");
+            let rendered = crate::core_bindings::render_pattern(&pattern);
+            assert_eq!(MatchPattern::parse(&rendered).unwrap(), pattern);
+            let schema = vec![("value".into(), Typ::Int)];
+            assert_eq!(
+                pattern
+                    .typed_bindings(&Typ::Named(name.into()), &|lookup| (lookup == name)
+                        .then_some(schema.as_slice()))
+                    .unwrap(),
+                vec![("answer".into(), Typ::Int)]
+            );
+        }
+        for name in [
+            "",
+            "::Entry",
+            "dep::",
+            "dep::::Entry",
+            "dep:Entry",
+            "dep::9Entry",
+            "dep::Entry<T>",
+            "dep::Entry value",
+        ] {
+            assert!(
+                MatchPattern::parse(&format!("{name}{{value: answer}}")).is_err(),
+                "{name}"
+            );
+        }
     }
 
     #[test]

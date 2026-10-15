@@ -367,6 +367,108 @@ fn owned_conditional_and_block_values_preserve_scope_effects_and_control_flow() 
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
+fn owned_dependency_modules_expand_before_verification_and_optimization() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let crate_name = format!("in_dependency_probe_{}_{}", std::process::id(), nonce);
+    let vendor = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor");
+    let dependency = vendor.join(&crate_name);
+    let sources = dependency.join("src");
+    fs::create_dir_all(&sources).unwrap();
+    for (name, value) in [("left", 20), ("right", 22)] {
+        fs::write(sources.join(format!("{name}.rs")), format!(
+            "static VALUE:i64={value};struct Entry{{value:i64}}fn helper(value:i64)->i64{{if value>0{{return value;}}0}}fn make()->Entry{{Entry{{value:VALUE}}}}pub fn answer()->i64{{helper(make().value)}}"
+        )).unwrap();
+    }
+    for extension in ["rs", "in"] {
+        let source = temp_path(&format!("dependency-before-verification.{extension}"));
+        let ret = if extension == "rs" { "i64" } else { "Int" };
+        fs::write(&source, format!(
+        "fn main()->{ret}{{let first={crate_name}::left::answer;return invoke(first)+{crate_name}::right::answer();}}"
+    )).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{profile:?}: {report:?}"
+            );
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("dependency-before-verification-native");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(report.success, "{profile:?}: {report:?}");
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42)
+                );
+                if profile == crate::emit_profile::EmitProfile::Default {
+                    let dependency_source = sources.join("right.rs");
+                    let original = fs::read_to_string(&dependency_source).unwrap();
+                    let changed = original.replace("VALUE:i64=22", "VALUE:i64=24");
+                    assert_ne!(changed, original);
+                    fs::write(&dependency_source, &changed).unwrap();
+                    let updated = compile_owned(&request);
+                    assert!(updated.success && !updated.cache_hit, "{updated:?}");
+                    assert_eq!(
+                        std::process::Command::new(&binary).status().unwrap().code(),
+                        Some(44)
+                    );
+                    let cached = compile_owned(&request);
+                    assert!(cached.success && cached.cache_hit, "{cached:?}");
+                    assert_eq!(
+                        std::process::Command::new(&binary).status().unwrap().code(),
+                        Some(44)
+                    );
+                    fs::write(&dependency_source, &original).unwrap();
+                    let restored = compile_owned(&request);
+                    assert!(restored.success && !restored.cache_hit, "{restored:?}");
+                    assert_eq!(
+                        std::process::Command::new(&binary).status().unwrap().code(),
+                        Some(42)
+                    );
+                    fs::write(&dependency_source, &changed).unwrap();
+                    request.profile = crate::emit_profile::EmitProfile::Lean;
+                    let alternate = compile_owned(&request);
+                    assert!(alternate.success, "{alternate:?}");
+                    assert_eq!(
+                        std::process::Command::new(&binary).status().unwrap().code(),
+                        Some(44)
+                    );
+                    fs::write(&dependency_source, original).unwrap();
+                    request.profile = crate::emit_profile::EmitProfile::Default;
+                    let restored = compile_owned(&request);
+                    assert!(restored.success && !restored.cache_hit, "{restored:?}");
+                    assert_eq!(
+                        std::process::Command::new(&binary).status().unwrap().code(),
+                        Some(42)
+                    );
+                }
+                fs::remove_file(binary).unwrap();
+            }
+        }
+        fs::remove_file(source).unwrap();
+    }
+    fs::remove_dir_all(dependency).unwrap();
+    let _ = fs::remove_dir(vendor);
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
 fn owned_function_addresses_preserve_targets_and_indirect_arguments() {
     for text in [
         "fn answer()->Int{return 42;}\nfn main()->Int{let pointer:Int=answer;return invoke(pointer);}",

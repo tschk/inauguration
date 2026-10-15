@@ -4,9 +4,9 @@
 //! crate, loads and parses its source, registers the definitions, and
 //! recurses until all symbols resolve.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use crate::core_ir::{Decl, Expr, Stmt, UnifiedModule};
+use crate::core_ir::{Decl, Expr, MatchPattern, Stmt, Typ, UnifiedModule};
 use crate::crate_db::CrateDb;
 
 /// Result of resolving dependencies for a module.
@@ -19,36 +19,160 @@ pub struct ResolveResult {
 
 /// Collect unbound function names used as callees or address values.
 fn collect_externals(module: &UnifiedModule) -> Vec<String> {
-    let mut locals: HashSet<String> = HashSet::new();
-    for decl in &module.decls {
-        if let Decl::Function { name, .. } | Decl::Global { name, .. } = decl {
-            locals.insert(name.clone());
-        }
-    }
-
+    let locals: HashSet<_> = module
+        .decls
+        .iter()
+        .map(|decl| declaration_name(decl).to_string())
+        .collect();
     let mut out = Vec::new();
     for decl in &module.decls {
-        if let Decl::Function { body, params, .. } = decl {
-            let mut scope = locals.clone();
-            scope.extend(params.iter().map(|(name, _)| name.clone()));
-            walk_stmts(body, &mut scope, &mut out);
-        } else if let Decl::Global {
-            init: Some(value), ..
-        } = decl
-        {
-            walk_expr(value, &locals, &mut out);
-        }
+        walk_decl(decl, &locals, &mut out);
     }
     out.sort();
     out.dedup();
     out
 }
 
+/// Avoid initializing a source database when every reference is local or compiler-owned.
+pub(crate) fn requires_source_resolution(module: &UnifiedModule) -> bool {
+    collect_externals(module).iter().any(|name| {
+        name.contains("::")
+            && !matches!(
+                name.as_str(),
+                "Vec::new"
+                    | "std::vec::Vec::new"
+                    | "alloc::vec::Vec::new"
+                    | "Vec::with_capacity"
+                    | "std::vec::Vec::with_capacity"
+                    | "alloc::vec::Vec::with_capacity"
+                    | "Vec::<_>::new"
+                    | "std::vec::Vec::<_>::new"
+                    | "alloc::vec::Vec::<_>::new"
+                    | "Vec::<_>::with_capacity"
+                    | "std::vec::Vec::<_>::with_capacity"
+                    | "alloc::vec::Vec::<_>::with_capacity"
+            )
+    })
+}
+
+fn walk_type(typ: &Typ, locals: &HashSet<String>, out: &mut Vec<String>) {
+    match typ.canonical() {
+        Typ::Array(item) | Typ::Vector(item) => walk_type(&item, locals, out),
+        Typ::Named(name) => {
+            if let Some(fields) = crate::core_ir::tuples::fields(&name) {
+                for (_, typ) in fields {
+                    walk_type(&typ, locals, out);
+                }
+            } else if !locals.contains(&name) {
+                out.push(name);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn walk_pattern(pattern: &str, locals: &HashSet<String>, out: &mut Vec<String>) {
+    fn visit(pattern: &MatchPattern, locals: &HashSet<String>, out: &mut Vec<String>) {
+        match pattern {
+            MatchPattern::StructPat { name, fields } => {
+                walk_type(&Typ::Named(name.clone()), locals, out);
+                for (_, child) in fields {
+                    visit(child, locals, out);
+                }
+            }
+            MatchPattern::TuplePat(items) | MatchPattern::ArrayPat(items) => {
+                for child in items {
+                    visit(child, locals, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Ok(pattern) = MatchPattern::parse(pattern) {
+        visit(&pattern, locals, out);
+    }
+}
+
+fn walk_decl(decl: &Decl, locals: &HashSet<String>, out: &mut Vec<String>) {
+    match decl {
+        Decl::Function {
+            body,
+            params,
+            ret,
+            type_params,
+            ..
+        } => {
+            let mut scope = locals.clone();
+            scope.extend(type_params.iter().cloned());
+            for (_, typ) in params {
+                walk_type(typ, &scope, out);
+            }
+            walk_type(ret, &scope, out);
+            scope.extend(params.iter().map(|(name, _)| name.clone()));
+            walk_stmts(body, &mut scope, out);
+        }
+        Decl::Global { typ, init, .. } => {
+            walk_type(typ, locals, out);
+            if let Some(value) = init {
+                walk_expr(value, locals, out);
+            }
+        }
+        Decl::Struct {
+            fields,
+            type_params,
+            ..
+        }
+        | Decl::Class {
+            fields,
+            type_params,
+            ..
+        } => {
+            let mut scope = locals.clone();
+            scope.extend(type_params.iter().cloned());
+            for (_, typ) in fields {
+                walk_type(typ, &scope, out);
+            }
+            if let Decl::Class {
+                methods,
+                extends,
+                implements,
+                ..
+            } = decl
+            {
+                for name in extends.iter().chain(implements) {
+                    walk_type(&Typ::Named(name.clone()), &scope, out);
+                }
+                for method in methods {
+                    walk_decl(method, &scope, out);
+                }
+            }
+        }
+        Decl::Interface {
+            methods,
+            type_params,
+            ..
+        } => {
+            let mut scope = locals.clone();
+            scope.extend(type_params.iter().cloned());
+            for method in methods {
+                for (_, typ) in &method.params {
+                    walk_type(typ, &scope, out);
+                }
+                walk_type(&method.ret, &scope, out);
+            }
+        }
+        Decl::Component { .. } => {}
+    }
+}
+
 fn walk_stmts(stmts: &[Stmt], locals: &mut HashSet<String>, out: &mut Vec<String>) {
     for stmt in stmts {
         match stmt {
             Stmt::Expr(e) | Stmt::Return(Some(e)) => walk_expr(e, locals, out),
-            Stmt::Let(name, _, e) => {
+            Stmt::Let(name, typ, e) => {
+                if let Some(typ) = typ {
+                    walk_type(typ, locals, out);
+                }
                 walk_expr(e, locals, out);
                 locals.insert(name.clone());
             }
@@ -84,6 +208,7 @@ fn walk_stmts(stmts: &[Stmt], locals: &mut HashSet<String>, out: &mut Vec<String
             Stmt::Match { scrutinee, arms } => {
                 walk_expr(scrutinee, locals, out);
                 for arm in arms {
+                    walk_pattern(&arm.pattern, locals, out);
                     let mut scope = locals.clone();
                     crate::core_bindings::reserve_pattern(&arm.pattern, &mut scope);
                     if let Some(guard) = &arm.guard {
@@ -96,6 +221,7 @@ fn walk_stmts(stmts: &[Stmt], locals: &mut HashSet<String>, out: &mut Vec<String
             Stmt::Try { body, catches } => {
                 walk_stmts(body, &mut locals.clone(), out);
                 for c in catches {
+                    walk_pattern(&c.pattern, locals, out);
                     let mut scope = locals.clone();
                     crate::core_bindings::reserve_pattern(&c.pattern, &mut scope);
                     walk_stmts(&c.body, &mut scope, out);
@@ -110,6 +236,7 @@ fn walk_expr(expr: &Expr, locals: &HashSet<String>, out: &mut Vec<String>) {
     if let Expr::MatchValue { scrutinee, arms } = expr {
         walk_expr(scrutinee, locals, out);
         for arm in arms {
+            walk_pattern(&arm.pattern, locals, out);
             let mut scope = locals.clone();
             crate::core_bindings::reserve_pattern(&arm.pattern, &mut scope);
             if let Some(guard) = &arm.guard {
@@ -127,13 +254,23 @@ fn walk_expr(expr: &Expr, locals: &HashSet<String>, out: &mut Vec<String>) {
         }
         return;
     }
-    if let Expr::Closure { params, body, .. } = expr {
+    if let Expr::Closure {
+        params, ret, body, ..
+    } = expr
+    {
+        for (_, typ) in params {
+            walk_type(typ, locals, out);
+        }
+        walk_type(ret, locals, out);
         let mut scope = locals.clone();
         scope.extend(params.iter().map(|(name, _)| name.clone()));
         walk_stmts(body, &mut scope, out);
         return;
     }
 
+    if let Expr::StructInit { name, .. } = expr {
+        walk_type(&Typ::Named(name.clone()), locals, out);
+    }
     if let Expr::Ident(target) = expr
         && !locals.contains(target)
         && !target.starts_with("__inrt_")
@@ -144,68 +281,105 @@ fn walk_expr(expr: &Expr, locals: &HashSet<String>, out: &mut Vec<String>) {
     crate::core_ir::for_each_expr_child(expr, &mut |child| walk_expr(child, locals, out));
 }
 
+fn declaration_name(decl: &Decl) -> &str {
+    match decl {
+        Decl::Function { name, .. }
+        | Decl::Struct { name, .. }
+        | Decl::Global { name, .. }
+        | Decl::Class { name, .. }
+        | Decl::Interface { name, .. }
+        | Decl::Component { name, .. } => name,
+    }
+}
+
 /// Main entry: resolve all external deps by loading crate sources.
-pub fn resolve_deps(module: &UnifiedModule, crate_db: &CrateDb) -> ResolveResult {
+pub fn resolve_deps(module: &UnifiedModule, crate_db: &CrateDb) -> Result<ResolveResult, String> {
+    resolve_deps_for_entry(module, crate_db, None)
+}
+
+/// Discover dependencies only through the selected entry, or all declarations for libraries.
+pub fn resolve_deps_for_entry(
+    module: &UnifiedModule,
+    crate_db: &CrateDb,
+    entry: Option<&str>,
+) -> Result<ResolveResult, String> {
     let mut expanded = module.clone();
     let mut files_parsed = 0;
     let mut functions_added = 0;
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut declarations = HashMap::new();
     let mut attempted = HashSet::new();
-    // Seed with already-known functions
-    for decl in &expanded.decls {
-        if let Decl::Function { name, .. } = decl {
-            seen.insert(name.clone());
-        }
+    let mut loaded_modules = HashSet::new();
+    // Index existing canonical declarations before merging dependencies.
+    for (index, decl) in expanded.decls.iter().enumerate() {
+        declarations
+            .entry(declaration_name(decl).to_string())
+            .or_insert(index);
     }
 
-    loop {
-        let externals = collect_externals(&expanded);
-        let new: Vec<&String> = externals
+    let mut pending: std::collections::VecDeque<String> = if let Some(entry) = entry {
+        std::iter::once(entry.to_string()).collect()
+    } else {
+        expanded
+            .decls
             .iter()
-            .filter(|n| !seen.contains(n.as_str()) && !attempted.contains(n.as_str()))
-            .collect();
-        if new.is_empty() {
-            break;
-        }
-        for target in &new {
-            attempted.insert((*target).clone());
-        }
-
-        let mut resolved_modules = Vec::new();
-        for target in &new {
-            if let Ok((_cname, _mpath, dep_mod)) = crate_db.resolve(target)
-                && dep_mod.decls.iter().any(|decl| {
-                    matches!(decl, Decl::Function { name, .. }
-                    if name == target.as_str() || target.rsplit("::").next() == Some(name.as_str()))
-                })
-            {
-                resolved_modules.push(dep_mod);
+            .map(|decl| declaration_name(decl).to_string())
+            .collect()
+    };
+    let mut visited = HashSet::new();
+    while let Some(target) = pending.pop_front() {
+        if let Some(index) = declarations.get(&target).copied() {
+            if visited.insert(target) {
+                let mut references = Vec::new();
+                // Module bindings remain visible as dependency edges; only lexical locals shadow them.
+                walk_decl(&expanded.decls[index], &HashSet::new(), &mut references);
+                references.sort();
+                references.dedup();
+                pending.extend(references);
             }
+            continue;
         }
-
-        let mut processed_modules = std::collections::HashSet::new();
-        for dep_mod in resolved_modules {
-            let mod_ptr = std::sync::Arc::as_ptr(&dep_mod) as usize;
-            if processed_modules.insert(mod_ptr) {
-                for decl in &dep_mod.decls {
-                    if let Decl::Function { name, .. } = decl {
-                        if !seen.contains(name) {
-                            expanded.decls.push(decl.clone());
-                            seen.insert(name.clone());
-                            functions_added += 1;
-                        }
-                    }
+        if !attempted.insert(target.clone()) {
+            continue;
+        }
+        let Ok((crate_name, module_path, dep_mod)) = crate_db.resolve(&target) else {
+            continue;
+        };
+        if !dep_mod
+            .decls
+            .iter()
+            .any(|decl| declaration_name(decl) == target)
+        {
+            continue;
+        }
+        if !loaded_modules.insert((crate_name, module_path)) {
+            continue;
+        }
+        for decl in &dep_mod.decls {
+            let name = declaration_name(decl);
+            if let Some(index) = declarations.get(name) {
+                if &expanded.decls[*index] != decl {
+                    return Err(format!("dependency declaration conflict for `{name}`"));
                 }
-                files_parsed += 1;
+                continue;
+            }
+            declarations.insert(name.to_string(), expanded.decls.len());
+            expanded.decls.push(decl.clone());
+            if entry.is_none() || attempted.contains(name) {
+                // Revisit an earlier missing edge when its declaration arrives as support.
+                pending.push_back(name.to_string());
+            }
+            if matches!(decl, Decl::Function { .. }) {
+                functions_added += 1;
             }
         }
+        files_parsed += 1;
     }
 
-    ResolveResult {
+    Ok(ResolveResult {
         module: expanded,
         files_parsed,
         functions_added,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -218,11 +392,211 @@ mod tests {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
+    fn entry_discovery_follows_globals_addresses_schemas_and_guards_only_when_reached() {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root =
+            std::env::temp_dir().join(format!("resolve_entry_{}_{}", std::process::id(), id));
+        fs::create_dir_all(root.join("src")).unwrap();
+        for (name, source) in [
+            ("callback", "pub fn answer()->i64{42}"),
+            ("schema", "pub struct Entry{pub value:i64}"),
+            ("guard", "pub fn allowed()->bool{true}"),
+            ("unrelated", "pub fn answer()->i64{0}"),
+        ] {
+            fs::write(root.join("src").join(format!("{name}.rs")), source).unwrap();
+        }
+        let mut db = CrateDb::new();
+        db.search_roots.clear();
+        db.register_crate("sample", root.clone());
+        let call = |name: &str| Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args: vec![],
+        };
+        let module = UnifiedModule::new(vec![
+            Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![
+                    Stmt::Let(
+                        "entry".into(),
+                        Some(Typ::Named("Local".into())),
+                        Expr::StructInit {
+                            name: "Local".into(),
+                            fields: vec![],
+                        },
+                    ),
+                    Stmt::Match {
+                        scrutinee: Expr::BoolLit(true),
+                        arms: vec![crate::core_ir::MatchArm {
+                            pattern: "_".into(),
+                            guard: Some(call("sample::guard::allowed")),
+                            body: vec![Stmt::Return(Some(Expr::Ident("CALLBACK".into())))],
+                        }],
+                    },
+                ],
+            },
+            Decl::Global {
+                name: "CALLBACK".into(),
+                typ: Typ::Int,
+                mutable: false,
+                constant_value: false,
+                init: Some(Box::new(Expr::Ident("sample::callback::answer".into()))),
+            },
+            Decl::Struct {
+                name: "Local".into(),
+                fields: vec![("nested".into(), Typ::Named("sample::schema::Entry".into()))],
+                type_params: vec![],
+            },
+            Decl::Function {
+                name: "unused".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![Stmt::Return(Some(call("sample::unrelated::answer")))],
+            },
+        ]);
+        let reached = resolve_deps_for_entry(&module, &db, Some("main")).unwrap();
+        assert_eq!(reached.files_parsed, 3);
+        for name in [
+            "sample::callback::answer",
+            "sample::schema::Entry",
+            "sample::guard::allowed",
+        ] {
+            assert!(
+                reached
+                    .module
+                    .decls
+                    .iter()
+                    .any(|decl| declaration_name(decl) == name),
+                "{name}"
+            );
+        }
+        assert!(
+            !reached
+                .module
+                .decls
+                .iter()
+                .any(|decl| declaration_name(decl) == "sample::unrelated::answer")
+        );
+        assert_eq!(resolve_deps(&module, &db).unwrap().files_parsed, 4);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_resolution_guard_skips_local_and_compiler_owned_names() {
+        for (source, required) in [
+            (
+                "fn main()->i64{let mut values=Vec::<_>::new();values.push(42);values[0]}",
+                false,
+            ),
+            ("fn main()->i64{42}", false),
+            (
+                "fn main()->i64{let mut values=Vec::new();values.push(42);values[0]}",
+                false,
+            ),
+            (
+                "fn main()->i64{let mut values=std::vec::Vec::with_capacity(2);values.push(42);values[0]}",
+                false,
+            ),
+            (
+                "mod local{pub fn answer()->i64{42}} fn main()->i64{local::answer()}",
+                false,
+            ),
+            ("fn main()->i64{dependency::source::answer()}", true),
+            (
+                "fn main()->i64{let value=dependency::source::Entry{answer:42};value.answer}",
+                true,
+            ),
+        ] {
+            let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            assert_eq!(
+                requires_source_resolution(&module),
+                required,
+                "{source}: {module:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn real_modules_keep_helpers_globals_schemas_addresses_and_transitive_calls_distinct() {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root =
+            std::env::temp_dir().join(format!("resolve_modules_{}_{}", std::process::id(), id));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        for (name, value) in [("left", 20), ("right", 22)] {
+            fs::write(src.join(format!("{name}.rs")), format!("const VALUE:i64={value}; pub struct Entry{{pub value:i64}} fn helper()->i64{{VALUE}} pub fn answer()->i64{{helper()}} pub fn produce()->Entry{{Entry{{value:VALUE}}}} pub fn callback()->usize{{helper as usize}}")).unwrap();
+        }
+        fs::write(
+            src.join("alpha.rs"),
+            "pub fn answer()->i64{crate::shared::helper()}",
+        )
+        .unwrap();
+        fs::write(src.join("shared.rs"), "pub fn helper()->i64{42}").unwrap();
+        let mut db = CrateDb::new();
+        db.search_roots.clear();
+        db.register_crate("sample", root.clone());
+        for source in [
+            "fn main()->i64{sample::left::answer()+sample::right::answer()}",
+            "fn main()->i64{sample::left::produce().value+sample::right::produce().value}",
+            "fn main()->i64{invoke(sample::left::callback())+invoke(sample::right::callback())}",
+            "fn main()->i64{let left=sample::left::Entry{value:20};let right=sample::right::Entry{value:22};left.value+right.value}",
+            "fn main()->i64{sample::alpha::answer()}",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let result = resolve_deps(&parsed, &db).unwrap();
+            let normalized = crate::typecheck::normalize_module(
+                crate::parser_registry::ParserId::Rust,
+                &result.module,
+            );
+            let checked = crate::typecheck::TypeChecker::new().check_module(&normalized);
+            let verified = crate::core_ir_verifier::verify_for_entry(&normalized, "main");
+            assert!(checked.is_ok(), "{source}: {checked:?}; {normalized:?}");
+            assert!(verified.ok, "{source}: {verified:?}; {normalized:?}");
+        }
+        let (_, _, loaded) = db.resolve("sample::left::answer").unwrap();
+        let helper = loaded
+            .decls
+            .iter()
+            .find(|decl| declaration_name(decl) == "sample::left::helper")
+            .unwrap()
+            .clone();
+        let mut module = crate::compiler::rust_front::parse_rust_source(
+            "fn main()->i64{sample::left::answer()}",
+        )
+        .unwrap();
+        module.decls.push(helper.clone());
+        assert_eq!(
+            resolve_deps(&module, &db)
+                .unwrap()
+                .module
+                .decls
+                .iter()
+                .filter(|decl| declaration_name(decl) == "sample::left::helper")
+                .count(),
+            1
+        );
+        let Decl::Function { body, .. } = module.decls.last_mut().unwrap() else {
+            unreachable!()
+        };
+        *body = vec![Stmt::Return(Some(Expr::IntLit(0)))];
+        assert!(
+            resolve_deps(&module, &db)
+                .err()
+                .unwrap()
+                .contains("dependency declaration conflict for `sample::left::helper`")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn function_addresses_resolve_without_confusing_attempted_and_loaded_symbols() {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
         let root =
             std::env::temp_dir().join(format!("resolve_addresses_{}_{}", std::process::id(), id));
-        let dir = root.join("dummy_crate/src/dummy_crate");
+        let dir = root.join("dummy_crate/src");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("foo.rs"),
@@ -243,7 +617,7 @@ mod tests {
                 Stmt::Return(Some(Expr::IntLit(42))),
             ],
         }]);
-        let resolved = resolve_deps(&module, &db);
+        let resolved = resolve_deps(&module, &db).unwrap();
         assert_eq!(resolved.functions_added, 1);
         assert!(
             resolved
@@ -257,7 +631,7 @@ mod tests {
             unreachable!()
         };
         body[0] = Stmt::Expr(Expr::Ident("dummy_crate::foo::NOT_A_FUNCTION".into()));
-        assert_eq!(resolve_deps(&missing, &db).functions_added, 0);
+        assert_eq!(resolve_deps(&missing, &db).unwrap().functions_added, 0);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -330,7 +704,7 @@ mod tests {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
         let temp_dir =
             std::env::temp_dir().join(format!("test_resolve_deps_{}_{}", std::process::id(), id));
-        let src_dir = temp_dir.join("dummy_crate/src/dummy_crate");
+        let src_dir = temp_dir.join("dummy_crate/src");
         fs::create_dir_all(&src_dir).unwrap();
         let mod_rs = src_dir.join("foo.rs");
         fs::write(&mod_rs, "pub fn bar() {}").unwrap();
@@ -364,7 +738,7 @@ mod tests {
             type_params: vec![],
         }]);
 
-        let res = resolve_deps(&module, &db);
+        let res = resolve_deps(&module, &db).unwrap();
         assert!(res.files_parsed > 0);
         assert!(res.functions_added > 0);
 
@@ -385,7 +759,7 @@ mod tests {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
         let temp_dir =
             std::env::temp_dir().join(format!("test_resolve_deps_2_{}_{}", std::process::id(), id));
-        let src_dir = temp_dir.join("dummy_crate/src/dummy_crate");
+        let src_dir = temp_dir.join("dummy_crate/src");
         fs::create_dir_all(&src_dir).unwrap();
         fs::write(&src_dir.join("func1.rs"), "pub fn func1() {}").unwrap();
         fs::write(&src_dir.join("func2.rs"), "pub fn func2() {}").unwrap();
@@ -426,7 +800,7 @@ mod tests {
             type_params: vec![],
         }]);
 
-        let res = resolve_deps(&module, &db);
+        let res = resolve_deps(&module, &db).unwrap();
         assert_eq!(res.functions_added, 3);
         assert_eq!(res.files_parsed, 3);
         let _ = fs::remove_dir_all(&temp_dir);

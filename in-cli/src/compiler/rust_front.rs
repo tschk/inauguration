@@ -430,7 +430,12 @@ fn lower_file_items_at_visited(
             }
             syn::Item::Use(u) => uses.push(u.clone()),
             syn::Item::Const(c) => {
-                if let Some(d) = lower_const_item(c) {
+                if let Some(mut d) = lower_const_item(c) {
+                    if c.ident == "_" {
+                        if let Decl::Global { name, .. } = &mut d {
+                            *name = format!("$anonymous_const${}", decls.len());
+                        }
+                    }
                     decls.push(d);
                 }
             }
@@ -1173,30 +1178,30 @@ fn rust_struct_fields(fields: &syn::Fields) -> Vec<(String, Typ)> {
     }
 }
 
-fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
-    // Strip generics from self type name to match collect_structs keys
-    // e.g., "Bencher < 'a , M >" → "Bencher"
-    let raw_type: String = i
-        .self_ty
+fn compact_rust_tokens(value: &impl ToTokens) -> String {
+    value
         .to_token_stream()
         .to_string()
         .chars()
-        .filter(|&c| c != ' ')
-        .collect();
-    let self_type = if let Some(idx) = raw_type.find(" <") {
-        raw_type[..idx].to_string()
-    } else if let Some(idx) = raw_type.find(" (") {
-        raw_type[..idx].to_string()
-    } else {
-        raw_type
-    };
+        .filter(|c| !c.is_whitespace())
+        .collect()
+}
+
+fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
+    // Retain generic arguments so distinct impl receivers retain distinct identities.
+    let self_type = compact_rust_tokens(&i.self_ty);
     let mut decls = Vec::new();
     for item in &i.items {
         if let syn::ImplItem::Fn(method) = item {
             let f = method.clone();
-            let method_name = if i.trait_.is_some() {
-                // Trait impl: use the original method name
-                f.sig.ident.to_string()
+            let method_name = if let Some((_, trait_path, _)) = &i.trait_ {
+                // Trait methods occupy their receiver/trait namespace, never the free-function namespace.
+                format!(
+                    "{}::{}::{}",
+                    self_type,
+                    compact_rust_tokens(trait_path),
+                    f.sig.ident
+                )
             } else {
                 // Inherent impl: `Type::method_name` (matches Rust path syntax)
                 format!("{}::{}", self_type, f.sig.ident)
@@ -2254,9 +2259,13 @@ fn lower_expr_with_types_inner(
             _ => Expr::Ident(l.lit.to_token_stream().to_string()),
         },
         syn::Expr::Path(p) => {
-            let path = p.path.to_token_stream().to_string();
-            // Strip spaces from path (token_stream produces "Point :: new" but table has "Point::new")
-            Expr::Ident(path.chars().filter(|&c| c != ' ').collect())
+            let path = compact_rust_tokens(&p.path);
+            Expr::Ident(if let Some(receiver) = &p.qself {
+                // Match the receiver/trait identity used for impl declarations, including UFCS.
+                format!("{}::{path}", compact_rust_tokens(&receiver.ty))
+            } else {
+                path
+            })
         }
         syn::Expr::Reference(r) => Expr::Call {
             callee: Box::new(Expr::Ident(crate::core_ir::BORROW.into())),
@@ -3558,5 +3567,94 @@ fn main() {
                 "{source}"
             );
         }
+    }
+    #[test]
+    fn anonymous_constants_keep_distinct_internal_names_and_initializers() {
+        let module = parse_rust_source("const _:i64=1; const _:i64=2; fn main()->i64{42}").unwrap();
+        let globals: Vec<_> = module
+            .decls
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::Global {
+                    name,
+                    init,
+                    constant_value,
+                    ..
+                } => Some((name, init, constant_value)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(globals.len(), 2);
+        assert_ne!(globals[0].0, globals[1].0);
+        for (index, (name, init, constant)) in globals.iter().enumerate() {
+            assert!(name.starts_with("$anonymous_const$"));
+            assert!(**constant);
+            assert_eq!(init.as_deref(), Some(&Expr::IntLit(index as i64 + 1)));
+        }
+    }
+
+    #[test]
+    fn trait_impl_identities_preserve_free_functions_receivers_traits_and_ufcs() {
+        let module = parse_rust_source(
+            r#"
+            struct Left {} struct Right {} struct Holder<T> { value:T }
+            trait First { fn eq(&self)->i64; } trait Second { fn eq(&self)->i64; }
+            fn eq()->i64 { 42 }
+            impl First for Left { fn eq(&self)->i64 { 1 } }
+            impl First for Right { fn eq(&self)->i64 { 2 } }
+            impl Second for Left { fn eq(&self)->i64 { 3 } }
+            impl First for Holder<i64> { fn eq(&self)->i64 { 4 } }
+            impl First for Holder<bool> { fn eq(&self)->i64 { 5 } }
+            fn main()->i64 { <Left as First>::eq(Left{}) + eq() }
+        "#,
+        )
+        .unwrap();
+        let names: Vec<_> = module
+            .decls
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::Function { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        for name in [
+            "eq",
+            "Left::First::eq",
+            "Right::First::eq",
+            "Left::Second::eq",
+            "Holder<i64>::First::eq",
+            "Holder<bool>::First::eq",
+        ] {
+            assert_eq!(
+                names.iter().filter(|actual| **actual == name).count(),
+                1,
+                "{names:?}"
+            );
+        }
+        let Decl::Function { body, .. } = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function {name, ..} if name == "main"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let mut calls = Vec::new();
+        let Stmt::Return(Some(expr)) = body.last().unwrap() else {
+            panic!("{body:?}")
+        };
+        {
+            fn visit(expr: &Expr, calls: &mut Vec<String>) {
+                if let Expr::Call { callee, .. } = expr {
+                    if let Expr::Ident(name) = callee.as_ref() {
+                        calls.push(name.clone());
+                    }
+                }
+                crate::core_ir::for_each_expr_child(expr, &mut |child| visit(child, calls));
+            }
+            visit(expr, &mut calls);
+        }
+        assert!(calls.contains(&"Left::First::eq".into()), "{calls:?}");
+        assert!(calls.contains(&"eq".into()), "{calls:?}");
     }
 }
