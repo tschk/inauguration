@@ -211,6 +211,7 @@ fn compile_resolved_dependencies(
     modules: &mut Vec<(String, UnifiedModule)>,
 ) {
     let mut already_compiled: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut manifest_cache: HashMap<String, bool> = HashMap::new();
     const MAX_DEP_CRATES: usize = 64;
     for dep_id in all_dep_ids {
         if already_compiled.len() >= MAX_DEP_CRATES {
@@ -236,10 +237,15 @@ fn compile_resolved_dependencies(
                 });
                 if !is_proc_macro {
                     if let Some(manifest_str) = pkg["manifest_path"].as_str() {
-                        if let Ok(content) = std::fs::read_to_string(manifest_str) {
-                            if content.contains("proc-macro") {
-                                is_proc_macro = true;
+                        if let Some(&cached_is_proc_macro) = manifest_cache.get(manifest_str) {
+                            is_proc_macro = cached_is_proc_macro;
+                        } else {
+                            if let Ok(content) = std::fs::read_to_string(manifest_str) {
+                                if content.contains("proc-macro") {
+                                    is_proc_macro = true;
+                                }
                             }
+                            manifest_cache.insert(manifest_str.to_string(), is_proc_macro);
                         }
                     }
                 }
