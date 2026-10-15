@@ -71,6 +71,7 @@ mod lower_collect;
 mod lower_compile;
 mod lower_ctx;
 mod lower_expr;
+mod lower_globals;
 mod lower_iterator;
 mod lower_stdlib;
 mod lower_stmt;
@@ -90,12 +91,13 @@ pub(crate) use lower_ctx::{
     IteratorMapSlots, LocalSlot, LowerCtx, alloc_declared_locals, append_static_arrays,
     append_string_table,
 };
+pub(crate) use lower_globals::{GlobalLayout, append_global_literals};
 pub(crate) use lower_iterator::lower_vec_for;
 pub(crate) use lower_stmt::{lower_stmt, lower_struct_expr_into_regs};
 pub(crate) use lower_util::{
-    base_struct_name, contains_call, emit_epilogue, emit_failure_return, ensure_return_type,
-    expr_type, find_field_offset, is_native_scalar_type, lower_comparison_result,
-    native_param_abi_slots, native_struct_fields, pick_scratch, reject_unsupported_function,
+    base_struct_name, emit_epilogue, emit_failure_return, ensure_return_type, expr_type,
+    find_field_offset, is_native_scalar_type, lower_comparison_result, native_param_abi_slots,
+    native_struct_fields, pick_scratch, reject_unsupported_function,
 };
 
 pub const TARGET_TRIPLE: &str = "aarch64-apple-darwin";
@@ -286,6 +288,9 @@ pub struct LoweredModule {
     /// (offset, codegen_base) — absolute address relocations to patch at JIT load time.
     /// Empty for AArch64 (position-independent code).
     pub relocations: Vec<(u32, u64)>,
+    /// Writable JIT global storage and pointer-literal relocation sites.
+    pub data: Vec<u8>,
+    pub global_relocs: Vec<(u32, u64)>,
     /// External symbol names referenced by the code (for native linking).
     /// Each entry is (instruction_offset, symbol_name).
     pub external_refs: Vec<(u32, String)>,
@@ -436,6 +441,12 @@ pub(crate) struct PendingString {
     pub(crate) rd: u8,
 }
 
+pub(crate) struct PendingGlobalLiteral {
+    pub(crate) adr_site: u32,
+    pub(crate) reg: u8,
+    pub(crate) data_offset: u64,
+}
+
 pub(crate) struct FunctionBuffer {
     pub(crate) name: String,
     pub(crate) bytes: Vec<u8>,
@@ -443,6 +454,7 @@ pub(crate) struct FunctionBuffer {
     pub(crate) pending_inrt_calls: Vec<PendingInrtCall>,
     pub(crate) pending_static_arrays: Vec<PendingStaticArray>,
     pub(crate) pending_strings: Vec<PendingString>,
+    pub(crate) global_relocs: Vec<(u32, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -458,24 +470,29 @@ fn lower_function_to_buffer(
     functions: &HashMap<String, FunctionInfo>,
     structs: &HashMap<String, Vec<(String, Typ)>>,
     strings: &HashMap<String, i64>,
+    globals: &GlobalLayout,
 ) -> Result<FunctionBuffer, String> {
     let mut emitter = CodeEmitter::new();
     let mut pending_calls = Vec::new();
     let mut pending_inrt_calls = Vec::new();
     let mut pending_static_arrays = Vec::new();
     let mut pending_strings = Vec::new();
+    let mut pending_global_literals = Vec::new();
     lower_function(
         &mut emitter,
         func,
         functions,
         structs,
         strings,
+        globals,
         &mut pending_calls,
         &mut pending_inrt_calls,
         &mut pending_static_arrays,
         &mut pending_strings,
+        &mut pending_global_literals,
         0,
     )?;
+    let global_relocs = append_global_literals(&mut emitter, pending_global_literals)?;
     Ok(FunctionBuffer {
         name: func.name.clone(),
         bytes: emitter.bytes,
@@ -483,6 +500,7 @@ fn lower_function_to_buffer(
         pending_inrt_calls,
         pending_static_arrays,
         pending_strings,
+        global_relocs,
     })
 }
 
@@ -559,6 +577,16 @@ pub fn lower_module_with_jobs(
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
     let strings = collect_strings(module);
+    let globals = GlobalLayout::collect(module, &structs)?;
+    let has_mutable_global = module
+        .decls
+        .iter()
+        .any(|decl| matches!(decl, crate::core_ir::Decl::Global { mutable: true, .. }));
+    if (!globals.data.is_empty() || has_mutable_global)
+        && (linkage != NativeLinkage::Executable || TL_NATIVE_MODE.with(|mode| *mode.borrow()))
+    {
+        return Err("native-lower: AArch64 globals require the JIT writable-data loader".into());
+    }
     // Try exact match first, then namespaced variants
     let resolved_entry = if functions.contains_key(entry) {
         entry.to_string()
@@ -590,6 +618,7 @@ pub fn lower_module_with_jobs(
     let mut pending_inrt_calls = Vec::new();
     let mut pending_static_arrays = Vec::new();
     let mut pending_strings = Vec::new();
+    let mut global_relocs = Vec::new();
     let mut names: Vec<String> = functions.keys().cloned().collect();
     names.retain(|name| !name.starts_with("__closure_"));
     names.sort();
@@ -598,60 +627,62 @@ pub fn lower_module_with_jobs(
     // ponytail: graceful degradation for self-hosting — skip stdlib functions
     // that use unsupported types rather than failing the entire module.
     let jobs = jobs.max(1);
-    let (buffers, skipped): (Vec<FunctionBuffer>, Vec<(String, String)>) =
-        if jobs == 1 || names.len() <= 1 {
-            let mut bufs = Vec::with_capacity(names.len());
-            let mut skip = Vec::new();
-            for name in &names {
-                let func = &functions[name];
-                match lower_function_to_buffer(func, &functions, &structs, &strings) {
-                    Ok(buf) => bufs.push(buf),
-                    Err(e) => {
-                        skip.push((name.clone(), e));
-                    }
+    let (buffers, skipped): (Vec<FunctionBuffer>, Vec<(String, String)>) = if jobs == 1
+        || names.len() <= 1
+    {
+        let mut bufs = Vec::with_capacity(names.len());
+        let mut skip = Vec::new();
+        for name in &names {
+            let func = &functions[name];
+            match lower_function_to_buffer(func, &functions, &structs, &strings, &globals) {
+                Ok(buf) => bufs.push(buf),
+                Err(e) => {
+                    skip.push((name.clone(), e));
                 }
             }
-            (bufs, skip)
-        } else {
-            std::thread::scope(|s| {
-                let functions = &functions;
-                let structs = &structs;
-                let strings = &strings;
-                let chunks: Vec<Vec<String>> = names
-                    .chunks(names.len().div_ceil(jobs))
-                    .map(|c| c.to_vec())
-                    .collect();
-                let mut handles = Vec::with_capacity(chunks.len());
-                for chunk in chunks {
-                    handles.push(s.spawn(move || {
-                        let mut bufs = Vec::new();
-                        let mut skips = Vec::new();
-                        for name in chunk {
-                            let func = &functions[&name];
-                            match lower_function_to_buffer(func, functions, structs, strings) {
-                                Ok(buf) => bufs.push((name, buf)),
-                                Err(e) => {
-                                    skips.push((name, e));
-                                }
+        }
+        (bufs, skip)
+    } else {
+        std::thread::scope(|s| {
+            let functions = &functions;
+            let structs = &structs;
+            let strings = &strings;
+            let globals = &globals;
+            let chunks: Vec<Vec<String>> = names
+                .chunks(names.len().div_ceil(jobs))
+                .map(|c| c.to_vec())
+                .collect();
+            let mut handles = Vec::with_capacity(chunks.len());
+            for chunk in chunks {
+                handles.push(s.spawn(move || {
+                    let mut bufs = Vec::new();
+                    let mut skips = Vec::new();
+                    for name in chunk {
+                        let func = &functions[&name];
+                        match lower_function_to_buffer(func, functions, structs, strings, globals) {
+                            Ok(buf) => bufs.push((name, buf)),
+                            Err(e) => {
+                                skips.push((name, e));
                             }
                         }
-                        (bufs, skips)
-                    }));
-                }
-                let mut results: Vec<(String, FunctionBuffer)> = Vec::with_capacity(names.len());
-                let mut skip = Vec::new();
-                for h in handles {
-                    let (bufs, skips) = h
-                        .join()
-                        .map_err(|e| format!("native-lower: worker thread panicked: {e:?}"))?;
-                    results.extend(bufs);
-                    skip.extend(skips);
-                }
-                results.sort_by(|(a, _), (b, _)| a.cmp(b));
-                let buffers: Vec<FunctionBuffer> = results.into_iter().map(|(_, b)| b).collect();
-                Ok::<_, String>((buffers, skip))
-            })?
-        };
+                    }
+                    (bufs, skips)
+                }));
+            }
+            let mut results: Vec<(String, FunctionBuffer)> = Vec::with_capacity(names.len());
+            let mut skip = Vec::new();
+            for h in handles {
+                let (bufs, skips) = h
+                    .join()
+                    .map_err(|e| format!("native-lower: worker thread panicked: {e:?}"))?;
+                results.extend(bufs);
+                skip.extend(skips);
+            }
+            results.sort_by(|(a, _), (b, _)| a.cmp(b));
+            let buffers: Vec<FunctionBuffer> = results.into_iter().map(|(_, b)| b).collect();
+            Ok::<_, String>((buffers, skip))
+        })?
+    };
 
     // Every skipped function and unresolved call target becomes a trap body
     // instead of a return-0 stub, and is recorded so callers can report it.
@@ -760,6 +791,11 @@ pub fn lower_module_with_jobs(
             site: base + c.site,
             target: c.target,
         }));
+        global_relocs.extend(
+            buf.global_relocs
+                .into_iter()
+                .map(|(site, offset)| (base + site, offset)),
+        );
     }
 
     append_static_arrays(&mut emitter, pending_static_arrays);
@@ -824,6 +860,8 @@ pub fn lower_module_with_jobs(
         exports,
         function_offsets,
         relocations: Vec::new(), // AArch64 uses position-independent code
+        data: globals.data,
+        global_relocs,
         external_refs,
         degradations,
         error_slot_refs,
@@ -836,10 +874,12 @@ fn lower_function(
     functions: &HashMap<String, FunctionInfo>,
     structs: &HashMap<String, Vec<(String, Typ)>>,
     strings: &HashMap<String, i64>,
+    globals: &GlobalLayout,
     pending_calls: &mut Vec<PendingCall>,
     pending_inrt_calls: &mut Vec<PendingInrtCall>,
     pending_static_arrays: &mut Vec<PendingStaticArray>,
     pending_strings: &mut Vec<PendingString>,
+    pending_global_literals: &mut Vec<PendingGlobalLiteral>,
     _fn_start_offset: u32,
 ) -> Result<(), String> {
     ensure_return_type(&func.ret, &func.name, structs)?;
@@ -853,9 +893,11 @@ fn lower_function(
         &func.params,
         structs,
         strings,
+        globals,
         pending_static_arrays,
         pending_inrt_calls,
         pending_strings,
+        pending_global_literals,
         &func.name,
     )?;
     alloc_declared_locals(&mut ctx, &func.body, &func.name, functions)?;

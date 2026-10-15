@@ -159,9 +159,9 @@ pub fn compile_jit(
         })
         .unwrap_or(EntryResultKind::None);
 
-    // Data section for the JIT load — only the x86_64 lowering produces one.
-    let mut jit_data: Vec<u8> = Vec::new();
-    let mut jit_global_relocs: Vec<(u32, u64)> = Vec::new();
+    // Each architecture supplies its own writable JIT data section.
+    let jit_data: Vec<u8>;
+    let jit_global_relocs: Vec<(u32, u64)>;
 
     // Select lowering based on host architecture
     let lowered = if cfg!(target_arch = "x86_64") {
@@ -185,19 +185,24 @@ pub fn compile_jit(
                 .into_iter()
                 .map(|o| (o, result.codegen_base))
                 .collect(),
+            data: Vec::new(),
+            global_relocs: Vec::new(),
             external_refs: Vec::new(),
             degradations: Vec::new(),
             error_slot_refs: Vec::new(),
         }
     } else {
         let jobs = jobs_for_request(request);
-        lower::lower_module_with_jobs(
+        let lowered = lower::lower_module_with_jobs(
             expanded_module,
             &resolved_entry,
             NativeLinkage::Executable,
             jobs,
         )
-        .map_err(|e| format!("jit-lowering-failed: {e}"))?
+        .map_err(|e| format!("jit-lowering-failed: {e}"))?;
+        jit_data = lowered.data.clone();
+        jit_global_relocs = lowered.global_relocs.clone();
+        lowered
     };
 
     let degradations = lowered.degradations;

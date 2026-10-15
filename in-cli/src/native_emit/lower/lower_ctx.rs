@@ -1,6 +1,7 @@
 use super::lower_util::{
     array_item_matches, base_struct_name, ensure_native_array_element, expr_type,
 };
+use super::{GlobalLayout, PendingGlobalLiteral};
 use super::{PendingInrtCall, PendingStaticArray};
 use crate::core_ir::{Expr, LoopKind, Stmt, Typ};
 use crate::native_emit::aarch64::{self, CodeEmitter};
@@ -209,9 +210,11 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) vec_for_slots: VecForPlan,
     pub(crate) structs: &'a HashMap<String, Vec<(String, Typ)>>,
     pub(crate) strings: &'a HashMap<String, i64>,
+    pub(crate) globals: &'a GlobalLayout,
     pub(crate) pending_static_arrays: &'a mut Vec<PendingStaticArray>,
     pub(crate) pending_inrt_calls: &'a mut Vec<PendingInrtCall>,
     pub(crate) pending_strings: &'a mut Vec<super::PendingString>,
+    pub(crate) pending_global_literals: &'a mut Vec<PendingGlobalLiteral>,
     pub(crate) stack_size: u32,
     pub(crate) emitted_return: bool,
     pub(crate) _params_src: &'a [(String, Typ)],
@@ -227,6 +230,15 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) aggregate_vector_scratch: Option<(u32, usize)>,
     pub(crate) iterator_chain_header_offset: Option<u32>,
     pub(crate) iterator_map_slots: Option<IteratorMapSlots>,
+    pub(crate) loop_branches: Vec<LoopBranchSites>,
+    pub(crate) try_depth: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct LoopBranchSites {
+    pub(crate) breaks: Vec<u32>,
+    pub(crate) continues: Vec<u32>,
+    pub(crate) try_depth: usize,
 }
 
 #[allow(clippy::only_used_in_recursion)]
@@ -380,13 +392,30 @@ pub(crate) fn alloc_local_struct_fields(
 }
 
 impl<'a> LowerCtx<'a> {
+    pub(crate) fn emit_global_address(
+        &mut self,
+        emitter: &mut CodeEmitter,
+        reg: u8,
+        data_offset: u64,
+    ) {
+        let adr_site = emitter.emit_insn(aarch64::adr(reg, 0));
+        emitter.emit_u32(aarch64::ldr64(reg, reg, 0));
+        self.pending_global_literals.push(PendingGlobalLiteral {
+            adr_site,
+            reg,
+            data_offset,
+        });
+    }
+
     pub(crate) fn new(
         params: &'a [(String, Typ)],
         structs: &'a HashMap<String, Vec<(String, Typ)>>,
         strings: &'a HashMap<String, i64>,
+        globals: &'a GlobalLayout,
         pending_static_arrays: &'a mut Vec<PendingStaticArray>,
         pending_inrt_calls: &'a mut Vec<PendingInrtCall>,
         pending_strings: &'a mut Vec<super::PendingString>,
+        pending_global_literals: &'a mut Vec<PendingGlobalLiteral>,
         fn_name: &str,
     ) -> Result<Self, String> {
         let mut ctx = Self {
@@ -399,9 +428,11 @@ impl<'a> LowerCtx<'a> {
             vec_for_slots: VecForPlan::default(),
             structs,
             strings,
+            globals,
             pending_static_arrays,
             pending_inrt_calls,
             pending_strings,
+            pending_global_literals,
             stack_size: 0,
             emitted_return: false,
             _params_src: params,
@@ -416,6 +447,8 @@ impl<'a> LowerCtx<'a> {
             aggregate_vector_scratch: None,
             iterator_chain_header_offset: None,
             iterator_map_slots: None,
+            loop_branches: Vec::new(),
+            try_depth: 0,
         };
         let mut abi_idx = 0usize;
         for (name, typ) in params {
