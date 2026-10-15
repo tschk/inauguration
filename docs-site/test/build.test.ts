@@ -4,27 +4,15 @@ import { join } from "node:path";
 import { buildSite } from "../src/build";
 import { renderer } from "../src/renderer";
 
-mock.module("node:fs/promises", () => ({
-  rm: mock(),
-  mkdir: mock(),
-  cp: mock(),
-  writeFile: mock(),
-}));
-
-const originalRenderer = await import("../src/renderer");
-
-mock.module("../src/renderer", () => {
-  return {
-    renderer: {
-      ...originalRenderer.renderer,
-      prerender: mock().mockResolvedValue("mock-html"),
-    },
-  };
-});
-
 let mockSpawn: ReturnType<typeof spyOn>;
 
 beforeEach(() => {
+  // Module mocks survive mock.restore() and would leak into dist/site tests.
+  spyOn(fs, "rm").mockResolvedValue(undefined);
+  spyOn(fs, "mkdir").mockResolvedValue(undefined);
+  spyOn(fs, "cp").mockResolvedValue(undefined);
+  spyOn(fs, "writeFile").mockResolvedValue(undefined);
+  spyOn(renderer, "prerender").mockResolvedValue("mock-html");
   mockSpawn = spyOn(Bun, "spawn").mockImplementation(() => {
     return {
       exited: Promise.resolve(0),

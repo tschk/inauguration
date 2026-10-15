@@ -66,7 +66,9 @@ export async function buildSite(
 
   await Promise.all([
     // Render and write index.html
-    renderer.prerender(ctx).then((html) => writeFile(join(outDir, "index.html"), html)),
+    renderer
+      .prerender(ctx)
+      .then((html) => writeFile(join(outDir, "index.html"), html)),
 
     // Copy static directory
     cp(join(siteDir, "static"), join(outDir, "static"), {
