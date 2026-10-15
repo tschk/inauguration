@@ -202,6 +202,51 @@ pub(crate) fn collect_globals(
     globals
 }
 
+/// Initial values are snapshots, independent of the mutable runtime slots.
+#[derive(Clone, Copy)]
+enum InitialValue<'a> {
+    Scalar(i64),
+    String(&'a str),
+}
+
+fn eval_initial_value<'a>(
+    typ: &Typ,
+    init: Option<&'a Expr>,
+    name: &str,
+    earlier: &HashMap<&str, (Typ, InitialValue<'a>)>,
+) -> Result<InitialValue<'a>, String> {
+    let typ = typ.canonical();
+    if let Some(Expr::Ident(source)) = init {
+        let Some((source_type, value)) = earlier.get(source.as_str()) else {
+            return Err(format!(
+                "unsupported native initializer for global `{name}`; reference `{source}` requires an earlier initialized scalar or string global"
+            ));
+        };
+        if source_type != &typ {
+            return Err(format!(
+                "unsupported native initializer for global `{name}`; initial-value reference `{source}` has type {source_type:?}, expected {typ:?}"
+            ));
+        }
+        return Ok(*value);
+    }
+    match (&typ, init) {
+        (Typ::String, Some(Expr::StringLit(value))) => Ok(InitialValue::String(value)),
+        (Typ::String, None) => Ok(InitialValue::String("")),
+        (Typ::Int, Some(Expr::IntLit(value))) => Ok(InitialValue::Scalar(*value)),
+        (Typ::Float, Some(Expr::FloatLit(value))) => {
+            Ok(InitialValue::Scalar(value.0.to_bits() as i64))
+        }
+        (Typ::Bool, Some(Expr::BoolLit(value))) => Ok(InitialValue::Scalar(i64::from(*value))),
+        (Typ::Int | Typ::Float | Typ::Bool, None) => Ok(InitialValue::Scalar(0)),
+        (Typ::String, _) => Err(format!(
+            "unsupported native initializer for global `{name}`; expected a string literal or an earlier compatible global"
+        )),
+        _ => Err(format!(
+            "unsupported native initializer for global `{name}`; expected an integer, float, or boolean constant or an earlier compatible global"
+        )),
+    }
+}
+
 pub(crate) fn build_data_section(
     module: &UnifiedModule,
     globals: &HashMap<String, u64>,
@@ -212,6 +257,7 @@ pub(crate) fn build_data_section(
     }
     let mut data = Vec::new();
     let mut strings = Vec::new();
+    let mut initial_values = HashMap::new();
     for decl in &module.decls {
         if let Decl::Global {
             name,
@@ -222,18 +268,22 @@ pub(crate) fn build_data_section(
         } = decl
         {
             let offset = *globals.get(name).unwrap_or(&0);
-            if typ.canonical() == Typ::String {
-                let value = match init.as_deref() {
-                    Some(Expr::StringLit(value)) => value.as_str(),
-                    None => "",
-                    _ => {
-                        return Err(format!(
-                            "unsupported native initializer for global `{name}`; expected a string literal"
-                        ));
+            if matches!(
+                typ.canonical(),
+                Typ::Int | Typ::Float | Typ::Bool | Typ::String
+            ) {
+                let value = eval_initial_value(typ, init.as_deref(), name, &initial_values)?;
+                match value {
+                    InitialValue::String(value) => {
+                        data.resize(offset as usize + 8, 0);
+                        strings.push((offset, value));
                     }
-                };
-                data.resize(offset as usize + 8, 0);
-                strings.push((offset, value));
+                    InitialValue::Scalar(value) => {
+                        data.resize(offset as usize, 0);
+                        data.extend_from_slice(&value.to_le_bytes());
+                    }
+                }
+                initial_values.insert(name.as_str(), (typ.canonical(), value));
                 continue;
             }
             if let Typ::Array(elem) = typ.canonical() {
@@ -672,5 +722,231 @@ mod tests {
             .bytes
             .is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod initial_reference_tests {
+    use super::*;
+
+    fn global(name: &str, typ: Typ, init: Option<Expr>) -> Decl {
+        Decl::Global {
+            name: name.into(),
+            typ,
+            init: init.map(Box::new),
+            mutable: true,
+            constant_value: false,
+        }
+    }
+
+    fn word(bytes: &[u8], offset: u64) -> u64 {
+        u64::from_le_bytes(
+            bytes[offset as usize..offset as usize + 8]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn earlier_scalar_and_string_initializers_snapshot_values_without_rewriting_ir() {
+        let text = "λ\0雪";
+        let float_bits = 0x8000_0000_0000_0000;
+        let module = UnifiedModule::new(vec![
+            global("word", Typ::String, Some(Expr::StringLit(text.into()))),
+            global("sentinel", Typ::Int, Some(Expr::IntLit(42))),
+            global("selected", Typ::String, Some(Expr::Ident("word".into()))),
+            global("first", Typ::Int, Some(Expr::IntLit(20))),
+            global("second", Typ::Int, Some(Expr::Ident("first".into()))),
+            global(
+                "third",
+                Typ::Named("i64".into()),
+                Some(Expr::Ident("second".into())),
+            ),
+            global(
+                "float",
+                Typ::Float,
+                Some(Expr::FloatLit(crate::core_ir::FloatVal(f64::from_bits(
+                    float_bits,
+                )))),
+            ),
+            global("float_copy", Typ::Float, Some(Expr::Ident("float".into()))),
+            global("flag", Typ::Bool, Some(Expr::BoolLit(true))),
+            global("flag_copy", Typ::Bool, Some(Expr::Ident("flag".into()))),
+        ]);
+        let original = module.clone();
+        let offsets = collect_globals(&module, &HashMap::new());
+        for layout in [StringLayout::Instring, StringLayout::Cstring] {
+            let mut data = build_data_section(&module, &offsets, layout).unwrap();
+            assert_eq!(word(&data.bytes, offsets["sentinel"]), 42);
+            for name in ["first", "second", "third"] {
+                assert_eq!(word(&data.bytes, offsets[name]), 20);
+            }
+            for name in ["float", "float_copy"] {
+                assert_eq!(word(&data.bytes, offsets[name]), float_bits);
+            }
+            for name in ["flag", "flag_copy"] {
+                assert_eq!(word(&data.bytes, offsets[name]), 1);
+            }
+            assert_eq!(data.pointer_fixups.len(), 2);
+            let targets: Vec<_> = data
+                .pointer_fixups
+                .iter()
+                .map(|(_, target)| *target)
+                .collect();
+            assert_ne!(targets[0], targets[1]);
+            for target in &targets {
+                let prefix = if layout == StringLayout::Instring {
+                    8
+                } else {
+                    0
+                };
+                if prefix != 0 {
+                    assert_eq!(word(&data.bytes, *target), text.len() as u64);
+                }
+                let start = *target as usize + prefix;
+                assert_eq!(&data.bytes[start..start + text.len()], text.as_bytes());
+                if layout == StringLayout::Cstring {
+                    assert_eq!(data.bytes[start + text.len()], 0);
+                }
+            }
+            apply_data_relocations(&mut data.bytes, &data.pointer_fixups, 0x1000, u64::MAX)
+                .unwrap();
+            let selected = word(&data.bytes, offsets["selected"]);
+            // Mutating the source's runtime slot cannot change the copied slot.
+            let source = offsets["word"] as usize;
+            data.bytes[source..source + 8].copy_from_slice(&0u64.to_le_bytes());
+            assert_eq!(word(&data.bytes, offsets["selected"]), selected);
+            assert_eq!(word(&data.bytes, offsets["sentinel"]), 42);
+        }
+        assert_eq!(module, original);
+    }
+
+    #[test]
+    fn earlier_default_initializers_keep_their_typed_zero_or_empty_value() {
+        let mut decls = Vec::new();
+        for (name, typ) in [
+            ("int", Typ::Int),
+            ("float", Typ::Float),
+            ("bool", Typ::Bool),
+            ("string", Typ::String),
+        ] {
+            decls.push(global(name, typ.clone(), None));
+            decls.push(global(
+                &format!("{name}_copy"),
+                typ,
+                Some(Expr::Ident(name.into())),
+            ));
+        }
+        let module = UnifiedModule::new(decls);
+        let offsets = collect_globals(&module, &HashMap::new());
+        for layout in [StringLayout::Instring, StringLayout::Cstring] {
+            let data = build_data_section(&module, &offsets, layout).unwrap();
+            for name in [
+                "int",
+                "int_copy",
+                "float",
+                "float_copy",
+                "bool",
+                "bool_copy",
+            ] {
+                assert_eq!(word(&data.bytes, offsets[name]), 0);
+            }
+            assert_eq!(data.pointer_fixups.len(), 2);
+            for (_, target) in data.pointer_fixups {
+                assert_eq!(data.bytes[target as usize], 0);
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_initial_value_references_and_calls_remain_refused() {
+        let call = || Expr::Call {
+            callee: Box::new(Expr::Ident("effect".into())),
+            args: vec![],
+        };
+        let cases = [
+            {
+                let mut source = global("constant", Typ::Int, Some(Expr::IntLit(42)));
+                if let Decl::Global { constant_value, .. } = &mut source {
+                    *constant_value = true;
+                }
+                vec![
+                    source,
+                    global("copy", Typ::Int, Some(Expr::Ident("constant".into()))),
+                ]
+            },
+            vec![
+                global("copy", Typ::Int, Some(Expr::Ident("later".into()))),
+                global("later", Typ::Int, Some(Expr::IntLit(42))),
+            ],
+            vec![global(
+                "copy",
+                Typ::Int,
+                Some(Expr::Ident("missing".into())),
+            )],
+            vec![
+                global("a", Typ::Int, Some(Expr::Ident("b".into()))),
+                global("b", Typ::Int, Some(Expr::Ident("a".into()))),
+            ],
+            vec![
+                global("source", Typ::Bool, Some(Expr::BoolLit(true))),
+                global("copy", Typ::Int, Some(Expr::Ident("source".into()))),
+            ],
+            vec![
+                global("source", Typ::String, Some(Expr::StringLit("text".into()))),
+                global("copy", Typ::Int, Some(Expr::Ident("source".into()))),
+            ],
+            vec![
+                global("copy", Typ::Int, Some(Expr::Ident("function".into()))),
+                Decl::Function {
+                    name: "function".into(),
+                    params: vec![],
+                    ret: Typ::Int,
+                    body: vec![],
+                    type_params: vec![],
+                },
+            ],
+            vec![global("copy", Typ::Int, Some(call()))],
+            vec![global(
+                "copy",
+                Typ::Int,
+                Some(Expr::Conditional {
+                    cond: Box::new(Expr::BoolLit(true)),
+                    then_expr: Box::new(Expr::IntLit(42)),
+                    else_expr: Box::new(call()),
+                }),
+            )],
+            vec![
+                global(
+                    "source",
+                    Typ::Array(Box::new(Typ::Int)),
+                    Some(Expr::ArrayLit(vec![Expr::IntLit(42)])),
+                ),
+                global(
+                    "copy",
+                    Typ::Array(Box::new(Typ::Int)),
+                    Some(Expr::Ident("source".into())),
+                ),
+            ],
+            vec![
+                global("source", Typ::Named("Point".into()), Some(Expr::IntLit(0))),
+                global(
+                    "copy",
+                    Typ::Named("Point".into()),
+                    Some(Expr::Ident("source".into())),
+                ),
+            ],
+        ];
+        for decls in cases {
+            let module = UnifiedModule::new(decls);
+            let offsets = collect_globals(&module, &HashMap::new());
+            for layout in [StringLayout::Instring, StringLayout::Cstring] {
+                let error = build_data_section(&module, &offsets, layout).unwrap_err();
+                assert!(
+                    error.contains("unsupported native initializer"),
+                    "{module:?}: {error}"
+                );
+            }
+        }
     }
 }

@@ -6180,3 +6180,70 @@ fn owned_macos_x86_jit_decodes_results_and_recreates_runtime_state() {
     // Enabling in-memory execution must not advertise native artifact support.
     assert!(!crate::native_emit::lower::host_supports_native_subset());
 }
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_global_initializers_snapshot_earlier_scalar_and_string_values() {
+    let original = r#"var word:String="λ雪";
+var sentinel:Int=42;
+var selected:String=word;
+var original:Int=20;
+var copied:Int=original;
+var flag:Bool=true;
+var copiedflag:Bool=flag;
+var number:Float=1.5;
+var copiednumber:Float=number;
+fn stringentry()->String{word="changed";return selected;}
+fn main()->Int{word="changed";original=1;flag=false;number=2.5;if selected!="λ雪" || word!="changed" || copied!=20 || !copiedflag || copiednumber!=1.5 || sentinel!=42{return 0;}return 42;}
+"#;
+    let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+    for text in [original, canonical.as_str()] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("initial-global-snapshots.in");
+            fs::write(&source, text).unwrap();
+            let mut request = default_request(
+                source.clone(),
+                CompileTarget::Jit,
+                Some("stringentry"),
+                None,
+            );
+            request.profile = profile;
+            for (entry, expected) in [
+                ("stringentry", EvalValue::Str("λ雪".into())),
+                ("main", EvalValue::Int(42)),
+            ] {
+                request.entry = Some(entry.into());
+                let report = compile_owned(&request);
+                assert!(report.success, "{profile:?}/{entry}: {report:?}");
+                assert_eq!(report.eval_result, Some(expected), "{profile:?}/{entry}");
+            }
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("initial-global-snapshots");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{profile:?}: {report:?}"
+                );
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42)
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
