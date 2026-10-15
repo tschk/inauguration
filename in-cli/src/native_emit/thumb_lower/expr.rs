@@ -15,6 +15,9 @@ pub(crate) fn lower_expr_into(
     pending: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
     match expr {
+        Expr::MatchValue { .. } => {
+            Err("thumb-lower: match values require owned ARM64 or x86 lowering".into())
+        }
         Expr::IntLit(v) => {
             // Accept any value that fits a 32-bit word: Cortex-M MMIO/system
             // register addresses live above i32::MAX (0xE0000000+), so values

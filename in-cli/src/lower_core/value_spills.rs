@@ -326,6 +326,39 @@ impl Lower {
     }
 
     fn expr(&mut self, expr: &mut Expr, out: &mut Vec<Stmt>) {
+        if let Expr::MatchValue { scrutinee, arms } = expr {
+            self.expr(scrutinee, out);
+            let typ = self.expr_type(scrutinee);
+            for arm in arms {
+                let types = self.types.clone();
+                let constants = self.constants.clone();
+                if let Some(typ) = &typ {
+                    if let Ok(pattern) = crate::core_ir::MatchPattern::parse(&arm.pattern) {
+                        if let Ok(bindings) =
+                            pattern.typed_bindings(typ, &|name| self.facts.pattern_fields(name))
+                        {
+                            for (name, typ) in bindings {
+                                self.constants.remove(&name);
+                                self.types.insert(name, typ);
+                            }
+                        }
+                    }
+                }
+                for value in arm.guard.iter_mut().chain(std::iter::once(&mut arm.value)) {
+                    let mut body = Vec::new();
+                    self.expr(value, &mut body);
+                    if !body.is_empty() {
+                        *value = Expr::Block {
+                            body,
+                            result: Some(Box::new(value.clone())),
+                        };
+                    }
+                }
+                self.types = types;
+                self.constants = constants;
+            }
+            return;
+        }
         if let Expr::Conditional {
             cond,
             then_expr,

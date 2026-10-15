@@ -38,6 +38,32 @@ fn value_block_ends_with_semicolon(inner: &str) -> bool {
 }
 
 fn try_parse_control_value(s: &str, context: &mut LoopParseContext<'_>) -> Option<Expr> {
+    if let Some(rest) = s.strip_prefix("match ") {
+        let rest = trim(rest);
+        let open = if rest.starts_with('(') {
+            find_fn_body_open_brace(rest)?
+        } else {
+            rest.find('{')?
+        };
+        let (inner, close) = brace_content_bounds_after_open(rest, open)?;
+        if !trim(&rest[close + 1..]).is_empty() {
+            return None;
+        }
+        let arms = match super::stmt::parse_match_value_arms(inner, context) {
+            Ok(arms) => arms,
+            Err(error) => {
+                context.error = Some(error);
+                return Some(Expr::Call {
+                    callee: Box::new(Expr::Ident("__unsupported_in_match_value".into())),
+                    args: vec![],
+                });
+            }
+        };
+        return Some(Expr::MatchValue {
+            scrutinee: Box::new(parse_expr_with_context(&rest[..open], context)),
+            arms,
+        });
+    }
     if let Some(rest) = s
         .strip_prefix("if ")
         .or_else(|| s.strip_prefix("if(").map(|_| &s[2..]))
@@ -75,7 +101,10 @@ fn try_parse_control_value(s: &str, context: &mut LoopParseContext<'_>) -> Optio
     if !value_block_ends_with_semicolon(inner)
         && let Some(last) = parts.last()
     {
-        let value = if trim(last).starts_with("if ") || trim(last).starts_with("if(") {
+        let value = if trim(last).starts_with("if ")
+            || trim(last).starts_with("if(")
+            || trim(last).starts_with("match ")
+        {
             try_parse_control_value(last, context)
         } else {
             match super::stmt::parse_stmt_line(last, context) {

@@ -300,6 +300,7 @@ fn bin_op(op: &str) -> &str {
 
 fn expr(lang: SourceLang, e: &Expr) -> String {
     match e {
+        Expr::MatchValue { .. } => unreachable!("match values refused by source limits scan"),
         Expr::Conditional {
             cond,
             then_expr,
@@ -721,6 +722,7 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool
         return false;
     }
     match e {
+        Expr::MatchValue { .. } => false,
         Expr::Conditional {
             cond,
             then_expr,

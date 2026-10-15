@@ -27,6 +27,79 @@ where
     ) -> Result<(), String>,
 {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            if native_expr_type(expr, ctx, functions).is_none() {
+                return Err(
+                    "native-lower: match value arm type mismatch or unknown result type".into(),
+                );
+            }
+            let (name, typ, planned) = ctx
+                .match_values
+                .get(&(expr as *const Expr as usize))
+                .cloned()
+                .ok_or("native-lower: missing match value storage plan")?;
+            if !crate::core_ir::match_value_exhaustive(&typ, arms, &|name| {
+                ctx.structs.get(name).map(Vec::as_slice)
+            }) {
+                return Err("native-lower: nonexhaustive match value".into());
+            }
+            super::lower_stmt::lower_store_local(
+                emitter,
+                ctx,
+                &name,
+                scrutinee,
+                functions,
+                pending_calls,
+                fn_name,
+            )?;
+            let mut ends = Vec::new();
+            for (arm, (test, bindings)) in arms.iter().zip(planned) {
+                lower_expr_into(emitter, ctx, &test, 0, functions, pending_calls, fn_name)?;
+                emitter.emit_u32(aarch64::cmp_reg64(0, aarch64::REG_XZR));
+                let next = emitter.emit_insn(aarch64::b_cond(0, 0));
+                let locals = ctx.locals.clone();
+                let types = ctx.scalar_types.clone();
+                let pointers = ctx.receiver_pointers.clone();
+                let ret = ctx.ret_typ.clone();
+                for binding in &bindings {
+                    super::lower_stmt::lower_stmt(
+                        emitter,
+                        ctx,
+                        binding,
+                        functions,
+                        pending_calls,
+                        fn_name,
+                        &ret,
+                    )?;
+                }
+                let guard_next = if let Some(guard) = &arm.guard {
+                    if !crate::core_ir::expr_diverges(guard)
+                        && native_expr_type(guard, ctx, functions) != Some(Typ::Bool)
+                    {
+                        return Err("native-lower: match guard must be Bool".into());
+                    }
+                    lower_expr_into(emitter, ctx, guard, 0, functions, pending_calls, fn_name)?;
+                    emitter.emit_u32(aarch64::cmp_reg64(0, aarch64::REG_XZR));
+                    Some(emitter.emit_insn(aarch64::b_cond(0, 0)))
+                } else {
+                    None
+                };
+                lower(emitter, ctx, &arm.value, pending_calls)?;
+                ends.push(emitter.emit_insn(aarch64::b(0)));
+                ctx.locals = locals;
+                ctx.scalar_types = types;
+                ctx.receiver_pointers = pointers;
+                emitter.patch_u32(next, aarch64::b_cond(0, emitter.len() as i32 - next as i32));
+                if let Some(next) = guard_next {
+                    emitter.patch_u32(next, aarch64::b_cond(0, emitter.len() as i32 - next as i32));
+                }
+            }
+            emit_failure_return(emitter, ctx, fn_name)?;
+            for end in ends {
+                emitter.patch_u32(end, aarch64::b(emitter.len() as i32 - end as i32));
+            }
+            Ok(())
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -114,7 +187,10 @@ pub(crate) fn lower_expr_into(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
-    if matches!(expr, Expr::Conditional { .. } | Expr::Block { .. }) {
+    if matches!(
+        expr,
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
+    ) {
         return lower_value_control(
             emitter,
             ctx,
@@ -128,7 +204,7 @@ pub(crate) fn lower_expr_into(
         );
     }
     match expr {
-        Expr::Conditional { .. } | Expr::Block { .. } => unreachable!(),
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. } => unreachable!(),
         Expr::IntLit(value) => {
             emitter.emit_insns(&aarch64::load_i64(rd, *value));
             Ok(())
@@ -1149,6 +1225,24 @@ fn native_expr_type_with_bindings(
         )));
     }
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            let typ = native_expr_type_with_bindings(scrutinee, ctx, functions, bindings)?;
+            let mut types = Vec::new();
+            for arm in arms {
+                let mut scoped = bindings.clone();
+                let pattern = crate::core_ir::MatchPattern::parse(&arm.pattern).ok()?;
+                for (name, typ) in pattern
+                    .typed_bindings(&typ, &|name| ctx.structs.get(name).map(Vec::as_slice))
+                    .ok()?
+                {
+                    scoped.insert(name, typ);
+                }
+                types.push(native_expr_type_with_bindings(
+                    &arm.value, ctx, functions, &scoped,
+                ));
+            }
+            crate::core_ir::match_value_type(arms, types)
+        }
         Expr::Conditional {
             then_expr,
             else_expr,

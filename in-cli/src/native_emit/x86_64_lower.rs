@@ -759,6 +759,15 @@ fn rename_calls_in_stmt(stmt: &mut Stmt, name_map: &HashMap<String, String>) {
 
 fn rename_calls_in_expr(expr: &mut Expr, name_map: &HashMap<String, String>) {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            rename_calls_in_expr(scrutinee, name_map);
+            for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    rename_calls_in_expr(guard, name_map);
+                }
+                rename_calls_in_expr(&mut arm.value, name_map);
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -878,6 +887,15 @@ fn collect_structs(module: &UnifiedModule) -> HashMap<String, Vec<(String, Typ)>
 
 fn collect_strings_from_expr(expr: &Expr, out: &mut Vec<String>) {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            collect_strings_from_expr(scrutinee, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_strings_from_expr(guard, out);
+                }
+                collect_strings_from_expr(&arm.value, out);
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -2363,6 +2381,22 @@ fn scalar_expr_type_with_bindings(
         )));
     }
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            let typ = scalar_expr_type_with_bindings(scrutinee, ctx, bindings)?;
+            let mut types = Vec::new();
+            for arm in arms {
+                let mut scoped = bindings.clone();
+                let pattern = crate::core_ir::MatchPattern::parse(&arm.pattern).ok()?;
+                for (name, typ) in pattern
+                    .typed_bindings(&typ, &|name| ctx.structs.get(name).map(Vec::as_slice))
+                    .ok()?
+                {
+                    scoped.insert(name, typ);
+                }
+                types.push(scalar_expr_type_with_bindings(&arm.value, ctx, &scoped));
+            }
+            crate::core_ir::match_value_type(arms, types)
+        }
         Expr::Conditional {
             then_expr,
             else_expr,
@@ -3217,7 +3251,10 @@ fn lower_call_argument(
     target_reg: u8,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
-    if matches!(arg, Expr::Conditional { .. } | Expr::Block { .. }) {
+    if matches!(
+        arg,
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
+    ) {
         return lower_value_control(
             emitter,
             ctx,
@@ -3606,7 +3643,10 @@ fn store_struct_value(
     fields: &HashMap<String, u32>,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
-    if matches!(expr, Expr::Conditional { .. } | Expr::Block { .. }) {
+    if matches!(
+        expr,
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
+    ) {
         return lower_value_control(
             emitter,
             ctx,
@@ -4214,6 +4254,89 @@ where
     ) -> Result<(), String>,
 {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            if scalar_expr_type(expr, ctx).is_none() {
+                return Err(
+                    "x86_64-lower: match value arm type mismatch or unknown result type".into(),
+                );
+            }
+            let typ = scalar_expr_type(scrutinee, ctx)
+                .ok_or("x86_64-lower: unknown match scrutinee type")?;
+            if !crate::core_ir::match_value_exhaustive(&typ, arms, &|name| {
+                ctx.structs.get(name).map(Vec::as_slice)
+            }) {
+                return Err("x86_64-lower: nonexhaustive match value".into());
+            }
+            let mut index = ctx.frame_size;
+            let name = loop {
+                let name = format!("__native_match_value_{index}");
+                if !ctx.locals.contains_key(&name) && !ctx.globals.contains_key(&name) {
+                    break name;
+                }
+                index += 1;
+            };
+            ctx.alloc_local(&name, &typ)?;
+            lower_stmt(
+                emitter,
+                ctx,
+                &Stmt::Let(name.clone(), Some(typ.clone()), (**scrutinee).clone()),
+                pending_calls,
+            )?;
+            let mut ends = Vec::new();
+            for arm in arms {
+                let (test, bindings) = crate::lower_core::value_pattern_test(
+                    &arm.pattern,
+                    &typ,
+                    &|name| ctx.structs.get(name).map(Vec::as_slice),
+                    Expr::Ident(name.clone()),
+                )?;
+                lower_expr_into(emitter, ctx, &test, RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 0));
+                let next = emitter.len();
+                emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
+                let locals = ctx.locals.clone();
+                let types = ctx.scalar_types.clone();
+                let pointers = ctx.receiver_pointers.clone();
+                let empty = ctx.empty_struct_bases.clone();
+                for binding in &bindings {
+                    if let Stmt::Let(name, Some(typ), _) = binding {
+                        ctx.alloc_local(name, typ)?;
+                    }
+                    lower_stmt(emitter, ctx, binding, pending_calls)?;
+                }
+                let guard_next = if let Some(guard) = &arm.guard {
+                    if !crate::core_ir::expr_diverges(guard)
+                        && scalar_expr_type(guard, ctx) != Some(Typ::Bool)
+                    {
+                        return Err("x86_64-lower: match guard must be Bool".into());
+                    }
+                    lower_expr_into(emitter, ctx, guard, RAX, pending_calls)?;
+                    emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 0));
+                    let next = emitter.len();
+                    emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
+                    Some(next)
+                } else {
+                    None
+                };
+                lower(emitter, ctx, &arm.value, pending_calls)?;
+                let done = emitter.len();
+                emitter.emit_insns(&x86_64::jmp_rel32(0));
+                ends.push(done);
+                ctx.locals = locals;
+                ctx.scalar_types = types;
+                ctx.receiver_pointers = pointers;
+                ctx.empty_struct_bases = empty;
+                emitter.patch_u32(next + 2, emitter.len() - next - 6);
+                if let Some(next) = guard_next {
+                    emitter.patch_u32(next + 2, emitter.len() - next - 6);
+                }
+            }
+            emit_failure_return(emitter, ctx)?;
+            for done in ends {
+                emitter.patch_u32(done + 1, emitter.len() - done - 5);
+            }
+            Ok(())
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -4296,7 +4419,10 @@ fn lower_expr_into(
     target_reg: u8,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
-    if matches!(expr, Expr::Conditional { .. } | Expr::Block { .. }) {
+    if matches!(
+        expr,
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
+    ) {
         return lower_value_control(
             emitter,
             ctx,
@@ -4309,7 +4435,7 @@ fn lower_expr_into(
     }
 
     match expr {
-        Expr::Conditional { .. } | Expr::Block { .. } => unreachable!(),
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. } => unreachable!(),
         Expr::IntLit(value) => lower_int_lit(emitter, target_reg, *value),
         Expr::BoolLit(value) => lower_bool_lit(emitter, target_reg, *value),
         Expr::Ident(name) => {

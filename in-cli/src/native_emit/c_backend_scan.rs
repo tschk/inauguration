@@ -78,6 +78,12 @@ fn stmt_needs_invec(s: &Stmt) -> bool {
 
 fn expr_needs_invec(e: &Expr) -> bool {
     match e {
+        Expr::MatchValue { scrutinee, arms } => {
+            expr_needs_invec(scrutinee)
+                || arms.iter().any(|arm| {
+                    arm.guard.as_ref().is_some_and(expr_needs_invec) || expr_needs_invec(&arm.value)
+                })
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -236,6 +242,9 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
             count_expr(cond, depth + 1, nodes)?;
             count_expr(then_expr, depth + 1, nodes)?;
             count_expr(else_expr, depth + 1, nodes)
+        }
+        Expr::MatchValue { .. } => {
+            Err("c-backend: match values require shared pattern lowering".into())
         }
         Expr::Block { .. } => Err("c-backend: block values require owned native lowering".into()),
         Expr::Unary { op, expr } => {

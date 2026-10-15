@@ -262,6 +262,15 @@ fn rewrite_this_receiver_in_stmt(stmt: &mut Stmt) {
 
 fn rewrite_this_receiver_in_expr(expr: &mut Expr) {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            rewrite_this_receiver_in_expr(scrutinee);
+            for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    rewrite_this_receiver_in_expr(guard);
+                }
+                rewrite_this_receiver_in_expr(&mut arm.value);
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -407,6 +416,15 @@ fn rewrite_constructor_calls_in_stmt(stmt: &mut Stmt, class_fields: &HashMap<Str
 
 fn rewrite_constructor_calls_in_expr(expr: &mut Expr, class_fields: &HashMap<String, Vec<String>>) {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            rewrite_constructor_calls_in_expr(scrutinee, class_fields);
+            for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    rewrite_constructor_calls_in_expr(guard, class_fields);
+                }
+                rewrite_constructor_calls_in_expr(&mut arm.value, class_fields);
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,

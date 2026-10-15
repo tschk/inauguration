@@ -133,6 +133,41 @@ fn alloc_expr_locals(
     fn_name: &str,
     functions: &HashMap<String, super::FunctionInfo>,
 ) -> Result<(), String> {
+    if let Expr::MatchValue { scrutinee, arms } = expr {
+        alloc_expr_locals(ctx, scrutinee, fn_name, functions)?;
+        let typ = super::lower_expr::native_expr_type(scrutinee, ctx, functions)
+            .ok_or("native-lower: unknown match scrutinee type")?;
+        let mut index = ctx.locals.len();
+        let name = loop {
+            let name = format!("__native_match_value_{index}");
+            if !ctx.locals.contains_key(&name)
+                && !ctx.params.contains_key(&name)
+                && !ctx.globals.contains_key(&name)
+            {
+                break name;
+            }
+            index += 1;
+        };
+        ctx.alloc_let_local(&name, Some(&typ), scrutinee, fn_name, functions)?;
+        let mut planned = Vec::new();
+        for arm in arms {
+            let (test, bindings) = crate::lower_core::value_pattern_test(
+                &arm.pattern,
+                &typ,
+                &|name| ctx.structs.get(name).map(Vec::as_slice),
+                Expr::Ident(name.clone()),
+            )?;
+            alloc_declared_locals(ctx, &bindings, fn_name, functions)?;
+            if let Some(guard) = &arm.guard {
+                alloc_expr_locals(ctx, guard, fn_name, functions)?;
+            }
+            alloc_expr_locals(ctx, &arm.value, fn_name, functions)?;
+            planned.push((test, bindings));
+        }
+        ctx.match_values
+            .insert(expr as *const Expr as usize, (name, typ, planned));
+        return Ok(());
+    }
     if let Expr::Block { body, .. } = expr {
         alloc_declared_locals(ctx, body, fn_name, functions)?;
     }
@@ -321,6 +356,7 @@ pub(crate) struct LowerCtx<'a> {
     /// Stack-based params: (incoming_stack_offset, local_stack_offset)
     pub(crate) stack_params: Vec<(u32, u32)>,
     pub(crate) locals: HashMap<String, LocalSlot>,
+    pub(crate) match_values: HashMap<usize, (String, Typ, Vec<(Expr, Vec<Stmt>)>)>,
     pub(crate) globals: &'a HashMap<String, u64>,
     pub(crate) global_types: &'a HashMap<String, Typ>,
     pub(crate) pending_globals: Vec<(u32, u64)>,
@@ -527,6 +563,7 @@ impl<'a> LowerCtx<'a> {
             param_stores: Vec::new(),
             stack_params: Vec::new(),
             locals: HashMap::new(),
+            match_values: HashMap::new(),
             globals,
             global_types,
             pending_globals: Vec::new(),

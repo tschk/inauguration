@@ -7,7 +7,7 @@ use crate::boundary_ir::{
     BoundaryTransfer, CompileArtifact, IN_ABI_VERSION,
 };
 use crate::boundary_verify::boundary_ir_verify;
-use crate::core_ir::{CatchArm, Expr, LoopKind, MatchArm, Stmt, Typ};
+use crate::core_ir::{CatchArm, Expr, LoopKind, MatchArm, MatchValueArm, Stmt, Typ};
 use crate::core_ir::{Decl, FloatVal, UnifiedModule};
 use quote::ToTokens;
 use std::collections::{HashMap, HashSet};
@@ -1457,10 +1457,27 @@ fn vector_value_initializer(expr: &syn::Expr) -> bool {
         syn::Expr::Block(value) => value.block.stmts.last().is_some_and(
             |stmt| matches!(stmt, syn::Stmt::Expr(value, None) if vector_value_initializer(value)),
         ),
+        syn::Expr::Match(value) => value
+            .arms
+            .iter()
+            .any(|arm| vector_value_initializer(&arm.body)),
         syn::Expr::Paren(value) => vector_value_initializer(&value.expr),
         syn::Expr::Group(value) => vector_value_initializer(&value.expr),
         _ => false,
     }
+}
+
+fn lower_match_arm_value(expr: &syn::Expr, local_types: &HashMap<String, String>) -> Expr {
+    if let syn::Expr::Block(value) = expr {
+        return lower_block_value(&value.block, local_types);
+    }
+    lower_block_value(
+        &syn::Block {
+            brace_token: Default::default(),
+            stmts: vec![syn::Stmt::Expr(expr.clone(), None)],
+        },
+        local_types,
+    )
 }
 
 fn lower_block_value(block: &syn::Block, local_types: &HashMap<String, String>) -> Expr {
@@ -2490,11 +2507,33 @@ fn lower_expr_with_types_inner(
                 ),
             }
         }
-        // shortcut: match values need an explicit value-producing match representation.
-        syn::Expr::If(_) => Expr::Call {
-            callee: Box::new(Expr::Ident("#unsupported-rust-if-let-value".into())),
-            args: vec![],
-        },
+        syn::Expr::If(value) => {
+            let syn::Expr::Let(binding) = value.cond.as_ref() else {
+                unreachable!()
+            };
+            Expr::MatchValue {
+                scrutinee: Box::new(lower_expr_with_types(&binding.expr, local_types)),
+                arms: vec![
+                    MatchValueArm {
+                        pattern: binding.pat.to_token_stream().to_string(),
+                        guard: None,
+                        value: lower_block_value(&value.then_branch, local_types),
+                    },
+                    MatchValueArm {
+                        pattern: "_".into(),
+                        guard: None,
+                        value: value
+                            .else_branch
+                            .as_ref()
+                            .map(|(_, expr)| lower_match_arm_value(expr, local_types))
+                            .unwrap_or(Expr::Block {
+                                body: vec![],
+                                result: None,
+                            }),
+                    },
+                ],
+            }
+        }
         syn::Expr::Block(value) => lower_block_value(&value.block, local_types),
         syn::Expr::Unsafe(value) => lower_block_value(&value.block, local_types),
         syn::Expr::Repeat(repeat) => Expr::Call {
@@ -2533,19 +2572,21 @@ fn lower_expr_with_types_inner(
                 .map(|e| lower_expr_with_types(e, local_types))
                 .collect(),
         },
-        syn::Expr::Match(value) => {
-            let mut body = Vec::new();
-            lower_match_with_types(value, true, &mut body, local_types);
-            if !all_paths_return(&body) {
-                body.push(Stmt::Return(None));
-            }
-            Expr::Closure {
-                params: vec![],
-                ret: Typ::Generic("_".into()),
-                body,
-                captures: vec![],
-            }
-        }
+        syn::Expr::Match(value) => Expr::MatchValue {
+            scrutinee: Box::new(lower_expr_with_types(&value.expr, local_types)),
+            arms: value
+                .arms
+                .iter()
+                .map(|arm| MatchValueArm {
+                    pattern: arm.pat.to_token_stream().to_string(),
+                    guard: arm
+                        .guard
+                        .as_ref()
+                        .map(|(_, value)| lower_expr_with_types(value, &mut local_types.clone())),
+                    value: lower_match_arm_value(&arm.body, local_types),
+                })
+                .collect(),
+        },
         syn::Expr::Group(g) => lower_expr_with_types(&g.expr, local_types),
         syn::Expr::Const(c) => Expr::Closure {
             params: vec![],

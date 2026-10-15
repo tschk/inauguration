@@ -798,6 +798,44 @@ fn check_expr_with_array_borrow(
     loop_depth: usize,
 ) -> Result<(), (String, String)> {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            check_expr_in_loop(fn_name, scrutinee, facts, env, call_edges, loop_depth)?;
+            let typ = expr_type(scrutinee, facts, env).ok_or_else(|| {
+                (
+                    "unresolved-type".into(),
+                    "match scrutinee type must resolve".into(),
+                )
+            })?;
+            if !crate::core_ir::match_value_exhaustive(&typ, arms, &|name| {
+                facts.structs.get(name).copied()
+            }) {
+                return Err((
+                    "non-exhaustive-match".into(),
+                    "match value requires exhaustive unguarded patterns".into(),
+                ));
+            }
+            for arm in arms {
+                let mut inner = env.clone();
+                let pattern = crate::core_ir::MatchPattern::parse(&arm.pattern)
+                    .map_err(|error| ("invalid-match-pattern".into(), error))?;
+                let bindings = pattern
+                    .typed_bindings(&typ, &|name| facts.structs.get(name).copied())
+                    .map_err(|error| ("invalid-match-pattern".into(), error))?;
+                inner.extend(bindings);
+                if let Some(guard) = &arm.guard {
+                    check_expr_in_loop(fn_name, guard, facts, &inner, call_edges, loop_depth)?;
+                    require_type(fn_name, "match guard", &Typ::Bool, guard, facts, &inner)?;
+                }
+                check_expr_in_loop(fn_name, &arm.value, facts, &inner, call_edges, loop_depth)?;
+            }
+            if expr_type(expr, facts, env).is_none() {
+                return Err((
+                    "type-mismatch".into(),
+                    "match values must have compatible resolved types".into(),
+                ));
+            }
+            Ok(())
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -1351,6 +1389,21 @@ fn check_struct_init(
 
 fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -> Option<Typ> {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            let typ = expr_type(scrutinee, facts, env)?;
+            crate::core_ir::match_value_type(
+                arms,
+                arms.iter().map(|arm| {
+                    let pattern = crate::core_ir::MatchPattern::parse(&arm.pattern).ok()?;
+                    let bindings = pattern
+                        .typed_bindings(&typ, &|name| facts.structs.get(name).copied())
+                        .ok()?;
+                    let mut inner = env.clone();
+                    inner.extend(bindings);
+                    expr_type(&arm.value, facts, &inner)
+                }),
+            )
+        }
         Expr::Conditional {
             then_expr,
             else_expr,
@@ -2831,6 +2884,54 @@ mod tests {
             )]);
             let report = verify_for_entry(&module, "main");
             assert_eq!(report.ok, accepted, "{report:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod match_value_tests {
+    #[test]
+    fn verifies_exhaustive_typed_match_values_and_refuses_unsafe_fallthrough() {
+        for (source, valid) in [
+            (
+                "fn main()->i64{let value=match true{true=>42,false=>0};value}",
+                true,
+            ),
+            (
+                "fn main()->i64{let value=match (20,22){(a,b)=>a+b};value}",
+                true,
+            ),
+            (
+                "fn main()->i64{let value=match 20{x if x==20=>x+22,_=>0};value}",
+                true,
+            ),
+            (
+                "fn main()->i64{let value=match 0{0=>return 42,_=>0};value}",
+                true,
+            ),
+            (
+                "fn main()->i64{let value=if let (a,b)=(20,22){a+b}else{0};value}",
+                true,
+            ),
+            ("fn main()->i64{let value=match 0{0=>42};value}", false),
+            (
+                "fn main()->i64{let value=match true{true if true=>42,false=>0};value}",
+                false,
+            ),
+            (
+                "fn main()->i64{let value=match true{true=>42,false=>0.0};value}",
+                false,
+            ),
+            (
+                "fn main()->i64{let value=match true{true if 1=>42,_=>0};value}",
+                false,
+            ),
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            let report = super::verify_for_entry(&module, "main");
+            assert_eq!(report.ok, valid, "{source}: {report:?}; {module:?}");
         }
     }
 }

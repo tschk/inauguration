@@ -139,6 +139,13 @@ impl Typ {
     /// Literals acquire their sequence layout from the typed destination.
     pub(crate) fn accepts_sequence_literal(&self, expr: &Expr, actual: &Typ) -> bool {
         match expr {
+            Expr::MatchValue { arms, .. } => {
+                return !arms.is_empty()
+                    && arms.iter().all(|arm| {
+                        expr_diverges(&arm.value)
+                            || self.accepts_sequence_literal(&arm.value, actual)
+                    });
+            }
             Expr::Conditional {
                 then_expr,
                 else_expr,
@@ -239,6 +246,22 @@ pub(crate) fn stmts_diverge(body: &[Stmt]) -> bool {
 
 pub(crate) fn expr_diverges(expr: &Expr) -> bool {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            let exhaustive = arms.iter().any(|arm| {
+                arm.guard.is_none()
+                    && matches!(
+                        MatchPattern::parse(&arm.pattern),
+                        Ok(MatchPattern::WildPat | MatchPattern::IdentPat(_))
+                    )
+            }) || ["true", "false"].iter().all(|value| {
+                arms.iter()
+                    .any(|arm| arm.guard.is_none() && arm.pattern.trim() == *value)
+            });
+            expr_diverges(scrutinee)
+                || (exhaustive
+                    && !arms.is_empty()
+                    && arms.iter().all(|arm| expr_diverges(&arm.value)))
+        }
         Expr::Block { body, result } => {
             stmts_diverge(body) || result.as_deref().is_some_and(expr_diverges)
         }
@@ -276,9 +299,62 @@ pub(crate) fn conditional_type(
     None
 }
 
+pub(crate) fn match_value_type(
+    arms: &[MatchValueArm],
+    types: impl IntoIterator<Item = Option<Typ>>,
+) -> Option<Typ> {
+    if arms.is_empty() {
+        return None;
+    }
+    let mut result: Option<(&Expr, Typ)> = None;
+    for (arm, typ) in arms.iter().zip(types) {
+        if expr_diverges(&arm.value) {
+            continue;
+        }
+        let typ = typ?;
+        result = Some(match result {
+            None => (&arm.value, typ),
+            Some((value, previous)) => (
+                value,
+                conditional_type(value, Some(previous), &arm.value, Some(typ))?,
+            ),
+        });
+    }
+    Some(result.map(|(_, typ)| typ.canonical()).unwrap_or(Typ::Void))
+}
+
+pub(crate) fn match_value_exhaustive<'a>(
+    typ: &Typ,
+    arms: &[MatchValueArm],
+    schema: &impl Fn(&str) -> Option<&'a [(String, Typ)]>,
+) -> bool {
+    let mut bools = [false; 2];
+    let mut exhaustive = false;
+    for arm in arms {
+        let Ok(pattern) = MatchPattern::parse(&arm.pattern) else {
+            return false;
+        };
+        if pattern.typed_bindings(typ, schema).is_err() {
+            return false;
+        }
+        if arm.guard.is_some() {
+            continue;
+        }
+        if pattern.irrefutable(typ, schema)
+            || matches!(&pattern, MatchPattern::ArrayPat(items) if matches!(typ.canonical(), Typ::Array(_) | Typ::Vector(_)) && matches!(items.as_slice(), [MatchPattern::RestPat]))
+        {
+            exhaustive = true;
+        }
+        if let MatchPattern::BoolPat(value) = pattern {
+            bools[usize::from(value)] = true;
+        }
+    }
+    exhaustive || (typ.canonical() == Typ::Bool && bools.into_iter().all(|covered| covered))
+}
+
 pub(crate) fn expr_contains_call(expr: &Expr) -> bool {
     match expr {
-        Expr::Call { .. } | Expr::Block { .. } => true,
+        Expr::Call { .. } | Expr::Block { .. } | Expr::MatchValue { .. } => true,
         Expr::Conditional {
             cond,
             then_expr,
@@ -384,6 +460,10 @@ pub enum Expr {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+    },
+    MatchValue {
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchValueArm>,
     },
     Conditional {
         cond: Box<Expr>,
@@ -791,6 +871,13 @@ impl MatchPattern {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchValueArm {
+    pub pattern: String,
+    pub guard: Option<Expr>,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchArm {
     pub pattern: String,
     /// Evaluated after a pattern matches; false proceeds to the next arm.
@@ -974,6 +1061,15 @@ pub fn for_each_expr_child<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
             f(then_expr);
             f(else_expr);
         }
+        Expr::MatchValue { scrutinee, arms } => {
+            f(scrutinee);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    f(guard);
+                }
+                f(&arm.value);
+            }
+        }
         // Statements need a scope-aware traversal, like closure bodies.
         Expr::Block { result, .. } => {
             if let Some(result) = result {
@@ -1027,6 +1123,15 @@ pub(crate) fn for_each_expr_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr
             f(then_expr);
             f(else_expr);
         }
+        Expr::MatchValue { scrutinee, arms } => {
+            f(scrutinee);
+            for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    f(guard);
+                }
+                f(&mut arm.value);
+            }
+        }
         // Statements need a scope-aware traversal, like closure bodies.
         Expr::Block { result, .. } => {
             if let Some(result) = result {
@@ -1060,6 +1165,44 @@ pub(crate) fn for_each_expr_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn value_matches_require_unguarded_exhaustive_patterns_and_compatible_values() {
+        use super::*;
+        let arm = |pattern: &str, guard: Option<Expr>, value| MatchValueArm {
+            pattern: pattern.into(),
+            guard,
+            value,
+        };
+        let arms = vec![
+            arm("true", None, Expr::IntLit(42)),
+            arm("false", None, Expr::IntLit(0)),
+        ];
+        assert!(match_value_exhaustive(&Typ::Bool, &arms, &|_| None));
+        assert_eq!(
+            match_value_type(&arms, [Some(Typ::Int), Some(Typ::Int)]),
+            Some(Typ::Int)
+        );
+        assert_eq!(
+            match_value_type(&arms, [Some(Typ::Int), Some(Typ::Bool)]),
+            None
+        );
+        assert!(!match_value_exhaustive(&Typ::Bool, &arms[..1], &|_| None));
+        let guarded = vec![arm("_", Some(Expr::BoolLit(true)), Expr::IntLit(42))];
+        assert!(!match_value_exhaustive(&Typ::Int, &guarded, &|_| None));
+        let fixed_array = vec![arm("[x]", None, Expr::IntLit(42))];
+        assert!(!match_value_exhaustive(
+            &Typ::Array(Box::new(Typ::Int)),
+            &fixed_array,
+            &|_| None
+        ));
+        let rest_array = vec![arm("[..]", None, Expr::IntLit(42))];
+        assert!(match_value_exhaustive(
+            &Typ::Array(Box::new(Typ::Int)),
+            &rest_array,
+            &|_| None
+        ));
+    }
+
     #[test]
     fn vector_sources_only_infer_empty_literals() {
         let destination = super::Typ::Vector(Box::new(super::Typ::Int));

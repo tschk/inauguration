@@ -234,6 +234,22 @@ fn format_expr(expr: &Expr) -> String {
             out.push(')');
             out
         }
+        Expr::MatchValue { scrutinee, arms } => {
+            let mut out = format!("(match ({}) {{\n", format_expr(scrutinee));
+            for arm in arms {
+                out.push_str("  ");
+                out.push_str(&arm.pattern);
+                if let Some(guard) = &arm.guard {
+                    out.push_str(" if ");
+                    out.push_str(&format_expr(guard));
+                }
+                out.push_str(" -> ");
+                out.push_str(&format_value_branch(&arm.value));
+                out.push('\n');
+            }
+            out.push_str("})");
+            out
+        }
         Expr::Conditional {
             cond,
             then_expr,

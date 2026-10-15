@@ -4837,6 +4837,53 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn match_values_preserve_selected_effects_bindings_and_control_flow() {
+        for source in [
+            "fn main()->i64{let tag=1;let value=match tag{0=>20,1=>42,_=>0};value}",
+            "fn main()->i64{let x=match 1{n if {return 42;}=>0,_=>0};x}",
+            "fn main()->i64{let x=match true{true=>42,false=>0};x}",
+            "static mut CALLS:i64=0;fn source()->i64{unsafe{CALLS+=1;}2}fn main()->i64{let x=match source(){0=>0,n if n==2=>41,_=>0};unsafe{x+CALLS}}",
+            "fn main()->i64{let mut x=20;let y=match 1{0=>{x=0;0},_=>{x+=1;x}};x+y}",
+            "fn main()->i64{let x=20;let y=match 22{x=>x};x+y}",
+            "fn main()->i64{let x=match 0{0=>return 42,_=>0};x}",
+            "fn main()->i64{let x:i64=match true{true=>return 42,false=>return 0};x}",
+            "fn main()->i64{let mut v=match 1{0=>vec![0],_=>vec![20]};v.push(22);v[0]+v[1]}",
+            "fn take(prefix:i64,v:Vec<i64>)->i64{prefix+v[0]+v[1]}fn main()->i64{take(1,match 1{0=>vec![0],_=>vec![20,21]})}",
+            "struct Pair{x:i64,y:i64}fn main()->i64{let p=match false{true=>Pair{x:0,y:0},false=>Pair{x:20,y:22}};p.x+p.y}",
+            "fn main()->i64{let p=match 1{0=>(0,0),_=>(20,22)};p.0+p.1}",
+            "fn main()->i64{let x=match (20,22){(a,b) if a==20=>a+b,_=>0};x}",
+            "fn main()->i64{let x=match [20,22]{[a,b] if a==20=>a+b,_=>0};x}",
+            "fn main()->i64{let x=if let (20,value)=(20,42){value}else{0};x}",
+            "fn main()->i64{let mut sum=0;for i in 0..3{let x=match i{1=>continue,_=>i};sum+=x;}sum+40}",
+            "fn main()->i64{let mut sum=0;while sum<1{let x=match sum{0=>{sum=42;break;},_=>0};sum+=x;}sum}",
+            "static mut CALLS:i64=0;fn main()->i64{let x=match 1{n if {unsafe{CALLS+=1;}false}=>0,n if n==1=>41,_=>0};unsafe{x+CALLS}}",
+            "fn main()->i64{let mut values=[20,22];let x=match values{[a,b] if {values[0]=0;true}=>a+b,_=>0};x}",
+            "fn main()->i64{let x=match 1{0=>0,_=>match true{true=>42,false=>0}};x}",
+            "fn main()->i64{let x=match false{true=>0.0,false=>42.0};x as i64}",
+            "fn main()->i64{let x=match 1{0=>\"no\",_=>\"yes\"};if x==\"yes\"{42}else{0}}",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut module);
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{source}: {report:?}; {module:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn conditional_and_block_values_preserve_scope_effects_and_control_flow() {
         for source in [
             "static mut CALLS:i64=0;fn take(unit:())->i64{unsafe{CALLS+41}}fn main()->i64{take({unsafe{CALLS+=1;}})}",

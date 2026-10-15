@@ -142,12 +142,50 @@ pub(crate) fn validate_class_contracts(module: &UnifiedModule) -> Result<(), Str
     Ok(())
 }
 
+fn value_arm_environment(
+    pattern: &str,
+    typ: &Typ,
+    env: &HashMap<String, Typ>,
+    structs: &HashMap<String, HashMap<String, Typ>>,
+) -> Option<HashMap<String, Typ>> {
+    let schemas: HashMap<_, Vec<_>> = structs
+        .iter()
+        .map(|(name, fields)| {
+            (
+                name.as_str(),
+                fields
+                    .iter()
+                    .map(|(name, typ)| (name.clone(), typ.clone()))
+                    .collect(),
+            )
+        })
+        .collect();
+    let bindings = crate::core_ir::MatchPattern::parse(pattern)
+        .ok()?
+        .typed_bindings(typ, &|name| schemas.get(name).map(Vec::as_slice))
+        .ok()?;
+    let mut inner = env.clone();
+    inner.extend(bindings);
+    Some(inner)
+}
+
 pub(crate) fn validate_expr_shapes(
     fn_name: &str,
     structs: &HashMap<String, Vec<String>>,
     expr: &Expr,
 ) -> Result<(), String> {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            validate_expr_shapes(fn_name, structs, scrutinee)?;
+            for arm in arms {
+                crate::core_ir::MatchPattern::parse(&arm.pattern)?;
+                if let Some(guard) = &arm.guard {
+                    validate_expr_shapes(fn_name, structs, guard)?;
+                }
+                validate_expr_shapes(fn_name, structs, &arm.value)?;
+            }
+            Ok(())
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -427,6 +465,19 @@ pub(crate) fn desugar_method_calls_in_expr(
     fn_rets: &HashMap<String, Typ>,
 ) {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            desugar_method_calls_in_expr(scrutinee, env, structs, fn_rets);
+            if let Some(typ) = infer_in_expr_type(scrutinee, env, structs, fn_rets) {
+                for arm in arms {
+                    if let Some(inner) = value_arm_environment(&arm.pattern, &typ, env, structs) {
+                        if let Some(guard) = &mut arm.guard {
+                            desugar_method_calls_in_expr(guard, &inner, structs, fn_rets);
+                        }
+                        desugar_method_calls_in_expr(&mut arm.value, &inner, structs, fn_rets);
+                    }
+                }
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -502,6 +553,16 @@ pub(crate) fn infer_in_expr_type(
     fn_rets: &HashMap<String, Typ>,
 ) -> Option<Typ> {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            let typ = infer_in_expr_type(scrutinee, env, structs, fn_rets)?;
+            crate::core_ir::match_value_type(
+                arms,
+                arms.iter().map(|arm| {
+                    let inner = value_arm_environment(&arm.pattern, &typ, env, structs)?;
+                    infer_in_expr_type(&arm.value, &inner, structs, fn_rets)
+                }),
+            )
+        }
         Expr::Conditional {
             then_expr,
             else_expr,
@@ -595,6 +656,21 @@ pub(crate) fn infer_in_expr_type(
 
 fn replace_idents(expr: &mut Expr, consts: &std::collections::HashMap<String, Expr>) {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            replace_idents(scrutinee, consts);
+            for arm in arms {
+                let mut names = HashSet::new();
+                crate::core_bindings::reserve_pattern(&arm.pattern, &mut names);
+                let mut inner = consts.clone();
+                for name in names {
+                    inner.remove(&name);
+                }
+                if let Some(guard) = &mut arm.guard {
+                    replace_idents(guard, &inner);
+                }
+                replace_idents(&mut arm.value, &inner);
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,

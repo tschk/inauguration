@@ -554,14 +554,44 @@ fn pattern_source(pattern: &MatchPattern) -> String {
     }
 }
 
+pub(crate) fn value_pattern_test<'a>(
+    source: &str,
+    typ: &Typ,
+    fields: &impl Fn(&str) -> Option<&'a [(String, Typ)]>,
+    value: Expr,
+) -> Result<(Expr, Vec<Stmt>), String> {
+    let pattern = MatchPattern::parse(source)?;
+    let bindings = pattern.typed_bindings(typ, fields)?;
+    let pattern = typed_pattern_with_schema(&pattern, typ, fields);
+    let (test, mut statements) = pattern_test(&pattern, value)
+        .ok_or_else(|| "unsupported value match pattern".to_string())?;
+    for stmt in &mut statements {
+        if let Stmt::Let(name, typ, _) = stmt {
+            *typ = bindings
+                .iter()
+                .find(|(binding, _)| binding == name)
+                .map(|(_, typ)| typ.clone());
+        }
+    }
+    Ok((test, statements))
+}
+
 fn typed_pattern(
     pattern: &MatchPattern,
     typ: &Typ,
     facts: &crate::typecheck::Facts,
 ) -> MatchPattern {
+    typed_pattern_with_schema(pattern, typ, &|name| facts.pattern_fields(name))
+}
+
+fn typed_pattern_with_schema<'a>(
+    pattern: &MatchPattern,
+    typ: &Typ,
+    schema_lookup: &impl Fn(&str) -> Option<&'a [(String, Typ)]>,
+) -> MatchPattern {
     match (pattern, typ) {
         (MatchPattern::TuplePat(items), Typ::Named(name)) => {
-            let Some(schema) = facts.pattern_fields(name) else {
+            let Some(schema) = schema_lookup(name) else {
                 return pattern.clone();
             };
             let rest = items
@@ -583,7 +613,10 @@ fn typed_pattern(
                         .find(|(name, _)| name == &field)
                         .expect("validated tuple field")
                         .1;
-                    (field, typed_pattern(item, field_typ, facts))
+                    (
+                        field,
+                        typed_pattern_with_schema(item, field_typ, schema_lookup),
+                    )
                 })
                 .collect();
             MatchPattern::StructPat {
@@ -592,7 +625,7 @@ fn typed_pattern(
             }
         }
         (MatchPattern::StructPat { name, fields }, _) => {
-            let Some(schema) = facts.pattern_fields(name) else {
+            let Some(schema) = schema_lookup(name) else {
                 return pattern.clone();
             };
             MatchPattern::StructPat {
@@ -605,7 +638,10 @@ fn typed_pattern(
                             .find(|(name, _)| name == field)
                             .expect("validated struct field")
                             .1;
-                        (field.clone(), typed_pattern(item, field_typ, facts))
+                        (
+                            field.clone(),
+                            typed_pattern_with_schema(item, field_typ, schema_lookup),
+                        )
                     })
                     .collect(),
             }
@@ -616,7 +652,7 @@ fn typed_pattern(
         ) => {
             let items = items
                 .iter()
-                .map(|pattern| typed_pattern(pattern, item, facts))
+                .map(|pattern| typed_pattern_with_schema(pattern, item, schema_lookup))
                 .collect();
             if matches!(pattern, MatchPattern::ArrayPat(_)) {
                 MatchPattern::ArrayPat(items)
@@ -625,5 +661,52 @@ fn typed_pattern(
             }
         }
         _ => pattern.clone(),
+    }
+}
+
+#[cfg(test)]
+mod value_pattern_tests {
+    use super::*;
+
+    #[test]
+    fn tuple_value_patterns_use_typed_field_bindings() {
+        let schemas = HashMap::from([(
+            "Pair".to_string(),
+            vec![("_0".into(), Typ::Int), ("_1".into(), Typ::Bool)],
+        )]);
+        let fields = |name: &str| schemas.get(name).map(Vec::as_slice);
+        let (_, bindings) = value_pattern_test(
+            "(left, right)",
+            &Typ::Named("Pair".into()),
+            &fields,
+            Expr::Ident("saved".into()),
+        )
+        .unwrap();
+        assert!(
+            matches!(&bindings[0], Stmt::Let(name, Some(Typ::Int), Expr::Field {name:field,..}) if name=="left" && field=="_0")
+        );
+        assert!(
+            matches!(&bindings[1], Stmt::Let(name, Some(Typ::Bool), Expr::Field {name:field,..}) if name=="right" && field=="_1")
+        );
+        assert!(value_pattern_test("(left, right)", &Typ::Int, &fields, Expr::IntLit(42)).is_err());
+    }
+
+    #[test]
+    fn array_value_pattern_checks_shape_before_element_reads() {
+        let (test, bindings) = value_pattern_test(
+            "[20, tail]",
+            &Typ::Array(Box::new(Typ::Int)),
+            &|_| None,
+            Expr::Ident("saved".into()),
+        )
+        .unwrap();
+        let Expr::Binary { op, lhs, .. } = test else {
+            panic!()
+        };
+        assert_eq!(op, "&&");
+        assert!(matches!(lhs.as_ref(),Expr::Binary {op,..} if op=="&&"));
+        assert!(
+            matches!(&bindings[0],Stmt::Let(name,Some(Typ::Int),Expr::Index {..}) if name=="tail")
+        );
     }
 }

@@ -102,6 +102,18 @@ fn walk_stmts(stmts: &[Stmt], locals: &mut HashSet<String>, out: &mut Vec<String
 }
 
 fn walk_expr(expr: &Expr, locals: &HashSet<String>, out: &mut Vec<String>) {
+    if let Expr::MatchValue { scrutinee, arms } = expr {
+        walk_expr(scrutinee, locals, out);
+        for arm in arms {
+            let mut scope = locals.clone();
+            crate::core_bindings::reserve_pattern(&arm.pattern, &mut scope);
+            if let Some(guard) = &arm.guard {
+                walk_expr(guard, &scope, out);
+            }
+            walk_expr(&arm.value, &scope, out);
+        }
+        return;
+    }
     if let Expr::Block { body, result } = expr {
         let mut scope = locals.clone();
         walk_stmts(body, &mut scope, out);

@@ -2249,3 +2249,18 @@ fn conditional_and_block_values_round_trip_canonical_source() {
         assert_eq!(before.decls, after.decls, "{source}\n{canonical}");
     }
 }
+
+#[test]
+fn match_values_round_trip_with_guards_and_arm_scopes() {
+    for source in [
+        "fn main()->Int {let value=(match (true) {true -> {42} false -> {0}});return value;}",
+        "fn main()->Int {let value=(match (20) {value if value==20 -> {let extra=22;value+extra} _ -> {0}});return value;}",
+        "fn main()->Int {let value=(match (42) {_ -> {return 42;}});return value;}",
+    ] {
+        let before = parse_in_source(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        let canonical = crate::in_canonical::canonicalize_in_source(source).unwrap();
+        let after =
+            parse_in_source(&canonical).unwrap_or_else(|error| panic!("{canonical}: {error}"));
+        assert_eq!(before.decls, after.decls, "{source}\n{canonical}");
+    }
+}

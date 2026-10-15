@@ -228,6 +228,33 @@ fn parse_match_arms(
     inner: &str,
     context: &mut LoopParseContext<'_>,
 ) -> Result<Vec<crate::core_ir::MatchArm>, String> {
+    parse_match_arm_parts(inner, context, |pattern, guard, body, context| {
+        Ok(crate::core_ir::MatchArm {
+            pattern,
+            guard,
+            body: parse_function_body_with_context(body, context)?,
+        })
+    })
+}
+
+pub(crate) fn parse_match_value_arms(
+    inner: &str,
+    context: &mut LoopParseContext<'_>,
+) -> Result<Vec<crate::core_ir::MatchValueArm>, String> {
+    parse_match_arm_parts(inner, context, |pattern, guard, body, context| {
+        Ok(crate::core_ir::MatchValueArm {
+            pattern,
+            guard,
+            value: parse_expr_with_context(&format!("{{{body}}}"), context),
+        })
+    })
+}
+
+fn parse_match_arm_parts<T>(
+    inner: &str,
+    context: &mut LoopParseContext<'_>,
+    mut build: impl FnMut(String, Option<Expr>, &str, &mut LoopParseContext<'_>) -> Result<T, String>,
+) -> Result<Vec<T>, String> {
     let mut arms = Vec::new();
     let mut pos = 0usize;
     while pos < inner.len() {
@@ -263,11 +290,7 @@ fn parse_match_arms(
             .map_err(|_| format!(".in: unknown pattern `{pattern}` in match arm"))?;
         let (body_inner, close) = brace_content_bounds_after_open(inner, open)
             .ok_or_else(|| ".in: unclosed match arm body".to_string())?;
-        arms.push(crate::core_ir::MatchArm {
-            guard,
-            pattern: pattern.to_string(),
-            body: parse_function_body_with_context(body_inner, context)?,
-        });
+        arms.push(build(pattern, guard, body_inner, context)?);
         pos = close + 1;
         while pos < inner.len() {
             let Some(ch) = inner[pos..].chars().next() else {

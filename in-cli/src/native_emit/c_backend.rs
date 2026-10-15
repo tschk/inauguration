@@ -373,6 +373,7 @@ impl Ctx {
                 self.expr_str(then_expr),
                 self.expr_str(else_expr)
             ),
+            Expr::MatchValue { .. } => unreachable!("match values rejected by C backend scan"),
             Expr::Block { .. } => unreachable!("block values rejected by C backend scan"),
             Expr::IntLit(n) => format!("INT64_C({})", n),
             Expr::FloatLit(f) => {

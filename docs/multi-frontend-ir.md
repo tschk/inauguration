@@ -23,6 +23,14 @@ For `.icore` version 2 or 3, expression objects use `kind: "conditional"` with `
 }
 ```
 
+## Match values
+
+`MatchValue { scrutinee, arms }` evaluates its scrutinee once, tries patterns and guards in source order, and yields the first selected arm's value. Each arm has its own pattern bindings. Bindings are captured before its guard executes; a failed guard continues to the next arm without evaluating the arm value. Native dispatch uses one branch sequence without duplicating later arms.
+
+Value matches require compatible arm types and proven exhaustiveness. An unguarded wildcard, binding, or irrefutable typed aggregate pattern establishes coverage; both unguarded Bool literals also cover Bool values. Guards alone do not prove coverage. Fixed-length array patterns require a fallback because Core IR arrays do not retain a static length. Block arms retain enclosing returns and loop jumps.
+
+Rust expression `match` and value-position `if let`, brace-form `.in` matches, and `.icore` v2/v3 `kind: "match-value"` use this representation. The JSON form contains `scrutinee` and `arms`; each arm has `pattern`, optional `guard`, and `value`. C/Go source projection, Thumb, and INISA refuse match values until those emitters preserve the same semantics.
+
 ## Historical textual SIL merge behavior (`hybrid_sil`)
 
 `parse_textual_sil` keeps the legacy top-level **`function_id`** as whichever **`sil @name`** line appeared **last** in the input, and still exposes flattened block / instruction vectors for existing callers. It also records explicit per-function entries in **`SilArtifact::functions`**, each with its own blocks and instructions. **`extract_call_graph`** prefers those per-function records, then falls back to **`instruction_callers`**, then to the legacy **`function_id`** behavior for old artifacts. Emitters still typically place **`sil @main` last** so single-function views line up with `main`. For full detail see [in-language.md](in-language.md#hybrid_sil-and-merged-textual-sil).

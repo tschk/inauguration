@@ -397,7 +397,10 @@ pub(crate) fn lower_vector_call_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
-    if matches!(arg, Expr::Conditional { .. } | Expr::Block { .. }) {
+    if matches!(
+        arg,
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
+    ) {
         let words = 3;
         super::lower_expr::lower_value_control(
             emitter,
@@ -789,7 +792,10 @@ pub(crate) fn lower_array_call_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
-    if matches!(arg, Expr::Conditional { .. } | Expr::Block { .. }) {
+    if matches!(
+        arg,
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
+    ) {
         let words = 2;
         super::lower_expr::lower_value_control(
             emitter,
@@ -939,7 +945,10 @@ pub(crate) fn lower_struct_call_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
-    if matches!(arg, Expr::Conditional { .. } | Expr::Block { .. }) {
+    if matches!(
+        arg,
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
+    ) {
         let words = super::lower_util::native_param_abi_slots(
             &[("value".into(), Typ::Named(struct_name.into()))],
             ctx.structs,

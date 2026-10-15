@@ -146,7 +146,10 @@ fn expr_has_call(e: &Expr) -> bool {
         // Cloning allocates; substitution must not duplicate its storage or evaluation.
         if matches!(
             n,
-            Expr::Call { .. } | Expr::Block { .. } | Expr::Conditional { .. }
+            Expr::Call { .. }
+                | Expr::Block { .. }
+                | Expr::Conditional { .. }
+                | Expr::MatchValue { .. }
         ) || matches!(n, Expr::Unary {op, ..} if op == "vector-clone")
         {
             has = true;
@@ -157,6 +160,15 @@ fn expr_has_call(e: &Expr) -> bool {
 
 fn map_expr_mut<F: FnMut(&mut Expr)>(e: &mut Expr, f: &mut F) {
     match e {
+        Expr::MatchValue { scrutinee, arms } => {
+            map_expr_mut(scrutinee, f);
+            for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    map_expr_mut(guard, f);
+                }
+                map_expr_mut(&mut arm.value, f);
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -284,6 +296,17 @@ fn map_stmt_mut<F: FnMut(&mut Expr)>(s: &mut Stmt, f: &mut F) {
 
 fn map_expr<F: FnMut(Expr) -> Expr + Copy>(e: Expr, f: &mut F) -> Expr {
     let mapped = match e {
+        Expr::MatchValue { scrutinee, arms } => Expr::MatchValue {
+            scrutinee: Box::new(map_expr(*scrutinee, f)),
+            arms: arms
+                .into_iter()
+                .map(|mut arm| {
+                    arm.guard = arm.guard.map(|guard| map_expr(guard, f));
+                    arm.value = map_expr(arm.value, f);
+                    arm
+                })
+                .collect(),
+        },
         Expr::Conditional {
             cond,
             then_expr,
@@ -680,6 +703,15 @@ fn ptr_in_stmts(stmts: &[Stmt], out: &mut Vec<String>) {
 }
 fn ptr_in_expr(e: &Expr, out: &mut Vec<String>) {
     match e {
+        Expr::MatchValue { scrutinee, arms } => {
+            ptr_in_expr(scrutinee, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    ptr_in_expr(guard, out);
+                }
+                ptr_in_expr(&arm.value, out);
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -2545,6 +2577,15 @@ fn rename_calls_in_expr(e: &mut Expr, rename: &HashMap<String, String>) {
         Expr::ArrayLit(args) => {
             for a in args.iter_mut() {
                 rename_calls_in_expr(a, rename);
+            }
+        }
+        Expr::MatchValue { scrutinee, arms } => {
+            rename_calls_in_expr(scrutinee, rename);
+            for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    rename_calls_in_expr(guard, rename);
+                }
+                rename_calls_in_expr(&mut arm.value, rename);
             }
         }
         Expr::Conditional {

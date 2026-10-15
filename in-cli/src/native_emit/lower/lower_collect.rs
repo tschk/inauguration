@@ -122,6 +122,15 @@ pub(crate) fn rename_calls(stmts: &mut [Stmt], name_map: &HashMap<String, String
 
 pub(crate) fn rename_call_expr(expr: &mut Expr, name_map: &HashMap<String, String>) {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            rename_call_expr(scrutinee, name_map);
+            for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    rename_call_expr(guard, name_map);
+                }
+                rename_call_expr(&mut arm.value, name_map);
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -337,6 +346,15 @@ fn collect_pattern_strings(pattern: &str, values: &mut Vec<String>) {
 
 fn collect_expr_strings(expr: &Expr, values: &mut Vec<String>) {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            collect_expr_strings(scrutinee, values);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expr_strings(guard, values);
+                }
+                collect_expr_strings(&arm.value, values);
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,

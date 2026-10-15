@@ -1105,6 +1105,12 @@ fn lower_function(
 fn has_iter_once(body: &[Stmt]) -> bool {
     fn expr_has_once(expr: &Expr) -> bool {
         match expr {
+            Expr::MatchValue { scrutinee, arms } => {
+                expr_has_once(scrutinee)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(expr_has_once) || expr_has_once(&arm.value)
+                    })
+            }
             Expr::Conditional {
                 cond,
                 then_expr,
@@ -1165,6 +1171,12 @@ fn has_iter_once(body: &[Stmt]) -> bool {
 fn has_iter_map(body: &[Stmt]) -> bool {
     fn expr_has_map(expr: &Expr) -> bool {
         match expr {
+            Expr::MatchValue { scrutinee, arms } => {
+                expr_has_map(scrutinee)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(expr_has_map) || expr_has_map(&arm.value)
+                    })
+            }
             Expr::Conditional {
                 cond,
                 then_expr,
@@ -1225,6 +1237,12 @@ fn has_iter_map(body: &[Stmt]) -> bool {
 fn has_iter_chain(body: &[Stmt]) -> bool {
     fn expr_has_chain(expr: &Expr) -> bool {
         match expr {
+            Expr::MatchValue { scrutinee, arms } => {
+                expr_has_chain(scrutinee)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(expr_has_chain) || expr_has_chain(&arm.value)
+                    })
+            }
             Expr::Conditional {
                 cond,
                 then_expr,
@@ -1381,6 +1399,15 @@ fn max_aggregate_vector_literal_words(
         max: &mut usize,
     ) -> Result<(), String> {
         match expr {
+            Expr::MatchValue { scrutinee, arms } => {
+                inspect_expr(scrutinee, structs, fn_name, max)?;
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        inspect_expr(guard, structs, fn_name, max)?;
+                    }
+                    inspect_expr(&arm.value, structs, fn_name, max)?;
+                }
+            }
             Expr::Conditional {
                 cond,
                 then_expr,

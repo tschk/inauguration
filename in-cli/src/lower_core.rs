@@ -13,7 +13,7 @@ mod value_spills;
 pub(crate) use constant_values::lower_named_constants;
 #[path = "lower_core/match_guards.rs"]
 mod match_guards;
-pub(crate) use match_guards::{lower_guarded_decls, prepared_native_module};
+pub(crate) use match_guards::{lower_guarded_decls, prepared_native_module, value_pattern_test};
 pub(crate) use value_spills::lower_value_spills;
 
 pub fn desugar_module(module: &mut UnifiedModule) {
@@ -585,6 +585,17 @@ fn rewrite_field_refs_in_stmt(stmt: &mut Stmt, fields: &HashSet<String>, bound: 
 
 fn rewrite_field_refs_in_expr(expr: &mut Expr, fields: &HashSet<String>, bound: &HashSet<String>) {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            rewrite_field_refs_in_expr(scrutinee, fields, bound);
+            for arm in arms {
+                let mut scope = bound.clone();
+                crate::core_bindings::reserve_pattern(&arm.pattern, &mut scope);
+                if let Some(guard) = &mut arm.guard {
+                    rewrite_field_refs_in_expr(guard, fields, &scope);
+                }
+                rewrite_field_refs_in_expr(&mut arm.value, fields, &scope);
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -719,6 +730,11 @@ fn collect_declared_vars_in_body(body: &[Stmt], out: &mut HashSet<String>) {
             if let Expr::Block { body, .. } = expr {
                 collect_declared_vars_in_body(body, out);
             }
+            if let Expr::MatchValue { arms, .. } = expr {
+                for arm in arms {
+                    crate::core_bindings::reserve_pattern(&arm.pattern, out);
+                }
+            }
         });
         match stmt {
             Stmt::Let(name, _, _) => {
@@ -833,6 +849,22 @@ fn rewrite_captures_in_body(body: &mut [Stmt], captures: &HashSet<&str>) {
 
 fn rewrite_captures_in_expr(expr: &mut Expr, captures: &HashSet<&str>) {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            rewrite_captures_in_expr(scrutinee, captures);
+            for arm in arms {
+                let mut names = HashSet::new();
+                crate::core_bindings::reserve_pattern(&arm.pattern, &mut names);
+                let inner = captures
+                    .iter()
+                    .copied()
+                    .filter(|name| !names.contains(*name))
+                    .collect();
+                if let Some(guard) = &mut arm.guard {
+                    rewrite_captures_in_expr(guard, &inner);
+                }
+                rewrite_captures_in_expr(&mut arm.value, &inner);
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,
@@ -897,6 +929,9 @@ fn desugar_closures_in_expr(
     globals: &HashSet<String>,
 ) {
     match expr {
+        Expr::MatchValue { .. } => crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
+            desugar_closures_in_expr(child, counter, extra_decls, names, globals)
+        }),
         Expr::Conditional {
             cond,
             then_expr,
@@ -1065,6 +1100,9 @@ fn rewrite_method_calls_in_body(body: &mut [Stmt], method_map: &HashMap<String, 
 
 fn rewrite_method_calls_in_expr(expr: &mut Expr, method_map: &HashMap<String, String>) {
     match expr {
+        Expr::MatchValue { .. } => crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
+            rewrite_method_calls_in_expr(child, method_map)
+        }),
         Expr::Conditional {
             cond,
             then_expr,
@@ -1152,7 +1190,7 @@ fn lower_expr(
     out: &mut String,
 ) -> usize {
     match e {
-        Expr::Conditional { .. } | Expr::Block { .. } => {
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. } => {
             let id = *ssa;
             *ssa += 1;
             out.push_str(&format!("%{id} = unsupported_structured_value\n"));
@@ -1400,6 +1438,19 @@ fn fold_bool_binop(op: &str, lhs: &Expr, rhs: &Expr) -> Option<bool> {
 
 fn collect_expr_reads(e: &Expr, reads: &mut HashSet<String>) {
     match e {
+        Expr::MatchValue { scrutinee, arms } => {
+            collect_expr_reads(scrutinee, reads);
+            for arm in arms {
+                let mut inner = HashSet::new();
+                if let Some(guard) = &arm.guard {
+                    collect_expr_reads(guard, &mut inner);
+                }
+                collect_expr_reads(&arm.value, &mut inner);
+                let mut bound = HashSet::new();
+                crate::core_bindings::reserve_pattern(&arm.pattern, &mut bound);
+                reads.extend(inner.into_iter().filter(|name| !bound.contains(name)));
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,

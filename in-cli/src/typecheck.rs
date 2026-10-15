@@ -464,6 +464,13 @@ impl TypeChecker {
 
     fn resolve_vector_allocation(&self, expr: &mut Expr, expected: &Typ, facts: &Facts) -> bool {
         match expr {
+            Expr::MatchValue { arms, .. } => {
+                let mut changed = false;
+                for arm in arms {
+                    changed |= self.resolve_vector_allocation(&mut arm.value, expected, facts);
+                }
+                return changed;
+            }
             Expr::Conditional {
                 then_expr,
                 else_expr,
@@ -539,7 +546,27 @@ impl TypeChecker {
                 self.resolve_vector_allocation(arg, expected, facts);
             }
         }
-        if let Expr::Block { body, result } = expr {
+        if let Expr::MatchValue { scrutinee, arms } = expr {
+            self.resolve_typed_expr(scrutinee, facts, env, promote_c_bool, return_type);
+            let typ = self.expr_type(scrutinee, facts, env);
+            for arm in arms {
+                let inner = typ
+                    .as_ref()
+                    .and_then(|typ| self.pattern_environment(&arm.pattern, typ, facts, env));
+                if let Some(inner) = inner {
+                    if let Some(guard) = &mut arm.guard {
+                        self.resolve_typed_expr(guard, facts, &inner, promote_c_bool, return_type);
+                    }
+                    self.resolve_typed_expr(
+                        &mut arm.value,
+                        facts,
+                        &inner,
+                        promote_c_bool,
+                        return_type,
+                    );
+                }
+            }
+        } else if let Expr::Block { body, result } = expr {
             let mut inner = env.clone();
             self.resolve_typed_body(body, facts, &mut inner, return_type, promote_c_bool);
             if let Some(result) = result {
@@ -1562,6 +1589,55 @@ impl TypeChecker {
         errors: &mut Vec<TypeError>,
     ) {
         match expr {
+            Expr::MatchValue { scrutinee, arms } => {
+                self.check_expr(fn_name, scrutinee, facts, env, errors);
+                if let Some(typ) = self.expr_type(scrutinee, facts, env) {
+                    if !crate::core_ir::match_value_exhaustive(&typ, arms, &|name| {
+                        facts.structs.get(name).map(Vec::as_slice)
+                    }) {
+                        errors.push(TypeError::TypeMismatch {
+                            context: format!("non-exhaustive match value in `{fn_name}`"),
+                            expected: Typ::Named("exhaustive-match".into()),
+                            got: typ.clone(),
+                        });
+                    }
+                    for arm in arms {
+                        if let Some(inner) =
+                            self.pattern_environment(&arm.pattern, &typ, facts, env)
+                        {
+                            if let Some(guard) = &arm.guard {
+                                self.check_expr(fn_name, guard, facts, &inner, errors);
+                                if let Some(actual) = self.expr_type(guard, facts, &inner)
+                                    && actual.canonical() != Typ::Bool
+                                    && !crate::core_ir::expr_diverges(guard)
+                                {
+                                    errors.push(TypeError::TypeMismatch {
+                                        context: format!("match guard in `{fn_name}`"),
+                                        expected: Typ::Bool,
+                                        got: actual,
+                                    });
+                                }
+                            }
+                            self.check_expr(fn_name, &arm.value, facts, &inner, errors);
+                        } else {
+                            errors.push(TypeError::TypeMismatch {
+                                context: format!("match pattern `{}` in `{fn_name}`", arm.pattern),
+                                expected: typ.clone(),
+                                got: Typ::Named("invalid-pattern".into()),
+                            });
+                        }
+                    }
+                }
+                if self.expr_type(expr, facts, env).is_none() {
+                    errors.push(TypeError::TypeMismatch {
+                        context: format!(
+                            "match values in `{fn_name}` require compatible resolved types"
+                        ),
+                        expected: Typ::Named("compatible-match-arms".into()),
+                        got: Typ::Named("invalid-match-values".into()),
+                    });
+                }
+            }
             Expr::Conditional {
                 cond,
                 then_expr,
@@ -2001,6 +2077,16 @@ impl TypeChecker {
         env: &HashMap<String, Typ>,
     ) -> Option<Typ> {
         match expr {
+            Expr::MatchValue { scrutinee, arms } => {
+                let typ = self.expr_type(scrutinee, facts, env)?;
+                crate::core_ir::match_value_type(
+                    arms,
+                    arms.iter().map(|arm| {
+                        let inner = self.pattern_environment(&arm.pattern, &typ, facts, env)?;
+                        self.expr_type(&arm.value, facts, &inner)
+                    }),
+                )
+            }
             Expr::Conditional {
                 cond: _,
                 then_expr,

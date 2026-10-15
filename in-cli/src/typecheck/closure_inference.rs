@@ -67,6 +67,17 @@ pub(super) fn argument_type(
     }
     let mut complete = true;
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            let typ = argument_type(checker, scrutinee, facts, env)?;
+            return crate::core_ir::match_value_type(
+                arms,
+                arms.iter().map(|arm| {
+                    let inner = checker.pattern_environment(&arm.pattern, &typ, facts, env)?;
+                    argument_type(checker, &arm.value, facts, &inner)
+                }),
+            )
+            .filter(resolved_closure_type);
+        }
         Expr::Block { body, result } => {
             let mut inner = env.clone();
             for stmt in body {
@@ -124,6 +135,20 @@ fn expression_constraints(
     changed: &mut bool,
 ) {
     if matches!(expr, Expr::Closure { .. }) {
+        return;
+    }
+    if let Expr::MatchValue { scrutinee, arms } = expr {
+        expression_constraints(checker, scrutinee, facts, generated, env, changed);
+        if let Some(typ) = argument_type(checker, scrutinee, facts, env) {
+            for arm in arms {
+                if let Some(inner) = checker.pattern_environment(&arm.pattern, &typ, facts, env) {
+                    if let Some(guard) = &arm.guard {
+                        expression_constraints(checker, guard, facts, generated, &inner, changed);
+                    }
+                    expression_constraints(checker, &arm.value, facts, generated, &inner, changed);
+                }
+            }
+        }
         return;
     }
     if let Expr::Block { body, result } = expr {

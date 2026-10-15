@@ -337,6 +337,34 @@ fn parse_v2_expr(value: &Value, context: &str) -> Result<Expr, String> {
                 rhs: Box::new(rhs),
             })
         }
+        "match-value" => {
+            let scrutinee = Box::new(parse_v2_expr(
+                required_field(object, "scrutinee", context)?,
+                context,
+            )?);
+            let arms = required_field(object, "arms", context)?
+                .as_array()
+                .ok_or_else(|| format!("{context}: match `arms` must be an array"))?
+                .iter()
+                .map(|arm| {
+                    let arm = value_object(arm, context)?;
+                    let pattern = string_field(arm, "pattern", context)?.to_string();
+                    crate::core_ir::MatchPattern::parse(&pattern)?;
+                    let guard = arm
+                        .get("guard")
+                        .filter(|value| !value.is_null())
+                        .map(|value| parse_v2_expr(value, context))
+                        .transpose()?;
+                    let value = parse_v2_expr(required_field(arm, "value", context)?, context)?;
+                    Ok(crate::core_ir::MatchValueArm {
+                        pattern,
+                        guard,
+                        value,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(Expr::MatchValue { scrutinee, arms })
+        }
         "conditional" => Ok(Expr::Conditional {
             cond: Box::new(parse_v2_expr(
                 required_field(object, "cond", context)?,
@@ -553,6 +581,24 @@ fn validate_module(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_typed_match_values_and_rejects_malformed_arms() {
+        let value = serde_json::json!({"kind":"match-value", "scrutinee":true, "arms":[
+            {"pattern":"true", "value":42}, {"pattern":"false", "guard":true, "value":0}
+        ]});
+        let parsed = super::parse_v2_expr(&value, "test").unwrap();
+        assert!(
+            matches!(parsed, crate::core_ir::Expr::MatchValue { arms, .. } if arms.len()==2 && arms[1].guard==Some(crate::core_ir::Expr::BoolLit(true)))
+        );
+        assert!(
+            super::parse_v2_expr(
+                &serde_json::json!({"kind":"match-value","scrutinee":0,"arms":[{"pattern":"_"}]}),
+                "test"
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn parses_conditional_block_values_without_closures() {
         let value = serde_json::json!({

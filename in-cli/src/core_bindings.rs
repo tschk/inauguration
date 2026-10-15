@@ -75,6 +75,20 @@ pub(crate) fn normalize_initializer_with_references(
 
 pub(crate) fn reserve_expr(expr: &Expr, names: &mut HashSet<String>) {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            reserve_expr(scrutinee, names);
+            for arm in arms {
+                if let Ok(mut pattern) = MatchPattern::parse(&arm.pattern) {
+                    pattern_names(&mut pattern, &mut |name| {
+                        names.insert(name.clone());
+                    });
+                }
+                if let Some(guard) = &arm.guard {
+                    reserve_expr(guard, names);
+                }
+                reserve_expr(&arm.value, names);
+            }
+        }
         Expr::Ident(name) => {
             names.insert(name.clone());
         }
@@ -263,6 +277,17 @@ impl Bindings<'_> {
     fn expr(&mut self, expr: &mut Expr, scope: &HashMap<String, String>) {
         match expr {
             Expr::Ident(name) => Self::reference(name, scope),
+            Expr::MatchValue { scrutinee, arms } => {
+                self.expr(scrutinee, scope);
+                for arm in arms {
+                    let mut inner = scope.clone();
+                    self.pattern(&mut arm.pattern, &mut inner);
+                    if let Some(guard) = &mut arm.guard {
+                        self.expr(guard, &inner);
+                    }
+                    self.expr(&mut arm.value, &inner);
+                }
+            }
             Expr::Conditional {
                 cond,
                 then_expr,

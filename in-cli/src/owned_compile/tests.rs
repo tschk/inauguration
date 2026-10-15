@@ -45,6 +45,72 @@ fn default_request(
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
+fn owned_match_values_preserve_selected_effects_bindings_and_control_flow() {
+    for text in [
+        "fn main()->i64{let tag=1;let value=match tag{0=>20,1=>42,_=>0};value}",
+        "fn main()->i64{let x=match 1{n if {return 42;}=>0,_=>0};x}",
+        "fn main()->i64{let x=match true{true=>42,false=>0};x}",
+        "static mut CALLS:i64=0;fn source()->i64{unsafe{CALLS+=1;}2}fn main()->i64{let x=match source(){0=>0,n if n==2=>41,_=>0};unsafe{x+CALLS}}",
+        "fn main()->i64{let mut x=20;let y=match 1{0=>{x=0;0},_=>{x+=1;x}};x+y}",
+        "fn main()->i64{let x=20;let y=match 22{x=>x};x+y}",
+        "fn main()->i64{let x=match 0{0=>return 42,_=>0};x}",
+        "fn main()->i64{let x:i64=match true{true=>return 42,false=>return 0};x}",
+        "fn main()->i64{let mut v=match 1{0=>vec![0],_=>vec![20]};v.push(22);v[0]+v[1]}",
+        "fn take(prefix:i64,v:Vec<i64>)->i64{prefix+v[0]+v[1]}fn main()->i64{take(1,match 1{0=>vec![0],_=>vec![20,21]})}",
+        "struct Pair{x:i64,y:i64}fn main()->i64{let p=match false{true=>Pair{x:0,y:0},false=>Pair{x:20,y:22}};p.x+p.y}",
+        "fn main()->i64{let p=match 1{0=>(0,0),_=>(20,22)};p.0+p.1}",
+        "fn main()->i64{let x=match (20,22){(a,b) if a==20=>a+b,_=>0};x}",
+        "fn main()->i64{let x=match [20,22]{[a,b] if a==20=>a+b,_=>0};x}",
+        "fn main()->i64{let x=if let (20,value)=(20,42){value}else{0};x}",
+        "fn main()->i64{let mut sum=0;for i in 0..3{let x=match i{1=>continue,_=>i};sum+=x;}sum+40}",
+        "fn main()->i64{let mut sum=0;while sum<1{let x=match sum{0=>{sum=42;break;},_=>0};sum+=x;}sum}",
+        "static mut CALLS:i64=0;fn main()->i64{let x=match 1{n if {unsafe{CALLS+=1;}false}=>0,n if n==1=>41,_=>0};unsafe{x+CALLS}}",
+        "fn main()->i64{let mut values=[20,22];let x=match values{[a,b] if {values[0]=0;true}=>a+b,_=>0};x}",
+        "fn main()->i64{let x=match 1{0=>0,_=>match true{true=>42,false=>0}};x}",
+        "fn main()->i64{let x=match false{true=>0.0,false=>42.0};x as i64}",
+        "fn main()->i64{let x=match 1{0=>\"no\",_=>\"yes\"};if x==\"yes\"{42}else{0}}",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("match-value.rs");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{text} {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{text} {profile:?}"
+            );
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("match-value-native");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(report.success, "{text} {profile:?}: {report:?}");
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42),
+                    "{text} {profile:?}"
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
 fn owned_conditional_and_block_values_preserve_scope_effects_and_control_flow() {
     for text in [
         "static mut CALLS:i64=0;fn take(unit:())->i64{unsafe{CALLS+41}}fn main()->i64{take({unsafe{CALLS+=1;}})}",
@@ -103,6 +169,66 @@ fn owned_conditional_and_block_values_preserve_scope_effects_and_control_flow() 
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
                 let binary = temp_path("conditional-block-native");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(report.success, "{text} {profile:?}: {report:?}");
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42),
+                    "{text} {profile:?}"
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn shared_match_value_fronts_execute_and_preserve_errors() {
+    for (extension, text) in [
+        (
+            "in",
+            "fn main()->Int {let value=(match (20) {value if value==20 -> {let extra=22;value+extra} _ -> {0}});return value;}",
+        ),
+        (
+            "in",
+            "fn maybe()->Int {let value=(match (true) {true -> {throw 7;0} false -> {0}});return value;}\nfn main()->Int {try {maybe();return 0;} catch 7 {return 42;} return 0;}",
+        ),
+        (
+            "in",
+            "fn main()->Int {var sum:Int=0;for i in 0..3 {let value=(match (i) {1 -> {continue;} _ -> {i}});sum+=value;}return sum+40;}",
+        ),
+        (
+            "icore",
+            "{\"icoreVersion\": 2, \"decls\": [{\"kind\": \"function\", \"name\": \"main\", \"params\": [], \"return\": \"Int\", \"body\": [{\"kind\": \"return\", \"expr\": {\"kind\": \"match-value\", \"scrutinee\": 20, \"arms\": [{\"pattern\": \"value\", \"guard\": {\"kind\": \"binary\", \"op\": \"==\", \"lhs\": {\"kind\": \"ident\", \"name\": \"value\"}, \"rhs\": 20}, \"value\": {\"kind\": \"binary\", \"op\": \"+\", \"lhs\": {\"kind\": \"ident\", \"name\": \"value\"}, \"rhs\": 22}}, {\"pattern\": \"_\", \"value\": 0}]}}]}]}",
+        ),
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path(&format!("match-value.{extension}"));
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{text} {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{text} {profile:?}"
+            );
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("shared-match-value-native");
                 request.target = CompileTarget::Native;
                 request.out = Some(binary.clone());
                 let report = compile_owned(&request);

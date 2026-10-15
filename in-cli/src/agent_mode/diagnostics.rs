@@ -254,6 +254,41 @@ fn collect_dependency_symbol_calls_from_expr<'a>(
     out: &mut std::collections::BTreeSet<(&'a str, &'a str, &'a str)>,
 ) {
     match expr {
+        Expr::MatchValue { scrutinee, arms } => {
+            collect_dependency_symbol_calls_from_expr(
+                scrutinee,
+                symbols,
+                functions,
+                bound_aliases,
+                out,
+            );
+            for arm in arms {
+                let mut names = std::collections::HashSet::new();
+                crate::core_bindings::reserve_pattern(&arm.pattern, &mut names);
+                let mut calls = std::collections::BTreeSet::new();
+                if let Some(guard) = &arm.guard {
+                    collect_dependency_symbol_calls_from_expr(
+                        guard,
+                        symbols,
+                        functions,
+                        bound_aliases,
+                        &mut calls,
+                    );
+                }
+                collect_dependency_symbol_calls_from_expr(
+                    &arm.value,
+                    symbols,
+                    functions,
+                    bound_aliases,
+                    &mut calls,
+                );
+                out.extend(
+                    calls
+                        .into_iter()
+                        .filter(|(name, _, _)| !names.contains(*name)),
+                );
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,

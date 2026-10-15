@@ -908,7 +908,10 @@ pub(crate) fn lower_struct_expr_into_slots(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
-    if matches!(expr, Expr::Conditional { .. } | Expr::Block { .. }) {
+    if matches!(
+        expr,
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
+    ) {
         return lower_expr::lower_value_control(
             emitter,
             ctx,
@@ -1183,7 +1186,10 @@ pub(crate) fn lower_struct_expr_into_regs(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
-    if matches!(expr, Expr::Conditional { .. } | Expr::Block { .. }) {
+    if matches!(
+        expr,
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
+    ) {
         return lower_expr::lower_value_control(
             emitter,
             ctx,
@@ -1436,7 +1442,10 @@ pub(crate) fn lower_array_expr_into_regs(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
-    if matches!(expr, Expr::Conditional { .. } | Expr::Block { .. }) {
+    if matches!(
+        expr,
+        Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
+    ) {
         return lower_expr::lower_value_control(
             emitter,
             ctx,

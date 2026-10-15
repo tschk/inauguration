@@ -246,6 +246,15 @@ fn collect_expr_calls(expr: &Expr, out: &mut HashSet<String>) {
             collect_expr_calls(base, out);
             collect_expr_calls(index, out);
         }
+        Expr::MatchValue { scrutinee, arms } => {
+            collect_expr_calls(scrutinee, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expr_calls(guard, out);
+                }
+                collect_expr_calls(&arm.value, out);
+            }
+        }
         Expr::Conditional {
             cond,
             then_expr,

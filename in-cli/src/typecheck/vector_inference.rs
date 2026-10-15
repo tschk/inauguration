@@ -117,6 +117,44 @@ fn expression(
     if matches!(expr, Expr::Closure { .. }) {
         return;
     }
+    if let Expr::MatchValue { scrutinee, arms } = expr {
+        expression(
+            checker,
+            scrutinee,
+            facts,
+            env,
+            candidates,
+            constraints,
+            return_type,
+        );
+        if let Some(typ) = checker.expr_type(scrutinee, facts, env) {
+            for arm in arms {
+                if let Some(inner) = checker.pattern_environment(&arm.pattern, &typ, facts, env) {
+                    if let Some(guard) = &arm.guard {
+                        expression(
+                            checker,
+                            guard,
+                            facts,
+                            &inner,
+                            candidates,
+                            constraints,
+                            return_type,
+                        );
+                    }
+                    expression(
+                        checker,
+                        &arm.value,
+                        facts,
+                        &inner,
+                        candidates,
+                        constraints,
+                        return_type,
+                    );
+                }
+            }
+        }
+        return;
+    }
     if let Expr::Block { body, result } = expr {
         let mut inner = env.clone();
         let mut inner_candidates = candidates.clone();
