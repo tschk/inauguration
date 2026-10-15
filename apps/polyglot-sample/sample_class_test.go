@@ -5,13 +5,13 @@ import "testing"
 func TestNewCalculator(t *testing.T) {
 	calc1 := NewCalculator()
 	if calc1.value != 0 {
-		t.Errorf("Expected Initialized Calculator value to be 0, got %d", calc1.value)
+		t.Error("Expected Initialized Calculator value to be 0, got", calc1.value)
 	}
 
 	calc2 := NewCalculator()
 	calc1.Add(5)
 	if calc2.value != 0 {
-		t.Errorf("Expected second Calculator value to remain 0, got %d", calc2.value)
+		t.Error("Expected second Calculator value to remain 0, got", calc2.value)
 	}
 }
 
@@ -22,10 +22,10 @@ func TestNewCalculatorIndependence(t *testing.T) {
 	calc1.Add(10)
 
 	if calc1.value != 10 {
-		t.Errorf("Expected calc1 value to be 10, got %d", calc1.value)
+		t.Error("Expected calc1 value to be 10, got", calc1.value)
 	}
 	if calc2.value != 0 {
-		t.Errorf("Expected calc2 value to remain 0, got %d", calc2.value)
+		t.Error("Expected calc2 value to remain 0, got", calc2.value)
 	}
 }
 
@@ -59,33 +59,33 @@ func TestCalculatorAddConsecutive(t *testing.T) {
 
 	res := calc.Add(10)
 	if res != 10 {
-		t.Errorf("Expected Add to return 10, got %d", res)
+		t.Error("Expected Add to return 10, got", res)
 	}
 
 	res = calc.Add(20)
 	if res != 30 {
-		t.Errorf("Expected Add to return 30, got %d", res)
+		t.Error("Expected Add to return 30, got", res)
 	}
 
 	res = calc.Add(-5)
 	if res != 25 {
-		t.Errorf("Expected Add to return 25, got %d", res)
+		t.Error("Expected Add to return 25, got", res)
 	}
 
 	if calc.value != 25 {
-		t.Errorf("Expected final value to be 25, got %d", calc.value)
+		t.Error("Expected final value to be 25, got", calc.value)
 	}
 }
 
 func TestCalculatorAnswer(t *testing.T) {
 	calc := NewCalculator()
 	if ans := calc.Answer(); ans != 42 {
-		t.Errorf("Expected Answer to return 42, got %d", ans)
+		t.Error("Expected Answer to return 42, got", ans)
 	}
 }
 
 func TestAnswer(t *testing.T) {
 	if ans := answer(); ans != 42 {
-		t.Errorf("Expected answer to return 42, got %d", ans)
+		t.Error("Expected answer to return 42, got", ans)
 	}
 }
