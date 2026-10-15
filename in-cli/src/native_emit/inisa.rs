@@ -90,6 +90,12 @@ struct Compiler {
     funcs: Vec<Func>,
     code: Vec<u8>,
     fn_index: std::collections::HashMap<String, u32>,
+    loop_stack: Vec<LoopFixups>,
+}
+
+struct LoopFixups {
+    head: i32,
+    breaks: Vec<usize>,
 }
 
 pub(crate) fn compile_program(module: &UnifiedModule, entry: &str) -> Result<Program, String> {
@@ -156,6 +162,7 @@ fn compile(module: &UnifiedModule, entry: &str) -> Result<Program, String> {
         funcs: Vec::new(),
         code: Vec::new(),
         fn_index,
+        loop_stack: Vec::new(),
     };
     for d in decls {
         compile_function(&mut c, d)?;
@@ -182,7 +189,7 @@ fn compile_function(c: &mut Compiler, decl: &Decl) -> Result<(), String> {
     let nargs = params.len() as u16;
     collect_locals(body, &mut slots, nargs);
     let nlocals = slots.len() as u16;
-    compile_stmts(c, body, &slots, None)?;
+    compile_stmts(c, body, &slots)?;
     // Fall through: return 0
     emit_pushi(&mut c.code, 0);
     c.code.push(OP_RET);
@@ -241,10 +248,9 @@ fn compile_stmts(
     c: &mut Compiler,
     stmts: &[Stmt],
     slots: &std::collections::HashMap<String, u16>,
-    loop_end: Option<usize>,
 ) -> Result<(), String> {
     for s in stmts {
-        compile_stmt(c, s, slots, loop_end)?;
+        compile_stmt(c, s, slots)?;
     }
     Ok(())
 }
@@ -253,7 +259,6 @@ fn compile_stmt(
     c: &mut Compiler,
     stmt: &Stmt,
     slots: &std::collections::HashMap<String, u16>,
-    loop_end: Option<usize>,
 ) -> Result<(), String> {
     match stmt {
         Stmt::Let(name, _, e) | Stmt::Assign(name, e) => {
@@ -285,13 +290,13 @@ fn compile_stmt(
             c.code.push(OP_JZ);
             let jz = c.code.len();
             c.code.extend_from_slice(&0i32.to_le_bytes());
-            compile_stmts(c, then_body, slots, loop_end)?;
+            compile_stmts(c, then_body, slots)?;
             c.code.push(OP_JMP);
             let jmp = c.code.len();
             c.code.extend_from_slice(&0i32.to_le_bytes());
             let else_pc = c.code.len() as i32;
             patch_i32(&mut c.code, jz, else_pc);
-            compile_stmts(c, else_body, slots, loop_end)?;
+            compile_stmts(c, else_body, slots)?;
             let end = c.code.len() as i32;
             patch_i32(&mut c.code, jmp, end);
         }
@@ -307,41 +312,53 @@ fn compile_stmt(
             } else {
                 None
             };
-            compile_stmts(c, body, slots, Some(0))?;
+            c.loop_stack.push(LoopFixups {
+                head,
+                breaks: Vec::new(),
+            });
+            compile_stmts(c, body, slots)?;
+            let loop_fixups = c.loop_stack.pop().ok_or("inisa: missing loop scope")?;
             c.code.push(OP_JMP);
             c.code.extend_from_slice(&head.to_le_bytes());
             let end = c.code.len() as i32;
             if let Some(at) = jz_at {
                 patch_i32(&mut c.code, at, end);
             }
-            let _ = loop_end;
+            for at in loop_fixups.breaks {
+                patch_i32(&mut c.code, at, end);
+            }
         }
         Stmt::Break => {
-            if let Some(end) = loop_end {
-                c.code.push(OP_JMP);
-                c.code.extend_from_slice(&(end as i32).to_le_bytes());
-            }
+            let Some(loop_fixups) = c.loop_stack.last_mut() else {
+                return Err("inisa: break outside a loop".into());
+            };
+            c.code.push(OP_JMP);
+            let at = c.code.len();
+            c.code.extend_from_slice(&0i32.to_le_bytes());
+            loop_fixups.breaks.push(at);
         }
         Stmt::Continue => {
-            if let Some(end) = loop_end {
-                let _ = end;
-            }
+            let Some(loop_fixups) = c.loop_stack.last() else {
+                return Err("inisa: continue outside a loop".into());
+            };
+            c.code.push(OP_JMP);
+            c.code.extend_from_slice(&loop_fixups.head.to_le_bytes());
         }
         Stmt::Throw(e) => {
             compile_expr(c, e, slots)?;
             c.code.push(OP_POP);
         }
         Stmt::Try { body, catches } => {
-            compile_stmts(c, body, slots, loop_end)?;
+            compile_stmts(c, body, slots)?;
             for arm in catches {
-                compile_stmts(c, &arm.body, slots, loop_end)?;
+                compile_stmts(c, &arm.body, slots)?;
             }
         }
         Stmt::Match { scrutinee, arms } => {
             compile_expr(c, scrutinee, slots)?;
             c.code.push(OP_POP);
             for arm in arms {
-                compile_stmts(c, &arm.body, slots, loop_end)?;
+                compile_stmts(c, &arm.body, slots)?;
             }
         }
         Stmt::Propagate => {}
@@ -398,6 +415,26 @@ fn compile_expr(
                 }
                 _ => return Err(format!("inisa: unary `{op}`")),
             }
+        }
+        Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&&" | "||") => {
+            compile_expr(c, lhs, slots)?;
+            // JZ consumes its condition. Invert OR to jump on a deciding true LHS.
+            if op == "||" {
+                c.code.push(OP_NOT);
+            }
+            c.code.push(OP_JZ);
+            let decided = c.code.len();
+            c.code.extend_from_slice(&0i32.to_le_bytes());
+            compile_expr(c, rhs, slots)?;
+            c.code.extend_from_slice(&[OP_NOT, OP_NOT]); // canonical 0/1
+            c.code.push(OP_JMP);
+            let end = c.code.len();
+            c.code.extend_from_slice(&0i32.to_le_bytes());
+            let decided_pc = c.code.len() as i32;
+            patch_i32(&mut c.code, decided, decided_pc);
+            emit_pushi(&mut c.code, i64::from(op == "||"));
+            let end_pc = c.code.len() as i32;
+            patch_i32(&mut c.code, end, end_pc);
         }
         Expr::Binary { op, lhs, rhs } => {
             compile_expr(c, lhs, slots)?;
@@ -481,7 +518,11 @@ fn compile_expr(
             emit_pushi(&mut c.code, 0);
         }
         Expr::Closure { body, .. } => {
-            compile_stmts(c, body, slots, None)?;
+            // Closures cannot jump into an enclosing function's loop.
+            let enclosing_loops = std::mem::take(&mut c.loop_stack);
+            let result = compile_stmts(c, body, slots);
+            c.loop_stack = enclosing_loops;
+            result?;
             emit_pushi(&mut c.code, 0);
         }
     }

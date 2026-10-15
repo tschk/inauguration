@@ -54,8 +54,8 @@ tree-sitter-perl = "1.1.2"
 # HolyC and Ruby have extraction logic, keep as active
 tree-sitter-holyc = "0.1.2"
 tree-sitter-ruby = "0.23.1"
-# LOLCAT — our own grammar (always compiled)
-tree-sitter-lolcat = "0.0.1"
+# LOLCODE — our maintained grammar (always compiled)
+tree-sitter-lolcode = "0.0.2"
 # Crystal / Nim — our own grammars (always compiled)
 tree-sitter-crystal = "0.1.0"
 tree-sitter-nim = "0.1.0"
