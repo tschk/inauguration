@@ -425,64 +425,89 @@ pub(crate) fn local_in_import_path(base: &Path, raw: &str) -> Option<PathBuf> {
     Some(resolved)
 }
 
-fn parse_in_file_inner(path: &Path, seen: &mut HashSet<PathBuf>) -> Result<ParsedInModule, String> {
+// Keep source-file provenance until the complete graph is merged. A declaration
+// name is not an import identity: distinct files may declare the same name, and
+// validation must still report that collision.
+fn parse_in_file_inner(
+    path: &Path,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<Vec<(PathBuf, ParsedInModule)>, String> {
     let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !seen.insert(key) {
-        return Ok(ParsedInModule {
-            module: UnifiedModule::new(Vec::new()),
-            pending_globals: HashSet::new(),
-        });
+    if !seen.insert(key.clone()) {
+        return Ok(Vec::new());
     }
     let source = normalize_human_in_source(
         &fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?,
     );
     let surface = parse_in_surface_info(&source)?;
-    let mut decls = Vec::new();
-    let mut pending_globals = HashSet::new();
+    let mut files = Vec::new();
+    let mut emitted = HashSet::new();
+    let mut scheduled = HashSet::new();
     let imports: Vec<_> = surface
         .imports
         .into_iter()
         .filter_map(|import| local_in_import_path(path, &import))
+        .filter(|import| {
+            let key = import.canonicalize().unwrap_or_else(|_| import.clone());
+            !seen.contains(&key) && scheduled.insert(key)
+        })
         .collect();
     if imports.len() > 1 {
         std::thread::scope(|s| {
             let mut handles = Vec::with_capacity(imports.len());
             for import_path in imports {
-                let key = import_path
-                    .canonicalize()
-                    .unwrap_or_else(|_| import_path.clone());
-                if !seen.insert(key) {
-                    continue;
-                }
-                handles.push(s.spawn(move || {
-                    let mut local_seen = std::collections::HashSet::new();
-                    parse_in_file_inner(&import_path, &mut local_seen)
-                }));
+                // Include ancestors so a cycle crossing a worker boundary stops.
+                // Each worker keeps independent visitation; join order decides
+                // which occurrence of a shared dependency is retained.
+                let mut local_seen = seen.clone();
+                handles.push(s.spawn(move || parse_in_file_inner(&import_path, &mut local_seen)));
             }
-            let mut results = Vec::with_capacity(handles.len());
             for handle in handles {
                 let imported = handle
                     .join()
-                    .map_err(|e| format!("import parse thread panicked: {e:?}"))?;
-                results.push(imported?);
-            }
-            for imported in results {
-                decls.extend(imported.module.decls);
-                pending_globals.extend(imported.pending_globals);
+                    .map_err(|e| format!("import parse thread panicked: {e:?}"))??;
+                for (key, parsed) in imported {
+                    seen.insert(key.clone());
+                    if emitted.insert(key.clone()) {
+                        files.push((key, parsed));
+                    }
+                }
             }
             Ok::<(), String>(())
         })?;
     } else {
         for import_path in imports {
-            let imported = parse_in_file_inner(&import_path, seen)?;
-            decls.extend(imported.module.decls);
-            pending_globals.extend(imported.pending_globals);
+            for (key, parsed) in parse_in_file_inner(&import_path, seen)? {
+                if emitted.insert(key.clone()) {
+                    files.push((key, parsed));
+                }
+            }
         }
     }
-    let parsed = parse_in_module_without_validation(&source, Some(path))?;
-    let identity = parsed.module.identity.clone();
-    decls.extend(parsed.module.decls);
-    pending_globals.extend(parsed.pending_globals);
+    files.push((
+        key,
+        parse_in_module_without_validation(&source, Some(path))?,
+    ));
+    Ok(files)
+}
+
+fn parse_in_file_with_imports(path: &Path) -> Result<ParsedInModule, String> {
+    let mut files = parse_in_file_inner(path, &mut HashSet::new())?;
+    // An initially empty visited set always includes the root file last.
+    let (_, root) = files
+        .pop()
+        .ok_or_else(|| format!("{}: missing root module", path.display()))?;
+    let identity = root.module.identity.clone();
+    let mut decls = Vec::new();
+    let mut pending_globals = HashSet::new();
+    for parsed in files
+        .into_iter()
+        .map(|(_, parsed)| parsed)
+        .chain(std::iter::once(root))
+    {
+        decls.extend(parsed.module.decls);
+        pending_globals.extend(parsed.pending_globals);
+    }
     Ok(ParsedInModule {
         module: UnifiedModule::with_identity(decls, identity),
         pending_globals,
@@ -491,11 +516,9 @@ fn parse_in_file_inner(path: &Path, seen: &mut HashSet<PathBuf>) -> Result<Parse
 
 /// Read a `.in` file and parse to core IR.
 pub fn parse_in_file(path: &Path) -> Result<UnifiedModule, String> {
-    let mut seen = HashSet::new();
-    finalize_in_module(parse_in_file_inner(path, &mut seen)?, true)
+    finalize_in_module(parse_in_file_with_imports(path)?, true)
 }
 
 pub fn parse_in_library_file(path: &Path) -> Result<UnifiedModule, String> {
-    let mut seen = HashSet::new();
-    finalize_in_module(parse_in_file_inner(path, &mut seen)?, false)
+    finalize_in_module(parse_in_file_with_imports(path)?, false)
 }

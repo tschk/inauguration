@@ -266,3 +266,5 @@ All 37 languages now route through Core IR. Swift was unified into the Tree-sitt
 - [in-language.md](in-language.md) — `.in` v0.2 grammar and `hybrid_sil` note.
 
 - [README · Core Commands](../../README.md#core-commands) — CLI flags and sample commands (no duplicate install steps here).
+
+Local `.in` file imports retain canonical file identity until merging completes. Shared dependencies and path aliases contribute declarations once, in deterministic import order; cycles terminate across parallel parser workers. Distinct files with colliding declaration names still fail validation.

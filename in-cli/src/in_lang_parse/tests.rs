@@ -2934,3 +2934,143 @@ fn global_function_address_inference_preserves_int_carriers_and_unresolved_shado
             .is_ok()
     );
 }
+
+#[test]
+fn diamond_imports_merge_each_file_once_in_deterministic_dependency_order() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-diamond-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("shared.in"),
+        "module shared;\nconst banner=\"shared\";\nfn shared()->Int{return 20;}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("left.in"),
+        "import \"./shared.in\";\nfn left()->Int{return shared();}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("right.in"),
+        "import \"./shared.in\";\nfn right()->Int{return shared()+2;}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("main.in"), "module root;\nimport \"./left.in\";\nimport \"./right.in\";\nvar selected=banner;\nfn main()->Int{return left()+right();}\n").unwrap();
+    let first = parse_in_file(&dir.join("main.in")).unwrap();
+    for _ in 0..4 {
+        assert_eq!(parse_in_file(&dir.join("main.in")).unwrap(), first);
+    }
+    let names: Vec<_> = first
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Function { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, ["shared", "left", "right", "main"]);
+    assert_eq!(first.identity.module.as_deref(), Some("root"));
+    for name in ["banner", "selected"] {
+        assert!(first.decls.iter().any(|decl| matches!(decl, Decl::Global { name: actual, typ: Typ::String, .. } if actual == name)));
+    }
+    let report = crate::core_ir_verifier::verify_for_entry(&first, "main");
+    assert!(report.ok, "{report:?}");
+    assert!(
+        crate::typecheck::TypeChecker::new()
+            .check_module(&first)
+            .is_ok()
+    );
+    // Both direct and worker-crossing cycles retain each declaration once.
+    fs::write(
+        dir.join("left.in"),
+        "import \"./main.in\";\nimport \"./shared.in\";\nfn left()->Int{return shared();}\n",
+    )
+    .unwrap();
+    let cycle = parse_in_file(&dir.join("main.in")).unwrap();
+    assert_eq!(cycle, first);
+    fs::write(
+        dir.join("library.in"),
+        "import \"./shared.in\";\nimport \"./shared.in\";\nimport \"./library.in\";\n",
+    )
+    .unwrap();
+    let library = super::parse_in_library_file(&dir.join("library.in")).unwrap();
+    assert_eq!(
+        library
+            .decls
+            .iter()
+            .filter(|decl| matches!(decl, Decl::Function { name, .. } if name == "shared"))
+            .count(),
+        1
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn import_deduplication_preserves_duplicate_declarations_from_distinct_files() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-import-collision-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["left.in", "right.in"] {
+        fs::write(dir.join(name), "fn same()->Int{return 42;}\n").unwrap();
+    }
+    fs::write(
+        dir.join("main.in"),
+        "import \"./left.in\";\nimport \"./right.in\";\nfn main()->Int{return 42;}\n",
+    )
+    .unwrap();
+    let error = parse_in_file(&dir.join("main.in")).unwrap_err();
+    assert!(error.contains("duplicate top-level name: same"), "{error}");
+    fs::write(
+        dir.join("left.in"),
+        "fn same()->Int{return 42;}\nfn same()->Int{return 42;}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("main.in"),
+        "import \"./left.in\";\nimport \"./left.in\";\nfn main()->Int{return 42;}\n",
+    )
+    .unwrap();
+    let error = parse_in_file(&dir.join("main.in")).unwrap_err();
+    assert!(error.contains("duplicate top-level name: same"), "{error}");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn import_deduplication_uses_canonical_file_identity_for_path_aliases() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-import-alias-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("shared.in"), "fn shared()->Int{return 42;}\n").unwrap();
+    std::os::unix::fs::symlink("shared.in", dir.join("alias.in")).unwrap();
+    fs::write(dir.join("main.in"), "import \"./shared.in\";\nimport \"./sub/../shared.in\";\nimport \"./alias.in\";\nfn main()->Int{return shared();}\n").unwrap();
+    let module = parse_in_file(&dir.join("main.in")).unwrap();
+    assert_eq!(
+        module
+            .decls
+            .iter()
+            .filter(|decl| matches!(decl, Decl::Function { name, .. } if name == "shared"))
+            .count(),
+        1
+    );
+    assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+    fs::remove_dir_all(dir).unwrap();
+}
