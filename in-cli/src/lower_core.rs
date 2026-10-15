@@ -1191,6 +1191,227 @@ fn rewrite_method_calls_in_expr(expr: &mut Expr, method_map: &HashMap<String, St
     }
 }
 
+fn lower_int_lit(n: i64, ssa: &mut usize, out: &mut String) -> usize {
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, {n}\n"));
+    id
+}
+
+fn lower_float_lit(f: &f64, ssa: &mut usize, out: &mut String) -> usize {
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = float_literal $Builtin.FPIEEE64, {}\n", f));
+    id
+}
+
+fn lower_bool_lit(b: bool, ssa: &mut usize, out: &mut String) -> usize {
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = bool_literal {b}\n"));
+    id
+}
+
+fn lower_string_lit(s: &str, ssa: &mut usize, out: &mut String) -> usize {
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = string_literal {s:?}\n"));
+    id
+}
+
+fn lower_ident(
+    name: &str,
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    if direct_env.contains(name) {
+        if let Some(id) = env.get(name) {
+            return *id;
+        }
+    }
+    if env.contains_key(name) {
+        let id = *ssa;
+        *ssa += 1;
+        out.push_str(&format!("%{id} = load_var {name}\n"));
+        return id;
+    }
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, 0\n"));
+    id
+}
+
+fn lower_unary(
+    op: &str,
+    expr: &Expr,
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    if let Some(n) = fold_unary_int(op, expr) {
+        return lower_int_lit(n, ssa, out);
+    }
+    if let Some(b) = fold_unary_bool(op, expr) {
+        return lower_bool_lit(b, ssa, out);
+    }
+    let arg = lower_expr(expr, env, direct_env, ssa, out);
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = builtin_unop {op:?} %{arg}\n"));
+    id
+}
+
+fn lower_binary(
+    op: &str,
+    lhs: &Expr,
+    rhs: &Expr,
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    if let Some(n) = fold_int_binop(op, lhs, rhs) {
+        return lower_int_lit(n, ssa, out);
+    }
+    if let Some(b) = fold_bool_binop(op, lhs, rhs) {
+        return lower_bool_lit(b, ssa, out);
+    }
+    let lhs_id = lower_expr(lhs, env, direct_env, ssa, out);
+    let rhs_id = lower_expr(rhs, env, direct_env, ssa, out);
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!(
+        "%{id} = builtin_binop {op:?} %{lhs_id}, %{rhs_id}\n"
+    ));
+    id
+}
+
+fn lower_struct_init(
+    name: &str,
+    fields: &[(String, Expr)],
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    let mut rendered_fields = Vec::new();
+    for (field, expr) in fields {
+        let value_id = lower_expr(expr, env, direct_env, ssa, out);
+        rendered_fields.push(format!("{field}:%{value_id}"));
+    }
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!(
+        "%{id} = struct_init {name} {}\n",
+        rendered_fields.join(", ")
+    ));
+    id
+}
+
+fn lower_field_access(
+    base: &Expr,
+    name: &str,
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    let base_id = lower_expr(base, env, direct_env, ssa, out);
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = field_access %{base_id} {name}\n"));
+    id
+}
+
+fn lower_array_lit(
+    items: &[Expr],
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    let mut item_ids = Vec::new();
+    for item in items {
+        item_ids.push(lower_expr(item, env, direct_env, ssa, out));
+    }
+    let id = *ssa;
+    *ssa += 1;
+    let rendered_items = item_ids
+        .iter()
+        .map(|id| format!("%{id}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!("%{id} = array_init {rendered_items}\n"));
+    id
+}
+
+fn lower_index_access(
+    base: &Expr,
+    index: &Expr,
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    let base_id = lower_expr(base, env, direct_env, ssa, out);
+    let index_id = lower_expr(index, env, direct_env, ssa, out);
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = index_access %{base_id}, %{index_id}\n"));
+    id
+}
+
+fn lower_call(
+    callee: &Expr,
+    args: &[Expr],
+    env: &HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    out: &mut String,
+) -> usize {
+    let mut arg_ids = Vec::new();
+    if let Expr::Ident(name) = callee {
+        let r = *ssa;
+        *ssa += 1;
+        out.push_str(&format!(
+            "%{r} = function_ref @{name} : $@convention(thin)\n"
+        ));
+        for arg in args {
+            arg_ids.push(lower_expr(arg, env, direct_env, ssa, out));
+        }
+        let id = *ssa;
+        *ssa += 1;
+        let rendered_args = arg_ids
+            .iter()
+            .map(|id| format!("%{id}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "%{id} = apply %{r}({rendered_args}) : $@convention(thin)\n"
+        ));
+        id
+    } else {
+        let _ = lower_expr(callee, env, direct_env, ssa, out);
+        for arg in args {
+            let _ = lower_expr(arg, env, direct_env, ssa, out);
+        }
+        let id = *ssa;
+        *ssa += 1;
+        out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, 0\n"));
+        id
+    }
+}
+
+fn lower_closure(ssa: &mut usize, out: &mut String) -> usize {
+    let id = *ssa;
+    *ssa += 1;
+    out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, 0\n"));
+    id
+}
+
 fn lower_expr(
     e: &Expr,
     env: &HashMap<String, usize>,
@@ -1211,177 +1432,25 @@ fn lower_expr(
             out.push_str(&format!("%{id} = tuple ()\n"));
             id
         }
-        Expr::IntLit(n) => {
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, {n}\n"));
-            id
-        }
-        Expr::FloatLit(f) => {
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!(
-                "%{id} = float_literal $Builtin.FPIEEE64, {}\n",
-                f.0
-            ));
-            id
-        }
-        Expr::BoolLit(b) => {
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = bool_literal {b}\n"));
-            id
-        }
-        Expr::StringLit(s) => {
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = string_literal {s:?}\n"));
-            id
-        }
-        Expr::Ident(name) => {
-            if direct_env.contains(name)
-                && let Some(id) = env.get(name)
-            {
-                return *id;
-            }
-            if env.contains_key(name) {
-                let id = *ssa;
-                *ssa += 1;
-                out.push_str(&format!("%{id} = load_var {name}\n"));
-                return id;
-            }
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, 0\n"));
-            id
-        }
-        Expr::Unary { op, expr, .. } => {
-            if let Some(n) = fold_unary_int(op, expr) {
-                let id = *ssa;
-                *ssa += 1;
-                out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, {n}\n"));
-                return id;
-            }
-            if let Some(b) = fold_unary_bool(op, expr) {
-                let id = *ssa;
-                *ssa += 1;
-                out.push_str(&format!("%{id} = bool_literal {b}\n"));
-                return id;
-            }
-            let arg = lower_expr(expr, env, direct_env, ssa, out);
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = builtin_unop {op:?} %{arg}\n"));
-            id
-        }
-        Expr::Binary { op, lhs, rhs, .. } => {
-            if let Some(n) = fold_int_binop(op, lhs, rhs) {
-                let id = *ssa;
-                *ssa += 1;
-                out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, {n}\n"));
-                return id;
-            }
-            if let Some(b) = fold_bool_binop(op, lhs, rhs) {
-                let id = *ssa;
-                *ssa += 1;
-                out.push_str(&format!("%{id} = bool_literal {b}\n"));
-                return id;
-            }
-            let lhs_id = lower_expr(lhs, env, direct_env, ssa, out);
-            let rhs_id = lower_expr(rhs, env, direct_env, ssa, out);
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!(
-                "%{id} = builtin_binop {op:?} %{lhs_id}, %{rhs_id}\n"
-            ));
-            id
-        }
+        Expr::IntLit(n) => lower_int_lit(*n, ssa, out),
+        Expr::FloatLit(f) => lower_float_lit(&f.0, ssa, out),
+        Expr::BoolLit(b) => lower_bool_lit(*b, ssa, out),
+        Expr::StringLit(s) => lower_string_lit(s, ssa, out),
+        Expr::Ident(name) => lower_ident(name, env, direct_env, ssa, out),
+        Expr::Unary { op, expr, .. } => lower_unary(op, expr, env, direct_env, ssa, out),
+        Expr::Binary { op, lhs, rhs, .. } => lower_binary(op, lhs, rhs, env, direct_env, ssa, out),
         Expr::StructInit { name, fields, .. } => {
-            let mut rendered_fields = Vec::new();
-            for (field, expr) in fields {
-                let value_id = lower_expr(expr, env, direct_env, ssa, out);
-                rendered_fields.push(format!("{field}:%{value_id}"));
-            }
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!(
-                "%{id} = struct_init {name} {}\n",
-                rendered_fields.join(", ")
-            ));
-            id
+            lower_struct_init(name, fields, env, direct_env, ssa, out)
         }
-        Expr::Field { base, name, .. } => {
-            let base_id = lower_expr(base, env, direct_env, ssa, out);
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = field_access %{base_id} {name}\n"));
-            id
-        }
-        Expr::ArrayLit(items) => {
-            let mut item_ids = Vec::new();
-            for item in items {
-                item_ids.push(lower_expr(item, env, direct_env, ssa, out));
-            }
-            let id = *ssa;
-            *ssa += 1;
-            let rendered_items = item_ids
-                .iter()
-                .map(|id| format!("%{id}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            out.push_str(&format!("%{id} = array_init {rendered_items}\n"));
-            id
-        }
+        Expr::Field { base, name, .. } => lower_field_access(base, name, env, direct_env, ssa, out),
+        Expr::ArrayLit(items) => lower_array_lit(items, env, direct_env, ssa, out),
         Expr::Index { base, index, .. } => {
-            let base_id = lower_expr(base, env, direct_env, ssa, out);
-            let index_id = lower_expr(index, env, direct_env, ssa, out);
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = index_access %{base_id}, %{index_id}\n"));
-            id
+            lower_index_access(base, index, env, direct_env, ssa, out)
         }
-        Expr::Call { callee, args, .. } => {
-            let mut arg_ids = Vec::new();
-            if let Expr::Ident(name) = callee.as_ref() {
-                let r = *ssa;
-                *ssa += 1;
-                out.push_str(&format!(
-                    "%{r} = function_ref @{name} : $@convention(thin)\n"
-                ));
-                for arg in args {
-                    arg_ids.push(lower_expr(arg, env, direct_env, ssa, out));
-                }
-                let id = *ssa;
-                *ssa += 1;
-                let rendered_args = arg_ids
-                    .iter()
-                    .map(|id| format!("%{id}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                out.push_str(&format!(
-                    "%{id} = apply %{r}({rendered_args}) : $@convention(thin)\n"
-                ));
-                id
-            } else {
-                let _ = lower_expr(callee, env, direct_env, ssa, out);
-                for arg in args {
-                    let _ = lower_expr(arg, env, direct_env, ssa, out);
-                }
-                let id = *ssa;
-                *ssa += 1;
-                out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, 0\n"));
-                id
-            }
-        }
-        Expr::Closure { .. } => {
-            let id = *ssa;
-            *ssa += 1;
-            out.push_str(&format!("%{id} = integer_literal $Builtin.Int64, 0\n"));
-            id
-        }
+        Expr::Call { callee, args, .. } => lower_call(callee, args, env, direct_env, ssa, out),
+        Expr::Closure { .. } => lower_closure(ssa, out),
     }
 }
-
 fn const_int(e: &Expr) -> Option<i64> {
     match e {
         Expr::IntLit(n) => Some(*n),
@@ -1840,129 +1909,40 @@ fn lower_stmts_with_env(
                 then_body,
                 else_body,
             } => {
-                let cond_id = lower_expr(cond, env, direct_env, ssa, &mut out);
-                let label_id = *ssa;
-                *ssa += 1;
-                let then_label = format!("bb_if_then_{label_id}");
-                let else_label = format!("bb_if_else_{label_id}");
-                let end_label = format!("bb_if_end_{label_id}");
-                out.push_str(&format!("cond_br %{cond_id}, {then_label}, {else_label}\n"));
-                out.push_str(&format!("label {then_label}\n"));
-                let mut then_env = env.clone();
-                out.push_str(&lower_stmts_with_env(
+                lower_if_stmt(
+                    cond,
                     then_body,
+                    else_body,
+                    env,
+                    direct_env,
                     ssa,
                     finish_with_return,
-                    false,
-                    &mut then_env,
-                    direct_env,
-                    true,
-                ));
-                out.push_str(&format!("br {end_label}\n"));
-                out.push_str(&format!("label {else_label}\n"));
-                if !else_body.is_empty() {
-                    let mut else_env = env.clone();
-                    out.push_str(&lower_stmts_with_env(
-                        else_body,
-                        ssa,
-                        finish_with_return,
-                        false,
-                        &mut else_env,
-                        direct_env,
-                        true,
-                    ));
-                }
-                out.push_str(&format!("br {end_label}\n"));
-                out.push_str(&format!("label {end_label}\n"));
+                    &mut out,
+                );
             }
             Stmt::Loop { cond, body, .. } => {
-                let label_id = *ssa;
-                *ssa += 1;
-                let head_label = format!("bb_loop_head_{label_id}");
-                let body_label = format!("bb_loop_body_{label_id}");
-                let end_label = format!("bb_loop_end_{label_id}");
-                out.push_str(&format!("br {head_label}\n"));
-                out.push_str(&format!("label {head_label}\n"));
-                if let Some(c) = cond {
-                    let cond_id = lower_expr(c, env, direct_env, ssa, &mut out);
-                    out.push_str(&format!("cond_br %{cond_id}, {body_label}, {end_label}\n"));
-                } else {
-                    out.push_str(&format!("br {body_label}\n"));
-                }
-                out.push_str(&format!("label {body_label}\n"));
-                let mut loop_env = env.clone();
-                out.push_str(&lower_stmts_with_env(
+                lower_loop_stmt(
+                    cond,
                     body,
+                    env,
+                    direct_env,
                     ssa,
                     finish_with_return,
-                    false,
-                    &mut loop_env,
-                    direct_env,
-                    true,
-                ));
-                out.push_str(&format!("br {head_label}\n"));
-                out.push_str(&format!("label {end_label}\n"));
+                    &mut out,
+                );
             }
             Stmt::Match {
                 scrutinee, arms, ..
             } => {
-                let scrutinee_id = lower_expr(scrutinee, env, direct_env, ssa, &mut out);
-                let label_id = *ssa;
-                *ssa += 1;
-                let end_label = format!("bb_match_end_{label_id}");
-                let mut default_arm = None;
-                for arm in arms {
-                    let pattern =
-                        MatchPattern::parse(&arm.pattern).unwrap_or(MatchPattern::WildPat);
-                    if pattern == MatchPattern::WildPat {
-                        default_arm = Some(arm);
-                        continue;
-                    }
-                    let next_label = format!("bb_match_next_{label_id}_{}", *ssa);
-                    let arm_label = format!("bb_match_arm_{label_id}_{}", *ssa);
-                    let bindings = lower_pattern_into(
-                        &pattern,
-                        scrutinee_id,
-                        &arm_label,
-                        &next_label,
-                        ssa,
-                        &mut out,
-                    );
-                    out.push_str(&format!("label {arm_label}\n"));
-                    out.push_str("// match.arm\n");
-                    let pre_keys: Vec<String> = env.keys().cloned().collect();
-                    for (name, id) in &bindings {
-                        env.insert(name.clone(), *id);
-                        out.push_str(&format!("store_var {name} %{id}\n"));
-                    }
-                    out.push_str(&lower_stmts_with_env(
-                        &arm.body,
-                        ssa,
-                        finish_with_return,
-                        false,
-                        env,
-                        direct_env,
-                        true,
-                    ));
-                    env.retain(|k, _| pre_keys.contains(k));
-                    out.push_str(&format!("br {end_label}\n"));
-                    out.push_str(&format!("label {next_label}\n"));
-                }
-                if let Some(arm) = default_arm {
-                    out.push_str("// match.arm\n");
-                    let pre_keys: Vec<String> = env.keys().cloned().collect();
-                    out.push_str(&lower_stmts_with_env(
-                        &arm.body,
-                        ssa,
-                        finish_with_return,
-                        false,
-                        env,
-                        direct_env,
-                        true,
-                    ));
-                    env.retain(|k, _| pre_keys.contains(k));
-                }
-                out.push_str(&format!("label {end_label}\n"));
+                lower_match_stmt(
+                    scrutinee,
+                    arms,
+                    env,
+                    direct_env,
+                    ssa,
+                    finish_with_return,
+                    &mut out,
+                );
             }
             Stmt::Return(None) => {
                 let id = *ssa;
@@ -1992,40 +1972,16 @@ fn lower_stmts_with_env(
                 return out;
             }
             Stmt::Try { body, catches, .. } => {
-                let label_id = *ssa;
-                *ssa += 1;
-                let try_body_label = format!("bb_try_body_{label_id}");
-                let try_catch_label = format!("bb_try_catch_{label_id}");
-                let try_end_label = format!("bb_try_end_{label_id}");
-                out.push_str(&format!("br {try_body_label}\n"));
-                out.push_str(&format!("label {try_body_label}\n"));
-                let pre_keys: Vec<String> = env.keys().cloned().collect();
-                out.push_str(&lower_stmts_with_env(
+                lower_try_stmt(
                     body,
-                    ssa,
-                    finish_with_return,
-                    false,
+                    catches,
                     env,
                     direct_env,
+                    ssa,
+                    finish_with_return,
                     force_stores,
-                ));
-                env.retain(|k, _| pre_keys.contains(k));
-                out.push_str(&format!("br {try_end_label}\n"));
-                out.push_str(&format!("label {try_catch_label}\n"));
-                for arm in catches {
-                    let pre_keys: Vec<String> = env.keys().cloned().collect();
-                    out.push_str(&lower_stmts_with_env(
-                        &arm.body,
-                        ssa,
-                        finish_with_return,
-                        false,
-                        env,
-                        direct_env,
-                        force_stores,
-                    ));
-                    env.retain(|k, _| pre_keys.contains(k));
-                }
-                out.push_str(&format!("label {try_end_label}\n"));
+                    &mut out,
+                );
             }
             Stmt::Break | Stmt::Continue => {}
             Stmt::Propagate => out.push_str("builtin_call \"propagate_error\"\n"),
@@ -2041,6 +1997,196 @@ fn lower_stmts_with_env(
         out.push_str(&format!("bb1:\nreturn %{v} : $Builtin.Int64\n"));
     }
     out
+}
+
+fn lower_if_stmt(
+    cond: &Expr,
+    then_body: &[Stmt],
+    else_body: &[Stmt],
+    env: &mut HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    finish_with_return: bool,
+    out: &mut String,
+) {
+    let cond_id = lower_expr(cond, env, direct_env, ssa, out);
+    let label_id = *ssa;
+    *ssa += 1;
+    let then_label = format!("bb_if_then_{label_id}");
+    let else_label = format!("bb_if_else_{label_id}");
+    let end_label = format!("bb_if_end_{label_id}");
+    out.push_str(&format!("cond_br %{cond_id}, {then_label}, {else_label}\n"));
+    out.push_str(&format!("label {then_label}\n"));
+    let mut then_env = env.clone();
+    out.push_str(&lower_stmts_with_env(
+        then_body,
+        ssa,
+        finish_with_return,
+        false,
+        &mut then_env,
+        direct_env,
+        true,
+    ));
+    out.push_str(&format!("br {end_label}\n"));
+    out.push_str(&format!("label {else_label}\n"));
+    if !else_body.is_empty() {
+        let mut else_env = env.clone();
+        out.push_str(&lower_stmts_with_env(
+            else_body,
+            ssa,
+            finish_with_return,
+            false,
+            &mut else_env,
+            direct_env,
+            true,
+        ));
+    }
+    out.push_str(&format!("br {end_label}\n"));
+    out.push_str(&format!("label {end_label}\n"));
+}
+
+fn lower_loop_stmt(
+    cond: &Option<Expr>,
+    body: &[Stmt],
+    env: &mut HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    finish_with_return: bool,
+    out: &mut String,
+) {
+    let label_id = *ssa;
+    *ssa += 1;
+    let head_label = format!("bb_loop_head_{label_id}");
+    let body_label = format!("bb_loop_body_{label_id}");
+    let end_label = format!("bb_loop_end_{label_id}");
+    out.push_str(&format!("br {head_label}\n"));
+    out.push_str(&format!("label {head_label}\n"));
+    if let Some(c) = cond {
+        let cond_id = lower_expr(c, env, direct_env, ssa, out);
+        out.push_str(&format!("cond_br %{cond_id}, {body_label}, {end_label}\n"));
+    } else {
+        out.push_str(&format!("br {body_label}\n"));
+    }
+    out.push_str(&format!("label {body_label}\n"));
+    let mut loop_env = env.clone();
+    out.push_str(&lower_stmts_with_env(
+        body,
+        ssa,
+        finish_with_return,
+        false,
+        &mut loop_env,
+        direct_env,
+        true,
+    ));
+    out.push_str(&format!("br {head_label}\n"));
+    out.push_str(&format!("label {end_label}\n"));
+}
+
+fn lower_match_stmt(
+    scrutinee: &Expr,
+    arms: &[crate::core_ir::MatchArm],
+    env: &mut HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    finish_with_return: bool,
+    out: &mut String,
+) {
+    let scrutinee_id = lower_expr(scrutinee, env, direct_env, ssa, out);
+    let label_id = *ssa;
+    *ssa += 1;
+    let end_label = format!("bb_match_end_{label_id}");
+    let mut default_arm = None;
+    for arm in arms {
+        let pattern = MatchPattern::parse(&arm.pattern).unwrap_or(MatchPattern::WildPat);
+        if pattern == MatchPattern::WildPat {
+            default_arm = Some(arm);
+            continue;
+        }
+        let next_label = format!("bb_match_next_{label_id}_{}", *ssa);
+        let arm_label = format!("bb_match_arm_{label_id}_{}", *ssa);
+        let bindings =
+            lower_pattern_into(&pattern, scrutinee_id, &arm_label, &next_label, ssa, out);
+        out.push_str(&format!("label {arm_label}\n"));
+        out.push_str("// match.arm\n");
+        let pre_keys: Vec<String> = env.keys().cloned().collect();
+        for (name, id) in &bindings {
+            env.insert(name.clone(), *id);
+            out.push_str(&format!("store_var {name} %{id}\n"));
+        }
+        out.push_str(&lower_stmts_with_env(
+            &arm.body,
+            ssa,
+            finish_with_return,
+            false,
+            env,
+            direct_env,
+            true,
+        ));
+        env.retain(|k, _| pre_keys.contains(k));
+        out.push_str(&format!("br {end_label}\n"));
+        out.push_str(&format!("label {next_label}\n"));
+    }
+    if let Some(arm) = default_arm {
+        out.push_str("// match.arm\n");
+        let pre_keys: Vec<String> = env.keys().cloned().collect();
+        out.push_str(&lower_stmts_with_env(
+            &arm.body,
+            ssa,
+            finish_with_return,
+            false,
+            env,
+            direct_env,
+            true,
+        ));
+        env.retain(|k, _| pre_keys.contains(k));
+    }
+    out.push_str(&format!("label {end_label}\n"));
+}
+
+fn lower_try_stmt(
+    body: &[Stmt],
+    catches: &[crate::core_ir::CatchArm],
+    env: &mut HashMap<String, usize>,
+    direct_env: &HashSet<String>,
+    ssa: &mut usize,
+    finish_with_return: bool,
+    force_stores: bool,
+    out: &mut String,
+) {
+    let label_id = *ssa;
+    *ssa += 1;
+    let try_body_label = format!("bb_try_body_{label_id}");
+    let try_catch_label = format!("bb_try_catch_{label_id}");
+    let try_end_label = format!("bb_try_end_{label_id}");
+    out.push_str(&format!("br {try_body_label}\n"));
+    out.push_str(&format!("label {try_body_label}\n"));
+    let pre_keys: Vec<String> = env.keys().cloned().collect();
+    out.push_str(&lower_stmts_with_env(
+        body,
+        ssa,
+        finish_with_return,
+        false,
+        env,
+        direct_env,
+        force_stores,
+    ));
+    env.retain(|k, _| pre_keys.contains(k));
+    out.push_str(&format!("br {try_end_label}\n"));
+    out.push_str(&format!("label {try_catch_label}\n"));
+    for arm in catches {
+        let pre_keys: Vec<String> = env.keys().cloned().collect();
+        out.push_str(&lower_stmts_with_env(
+            &arm.body,
+            ssa,
+            finish_with_return,
+            false,
+            env,
+            direct_env,
+            force_stores,
+        ));
+        env.retain(|k, _| pre_keys.contains(k));
+    }
+    out.push_str(&format!("label {try_end_label}\n"));
 }
 
 fn helper_stub(ssa: &mut usize) -> String {

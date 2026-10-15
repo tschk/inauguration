@@ -6,6 +6,76 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[derive(Default, Clone)]
+pub struct CargoManifest {
+    pub package_name: Option<String>,
+    pub lib_path: Option<String>,
+}
+
+impl CargoManifest {
+    pub fn parse(toml: &str) -> Self {
+        let mut manifest = CargoManifest::default();
+        let mut in_package = false;
+        let mut in_lib = false;
+
+        for line in toml.lines() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            if t.starts_with('[') {
+                in_package = t == "[package]";
+                in_lib = t == "[lib]";
+                continue;
+            }
+            if in_package && t.starts_with("name") {
+                if let Some(idx) = t.find('=') {
+                    let val = t[idx + 1..].trim();
+                    let val = val.strip_prefix('"').unwrap_or(val);
+                    let val = val.strip_suffix('"').unwrap_or(val);
+                    manifest.package_name = Some(val.to_string());
+                }
+            } else if in_lib && t.starts_with("path") {
+                if let Some(idx) = t.find('=') {
+                    let val = t[idx + 1..].trim();
+                    let val = val.strip_prefix('"').unwrap_or(val);
+                    let val = val.strip_suffix('"').unwrap_or(val);
+                    manifest.lib_path = Some(val.to_string());
+                }
+            }
+        }
+        manifest
+    }
+}
+
+static MANIFEST_CACHE: std::sync::LazyLock<Mutex<HashMap<PathBuf, (Instant, Arc<CargoManifest>)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn get_manifest(crate_dir: &Path) -> Option<Arc<CargoManifest>> {
+    let toml_path = crate_dir.join("Cargo.toml");
+    let key = toml_path.clone();
+
+    if let Ok(cache) = MANIFEST_CACHE.lock() {
+        if let Some((timestamp, manifest)) = cache.get(&key) {
+            if timestamp.elapsed() < METADATA_CACHE_TTL {
+                return Some(Arc::clone(manifest));
+            }
+        }
+    }
+
+    if let Ok(content) = std::fs::read_to_string(&toml_path) {
+        let manifest = Arc::new(CargoManifest::parse(&content));
+
+        if let Ok(mut cache) = MANIFEST_CACHE.lock() {
+            cache.insert(key, (Instant::now(), Arc::clone(&manifest)));
+        }
+
+        return Some(manifest);
+    }
+
+    None
+}
+
 /// Cached cargo metadata (avoids re-running `cargo metadata` every compile).
 static METADATA_CACHE: std::sync::LazyLock<
     Mutex<HashMap<PathBuf, (Instant, Arc<serde_json::Value>)>>,
@@ -231,64 +301,28 @@ pub fn find_crate_dir(start: &Path) -> Option<PathBuf> {
 }
 
 pub fn crate_package_name(crate_dir: &Path) -> Option<String> {
-    let toml = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
-    let mut in_package = false;
-    for line in toml.lines() {
-        let t = line.trim();
-        if t == "[package]" {
-            in_package = true;
-            continue;
-        }
-        if t.starts_with('[') {
-            in_package = false;
-        }
-        if in_package && t.starts_with("name") {
-            return t
-                .split('=')
-                .nth(1)
-                .map(|v| v.trim().trim_matches('"').to_string());
-        }
-    }
-    None
+    get_manifest(crate_dir).and_then(|m| m.package_name.clone())
 }
 
 /// Find the crate root file (lib.rs or main.rs) from a project directory.
 pub fn find_crate_root(project_dir: &Path) -> Result<PathBuf, String> {
     let project_dir = find_crate_dir(project_dir).unwrap_or_else(|| project_dir.to_path_buf());
-    // Check for Cargo.toml
-    let cargo_toml = project_dir.join("Cargo.toml");
-    if cargo_toml.exists() {
-        if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
-            let lines: Vec<&str> = content.lines().collect();
-            // Find [lib] section and look for path = ... within it
-            for i in 0..lines.len() {
-                if lines[i].trim() == "[lib]" {
-                    // Scan subsequent lines until next section
-                    for j in (i + 1)..lines.len().min(i + 20) {
-                        let trimmed = lines[j].trim();
-                        if trimmed.starts_with('[') {
-                            break;
-                        } // next section
-                        if let Some(val) = trimmed.strip_prefix("path").and_then(|s| {
-                            s.split('=')
-                                .nth(1)
-                                .map(|v| v.trim().trim_matches('"').to_string())
-                        }) {
-                            let lib_rs = project_dir.join(&val);
-                            if lib_rs.exists() {
-                                return Ok(lib_rs);
-                            }
-                        }
-                    }
-                }
-            }
-            // Default: src/lib.rs
-            let default_lib = project_dir.join("src").join("lib.rs");
-            if default_lib.exists() {
-                return Ok(default_lib);
+
+    if let Some(manifest) = get_manifest(&project_dir) {
+        if let Some(lib_path_str) = &manifest.lib_path {
+            let lib_rs = project_dir.join(lib_path_str);
+            if lib_rs.exists() {
+                return Ok(lib_rs);
             }
         }
     }
+
+    // Default: src/lib.rs
+    let default_lib = project_dir.join("src").join("lib.rs");
+    if default_lib.exists() {
+        return Ok(default_lib);
+    }
+
     Err("no crate root found".to_string())
 }
 
@@ -439,16 +473,16 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_cargo_dependencies_finds_and_compiles() {
+    fn test_compile_cargo_dependencies_finds_and_compiles() -> std::io::Result<()> {
         let temp = TempDirGuard::new();
         let cargo_toml = temp.path.join("Cargo.toml");
         let src_dir = temp.path.join("src");
-        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&src_dir)?;
         let lib_rs = src_dir.join("lib.rs");
 
         let dep_dir = temp.path.join("dummy-dep");
         let dep_src_dir = dep_dir.join("src");
-        fs::create_dir_all(&dep_src_dir).unwrap();
+        fs::create_dir_all(&dep_src_dir)?;
         let dep_cargo_toml = dep_dir.join("Cargo.toml");
         let dep_lib_rs = dep_src_dir.join("lib.rs");
 
@@ -461,9 +495,8 @@ name = "libc"
 version = "0.2.0"
 edition = "2021"
 "#,
-        )
-        .unwrap();
-        fs::write(&dep_lib_rs, "pub fn libc_func() {}").unwrap();
+        )?;
+        fs::write(&dep_lib_rs, "pub fn libc_func() {}")?;
 
         fs::write(
             &cargo_toml,
@@ -475,9 +508,8 @@ edition = "2021"
 [dependencies]
 libc = { path = "dummy-dep" }
 "#,
-        )
-        .unwrap();
-        fs::write(&lib_rs, "pub fn foo() {}").unwrap();
+        )?;
+        fs::write(&lib_rs, "pub fn foo() {}")?;
 
         let modules = compile_cargo_dependencies(&temp.path);
 
@@ -490,6 +522,8 @@ libc = { path = "dummy-dep" }
             libc_dep.is_some(),
             "Expected 'libc' to be in the compiled dependencies"
         );
+
+        Ok(())
     }
 
     #[test]
@@ -520,11 +554,84 @@ libc = { path = "dummy-dep" }
     }
 
     #[test]
-    fn test_compile_cargo_dependencies_invalid_cargo_toml() {
+    fn test_compile_cargo_dependencies_invalid_cargo_toml() -> std::io::Result<()> {
         let temp = TempDirGuard::new();
         let cargo_toml = temp.path.join("Cargo.toml");
-        fs::write(&cargo_toml, "invalid toml [] [] []").unwrap();
+        fs::write(&cargo_toml, "invalid toml [] [] []")?;
         let modules = compile_cargo_dependencies(&temp.path);
         assert!(modules.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_crate_root_default() {
+        let temp = TempDirGuard::new();
+        let src_dir = temp.path.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(&lib_rs, "pub fn default() {}").unwrap();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"test-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(find_crate_root(&temp.path).unwrap(), lib_rs);
+    }
+
+    #[test]
+    fn test_find_crate_root_custom_path() {
+        let temp = TempDirGuard::new();
+        let custom_lib = temp.path.join("custom_lib.rs");
+        fs::write(&custom_lib, "pub fn custom() {}").unwrap();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"custom-crate\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"custom_lib.rs\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(find_crate_root(&temp.path).unwrap(), custom_lib);
+    }
+
+    #[test]
+    fn test_find_crate_root_nested_dir() {
+        let temp = TempDirGuard::new();
+        let src_dir = temp.path.join("src");
+        let nested_dir = src_dir.join("nested").join("module");
+        fs::create_dir_all(&nested_dir).unwrap();
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(&lib_rs, "pub fn default() {}").unwrap();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"test-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(find_crate_root(&nested_dir).unwrap(), lib_rs);
+    }
+
+    #[test]
+    fn test_find_crate_root_no_cargo_toml() {
+        let temp = TempDirGuard::new();
+        assert_eq!(
+            find_crate_root(&temp.path),
+            Err("no crate root found".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_crate_root_no_lib_rs() {
+        let temp = TempDirGuard::new();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"test-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_crate_root(&temp.path),
+            Err("no crate root found".to_string())
+        );
     }
 }

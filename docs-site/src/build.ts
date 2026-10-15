@@ -61,37 +61,47 @@ export async function buildSite(
     data: pageIr,
     signal: new AbortController().signal,
   };
-  const html = await renderer.prerender(ctx);
-  await writeFile(join(outDir, "index.html"), html);
-
-  await cp(join(siteDir, "static"), join(outDir, "static"), {
-    recursive: true,
-  });
 
   const docsOut = join(outDir, "docs");
-  await mkdir(docsOut, { recursive: true });
-  const hook = join(siteDir, "scripts", "docs-hook.sh");
-  const proc = Bun.spawn(
-    [
-      "bash",
-      hook,
-      "--docs-src",
-      join(repoRoot, "docs"),
-      "--out-dir",
-      docsOut,
-      "--site-name",
-      "inauguration",
-    ],
-    { cwd: siteDir, stdout: "inherit", stderr: "inherit" },
-  );
-  const code = await proc.exited;
-  if (code !== 0) {
-    throw new Error(`docs-gen exited ${code}`);
-  }
 
-  await writeFile(join(outDir, "404.html"), notFoundHtml);
-  await writeFile(join(outDir, "_redirects"), redirects);
-  await writeFile(join(outDir, "CNAME"), "inauguration.tsc.hk\n");
+  await Promise.all([
+    // Render and write index.html
+    renderer.prerender(ctx).then((html) => writeFile(join(outDir, "index.html"), html)),
+
+    // Copy static directory
+    cp(join(siteDir, "static"), join(outDir, "static"), {
+      recursive: true,
+    }),
+
+    // Build docs
+    (async () => {
+      await mkdir(docsOut, { recursive: true });
+      const hook = join(siteDir, "scripts", "docs-hook.sh");
+      const proc = Bun.spawn(
+        [
+          "bash",
+          hook,
+          "--docs-src",
+          join(repoRoot, "docs"),
+          "--out-dir",
+          docsOut,
+          "--site-name",
+          "inauguration",
+        ],
+        { cwd: siteDir, stdout: "inherit", stderr: "inherit" },
+      );
+      const code = await proc.exited;
+      if (code !== 0) {
+        throw new Error(`docs-gen exited ${code}`);
+      }
+    })(),
+
+    // Write static files
+    writeFile(join(outDir, "404.html"), notFoundHtml),
+    writeFile(join(outDir, "_redirects"), redirects),
+    writeFile(join(outDir, "CNAME"), "inauguration.tsc.hk\n"),
+  ]);
+
   console.log(`wrote ${outDir}`);
 }
 

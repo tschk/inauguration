@@ -158,7 +158,8 @@ mod tests {
         let result = load_dynamic_module(&lib);
         assert!(matches!(
             result,
-            Err(DynamicModuleError::EntryMissing { .. })
+            Err(DynamicModuleError::EntryMissing { ref symbol, .. })
+                if symbol == super::IN_MODULE_ENTRY_SYMBOL
         ));
     }
 
