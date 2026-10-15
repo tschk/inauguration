@@ -13,8 +13,10 @@ func (c *Calculator) Answer() int {
 }
 
 func (c *Calculator) Add(x int) int {
-	c.value = c.value + x
-	return c.value
+	v := c.value
+	v += x
+	c.value = v
+	return v
 }
 
 func answer() int {
