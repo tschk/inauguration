@@ -2407,7 +2407,7 @@ fn is_compatible(expected: &Typ, actual: &Typ) -> bool {
 }
 
 fn is_builtin_fn(name: &str) -> bool {
-    if crate::core_atomic::signature(name).is_some() {
+    if crate::core_ir_verifier::intrinsic_return_type(name).is_some() {
         return true;
     }
     matches!(

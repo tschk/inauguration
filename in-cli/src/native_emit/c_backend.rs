@@ -4,7 +4,9 @@
 //! Compile with: zig cc -c -target x86_64-freestanding -ffreestanding -O2 kernel.c
 
 use crate::core_ir::{Decl, Expr, LoopKind, Stmt, Typ, UnifiedModule};
-use std::collections::HashSet;
+use crate::typecheck::{Facts, TypeChecker};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 #[path = "c_backend_scan.rs"]
@@ -65,9 +67,11 @@ fn sanitize_comment(s: &str) -> String {
 
 /// Emit a complete C translation unit from Core IR.
 pub fn emit_c_module(module: &UnifiedModule) -> Result<String, String> {
-    let prepared = crate::lower_core::prepared_native_module(module);
+    let mut prepared = crate::lower_core::prepared_native_module(module);
+    check_module_limits(prepared.as_ref())?;
+    // Hoisted declarations require unique lexical names, even on the borrowed fast path.
+    crate::core_bindings::normalize_decls(&mut prepared.to_mut().decls);
     let module = prepared.as_ref();
-    check_module_limits(module)?;
 
     let mut names = HashSet::new();
     for decl in &module.decls {
@@ -85,7 +89,17 @@ pub fn emit_c_module(module: &UnifiedModule) -> Result<String, String> {
             _ => {}
         }
     }
-    let mut ctx = Ctx::new(Rc::new(names));
+    let checker = TypeChecker::new();
+    let facts = Rc::new(checker.collect_decl_facts(&module.decls));
+    let mut ctx = Ctx::new(Rc::new(names), facts);
+    ctx.types = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global { name, typ, .. } => Some((name.clone(), typ.clone())),
+            _ => None,
+        })
+        .collect();
     ctx.global_names = Rc::new(
         module
             .decls
@@ -303,11 +317,17 @@ static inline int64_t in_float_saturate(double value, unsigned bits, int is_sign
         }
     }
 
+    if let Some(error) = ctx.error.borrow_mut().take() {
+        return Err(error);
+    }
     Ok(ctx.out)
 }
 
 struct Ctx {
     out: String,
+    facts: Rc<Facts>,
+    types: HashMap<String, Typ>,
+    error: Rc<RefCell<Option<String>>>,
     indent_lvl: u32,
     func_names: Rc<HashSet<String>>,
     global_names: Rc<HashSet<String>>,
@@ -318,9 +338,12 @@ struct Ctx {
 }
 
 impl Ctx {
-    fn new(func_names: Rc<HashSet<String>>) -> Self {
+    fn new(func_names: Rc<HashSet<String>>, facts: Rc<Facts>) -> Self {
         Self {
             out: String::with_capacity(4096),
+            facts,
+            types: HashMap::new(),
+            error: Rc::new(RefCell::new(None)),
             indent_lvl: 0,
             func_names,
             global_names: Rc::new(HashSet::new()),
@@ -328,6 +351,20 @@ impl Ctx {
             tmp: 0,
             ret_is_void: false,
         }
+    }
+
+    fn fail(&self, message: String) {
+        let mut error = self.error.borrow_mut();
+        if error.is_none() {
+            *error = Some(message);
+        }
+    }
+
+    fn capture_type(&self, name: &str) -> Typ {
+        self.types.get(name).cloned().unwrap_or_else(|| {
+            self.fail(format!("c-backend: cannot infer capture `{name}`"));
+            Typ::Int
+        })
     }
 
     fn fresh(&mut self, prefix: &str) -> String {
@@ -457,11 +494,18 @@ impl Ctx {
                     return format!("{}({})", sanitize_ident(name), as_.join(", "));
                 }
                 if let Expr::Ident(name) = &**callee {
+                    if self.types.contains_key(name) && !self.is_func(name) {
+                        self.fail(format!(
+                            "c-backend: indirect local call `{name}` requires a function signature"
+                        ));
+                        return "0".into();
+                    }
                     self.intrinsic_or_call(name, args)
                 } else {
-                    let callee_s = self.expr_str(callee);
-                    let as_: Vec<String> = args.iter().map(|a| self.expr_str(a)).collect();
-                    format!("(({})({}))", callee_s, as_.join(", "))
+                    self.fail(
+                        "c-backend: indirect expression call requires a function signature".into(),
+                    );
+                    "0".into()
                 }
             }
             Expr::Field { base, name } => {
@@ -479,9 +523,19 @@ impl Ctx {
             }
             Expr::ArrayLit(items) => {
                 let els: Vec<String> = items.iter().map(|e| self.expr_str(e)).collect();
-                // Compound literal of int64_t; caller must keep storage live.
+                let typ = TypeChecker::new().expr_type(expr, &self.facts, &self.types);
+                let element = match typ.map(|typ| typ.canonical()) {
+                    // Empty sequence inference carries Void; preserve the existing empty carrier.
+                    Some(Typ::Array(item)) if item.canonical() == Typ::Void => "int64_t".into(),
+                    Some(Typ::Array(item)) => ctype(&item),
+                    _ => {
+                        self.fail("c-backend: cannot infer array element type".into());
+                        "int64_t".into()
+                    }
+                };
+                // Compound literal; caller must keep storage live.
                 format!(
-                    "((int64_t[]){{{}}})",
+                    "(({element}[]){{{}}})",
                     if els.is_empty() {
                         "0".into()
                     } else {
@@ -503,9 +557,13 @@ impl Ctx {
                 if !captures.is_empty() {
                     helper.push_str(&format!("struct {} {{\n", env_name));
                     for cap in captures {
-                        helper.push_str(&format!("  int64_t {};\n", sanitize_ident(cap)));
+                        helper.push_str(&format!(
+                            "  {} {};\n",
+                            ctype(&self.capture_type(cap)),
+                            sanitize_ident(cap)
+                        ));
                     }
-                    helper.push_str(&format!("}}\nstatic struct {} {};\n", env_name, env_name));
+                    helper.push_str(&format!("}};\nstatic struct {} {};\n", env_name, env_name));
                 }
                 let ps: Vec<String> = params
                     .iter()
@@ -517,18 +575,39 @@ impl Ctx {
                     cname,
                     ps.join(", ")
                 ));
-                let mut nested = Ctx::new(self.func_names.clone());
+                let mut nested = Ctx::new(self.func_names.clone(), self.facts.clone());
+                nested.error = self.error.clone();
+                nested.tmp = self.tmp;
+                nested.types = self.types.clone();
+                nested.types.extend(params.iter().cloned());
                 nested.global_names = self.global_names.clone();
                 nested.ret_is_void = matches!(ret.canonical(), Typ::Void);
                 nested.indent_lvl = 1;
                 for cap in captures {
                     let n = sanitize_ident(cap);
-                    nested.push(&format!("int64_t {} = {}.{};", n, env_name, n));
+                    nested.push(&format!(
+                        "{} {} = {}.{};",
+                        ctype(&self.capture_type(cap)),
+                        n,
+                        env_name,
+                        n
+                    ));
                 }
                 let mut locals = Vec::new();
                 let mut known = self.global_names.as_ref().clone();
                 known.extend(params.iter().map(|(name, _)| sanitize_ident(name)));
-                collect_locals(body, &mut locals, &known);
+                let mut env = nested.types.clone();
+                if let Err(error) = collect_locals(
+                    body,
+                    &mut locals,
+                    &known,
+                    &nested.facts,
+                    &mut env,
+                    &mut nested.types,
+                ) {
+                    nested.fail(error);
+                }
+                nested.types.extend(env);
                 for (n, ty) in &locals {
                     if captures.iter().any(|c| sanitize_ident(c) == *n) {
                         continue;
@@ -544,6 +623,8 @@ impl Ctx {
                 }
                 helper.push_str(&nested.out);
                 helper.push_str("}\n");
+                self.tmp = nested.tmp;
+                self.hoisted.extend(nested.hoisted);
                 self.hoisted.push(helper);
                 if captures.is_empty() {
                     format!("(uint64_t)({})", cname)
@@ -562,6 +643,18 @@ impl Ctx {
     }
 
     fn intrinsic_or_call(&mut self, name: &str, args: &[Expr]) -> String {
+        if matches!(name, "array_len" | "array-len")
+            && !self.is_func(name)
+            && args.first().is_some_and(|arg| {
+                matches!(
+                    TypeChecker::new().expr_type(arg, &self.facts, &self.types),
+                    Some(Typ::Array(_))
+                )
+            })
+        {
+            self.fail("c-backend: array length requires a length-bearing iterable".into());
+            return "0".into();
+        }
         let evaled: Vec<String> = args.iter().map(|e| self.expr_str(e)).collect();
         let a = |i: usize| -> String { evaled.get(i).cloned().unwrap_or_else(|| "0".into()) };
         match name {
@@ -683,7 +776,10 @@ fn emit_fn_def(ctx: &mut Ctx, name: &str, params: &[(String, Typ)], ret: &Typ, b
     );
 
     // Build body into a nested buffer so hoisted closures land before the fn.
-    let mut body_ctx = Ctx::new(ctx.func_names.clone());
+    let mut body_ctx = Ctx::new(ctx.func_names.clone(), ctx.facts.clone());
+    body_ctx.error = ctx.error.clone();
+    body_ctx.types = ctx.types.clone();
+    body_ctx.types.extend(params.iter().cloned());
     body_ctx.global_names = ctx.global_names.clone();
     body_ctx.tmp = ctx.tmp;
     body_ctx.ret_is_void = matches!(ret.canonical(), Typ::Void);
@@ -692,9 +788,18 @@ fn emit_fn_def(ctx: &mut Ctx, name: &str, params: &[(String, Typ)], ret: &Typ, b
     let mut locals: Vec<(String, String)> = Vec::new();
     let mut known = ctx.global_names.as_ref().clone();
     known.extend(params.iter().map(|(name, _)| sanitize_ident(name)));
-    collect_locals(body, &mut locals, &known);
-    // iterator / match temps
-    collect_loop_bindings(body, &mut locals);
+    let mut env = body_ctx.types.clone();
+    if let Err(error) = collect_locals(
+        body,
+        &mut locals,
+        &known,
+        &body_ctx.facts,
+        &mut env,
+        &mut body_ctx.types,
+    ) {
+        body_ctx.fail(error);
+    }
+    body_ctx.types.extend(env);
     for (n, ty) in &locals {
         body_ctx.push(&format!("{} {};", ty, n));
     }
@@ -785,7 +890,15 @@ fn emit_stmt(ctx: &mut Ctx, stmt: &Stmt) {
                     let vec = ctx.fresh("vec");
                     let bind = sanitize_ident(binding.trim().trim_start_matches("& "));
                     ctx.push(&format!("struct InVec {} = {};", vec, iter));
-                    ctx.push(&format!("int64_t* {} = (int64_t*)({}.ptr);", ptr, vec));
+                    let item_type = ctx
+                        .types
+                        .get(binding.trim().trim_start_matches("& "))
+                        .map(ctype)
+                        .unwrap_or_else(|| "int64_t".into());
+                    ctx.push(&format!(
+                        "{item_type}* {} = ({item_type}*)({}.ptr);",
+                        ptr, vec
+                    ));
                     ctx.push(&format!("int64_t {} = {}.len;", len, vec));
                     ctx.push(&format!(
                         "for (int64_t {} = 0; {} < {}; {}++) {{",
@@ -822,10 +935,15 @@ fn emit_stmt(ctx: &mut Ctx, stmt: &Stmt) {
             // Simple if/else chain; patterns are source text (Core IR stores pattern strings).
             let scr_tmp = ctx.fresh("scr");
             let scr = ctx.expr_str(scrutinee);
-            ctx.push(&format!("int64_t {} = (int64_t)({});", scr_tmp, scr));
+            let typ = TypeChecker::new().expr_type(scrutinee, &ctx.facts, &ctx.types);
+            let scr_type = typ.as_ref().map(ctype).unwrap_or_else(|| {
+                ctx.fail("c-backend: cannot infer match scrutinee type".into());
+                "int64_t".into()
+            });
+            ctx.push(&format!("{} {} = {};", scr_type, scr_tmp, scr));
             let mut first = true;
             for arm in arms {
-                let (cond, binds) = match_arm_cond_and_binds(&scr_tmp, &arm.pattern);
+                let (cond, binds) = match_arm_cond_and_binds(&scr_tmp, &arm.pattern, &scr_type);
                 if first {
                     ctx.push(&format!("if ({}) {{", cond));
                     first = false;
@@ -867,7 +985,7 @@ fn emit_stmt(ctx: &mut Ctx, stmt: &Stmt) {
                 ctx.indent();
                 for (i, c) in catches.iter().enumerate() {
                     let bind = c.pattern.trim();
-                    let (cond, binds) = match_arm_cond_and_binds("__in_err_val", bind);
+                    let (cond, binds) = match_arm_cond_and_binds("__in_err_val", bind, "int64_t");
                     if i == 0 {
                         ctx.push(&format!("if ({}) {{", cond));
                     } else {
@@ -925,7 +1043,7 @@ fn is_simple_ident(s: &str) -> bool {
 }
 
 /// Returns (C condition, binding statements) for a match arm pattern string.
-fn match_arm_cond_and_binds(scrutinee: &str, pattern: &str) -> (String, Vec<String>) {
+fn match_arm_cond_and_binds(scrutinee: &str, pattern: &str, typ: &str) -> (String, Vec<String>) {
     let p = pattern.trim().trim_end_matches(':').trim();
     if p == "_" || p == "-" || p == "else" || p == "default" || p == ".." {
         return ("1".into(), vec![]);
@@ -955,92 +1073,110 @@ fn match_arm_cond_and_binds(scrutinee: &str, pattern: &str) -> (String, Vec<Stri
         let name = sanitize_ident(p);
         return (
             "1".into(),
-            vec![format!("int64_t {} = {};", name, scrutinee)],
+            vec![format!("{} {} = {};", typ, name, scrutinee)],
         );
     }
     // Struct / other patterns: always true (lossy).
     ("1".into(), vec![])
 }
 
-fn collect_loop_bindings(stmts: &[Stmt], locals: &mut Vec<(String, String)>) {
+fn collect_locals(
+    stmts: &[Stmt],
+    locals: &mut Vec<(String, String)>,
+    known: &HashSet<String>,
+    facts: &Facts,
+    env: &mut HashMap<String, Typ>,
+    all_types: &mut HashMap<String, Typ>,
+) -> Result<(), String> {
+    let checker = TypeChecker::new();
     for stmt in stmts {
         match stmt {
-            Stmt::Loop {
-                kind: LoopKind::For { binding },
-                body,
-                ..
-            } => {
-                let bind = sanitize_ident(binding.trim().trim_start_matches("& "));
-                if bind != "_" && !bind.is_empty() && !locals.iter().any(|(n, _)| n == &bind) {
-                    locals.push((bind, "int64_t".into()));
-                }
-                collect_loop_bindings(body, locals);
-            }
-            Stmt::Loop { body, .. } => collect_loop_bindings(body, locals),
-            Stmt::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                collect_loop_bindings(then_body, locals);
-                collect_loop_bindings(else_body, locals);
-            }
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    collect_loop_bindings(&arm.body, locals);
-                }
-            }
-            Stmt::Try { body, catches } => {
-                collect_loop_bindings(body, locals);
-                for c in catches {
-                    collect_loop_bindings(&c.body, locals);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn collect_locals(stmts: &[Stmt], locals: &mut Vec<(String, String)>, known: &HashSet<String>) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Let(name, typ, _) => {
-                let n = sanitize_ident(name);
-                if !locals.iter().any(|(existing, _)| existing == &n) {
-                    let ty = typ.as_ref().map(ctype).unwrap_or_else(|| "int64_t".into());
-                    locals.push((n, ty));
-                }
-            }
-            // Some fronts emit bare Assign without a prior Let.
-            Stmt::Assign(name, _) => {
+            Stmt::Let(name, _, value) | Stmt::Assign(name, value) => {
+                let annotation = match stmt {
+                    Stmt::Let(_, annotation, _) => annotation.as_ref(),
+                    _ => env.get(name),
+                };
+                // Closures use the existing C function-address carrier ABI.
+                let typ = annotation
+                    .cloned()
+                    .or_else(|| checker.expr_type(value, facts, env))
+                    .or_else(|| matches!(value, Expr::Closure { .. }).then_some(Typ::Int))
+                    .ok_or_else(|| format!("c-backend: cannot infer local `{name}`"))?;
                 let n = sanitize_ident(name);
                 if !known.contains(&n) && !locals.iter().any(|(existing, _)| existing == &n) {
-                    locals.push((n, "int64_t".into()));
+                    locals.push((n, ctype(&typ)));
                 }
+                all_types.insert(name.clone(), typ.clone());
+                env.insert(name.clone(), typ);
             }
             Stmt::If {
                 then_body,
                 else_body,
                 ..
             } => {
-                collect_locals(then_body, locals, known);
-                collect_locals(else_body, locals, known);
+                collect_locals(then_body, locals, known, facts, &mut env.clone(), all_types)?;
+                collect_locals(else_body, locals, known, facts, &mut env.clone(), all_types)?;
             }
-            Stmt::Loop { body, .. } => collect_locals(body, locals, known),
-            Stmt::Match { arms, .. } => {
+            Stmt::Loop { kind, cond, body } => {
+                let mut inner = env.clone();
+                if let LoopKind::For { binding } = kind {
+                    let typ = cond
+                        .as_ref()
+                        .and_then(|expr| checker.expr_type(expr, facts, env));
+                    let item = match typ.map(|typ| typ.canonical()) {
+                        Some(Typ::Vector(item)) => *item,
+                        Some(Typ::Array(_)) => {
+                            return Err(
+                                "c-backend: array iteration requires a length-bearing iterable"
+                                    .into(),
+                            );
+                        }
+                        Some(Typ::Named(name)) if name == "Vec" || name == "InVec" => Typ::Int,
+                        _ => return Err("c-backend: cannot infer iterator element type".into()),
+                    };
+                    let name = binding.trim().trim_start_matches("& ").to_string();
+                    let emitted = sanitize_ident(&name);
+                    if emitted != "_"
+                        && !emitted.is_empty()
+                        && !locals.iter().any(|(n, _)| n == &emitted)
+                    {
+                        locals.push((emitted, ctype(&item)));
+                    }
+                    all_types.insert(name.clone(), item.clone());
+                    inner.insert(name, item);
+                }
+                collect_locals(body, locals, known, facts, &mut inner, all_types)?;
+            }
+            Stmt::Match { scrutinee, arms } => {
+                let typ = checker.expr_type(scrutinee, facts, env);
                 for arm in arms {
-                    collect_locals(&arm.body, locals, known);
+                    let mut inner = env.clone();
+                    if let Some(typ) = &typ {
+                        let pattern = crate::core_ir::MatchPattern::parse(&arm.pattern)?;
+                        let bindings =
+                            pattern.typed_bindings(typ, &|name| facts.pattern_fields(name))?;
+                        all_types.extend(bindings.iter().cloned());
+                        inner.extend(bindings);
+                    }
+                    collect_locals(&arm.body, locals, known, facts, &mut inner, all_types)?;
                 }
             }
             Stmt::Try { body, catches } => {
-                collect_locals(body, locals, known);
-                for c in catches {
-                    collect_locals(&c.body, locals, known);
+                collect_locals(body, locals, known, facts, &mut env.clone(), all_types)?;
+                for catch in catches {
+                    let mut inner = env.clone();
+                    let pattern = crate::core_ir::MatchPattern::parse(&catch.pattern)?;
+                    let bindings =
+                        pattern.typed_bindings(&Typ::Int, &|name| facts.pattern_fields(name))?;
+                    all_types.extend(bindings.iter().cloned());
+                    inner.extend(bindings);
+                    collect_locals(&catch.body, locals, known, facts, &mut inner, all_types)?;
                 }
             }
             _ => {}
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

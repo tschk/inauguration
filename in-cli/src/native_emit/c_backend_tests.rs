@@ -845,3 +845,226 @@ fn in_index_compound_projection_preserves_place_and_read_order() {
     std::fs::remove_dir_all(dir).unwrap();
     assert_eq!(status.code(), Some(42));
 }
+
+fn assert_inferred_c_executes(module: &UnifiedModule, entry_body: &str) {
+    use std::process::Command;
+    let original = module.clone();
+    let emitted = emit_c_module(module).unwrap();
+    assert_eq!(module, &original, "C emission mutated its input");
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-c-local-types-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let source = dir.join("locals.c");
+    let binary = dir.join("locals");
+    std::fs::write(
+        &source,
+        format!("{emitted}\n#include <string.h>\nint main(void){{{entry_body}}}\n"),
+    )
+    .unwrap();
+    let build = Command::new("clang")
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}: {}",
+        source.display(),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let status = Command::new(&binary).status().unwrap();
+    assert_eq!(status.code(), Some(42), "{}", source.display());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn inferred_c_locals_preserve_values_aliases_and_lexical_types() {
+    for source in [
+        "fn main()->Int{let ratio=1.5;if ratio==1.5{return 42;}return 0;}",
+        "var original:Float=1.5;\nfn amount()->Float{return original;}\nfn main()->Int{let first=amount();let second=first;original=2.5;if second==1.5{return 42;}return 0;}",
+        "fn main()->Int{let value=1.5;if true{let value=0;if value!=0{return 0;}}if value==1.5{return 42;}return 0;}",
+        "var value:Float=1.5;\nfn echo(value:Float)->Int{if true{let value:Int=0;}let copy=value;if copy==1.5{return 42;}return 0;}\nfn main()->Int{return echo(value);}",
+        "struct Pair{Int x;Float weight}\nfn main()->Int{let pair=Pair{x:42,weight:1.5};let copy=pair;pair.x=0;if copy.weight==1.5{return copy.x;}return 0;}",
+        "struct Pair{Int x;Int y}\nfn main()->Int{let pair=Pair{x:20,y:22};match pair{whole{pair.x=0;return whole.x+whole.y;}}return 0;}",
+        "fn array_len(values:[Int])->Int{return 42;}\nfn main()->Int{let values=[1,2];return array_len(values);}",
+        "fn main()->Int{let values=[1.5,2.5];let copy=values[0];if copy==1.5 && values[1]==2.5{return 42;}return 0;}",
+        "fn main()->Int{let ready=true;match ready{item{let copy=item;if copy{return 42;}}}return 0;}",
+    ] {
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        for decl in &mut module.decls {
+            if let Decl::Function { name, .. } = decl
+                && name == "main"
+            {
+                *name = "answer".into();
+            }
+        }
+        assert_inferred_c_executes(&module, "return (int)answer();");
+    }
+    let module = UnifiedModule::new(vec![Decl::Function {
+        name: "answer".into(),
+        params: vec![],
+        ret: Typ::Int,
+        type_params: vec![],
+        body: vec![
+            Stmt::Assign(
+                "ratio".into(),
+                Expr::FloatLit(crate::core_ir::FloatVal(1.5)),
+            ),
+            Stmt::If {
+                cond: Expr::Binary {
+                    op: "==".into(),
+                    lhs: Box::new(Expr::Ident("ratio".into())),
+                    rhs: Box::new(Expr::FloatLit(crate::core_ir::FloatVal(1.5))),
+                },
+                then_body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                else_body: vec![],
+            },
+            Stmt::Return(Some(Expr::IntLit(0))),
+        ],
+    }]);
+    assert_inferred_c_executes(&module, "return (int)answer();");
+}
+
+#[test]
+fn inferred_c_closure_locals_use_typed_parameters() {
+    let module = UnifiedModule::new(vec![Decl::Function {
+        name: "answer".into(),
+        params: vec![],
+        ret: Typ::Int,
+        type_params: vec![],
+        body: vec![Stmt::Return(Some(Expr::Closure {
+            params: vec![("value".into(), Typ::Float)],
+            ret: Typ::Float,
+            captures: vec![],
+            body: vec![
+                Stmt::Let("copy".into(), None, Expr::Ident("value".into())),
+                Stmt::Return(Some(Expr::Ident("copy".into()))),
+            ],
+        }))],
+    }]);
+    assert_inferred_c_executes(
+        &module,
+        "return ((double(*)(double))(uintptr_t)answer())(1.5)==1.5 ? 42 : 0;",
+    );
+}
+
+#[test]
+fn inferred_c_capture_fields_and_aliases_preserve_snapshot_types() {
+    let pair = |x| Expr::StructInit {
+        name: "Pair".into(),
+        fields: vec![
+            ("x".into(), Expr::IntLit(x)),
+            (
+                "weight".into(),
+                Expr::FloatLit(crate::core_ir::FloatVal(1.5)),
+            ),
+        ],
+    };
+    for (typ, initial, replacement, entry) in [
+        (
+            Typ::Int,
+            Expr::IntLit(42),
+            Expr::IntLit(0),
+            "return (int)((int64_t(*)(void))(uintptr_t)answer())();",
+        ),
+        (
+            Typ::Float,
+            Expr::FloatLit(crate::core_ir::FloatVal(1.5)),
+            Expr::FloatLit(crate::core_ir::FloatVal(2.5)),
+            "return ((double(*)(void))(uintptr_t)answer())()==1.5 ? 42 : 0;",
+        ),
+        (
+            Typ::String,
+            Expr::StringLit("λ雪".into()),
+            Expr::StringLit("changed".into()),
+            "return strcmp(((const char*(*)(void))(uintptr_t)answer())(),\"λ雪\")==0 ? 42 : 0;",
+        ),
+        (
+            Typ::Bool,
+            Expr::BoolLit(true),
+            Expr::BoolLit(false),
+            "return ((uint8_t(*)(void))(uintptr_t)answer())() ? 42 : 0;",
+        ),
+        (
+            Typ::Named("Pair".into()),
+            pair(42),
+            pair(0),
+            "struct Pair value=((struct Pair(*)(void))(uintptr_t)answer())();return value.x==42 && value.weight==1.5 ? 42 : 0;",
+        ),
+    ] {
+        let module = UnifiedModule::new(vec![
+            Decl::Struct {
+                name: "Pair".into(),
+                fields: vec![("x".into(), Typ::Int), ("weight".into(), Typ::Float)],
+                type_params: vec![],
+            },
+            Decl::Function {
+                name: "answer".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![
+                    Stmt::Let("value".into(), None, initial),
+                    Stmt::Let(
+                        "f".into(),
+                        None,
+                        Expr::Closure {
+                            params: vec![],
+                            ret: typ,
+                            captures: vec!["value".into()],
+                            body: vec![
+                                Stmt::Let("copy".into(), None, Expr::Ident("value".into())),
+                                Stmt::Return(Some(Expr::Ident("copy".into()))),
+                            ],
+                        },
+                    ),
+                    Stmt::Assign("value".into(), replacement),
+                    Stmt::Return(Some(Expr::Ident("f".into()))),
+                ],
+            },
+        ]);
+        assert_inferred_c_executes(&module, entry);
+    }
+}
+
+#[test]
+fn c_local_inference_refuses_unknown_values_and_missing_indirect_signatures() {
+    for (source, reason) in [
+        (
+            "fn main()->Int{let value=unknown_target();return value;}",
+            "cannot infer local",
+        ),
+        (
+            "fn main()->Int{let f=fn()->Int{return 42;};return f();}",
+            "requires a function signature",
+        ),
+        (
+            "fn main()->Int{let answer=0;for item in [42]{answer+=item;}return answer;}",
+            "length-bearing iterable",
+        ),
+    ] {
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        let error = emit_c_module(&module).unwrap_err();
+        assert!(error.contains(reason), "{source}: {error}");
+    }
+}
+
+#[test]
+fn inferred_c_hardware_intrinsic_alias_retains_integer_type() {
+    let module =
+        crate::in_lang_parse::parse_in_source("fn main()->Int{let value=read_cr2();return value;}")
+            .unwrap();
+    let source = emit_c_module(&module).unwrap();
+    assert!(source.contains("int64_t value;"), "{source}");
+    assert!(source.contains("mov %%cr2"), "{source}");
+}
