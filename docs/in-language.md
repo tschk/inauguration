@@ -315,7 +315,7 @@ fn halt_loop() -> void {
 
 ### Expressions and operators
 
-Integer literals support decimal, hexadecimal (`0x`), octal (`0o`) and binary (`0b`) notation; uppercase prefixes are accepted. Invalid digits and overflowing positive literals are refused.
+Integer literals support decimal, hexadecimal (`0x`), octal (`0o`) and binary (`0b`) notation; uppercase prefixes are accepted. The signed 64-bit minimum is accepted with unary minus in every base, including `-0x8000000000000000`. Invalid digits and values outside the signed 64-bit range are refused.
 
 Float literals support decimal and scientific notation, including `1e3`, `1e+3`, and `1.25E-2`. Exponent signs remain part of the literal inside arithmetic expressions; names such as `e` and hexadecimal integers remain ordinary operands.
 

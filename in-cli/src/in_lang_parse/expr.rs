@@ -211,10 +211,9 @@ pub(crate) fn parse_expr_with_context(s: &str, context: &mut LoopParseContext<'_
         && !trim(rest).is_empty()
         && rest.parse::<i64>().is_err()
     {
-        // -9223372036854775808 is i64::MIN: its positive magnitude overflows
-        // i64, so fold it into a single literal instead of a Unary over a
-        // numeric-looking identifier.
-        if trim(rest) == "9223372036854775808" {
+        // The positive magnitude of i64::MIN cannot be represented as an
+        // IntLit. Recognize that exact magnitude before parsing unary minus.
+        if crate::core_ir::parse_int_literal(&format!("-{}", trim(rest))) == Some(i64::MIN) {
             return Expr::IntLit(i64::MIN);
         }
         return Expr::Unary {
@@ -228,17 +227,8 @@ pub(crate) fn parse_expr_with_context(s: &str, context: &mut LoopParseContext<'_
     if s == "false" {
         return Expr::BoolLit(false);
     }
-    if let Ok(n) = s.parse::<i64>() {
+    if let Some(n) = crate::core_ir::parse_int_literal(s) {
         return Expr::IntLit(n);
-    }
-    for (lower, upper, radix) in [("0x", "0X", 16), ("0o", "0O", 8), ("0b", "0B", 2)] {
-        if let Some(digits) = s.strip_prefix(lower).or_else(|| s.strip_prefix(upper))
-            && !digits.is_empty()
-            && (radix == 16 || digits.chars().all(|digit| digit.is_digit(radix)))
-            && let Ok(value) = i64::from_str_radix(digits, radix)
-        {
-            return Expr::IntLit(value);
-        }
     }
     if let Some(value) = crate::core_ir::decode_string_literal(s) {
         return Expr::StringLit(value);

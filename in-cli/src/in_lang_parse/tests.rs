@@ -3272,3 +3272,41 @@ fn integer_radix_literals_preserve_values_and_refuse_invalid_or_overflowing_digi
         crate::in_canonical::canonicalize_in_source("fn main()->Int{return 0o755;}").unwrap();
     assert_eq!(parse_in_source(&canonical).unwrap(), module);
 }
+
+#[test]
+fn signed_integer_minimum_is_consistent_across_radices_and_canonicalization() {
+    for magnitude in [
+        "9223372036854775808",
+        "0x8000000000000000",
+        "0X8000000000000000",
+        "0o1000000000000000000000",
+        "0O1000000000000000000000",
+        "0b1000000000000000000000000000000000000000000000000000000000000000",
+        "0B1000000000000000000000000000000000000000000000000000000000000000",
+    ] {
+        for separator in ["", " ", "\t"] {
+            let literal = format!("-{separator}{magnitude}");
+            assert_eq!(parse_expr(&literal), Expr::IntLit(i64::MIN), "{literal}");
+            let source = format!("fn main()->Int{{return {literal};}}");
+            let module = parse_in_source(&source).unwrap();
+            let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+            assert_eq!(parse_in_source(&canonical).unwrap(), module, "{literal}");
+        }
+        let source = format!("fn main()->Int{{return {magnitude};}}");
+        assert!(parse_in_source(&source).is_err(), "{magnitude}");
+    }
+    for literal in [
+        "-9223372036854775809",
+        "-0x8000000000000001",
+        "-0o1000000000000000000001",
+        "-0b1000000000000000000000000000000000000000000000000000000000000001",
+        "18446744073709551616",
+        "-18446744073709551616",
+    ] {
+        let source = format!("fn main()->Int{{return {literal};}}");
+        assert!(parse_in_source(&source).is_err(), "{literal}");
+    }
+    for literal in ["0x-1", "0x+1", "-0x-8000000000000000", "0o8", "0b2", "0xg"] {
+        assert!(!matches!(parse_expr(literal), Expr::IntLit(_)), "{literal}");
+    }
+}

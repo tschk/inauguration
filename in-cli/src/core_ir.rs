@@ -602,17 +602,44 @@ fn split_match_pat_args(inner: &str) -> Vec<String> {
     out
 }
 
-/// True when `s` has the shape of an integer literal (optional sign, decimal
-/// digits, or a `0x` hex body). Callers pair this with a failed `i64` parse to
-/// reject out-of-range literals instead of silently treating them as
-/// identifiers or binding patterns.
+/// Parse signed integer literals without accepting a sign inside a radix prefix.
+pub(crate) fn parse_int_literal(s: &str) -> Option<i64> {
+    let (negative, magnitude) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
+    } else {
+        (false, s.strip_prefix('+').unwrap_or(s))
+    };
+    let (digits, radix) = [("0x", "0X", 16), ("0o", "0O", 8), ("0b", "0B", 2)]
+        .into_iter()
+        .find_map(|(lower, upper, radix)| {
+            magnitude
+                .strip_prefix(lower)
+                .or_else(|| magnitude.strip_prefix(upper))
+                .map(|digits| (digits, radix))
+        })
+        .unwrap_or((magnitude, 10));
+    if digits.is_empty() || !digits.chars().all(|digit| digit.is_digit(radix)) {
+        return None;
+    }
+    let magnitude = u64::from_str_radix(digits, radix).ok()?;
+    if negative && magnitude == 1_u64 << 63 {
+        Some(i64::MIN)
+    } else {
+        let value = i64::try_from(magnitude).ok()?;
+        Some(if negative { -value } else { value })
+    }
+}
+
+/// Recognize decimal, hexadecimal, octal, or binary digits regardless of range.
 pub(crate) fn looks_like_int_literal(s: &str) -> bool {
     let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
-    if let Some(hex) = digits
-        .strip_prefix("0x")
-        .or_else(|| digits.strip_prefix("0X"))
-    {
-        return !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit());
+    for (lower, upper, radix) in [("0x", "0X", 16), ("0o", "0O", 8), ("0b", "0B", 2)] {
+        if let Some(digits) = digits
+            .strip_prefix(lower)
+            .or_else(|| digits.strip_prefix(upper))
+        {
+            return !digits.is_empty() && digits.chars().all(|digit| digit.is_digit(radix));
+        }
     }
     !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
 }
@@ -681,7 +708,7 @@ impl MatchPattern {
         if s == "false" {
             return Ok(MatchPattern::BoolPat(false));
         }
-        if let Ok(n) = s.parse::<i64>() {
+        if let Some(n) = parse_int_literal(s) {
             return Ok(MatchPattern::IntPat(n));
         }
         // Out-of-range numeric tokens must not fall through to binding or
@@ -1209,6 +1236,83 @@ pub(crate) fn for_each_expr_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn radix_patterns_share_signed_literal_bounds() {
+        for (literal, expected) in [
+            ("9223372036854775807", i64::MAX),
+            ("0x7fffffffffffffff", i64::MAX),
+            ("0O777777777777777777777", i64::MAX),
+            (
+                "0B111111111111111111111111111111111111111111111111111111111111111",
+                i64::MAX,
+            ),
+            ("-9223372036854775807", i64::MIN + 1),
+            ("-0X7fffffffffffffff", i64::MIN + 1),
+            ("-0o777777777777777777777", i64::MIN + 1),
+            (
+                "-0b111111111111111111111111111111111111111111111111111111111111111",
+                i64::MIN + 1,
+            ),
+        ] {
+            assert_eq!(
+                super::parse_int_literal(literal),
+                Some(expected),
+                "{literal}"
+            );
+            assert_eq!(
+                super::MatchPattern::parse(literal),
+                Ok(super::MatchPattern::IntPat(expected))
+            );
+        }
+        for literal in [
+            "-9223372036854775808",
+            "-0x8000000000000000",
+            "-0O1000000000000000000000",
+            "-0B1000000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            assert_eq!(super::parse_int_literal(literal), Some(i64::MIN));
+            assert_eq!(
+                super::MatchPattern::parse(literal),
+                Ok(super::MatchPattern::IntPat(i64::MIN))
+            );
+        }
+        for literal in ["0o755", "0O755", "0b111101101", "0B111101101", "0x1ed"] {
+            assert_eq!(
+                super::MatchPattern::parse(literal),
+                Ok(super::MatchPattern::IntPat(493))
+            );
+        }
+        for literal in [
+            "0x8000000000000000",
+            "0o1000000000000000000000",
+            "0b1000000000000000000000000000000000000000000000000000000000000000",
+            "-0x8000000000000001",
+            "0x-1",
+            "0x+1",
+        ] {
+            assert_eq!(super::parse_int_literal(literal), None, "{literal}");
+            assert!(super::MatchPattern::parse(literal).is_err(), "{literal}");
+        }
+    }
+
+    #[test]
+    fn numeric_literal_detection_checks_radix_digits_without_parsing_range() {
+        for literal in [
+            "9223372036854775808",
+            "-0x8000000000000000",
+            "+0XFF",
+            "0o1000000000000000000000",
+            "-0O7",
+            "0b100",
+            "+0B1",
+        ] {
+            assert!(super::looks_like_int_literal(literal), "{literal}");
+        }
+        for literal in ["0x", "0o8", "0b2", "0x-1", "0x+1", "--1", "0o_7", "name"] {
+            assert!(!super::looks_like_int_literal(literal), "{literal}");
+        }
+    }
+
     #[test]
     fn unit_patterns_keep_unit_distinct_from_zero_and_empty_arrays() {
         use super::*;
