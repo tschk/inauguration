@@ -12,6 +12,7 @@ Ship an **ultrafast** compiler for **general object-oriented and C-type** langua
 
 ## Working rules
 
+- Work directly on `main`; create another branch only when explicitly requested.
 - Prefer small, composable changes with tests in same commit.
 - Keep terminal output useful: timings, reason codes, clear failures.
 - Do not break `in test`.
@@ -26,7 +27,7 @@ Run all:
 in test
 ```
 
-Use an `in` binary built from this repo. From a checkout, run **`in update`** (alias **`in self-update`**) to reinstall via `cargo install --path in-cli --locked` (honours **`IN_INSTALL_DIR`** like `./install.sh`). Outside a checkout, `in update` falls back to remote `install.sh` from `https://raw.githubusercontent.com/${IN_REPO:-tschk/inauguration}/master/install.sh` on Unix hosts. You can still use `./install.sh` or `cargo install --path in-cli --force` manually. A stale globally installed `in` (older than `in-cli` in your tree) can fail mid-suite with `No such file or directory` because `in test` must match the workspace layout.
+Use an `in` binary built from this repo. From a checkout, run **`in update`** (alias **`in self-update`**) to reinstall via `cargo install --path in-cli --locked` (honours **`IN_INSTALL_DIR`** like `./install.sh`). Outside a checkout, `in update` falls back to remote `install.sh` from `https://raw.githubusercontent.com/${IN_REPO:-tschk/inauguration}/v${CARGO_PKG_VERSION}/install.sh` (the running CLI version tag) on Unix hosts. You can still use `./install.sh` or `cargo install --path in-cli --force` manually. A stale globally installed `in` (older than `in-cli` in your tree) can fail mid-suite with `No such file or directory` because `in test` must match the workspace layout.
 
 If touching benchmarks or runtime timing, also run `in bench` (reads checked-in metrics NDJSON).
 
@@ -70,7 +71,7 @@ If touching benchmarks or runtime timing, also run `in bench` (reads checked-in 
 
 ## Release & crates.io
 
-- GitHub release binaries: bump `in-cli/Cargo.toml` version, commit, push `master`, tag `v*`, push tag — **`.github/workflows/release.yml`** builds tarballs and creates the GitHub release.
+- GitHub release binaries: bump `in-cli/Cargo.toml` version, commit, push `main`, tag `v*`, push tag — **`.github/workflows/release.yml`** builds tarballs and creates the GitHub release.
 - crates.io: publish **locally** when ready (`cargo publish --manifest-path in-cli/Cargo.toml --locked`). Do **not** re-add crates publish to CI.
 - Site hosting: **Cloudflare** (e.g. Pages) — build `docs-site/dist` with `./scripts/build-docs-site.sh`, deploy yourself; no GitHub Pages workflow.
 
