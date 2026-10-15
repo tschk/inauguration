@@ -222,8 +222,8 @@ fn render_md(md: &str) -> (String, String) {
 
     let mut title = String::new();
     for line in md.lines() {
-        if line.starts_with("# ") {
-            title = line[2..].trim().to_string();
+        if let Some(stripped) = line.strip_prefix("# ") {
+            title = stripped.trim().to_string();
             break;
         }
     }
@@ -233,6 +233,14 @@ fn render_md(md: &str) -> (String, String) {
         title = "Documentation".into();
     }
     (title, body)
+}
+
+fn parent_dir(key: &str) -> &str {
+    key.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+fn file_name(key: &str) -> &str {
+    key.rsplit_once('/').map_or(key, |(_, file)| file)
 }
 
 fn doc_href(from_key: &str, to_key: &str) -> String {
@@ -247,8 +255,9 @@ fn doc_href(from_key: &str, to_key: &str) -> String {
     if from_depth > 0 && to_depth == 0 {
         return format!("../{to_key}.html");
     }
-    let (from_dir, _) = from_key.rsplit_once('/').unwrap_or(("", from_key));
-    let (to_dir, to_file) = to_key.rsplit_once('/').unwrap_or(("", to_key));
+    let from_dir = parent_dir(from_key);
+    let to_dir = parent_dir(to_key);
+    let to_file = file_name(to_key);
     if from_dir == to_dir {
         return format!("{to_file}.html");
     }
@@ -310,7 +319,7 @@ fn render_nav(pages: &[(String, String)], current: &str) -> String {
             continue;
         }
         let href = doc_href(current, web_key);
-        let cls = nav_link_class(&web_key, current);
+        let cls = nav_link_class(web_key, current);
         extras.push_str(&format!(
             "<li><a href=\"{href}\"{cls}>{}</a></li>",
             esc(page_title)
