@@ -1,0 +1,2 @@
+import "../canonical.in";
+fn main() -> Int { emit_uint(42); return 42; }
