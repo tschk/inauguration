@@ -132,6 +132,37 @@ fn aarch64_object_paths_reject_mutable_globals() {
 }
 
 #[test]
+fn aarch64_object_paths_reject_immutable_struct_globals() {
+    // GlobalLayout::collect allocates writable storage for zero-init immutable
+    // struct globals too; the freestanding fallback must not silently replace
+    // them with the fixed-result object.
+    let module = parse_in_source(
+        "struct Pair { Int left }\nconst pair: Pair = 0;\nfn main() -> Int { return pair.left; }\n",
+    )
+    .expect("parse immutable struct global");
+    for (target_triple, linkage) in [
+        ("aarch64-unknown-none", NativeLinkage::StaticLib),
+        ("aarch64-unknown-linux-gnu", NativeLinkage::StaticLib),
+        ("aarch64-unknown-linux-gnu", NativeLinkage::Executable),
+        ("aarch64-apple-darwin", NativeLinkage::StaticLib),
+    ] {
+        let request = NativeObjectRequest {
+            target_triple,
+            linkage,
+            entry: "main",
+            exit_code: 0,
+            module: &module,
+            module_id: "App",
+            base: None,
+        };
+        assert!(
+            emit_native_object(&request).is_none(),
+            "{target_triple} {linkage:?} accepted missing global data for an immutable struct global"
+        );
+    }
+}
+
+#[test]
 fn unsupported_scalar_global_read_fails_instead_of_returning_zero() {
     let module = parse_in_source("var count: Int = 42;\nfn main() -> Int { return count; }\n")
         .expect("parse scalar global");

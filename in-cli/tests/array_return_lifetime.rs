@@ -77,6 +77,24 @@ fn main() -> Int {
 }
 "#;
 
+/// Executable variant of the preserved `nexnet_array_copy_update.in` probe:
+/// `update` keeps the copy-on-write shape but returns the updated scalar, so
+/// `main` can verify the caller's `xs` stays unchanged at runtime. The fixture
+/// itself stays degraded (IN3001) because it returns its local array.
+const COPY_ISOLATION: &str = r#"
+fn update(xs: [Int], at: Int, value: Int) -> Int {
+  let next: [Int] = [xs[0], xs[1], xs[2]];
+  next[at] = value;
+  return next[at];
+}
+fn main() -> Int {
+  let xs: [Int] = [1, 2, 3];
+  let updated: Int = update(xs, 1, 7);
+  if xs[1] != 2 { return 1; }
+  return updated - 7;
+}
+"#;
+
 #[test]
 fn returning_a_local_array_fails_lowering_before_jit_execution() {
     // Exact source from Nexnet's preserved array_copy_update.in probe.
@@ -112,6 +130,17 @@ fn returning_a_literal_array_remains_supported() {
         "{:?}",
         lowered.degradations
     );
+    // main must also be able to read the array returned by make() at runtime.
+    let functions = lowered
+        .function_offsets
+        .iter()
+        .map(|(name, offset)| (name.clone(), *offset, lowered.code.len() as u32 - *offset))
+        .collect::<Vec<_>>();
+    let mut runtime = JitRuntime::new();
+    runtime
+        .load(&lowered.code, &functions, &lowered.relocations)
+        .expect("load literal-array return fixture");
+    assert_eq!(unsafe { runtime.invoke("main", &[]) }, Some(0));
 }
 
 #[test]
@@ -229,5 +258,28 @@ fn forwarded_borrowed_parameter_can_be_consumed_in_the_callers_frame() {
     runtime
         .load(&lowered.code, &functions, &lowered.relocations)
         .expect("load borrowed array path");
+    assert_eq!(unsafe { runtime.invoke("main", &[]) }, Some(0));
+}
+
+#[test]
+fn array_copy_update_isolates_the_callers_array_when_executed() {
+    let module = parse_in_source(COPY_ISOLATION).expect("parse copy-isolation fixture");
+    let lowered = lower::lower_module(&module, "main", NativeLinkage::Executable)
+        .expect("lower copy-isolation fixture");
+    assert!(
+        lowered.degradations.is_empty(),
+        "{:?}",
+        lowered.degradations
+    );
+    let functions = lowered
+        .function_offsets
+        .iter()
+        .map(|(name, offset)| (name.clone(), *offset, lowered.code.len() as u32 - *offset))
+        .collect::<Vec<_>>();
+    let mut runtime = JitRuntime::new();
+    runtime
+        .load(&lowered.code, &functions, &lowered.relocations)
+        .expect("load copy-isolation fixture");
+    // Returns 0 only when xs[1] is still 2 and the updated element is 7.
     assert_eq!(unsafe { runtime.invoke("main", &[]) }, Some(0));
 }

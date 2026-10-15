@@ -9,7 +9,7 @@ use super::{
 #[test]
 fn top_level_globals_parse_initializers_with_optional_semicolons() {
     let module = parse_in_source(
-        "var count: Int = 42;\nconst limit: Int = 7\nvar label: String = \"a;b\";\nfn main() -> Int { return count; }\n",
+        "var count: Int = 42;\nconst limit: Int = 7\nconst cap: Int = 11;\nvar label: String = \"a;b\";\nfn main() -> Int { return count; }\n",
     )
     .expect("parse top-level globals");
     let globals = module
@@ -25,11 +25,12 @@ fn top_level_globals_parse_initializers_with_optional_semicolons() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(globals.len(), 3);
+    assert_eq!(globals.len(), 4);
     assert_eq!(globals[0], ("count", Some(&Expr::IntLit(42)), true));
     assert_eq!(globals[1], ("limit", Some(&Expr::IntLit(7)), false));
+    assert_eq!(globals[2], ("cap", Some(&Expr::IntLit(11)), false));
     assert_eq!(
-        globals[2],
+        globals[3],
         ("label", Some(&Expr::StringLit("a;b".into())), true)
     );
 }

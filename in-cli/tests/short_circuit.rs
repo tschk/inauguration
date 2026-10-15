@@ -286,6 +286,7 @@ fn short_circuit_c_backend_reference() {
         };
         assert_eq!(markers, expected_markers, "{name}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -393,4 +394,5 @@ int main(int argc, char **argv) {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let _ = std::fs::remove_dir_all(&dir);
 }

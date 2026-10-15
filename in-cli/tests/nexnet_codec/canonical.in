@@ -103,7 +103,7 @@ fn emit_byte(value: Int) -> Int {
 }
 
 fn emit_head(major: Int, value: Int) -> Int {
-  if major < 0 || major > 7 || value < 0 || value > 9007199253740991 { return -1; }
+  if major < 0 || major > 6 || value < 0 || value > 9007199253740991 { return -1; }
   let count: Int = 0;
   let divisor: Int = 0;
   if value < 24 { emit_byte(major * 32 + value); return 0; }

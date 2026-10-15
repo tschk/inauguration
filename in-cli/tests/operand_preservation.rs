@@ -227,6 +227,7 @@ fn operand_supported_references() {
         // lowering's established left-to-right order is asserted by the marker test.
         println!("C {} result={}", case.name, case.expected);
     }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn right_nested_module(operators: usize) -> UnifiedModule {

@@ -376,10 +376,9 @@ impl JitRuntime {
                     let r: i64;
                     unsafe {
                         std::arch::asm!(
-                            "mov x27, {e}",
                             "blr {f}",
-                            e = in(reg) ep,
                             f = in(reg) entry,
+                            inout("x27") ep => _,
                             lateout("x0") r,
                             clobber_abi("C"),
                         );
@@ -391,10 +390,9 @@ impl JitRuntime {
                     let r: i64;
                     unsafe {
                         std::arch::asm!(
-                            "mov x27, {e}",
                             "blr {f}",
-                            e = in(reg) ep,
                             f = in(reg) entry,
+                            inout("x27") ep => _,
                             in("x0") a0,
                             lateout("x0") r,
                             clobber_abi("C"),
@@ -408,10 +406,9 @@ impl JitRuntime {
                     let r: i64;
                     unsafe {
                         std::arch::asm!(
-                            "mov x27, {e}",
                             "blr {f}",
-                            e = in(reg) ep,
                             f = in(reg) entry,
+                            inout("x27") ep => _,
                             in("x0") a0,
                             in("x1") a1,
                             lateout("x0") r,
@@ -427,10 +424,9 @@ impl JitRuntime {
                     let r: i64;
                     unsafe {
                         std::arch::asm!(
-                            "mov x27, {e}",
                             "blr {f}",
-                            e = in(reg) ep,
                             f = in(reg) entry,
+                            inout("x27") ep => _,
                             in("x0") a0,
                             in("x1") a1,
                             in("x2") a2,
@@ -448,10 +444,9 @@ impl JitRuntime {
                     let r: i64;
                     unsafe {
                         std::arch::asm!(
-                            "mov x27, {e}",
                             "blr {f}",
-                            e = in(reg) ep,
                             f = in(reg) entry,
+                            inout("x27") ep => _,
                             in("x0") a0,
                             in("x1") a1,
                             in("x2") a2,
@@ -471,10 +466,9 @@ impl JitRuntime {
                     let r: i64;
                     unsafe {
                         std::arch::asm!(
-                            "mov x27, {e}",
                             "blr {f}",
-                            e = in(reg) ep,
                             f = in(reg) entry,
+                            inout("x27") ep => _,
                             in("x0") a0,
                             in("x1") a1,
                             in("x2") a2,
@@ -496,10 +490,9 @@ impl JitRuntime {
                     let r: i64;
                     unsafe {
                         std::arch::asm!(
-                            "mov x27, {e}",
                             "blr {f}",
-                            e = in(reg) ep,
                             f = in(reg) entry,
+                            inout("x27") ep => _,
                             in("x0") a0,
                             in("x1") a1,
                             in("x2") a2,

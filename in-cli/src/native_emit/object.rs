@@ -50,7 +50,7 @@ pub fn emit_native_object(request: &NativeObjectRequest<'_>) -> Option<NativeObj
         .module
         .decls
         .iter()
-        .any(|decl| matches!(decl, Decl::Global { mutable: true, .. }))
+        .any(|decl| matches!(decl, Decl::Global { .. }))
     {
         return None;
     }
