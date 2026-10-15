@@ -694,42 +694,57 @@ pub(crate) fn infer_in_expr_type(
     structs: &HashMap<String, HashMap<String, Typ>>,
     fn_rets: &HashMap<String, Typ>,
 ) -> Option<Typ> {
+    infer_in_expr_type_scoped(expr, env, structs, fn_rets, &HashSet::new())
+}
+
+fn infer_in_expr_type_scoped(
+    expr: &Expr,
+    env: &HashMap<String, Typ>,
+    structs: &HashMap<String, HashMap<String, Typ>>,
+    fn_rets: &HashMap<String, Typ>,
+    shadowed: &HashSet<String>,
+) -> Option<Typ> {
     match expr {
         Expr::MatchValue { scrutinee, arms } => {
-            let typ = infer_in_expr_type(scrutinee, env, structs, fn_rets)?;
+            let typ = infer_in_expr_type_scoped(scrutinee, env, structs, fn_rets, shadowed)?;
             crate::core_ir::match_value_type(
                 arms,
                 arms.iter().map(|arm| {
                     let inner = value_arm_environment(&arm.pattern, &typ, env, structs)?;
-                    infer_in_expr_type(&arm.value, &inner, structs, fn_rets)
+                    infer_in_expr_type_scoped(&arm.value, &inner, structs, fn_rets, shadowed)
                 }),
             )
         }
         Expr::Conditional {
+            cond,
             then_expr,
             else_expr,
-            ..
-        } => crate::core_ir::conditional_type(
-            then_expr,
-            infer_in_expr_type(then_expr, env, structs, fn_rets),
-            else_expr,
-            infer_in_expr_type(else_expr, env, structs, fn_rets),
-        ),
+        } => {
+            infer_in_expr_type_scoped(cond, env, structs, fn_rets, shadowed)?;
+            crate::core_ir::conditional_type(
+                then_expr,
+                infer_in_expr_type_scoped(then_expr, env, structs, fn_rets, shadowed),
+                else_expr,
+                infer_in_expr_type_scoped(else_expr, env, structs, fn_rets, shadowed),
+            )
+        }
         Expr::Block { body, result } => {
             let mut inner = env.clone();
+            let mut inner_shadowed = shadowed.clone();
             for stmt in body {
                 if let Stmt::Let(name, typ, value) = stmt {
-                    let value_type = typ
-                        .clone()
-                        .or_else(|| infer_in_expr_type(value, &inner, structs, fn_rets));
+                    let value_type = typ.clone().or_else(|| {
+                        infer_in_expr_type_scoped(value, &inner, structs, fn_rets, &inner_shadowed)
+                    });
                     inner.remove(name);
+                    inner_shadowed.insert(name.clone());
                     if let Some(typ) = value_type {
                         inner.insert(name.clone(), typ);
                     }
                 }
             }
             result.as_deref().map_or(Some(Typ::Void), |value| {
-                infer_in_expr_type(value, &inner, structs, fn_rets)
+                infer_in_expr_type_scoped(value, &inner, structs, fn_rets, &inner_shadowed)
             })
         }
         Expr::UnitLit => Some(Typ::Void),
@@ -737,10 +752,14 @@ pub(crate) fn infer_in_expr_type(
         Expr::FloatLit(_) => Some(Typ::Float),
         Expr::StringLit(_) => Some(Typ::String),
         Expr::BoolLit(_) => Some(Typ::Bool),
-        Expr::Ident(name) => env.get(name).cloned(),
+        Expr::Ident(name) => env.get(name).cloned().or_else(|| {
+            (!shadowed.contains(name) && fn_rets.contains_key(name)).then_some(Typ::Int)
+        }),
         Expr::StructInit { name, .. } => Some(Typ::Named(name.clone())),
         Expr::Field { base, name, .. } => {
-            if let Some(Typ::Named(struct_name)) = infer_in_expr_type(base, env, structs, fn_rets) {
+            if let Some(Typ::Named(struct_name)) =
+                infer_in_expr_type_scoped(base, env, structs, fn_rets, shadowed)
+            {
                 structs
                     .get(&struct_name)
                     .and_then(|fields| fields.get(name))
@@ -749,46 +768,78 @@ pub(crate) fn infer_in_expr_type(
                 None
             }
         }
-        Expr::ArrayLit(items) => Some(Typ::Array(Box::new(
-            items
+        Expr::ArrayLit(items) => {
+            let mut types = items
                 .iter()
-                .find_map(|item| infer_in_expr_type(item, env, structs, fn_rets))
-                .unwrap_or(Typ::Void),
-        ))),
+                .map(|item| infer_in_expr_type_scoped(item, env, structs, fn_rets, shadowed));
+            let first = types.next()??.canonical();
+            types
+                .all(|typ| typ.is_some_and(|typ| typ.canonical() == first))
+                .then(|| Typ::Array(Box::new(first)))
+        }
         Expr::Index { base, .. } => {
-            if let Some(Typ::Array(item)) = infer_in_expr_type(base, env, structs, fn_rets) {
+            if let Some(Typ::Array(item) | Typ::Vector(item)) =
+                infer_in_expr_type_scoped(base, env, structs, fn_rets, shadowed)
+            {
                 Some(*item)
             } else {
                 None
             }
         }
         Expr::Unary { op, expr, .. } => match op.as_str() {
-            "!" => Some(Typ::Bool),
-            _ => infer_in_expr_type(expr, env, structs, fn_rets),
+            "!" => (infer_in_expr_type_scoped(expr, env, structs, fn_rets, shadowed)?.canonical()
+                == Typ::Bool)
+                .then_some(Typ::Bool),
+            _ => infer_in_expr_type_scoped(expr, env, structs, fn_rets, shadowed),
         },
         Expr::Binary { op, lhs, rhs } => match op.as_str() {
             "&" | "|" | "^" => crate::core_ir::bitwise_result_type(
-                infer_in_expr_type(lhs, env, structs, fn_rets),
-                infer_in_expr_type(rhs, env, structs, fn_rets),
+                infer_in_expr_type_scoped(lhs, env, structs, fn_rets, shadowed),
+                infer_in_expr_type_scoped(rhs, env, structs, fn_rets, shadowed),
             ),
             "+" | "-" | "*" | "/" | "%" | "<<" | ">>" => {
-                let left = infer_in_expr_type(lhs, env, structs, fn_rets);
-                let right = infer_in_expr_type(rhs, env, structs, fn_rets);
+                let left = infer_in_expr_type_scoped(lhs, env, structs, fn_rets, shadowed);
+                let right = infer_in_expr_type_scoped(rhs, env, structs, fn_rets, shadowed);
                 match (left, right) {
                     (Some(Typ::String), Some(Typ::String)) if op == "+" => Some(Typ::String),
-                    (Some(Typ::Float), _) | (_, Some(Typ::Float)) => Some(Typ::Float),
-                    _ => Some(Typ::Int),
+                    (Some(Typ::Int), Some(Typ::Int)) => Some(Typ::Int),
+                    (Some(Typ::Float), Some(Typ::Int | Typ::Float))
+                    | (Some(Typ::Int), Some(Typ::Float))
+                        if matches!(op.as_str(), "+" | "-" | "*" | "/") =>
+                    {
+                        Some(Typ::Float)
+                    }
+                    _ => None,
                 }
             }
-            "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => Some(Typ::Bool),
+            "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => {
+                infer_in_expr_type_scoped(lhs, env, structs, fn_rets, shadowed)?;
+                infer_in_expr_type_scoped(rhs, env, structs, fn_rets, shadowed)?;
+                Some(Typ::Bool)
+            }
             _ => None,
         },
-        Expr::Call { callee, .. } => {
+        Expr::Call { callee, args } => {
             if let Expr::Ident(name) = callee.as_ref() {
-                fn_rets.get(name).cloned().or(match name.as_str() {
-                    "to-string" => Some(Typ::String),
-                    _ => None,
-                })
+                if env.contains_key(name) || shadowed.contains(name) {
+                    return None;
+                }
+                if let Some(ret) = fn_rets.get(name) {
+                    return Some(ret.clone());
+                }
+                if let Some(method) = name.strip_prefix("__method__") {
+                    let receiver =
+                        infer_in_expr_type_scoped(args.first()?, env, structs, fn_rets, shadowed)?
+                            .canonical();
+                    return match receiver {
+                        Typ::Named(owner) => fn_rets.get(&format!("{owner}-{method}")).cloned(),
+                        Typ::Int | Typ::Float | Typ::Bool | Typ::String if method == "toStr" => {
+                            Some(Typ::String)
+                        }
+                        _ => None,
+                    };
+                }
+                crate::core_ir_verifier::intrinsic_return_type(name).cloned()
             } else {
                 None
             }

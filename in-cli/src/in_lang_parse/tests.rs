@@ -2723,3 +2723,214 @@ fn global_receiver_method_lookup_does_not_escape_catch_bindings() {
     );
     assert_eq!(env.get("number"), Some(&Typ::Int));
 }
+
+#[test]
+fn unannotated_globals_infer_after_all_bindings_without_changing_annotations() {
+    let source = r#"
+var chain=last+1
+var items=[later,later]
+var message=last.toStr()
+var flag=true
+var fraction=1.5
+var entry=Entry{value:42}
+var later="λ"
+var last=41
+var explicit:Int=42
+struct Entry {Int value}
+fn main()->Int {return chain;}
+"#;
+    let before = parse_in_source(source).unwrap();
+    let types: std::collections::HashMap<_, _> = before
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global { name, typ, .. } => Some((name.as_str(), typ.clone())),
+            _ => None,
+        })
+        .collect();
+    for (name, typ) in [
+        ("chain", Typ::Int),
+        ("items", Typ::Array(Box::new(Typ::String))),
+        ("message", Typ::String),
+        ("flag", Typ::Bool),
+        ("fraction", Typ::Float),
+        ("entry", Typ::Named("Entry".into())),
+        ("explicit", Typ::Int),
+    ] {
+        assert_eq!(types.get(name), Some(&typ), "{name}: {before:?}");
+    }
+    let canonical = crate::in_canonical::canonicalize_in_source(source).unwrap();
+    assert_eq!(
+        before.decls,
+        parse_in_source(&canonical).unwrap().decls,
+        "{canonical}"
+    );
+    for init in ["unknown", "other+1", "[]", "[unknown]", "[1,true]", "cycle"] {
+        let source = format!("var cycle={init}\nfn main()->Int{{return 42;}}\n");
+        assert!(
+            parse_in_source(&source)
+                .unwrap_err()
+                .contains("explicit type annotation"),
+            "{source}"
+        );
+    }
+    let explicit = parse_in_source("var value:Int=false\nfn main()->Int{return 42;}").unwrap();
+    assert!(
+        explicit
+            .decls
+            .iter()
+            .any(|decl| matches!(decl,Decl::Global {name,typ:Typ::Int,..} if name=="value"))
+    );
+}
+
+#[test]
+fn unannotated_imported_globals_keep_private_inference_metadata_through_parallel_merge() {
+    let root = std::env::temp_dir().join(format!(
+        "in_global_inference_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("left.in"), "var left=right\n").unwrap();
+    fs::write(root.join("right.in"), "var right=\"雪\"\n").unwrap();
+    fs::write(root.join("main.in"),"import \"./left.in\";\nimport \"./right.in\";\nvar selected=left\nfn main()->Int{return 42;}\n").unwrap();
+    let result = parse_in_file(&root.join("main.in"));
+    fs::write(root.join("library.in"), "var selected=\"library\"\n").unwrap();
+    let library_file = super::parse_in_library_file(&root.join("library.in"));
+    fs::remove_dir_all(&root).unwrap();
+    assert!(library_file.unwrap().decls.iter().any(|decl| matches!(
+        decl,
+        Decl::Global {
+            typ: Typ::String,
+            ..
+        }
+    )));
+    let module = result.unwrap();
+    for name in ["left", "right", "selected"] {
+        assert!(
+            module.decls.iter().any(
+                |decl| matches!(decl,Decl::Global {name:actual,typ:Typ::String,..} if actual==name)
+            ),
+            "{module:?}"
+        );
+    }
+    let library = super::parse_in_library_source("var text=\"hello\"\n").unwrap();
+    assert!(matches!(
+        &library.decls[0],
+        Decl::Global {
+            typ: Typ::String,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn global_inference_prefers_declared_returns_and_resolves_methods_before_desugaring() {
+    let module = parse_in_source(
+        r#"
+var intrinsic=to-string(42)
+var method=receiver.read()
+var receiver=Entry{value:42}
+struct Entry {Int value}
+fn Entry-read(value:Entry)->Float{return 1.5;}
+fn main()->Int{return 42;}
+"#,
+    )
+    .unwrap();
+    for (name, expected) in [
+        ("intrinsic", Typ::String),
+        ("method", Typ::Float),
+        ("receiver", Typ::Named("Entry".into())),
+    ] {
+        assert!(module.decls.iter().any(|decl|matches!(decl,Decl::Global {name:actual,typ,..} if actual==name && typ==&expected)),"{module:?}");
+    }
+    let overridden=parse_in_source("var value=to-string(42)\nfn to-string(value:Int)->Bool{return true;}\nfn main()->Int{return 42;}\n").unwrap();
+    assert!(
+        overridden
+            .decls
+            .iter()
+            .any(|decl| matches!(decl,Decl::Global {name,typ:Typ::Bool,..} if name=="value"))
+    );
+}
+
+#[test]
+fn global_inference_covers_existing_in_operators_and_preserves_unit_type() {
+    for (expression, expected) in [
+        ("1+2", Typ::Int),
+        ("3-1", Typ::Int),
+        ("2*3", Typ::Int),
+        ("4/2", Typ::Int),
+        ("4%3", Typ::Int),
+        ("1<<2", Typ::Int),
+        ("4>>1", Typ::Int),
+        ("1&2", Typ::Int),
+        ("1|2", Typ::Int),
+        ("1^2", Typ::Int),
+        ("1.5+2.0", Typ::Float),
+        ("1==2", Typ::Bool),
+        ("1!=2", Typ::Bool),
+        ("1<2", Typ::Bool),
+        ("1>2", Typ::Bool),
+        ("1<=2", Typ::Bool),
+        ("1>=2", Typ::Bool),
+        ("true&&false", Typ::Bool),
+        ("true||false", Typ::Bool),
+        ("true&false", Typ::Bool),
+        ("true|false", Typ::Bool),
+        ("true^false", Typ::Bool),
+        ("!false", Typ::Bool),
+        ("()", Typ::Void),
+    ] {
+        let source = format!("var value={expression}\nfn main()->Int{{return 42;}}\n");
+        let module = parse_in_source(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert!(
+            module.decls.iter().any(
+                |decl| matches!(decl,Decl::Global {name,typ,..} if name=="value" && typ==&expected)
+            ),
+            "{source}: {module:?}"
+        );
+        let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+        assert!(report.ok, "{source}: {report:?}");
+    }
+}
+
+#[test]
+fn global_function_address_inference_preserves_int_carriers_and_unresolved_shadows() {
+    let module = parse_in_source(
+        "var callback=answer\nfn answer()->Int{return 42;}\nfn main()->Int{return 42;}\n",
+    )
+    .unwrap();
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl,Decl::Global {name,typ:Typ::Int,..} if name=="callback"))
+    );
+    assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+    for initializer in [
+        "({let answer=missing;answer})",
+        "({let to-string=missing;to-string(1)})",
+    ] {
+        let source = format!(
+            "var callback={initializer}\nfn answer()->Int{{return 42;}}\nfn main()->Int{{return 42;}}\n"
+        );
+        assert!(
+            parse_in_source(&source)
+                .unwrap_err()
+                .contains("explicit type annotation"),
+            "{source}"
+        );
+    }
+    let typed =
+        parse_in_source("var text=number.toStr()\nvar number=42\nfn main()->Int{return 42;}\n")
+            .unwrap();
+    assert!(crate::core_ir_verifier::verify_for_entry(&typed, "main").ok);
+    assert!(
+        crate::typecheck::TypeChecker::new()
+            .check_module(&typed)
+            .is_ok()
+    );
+}

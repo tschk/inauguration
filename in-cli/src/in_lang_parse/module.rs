@@ -11,17 +11,22 @@ use super::types::{parse_fn_header, parse_in_type};
 use super::util::*;
 use super::validate::{
     collect_top_level_type_names, desugar_method_calls, duplicate_top_level_names,
-    inline_const_values, type_known, validate_class_contracts, validate_stmt_types,
+    infer_in_expr_type, inline_const_values, type_known, validate_class_contracts,
+    validate_stmt_types,
 };
 use crate::core_ir::{CoreModuleIdentity, Decl, Typ, UnifiedModule};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub(crate) fn parse_module_from_blocks(
-    blocks: &[(usize, String)],
-) -> Result<UnifiedModule, String> {
+struct ParsedInModule {
+    module: UnifiedModule,
+    pending_globals: HashSet<String>,
+}
+
+fn parse_module_from_blocks(blocks: &[(usize, String)]) -> Result<ParsedInModule, String> {
     let mut decls = Vec::new();
+    let mut pending_globals = HashSet::new();
     for (start_line, block) in blocks {
         let line = trim(block);
         if line.is_empty() {
@@ -114,6 +119,9 @@ pub(crate) fn parse_module_from_blocks(
                     (lhs.to_string(), None)
                 };
                 let init = parse_expr(rhs.trim_end_matches(';').trim());
+                if typ.is_none() {
+                    pending_globals.insert(name.clone());
+                }
                 decls.push(Decl::Global {
                     name,
                     typ: typ.unwrap_or(crate::core_ir::Typ::Int),
@@ -140,6 +148,9 @@ pub(crate) fn parse_module_from_blocks(
                     (lhs.to_string(), None)
                 };
                 let init = parse_expr(rhs.trim_end_matches(';').trim());
+                if typ.is_none() {
+                    pending_globals.insert(name.clone());
+                }
                 decls.push(Decl::Global {
                     name,
                     typ: typ.unwrap_or(crate::core_ir::Typ::Int),
@@ -156,7 +167,10 @@ pub(crate) fn parse_module_from_blocks(
             ));
         }
     }
-    Ok(UnifiedModule::new(decls))
+    Ok(ParsedInModule {
+        module: UnifiedModule::new(decls),
+        pending_globals,
+    })
 }
 
 fn is_skipped_topology_block(line: &str) -> bool {
@@ -170,21 +184,21 @@ fn is_skipped_topology_block(line: &str) -> bool {
         || line.starts_with("startup ")
 }
 
-pub(crate) fn parse_in_module_without_validation(
+fn parse_in_module_without_validation(
     source: &str,
     source_path: Option<&std::path::Path>,
-) -> Result<UnifiedModule, String> {
+) -> Result<ParsedInModule, String> {
     let surface = parse_in_surface_info(source)?;
     let identity = CoreModuleIdentity {
         package: surface.package.clone(),
         module: surface.module.clone(),
     };
     let blocks = split_top_level_decl_blocks(source);
-    let mut module = parse_module_from_blocks(&blocks)?;
+    let ParsedInModule {
+        mut module,
+        pending_globals,
+    } = parse_module_from_blocks(&blocks)?;
     module.identity = identity;
-    // Inline constant references in function bodies while preserving lexical shadows.
-    // This avoids type-checking and lowering complications for compile-time constants.
-    inline_const_values(&mut module);
     let mut std_decls = Vec::new();
     for import in surface.imports {
         std_decls.extend(
@@ -224,7 +238,85 @@ pub(crate) fn parse_in_module_without_validation(
     }
     std_decls.extend(module.decls);
     module.decls = std_decls;
+    Ok(ParsedInModule {
+        module,
+        pending_globals,
+    })
+}
+
+/// Resolve private omitted-type metadata only after the complete import graph is available.
+fn finalize_in_module(parsed: ParsedInModule, require_main: bool) -> Result<UnifiedModule, String> {
+    let ParsedInModule {
+        mut module,
+        mut pending_globals,
+    } = parsed;
+    if let Some(duplicate) = duplicate_top_level_names(&module).first() {
+        return Err(format!(".in: duplicate top-level name: {duplicate}"));
+    }
+    let structs: HashMap<String, HashMap<String, Typ>> = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Struct { name, fields, .. } | Decl::Class { name, fields, .. } => {
+                Some((name.clone(), fields.iter().cloned().collect()))
+            }
+            _ => None,
+        })
+        .collect();
+    let fn_rets: HashMap<String, Typ> = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Function { name, ret, .. } => Some((name.clone(), ret.clone())),
+            _ => None,
+        })
+        .collect();
+    let mut env: HashMap<String, Typ> = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global { name, typ, .. } if !pending_globals.contains(name) => {
+                Some((name.clone(), typ.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    while !pending_globals.is_empty() {
+        let previous = pending_globals.len();
+        for decl in &mut module.decls {
+            if let Decl::Global {
+                name,
+                typ,
+                init: Some(init),
+                ..
+            } = decl
+                && pending_globals.contains(name)
+                && let Some(inferred) = infer_in_expr_type(init, &env, &structs, &fn_rets)
+            {
+                *typ = inferred.clone();
+                env.insert(name.clone(), inferred);
+                pending_globals.remove(name);
+            }
+        }
+        if pending_globals.len() == previous {
+            let name = module
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Global { name, .. } if pending_globals.contains(name) => {
+                        Some(name.as_str())
+                    }
+                    _ => None,
+                })
+                .unwrap_or("<unknown>");
+            return Err(format!(
+                ".in: cannot infer global `{name}`; add an explicit type annotation"
+            ));
+        }
+    }
     desugar_method_calls(&mut module);
+    inline_const_values(&mut module);
+    validate_module(&module, require_main)?;
     Ok(module)
 }
 
@@ -309,16 +401,14 @@ pub(crate) fn validate_module(module: &UnifiedModule, require_main: bool) -> Res
 
 /// Parse and validate `.in` v0.2 source; returns human-readable errors as strings.
 pub fn parse_in_source(source: &str) -> Result<UnifiedModule, String> {
-    let module = parse_in_module_without_validation(&normalize_human_in_source(source), None)?;
-    validate_module(&module, true)?;
-    Ok(module)
+    let parsed = parse_in_module_without_validation(&normalize_human_in_source(source), None)?;
+    finalize_in_module(parsed, true)
 }
 
 /// Parse library source without requiring a `main` entry point.
 pub fn parse_in_library_source(source: &str) -> Result<UnifiedModule, String> {
-    let module = parse_in_module_without_validation(&normalize_human_in_source(source), None)?;
-    validate_module(&module, false)?;
-    Ok(module)
+    let parsed = parse_in_module_without_validation(&normalize_human_in_source(source), None)?;
+    finalize_in_module(parsed, false)
 }
 
 pub(crate) fn local_in_import_path(base: &Path, raw: &str) -> Option<PathBuf> {
@@ -335,19 +425,20 @@ pub(crate) fn local_in_import_path(base: &Path, raw: &str) -> Option<PathBuf> {
     Some(resolved)
 }
 
-pub(crate) fn parse_in_file_inner(
-    path: &Path,
-    seen: &mut HashSet<PathBuf>,
-) -> Result<UnifiedModule, String> {
+fn parse_in_file_inner(path: &Path, seen: &mut HashSet<PathBuf>) -> Result<ParsedInModule, String> {
     let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if !seen.insert(key) {
-        return Ok(UnifiedModule::new(Vec::new()));
+        return Ok(ParsedInModule {
+            module: UnifiedModule::new(Vec::new()),
+            pending_globals: HashSet::new(),
+        });
     }
     let source = normalize_human_in_source(
         &fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?,
     );
     let surface = parse_in_surface_info(&source)?;
     let mut decls = Vec::new();
+    let mut pending_globals = HashSet::new();
     let imports: Vec<_> = surface
         .imports
         .into_iter()
@@ -376,39 +467,35 @@ pub(crate) fn parse_in_file_inner(
                 results.push(imported?);
             }
             for imported in results {
-                decls.extend(imported.decls);
+                decls.extend(imported.module.decls);
+                pending_globals.extend(imported.pending_globals);
             }
             Ok::<(), String>(())
         })?;
     } else {
         for import_path in imports {
             let imported = parse_in_file_inner(&import_path, seen)?;
-            decls.extend(imported.decls);
+            decls.extend(imported.module.decls);
+            pending_globals.extend(imported.pending_globals);
         }
     }
-    let module = parse_in_module_without_validation(&source, Some(path))?;
-    let identity = module.identity.clone();
-    decls.extend(module.decls);
-    let mut merged = UnifiedModule::with_identity(decls, identity);
-    // Imported globals and receiver types are available only after merging.
-    desugar_method_calls(&mut merged);
-    // Re-inline constants after merging imported modules so that constants
-    // from imported files are available to functions in the current file.
-    inline_const_values(&mut merged);
-    Ok(merged)
+    let parsed = parse_in_module_without_validation(&source, Some(path))?;
+    let identity = parsed.module.identity.clone();
+    decls.extend(parsed.module.decls);
+    pending_globals.extend(parsed.pending_globals);
+    Ok(ParsedInModule {
+        module: UnifiedModule::with_identity(decls, identity),
+        pending_globals,
+    })
 }
 
 /// Read a `.in` file and parse to core IR.
 pub fn parse_in_file(path: &Path) -> Result<UnifiedModule, String> {
     let mut seen = HashSet::new();
-    let module = parse_in_file_inner(path, &mut seen)?;
-    validate_module(&module, true)?;
-    Ok(module)
+    finalize_in_module(parse_in_file_inner(path, &mut seen)?, true)
 }
 
 pub fn parse_in_library_file(path: &Path) -> Result<UnifiedModule, String> {
     let mut seen = HashSet::new();
-    let module = parse_in_file_inner(path, &mut seen)?;
-    validate_module(&module, false)?;
-    Ok(module)
+    finalize_in_module(parse_in_file_inner(path, &mut seen)?, false)
 }

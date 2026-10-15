@@ -6063,3 +6063,55 @@ fn native_integer_strings_preserve_extremes_lifetimes_and_print_digits() {
         }
     }
 }
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_inferred_globals_preserve_values_and_constant_chains() {
+    let original = "const selected=alias;\nconst alias=prefix;\nconst prefix=\"λ\";\nvar word=\"雪\";\nvar enabled=true;\nvar ratio=1.5;\nvar values=[20,22];\nfn stringentry()->String{return selected+\"|\"+word;}\nfn floatentry()->Float{return ratio;}\nfn main()->Int{if enabled && ratio==1.5 && values[0]+values[1]==42 && stringentry()==\"λ|雪\"{return 42;}return 0;}";
+    let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+    for text in [original, canonical.as_str()] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("inferred-global-values.in");
+            fs::write(&source, text).unwrap();
+            let mut request = default_request(
+                source.clone(),
+                CompileTarget::Jit,
+                Some("stringentry"),
+                None,
+            );
+            request.profile = profile;
+            for (entry, expected) in [
+                ("stringentry", EvalValue::Str("λ|雪".into())),
+                ("floatentry", EvalValue::Float(1.5)),
+                ("main", EvalValue::Int(42)),
+            ] {
+                request.entry = Some(entry.into());
+                let report = compile_owned(&request);
+                assert!(report.success, "{entry} {profile:?} {text}: {report:?}");
+                assert_eq!(report.eval_result, Some(expected), "{entry} {profile:?}");
+            }
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("inferred-global-values");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{profile:?} {text}: {report:?}"
+                );
+                let output = std::process::Command::new(&binary).output().unwrap();
+                assert_eq!(output.status.code(), Some(42), "{profile:?}: {output:?}");
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
