@@ -1,0 +1,2 @@
+fn update(xs: [Int], at: Int, value: Int) -> [Int] { let next: [Int] = [xs[0], xs[1], xs[2]]; next[at] = value; return next; }
+fn main() -> Int { let xs: [Int] = [1, 2, 3]; let next: [Int] = update(xs, 1, 7); if xs[1] != 2 { return 1; } return next[1] - 7; }
