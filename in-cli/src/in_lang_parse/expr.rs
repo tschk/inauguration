@@ -65,11 +65,7 @@ fn try_parse_control_value(s: &str, context: &mut LoopParseContext<'_>) -> Optio
         .or_else(|| s.strip_prefix("if(").map(|_| &s[2..]))
     {
         let rest = trim(rest);
-        let open = if rest.starts_with('(') {
-            find_fn_body_open_brace(rest)?
-        } else {
-            rest.find('{')?
-        };
+        let open = find_struct_init_open_brace(rest)?;
         let condition = trim(&rest[..open]);
         let (_, close) = brace_content_bounds_after_open(rest, open)?;
         let tail = trim(&rest[close + 1..]).strip_prefix("else")?;

@@ -164,9 +164,8 @@ fn parse_if_stmt(s: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt, St
     let rest = trim(s)
         .strip_prefix("if ")
         .ok_or_else(|| ".in: internal if parse".to_string())?;
-    let open = rest
-        .find('{')
-        .ok_or_else(|| ".in: `if` needs `{` body".to_string())?;
+    let open =
+        find_struct_init_open_brace(rest).ok_or_else(|| ".in: `if` needs `{` body".to_string())?;
     let cond = parse_expr_with_context(trim(&rest[..open]), context);
     let (then_inner, then_close) = brace_content_bounds_after_open(rest, open)
         .ok_or_else(|| ".in: unclosed `if` body".to_string())?;
@@ -197,8 +196,7 @@ fn parse_while_stmt(s: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt,
     let rest = trim(s)
         .strip_prefix("while ")
         .ok_or_else(|| ".in: internal while parse".to_string())?;
-    let open = rest
-        .find('{')
+    let open = find_struct_init_open_brace(rest)
         .ok_or_else(|| ".in: `while` needs `{` body".to_string())?;
     let cond = parse_expr_with_context(trim(&rest[..open]), context);
     let (inner, _) = brace_content_bounds_after_open(rest, open)

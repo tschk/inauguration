@@ -2486,3 +2486,63 @@ fn match_does_not_steal_a_following_standalone_block() {
         "{canonical}"
     );
 }
+
+#[test]
+fn conditional_headers_preserve_quoted_and_nested_braces_in_canonical_roundtrips() {
+    for condition in [
+        r#"text=="//literal { :""#,
+        r#"text=="escaped\"{[,:""#,
+        "({counter=counter+1;counter==1})",
+        "(Entry{flag:true}).flag",
+        "[true,false][0]",
+    ] {
+        for kind in ["if", "else-if", "while", "value"] {
+            let control = match kind {
+                "if" => format!("if {condition} {{return 42;}} else {{return 0;}}"),
+                "else-if" => format!(
+                    "if false {{return 0;}} else if {condition} {{return 42;}} else {{return 1;}}"
+                ),
+                "while" => format!("while {condition} {{counter=42;break;}} return counter;"),
+                "value" => format!(
+                    "let answer=if {condition} {{42}} else if false {{0}} else {{1}};return answer;"
+                ),
+                _ => unreachable!(),
+            };
+            let source = format!(
+                "struct Entry {{Bool flag}}\nfn main()->Int {{let counter=0;let text=\"//literal {{ :\";{control}}}\n"
+            );
+            let before =
+                parse_in_source(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let body = before
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Function { name, body, .. } if name == "main" => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            let actual = match &body[2] {
+                Stmt::If {
+                    cond, else_body, ..
+                } if kind == "else-if" => {
+                    assert_eq!(cond, &Expr::BoolLit(false));
+                    let Stmt::If { cond, .. } = &else_body[0] else {
+                        panic!("{else_body:?}")
+                    };
+                    cond
+                }
+                Stmt::If { cond, .. }
+                | Stmt::Loop {
+                    cond: Some(cond), ..
+                } => cond,
+                Stmt::Let(_, _, Expr::Conditional { cond, .. }) => cond.as_ref(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(actual, &parse_expr(condition), "{source}");
+            let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+            let after =
+                parse_in_source(&canonical).unwrap_or_else(|error| panic!("{canonical}: {error}"));
+            assert_eq!(before.decls, after.decls, "{source}\n{canonical}");
+        }
+    }
+}

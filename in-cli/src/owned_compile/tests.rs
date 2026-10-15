@@ -45,6 +45,63 @@ fn default_request(
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
+fn owned_conditional_headers_preserve_quoted_braces_and_expression_effects() {
+    for original in [
+        "fn main()->Int {if \"{\"==\"{\" {return 42;} return 0;}",
+        "fn main()->Int {var count:Int=0;while \"}\"==\"}\" && count<1 {count+=1;} return count+41;}",
+        "fn main()->Int {let value=(if \"{\"==\"{\" {42} else {0});return value;}",
+        "fn main()->Int {if \"{\"!=\"{\" {return 0;} else if \"}\"==\"}\" {return 42;} else {return 0;}}",
+        "fn main()->Int {let value=(if false {0} else if \"{\"==\"{\" {42} else {0});return value;}",
+        "fn main()->Int {var calls:Int=0;if ({calls+=1;calls==1}) {return calls+41;} return 0;}",
+        "fn main()->Int {var checks:Int=0;var turns:Int=0;while ({checks+=1;turns<1}) {turns+=1;} return checks+turns+39;}",
+        "struct Flag {Bool ready}\nfn main()->Int {if (Flag {ready:true}).ready {return 42;} return 0;}",
+        "struct Flag {Bool ready}\nfn main()->Int {while (Flag {ready:true}).ready {return 42;} return 0;}",
+    ] {
+        let canonical = crate::in_canonical::canonicalize_in_source(original)
+            .unwrap_or_else(|error| panic!("{original}: {error}"));
+        for (form, text) in [("original", original), ("canonical", canonical.as_str())] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let source = temp_path("conditional-header.in");
+                fs::write(&source, text).unwrap();
+                let mut request =
+                    default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{form} {profile:?} {text}: {report:?}");
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{form} {profile:?} {text}"
+                );
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    let binary = temp_path("conditional-header-native");
+                    request.target = CompileTarget::Native;
+                    request.out = Some(binary.clone());
+                    let report = compile_owned(&request);
+                    assert!(report.success, "{form} {profile:?} {text}: {report:?}");
+                    assert_eq!(
+                        std::process::Command::new(&binary).status().unwrap().code(),
+                        Some(42),
+                        "{form} {profile:?} {text}"
+                    );
+                    fs::remove_file(binary).unwrap();
+                }
+                fs::remove_file(source).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
 fn unit_aggregate_layouts_refuse_until_zero_width_storage_is_supported() {
     for text in [
         "fn main()->i64{let items=[()];match items[0]{()=>42}}",

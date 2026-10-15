@@ -6183,6 +6183,50 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn conditional_headers_preserve_quoted_braces_blocks_and_field_values() {
+        for body in [
+            r#"if "a{b}"=="a{b}" {return 42;} else {return 0;}"#,
+            r#"let count:Int=0;while "a{b}"=="a{b}" && count<2 {count+=1;}return count+40;"#,
+            r#"let answer=(if "a{b}"=="no" {0} else if "a{b}"=="a{b}" {42} else {0});return answer;"#,
+            "if ({calls+=1;calls==1}) {return calls+41;}return 0;",
+            "let count:Int=0;while ({calls+=1;count<2}) {count+=1;}return count+calls+37;",
+            "let answer=(if ({calls+=1;false}) {0} else if ({calls+=1;true}) {40} else {0});return answer+calls;",
+            "if ((Entry{value:42}).value==42) {return 42;}return 0;",
+        ] {
+            let source = format!(
+                "struct Entry{{\n Int value\n}}\nvar calls:Int=0;\nfn main()->Int{{{body}}}"
+            );
+            let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+            for source in [&source, &canonical] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                crate::lower_core::desugar_module(&mut module);
+                let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+                assert!(report.ok, "{source}: {report:?}; {module:?}");
+                for profile in [
+                    crate::emit_profile::EmitProfile::Default,
+                    crate::emit_profile::EmitProfile::Lean,
+                    crate::emit_profile::EmitProfile::Harden,
+                ] {
+                    let mut optimized = module.clone();
+                    crate::core_opt::optimize_with_profile(
+                        &mut optimized.decls,
+                        Some("main"),
+                        profile,
+                    );
+                    let report = crate::core_ir_verifier::verify_for_entry(&optimized, "main");
+                    assert!(report.ok, "{source} {profile:?}: {report:?}");
+                    assert_eq!(
+                        invoke_module(&optimized, profile, &[]),
+                        Some(42),
+                        "{source} {profile:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn jit_runtime_new_is_empty() {
         let rt = JitRuntime::new();
         assert_eq!(rt.function_count(), 0);

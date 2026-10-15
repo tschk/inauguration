@@ -275,7 +275,12 @@ fn format_expr(expr: &Expr) -> String {
             "(if ({}) {} else {})",
             format_expr(cond),
             format_value_branch(then_expr),
-            format_value_branch(else_expr)
+            if matches!(else_expr.as_ref(), Expr::Conditional { .. }) {
+                let nested = format_expr(else_expr);
+                nested[1..nested.len() - 1].to_string()
+            } else {
+                format_value_branch(else_expr)
+            }
         ),
         Expr::Block { body, result } => {
             let mut out = String::from("({\n");
@@ -315,9 +320,9 @@ fn format_if(
     out: &mut String,
 ) {
     out.push_str(indent);
-    out.push_str("if ");
+    out.push_str("if (");
     out.push_str(&format_expr(cond));
-    out.push_str(" {\n");
+    out.push_str(") {\n");
     format_body(then_body, depth + 1, out);
     out.push_str(indent);
     out.push('}');
@@ -333,9 +338,9 @@ fn format_if(
 
 fn format_while_loop(cond: &Expr, body: &[Stmt], depth: usize, indent: &str, out: &mut String) {
     out.push_str(indent);
-    out.push_str("while ");
+    out.push_str("while (");
     out.push_str(&format_expr(cond));
-    out.push_str(" {\n");
+    out.push_str(") {\n");
     format_body(body, depth + 1, out);
     out.push_str(indent);
     out.push_str("}\n");
@@ -494,9 +499,9 @@ fn main() { return; }
         assert!(canonical.contains("p.x = 3"));
         assert!(canonical.contains("let arr: [Int] = [1, 2, 3]"));
         assert!(canonical.contains("arr[0] = 4"));
-        assert!(canonical.contains("while p.x < 10 {"));
+        assert!(canonical.contains("while (p.x < 10) {"));
         assert!(canonical.contains("match (p.y) {"));
-        assert!(canonical.contains("if p.x == 10 {"));
-        assert!(canonical.contains("while true {"));
+        assert!(canonical.contains("if (p.x == 10) {"));
+        assert!(canonical.contains("while (true) {"));
     }
 }
