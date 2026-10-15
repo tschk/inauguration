@@ -514,6 +514,26 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
             if params.iter().all(|(_, typ)| internal_type(typ)) {
                 return true;
             }
+            if cfg!(target_arch = "x86_64") {
+                // Each named argument is staged through the backend's scalar-field
+                // pointer ABI, including receivers; unsupported fields stay compile-only.
+                return params.len() <= 16
+                    && params.iter().all(|(_, typ)| {
+                        if internal_type(typ) {
+                            return true;
+                        }
+                        let Typ::Named(name) = typ.canonical() else {
+                            return false;
+                        };
+                        crate::native_emit::struct_layout::x86_fields(&return_structs, &name)
+                            .is_ok_and(|fields| {
+                                fields.len() <= usize::from(u16::MAX) / 8
+                                    && fields.iter().all(|(_, field)| {
+                                        scalar(field) && field.canonical() != Typ::Void
+                                    })
+                            })
+                    });
+            }
             if !cfg!(target_arch = "aarch64") {
                 return false;
             }
@@ -554,6 +574,21 @@ fn decode_jit_string(raw: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_struct_arguments_and_receivers_use_the_supported_host_abi() {
+        for source in [
+            "struct Pair{x:i64,y:i64} fn take(prefix:i64,p:Pair)->i64{prefix+p.x+p.y} fn main()->i64{take(1,if true{Pair{x:20,y:21}}else{Pair{x:0,y:0}})}",
+            "struct Reader{value:i64} impl Reader{fn take(&self,items:Vec<i64>)->i64{if items.capacity()>=10{self.value}else{0}}} fn main()->i64{let reader=Reader{value:42};reader.take(Vec::with_capacity(10))}",
+        ] {
+            let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            assert_eq!(
+                rust_entry_can_execute(&module, "main", "main"),
+                cfg!(any(target_arch = "aarch64", target_arch = "x86_64")),
+                "{source}"
+            );
+        }
+    }
 
     #[test]
     fn aggregate_parameter_execution_requires_known_bounded_layouts() {

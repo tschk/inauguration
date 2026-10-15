@@ -496,7 +496,10 @@ fn owned_match_values_preserve_selected_effects_bindings_and_control_flow() {
 
 #[test]
 #[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 fn owned_conditional_and_block_values_preserve_scope_effects_and_control_flow() {
@@ -1006,7 +1009,10 @@ fn owned_compile_rejects_unknown_field_write_before_execution() {
 
 #[test]
 #[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 fn rust_jit_executes_explicit_scalar_vector_constructors() {
