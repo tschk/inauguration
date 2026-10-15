@@ -113,4 +113,25 @@ mod tests {
         let header = emit_c_header(&module).expect("header");
         assert!(header.contains("uint8_t _reserved[42];"));
     }
+
+    #[test]
+    fn c_header_snapshot_matches() {
+        let module = sample_module();
+        let header = emit_c_header(&module).expect("header");
+        let expected = "#ifndef IN_BOUNDARY_SAMPLE_PERSON_H\n\
+                        #define IN_BOUNDARY_SAMPLE_PERSON_H\n\n\
+                        #include <stdint.h>\n\
+                        #include \"in_abi.h\"\n\n\
+                        #if defined(__GNUC__) || defined(__clang__)\n\
+                        #define IN_BOUNDARY_PACKED __attribute__((packed))\n\
+                        #else\n\
+                        #define IN_BOUNDARY_PACKED\n\
+                        #endif\n\n\
+                        typedef struct Person {\n\
+                        \x20   InSliceU8 name;\n\
+                        \x20   uint32_t age;\n\
+                        } Person;\n\n\n\
+                        #endif\n";
+        assert_eq!(header, expected);
+    }
 }
