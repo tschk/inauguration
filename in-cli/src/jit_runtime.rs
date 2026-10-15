@@ -6346,6 +6346,44 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn optimized_index_failure_exits_stay_in_their_original_function() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (source, expected) in [
+                ("fn main()->Int{let values=[42];return 100+values[9];}", 1),
+                (
+                    "fn main()->Int{let values=[42];let ignored=values[9];return 42;}",
+                    1,
+                ),
+                ("fn main()->Int{let values=[42];return 42+0*values[9];}", 1),
+                ("fn main()->Int{let values=[42];return 42+values[9]*0;}", 1),
+                (
+                    "fn compute()->Int{let values=[42];return values[9];}\nfn main()->Int{return compute()+41;}",
+                    42,
+                ),
+                ("fn main()->Int{let values=[42];return values[0];}", 42),
+                (
+                    "fn main()->Int{let values=[42];if false && values[9]==0{return 0;}return 42;}",
+                    42,
+                ),
+            ] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                crate::lower_core::desugar_module(&mut module);
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(expected),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn optimized_integer_failure_exits_survive_absorption_dce_and_inlining() {
         let sources = [
             (

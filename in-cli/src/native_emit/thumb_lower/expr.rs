@@ -475,6 +475,8 @@ pub(crate) fn emit_array_index_address(
 ) -> Result<(u32, u32), String> {
     lower_expr_into(emitter, ctx, index, R2, pending)?;
 
+    // Materializing an index with MOVW/MOVT need not set flags.
+    emitter.emit_u16(thumb::cmp_imm8(R2, 0));
     // Bounds: index < 0 or index >= len
     let neg = emitter.len();
     emitter.emit_u32_thumb(thumb::b_cond_wide(COND_LT, 0));
@@ -531,7 +533,7 @@ pub(crate) fn lower_index_load(
     let b_end = emitter.len();
     emitter.emit_u32_thumb(thumb::b_wide(0));
     let fail = emitter.len();
-    thumb::load_i32(emitter, R0, 0);
+    emit_scalar_failure_return(emitter, ctx)?;
     let end = emitter.len();
     patch_b(emitter, b_end, end)?;
     patch_b_cond(emitter, neg, fail)?;
@@ -558,9 +560,14 @@ pub(crate) fn lower_index_assign(
 
     emitter.emit_u16(thumb::str_imm(R4, R1, 0)?);
 
+    let branch = emitter.len();
+    emitter.emit_u32_thumb(thumb::b_wide(0));
+    let fail = emitter.len();
+    emit_scalar_failure_return(emitter, ctx)?;
     let end = emitter.len();
-    patch_b_cond(emitter, neg, end)?;
-    patch_b_cond(emitter, oob, end)?;
+    patch_b(emitter, branch, end)?;
+    patch_b_cond(emitter, neg, fail)?;
+    patch_b_cond(emitter, oob, fail)?;
     Ok(())
 }
 
@@ -698,6 +705,13 @@ pub(crate) fn try_lower_mmio(
     }
 }
 
+// Bounds and arithmetic failures leave the current scalar function without
+// exposing a normal expression result or writing a language error carrier.
+fn emit_scalar_failure_return(emitter: &mut CodeEmitter, ctx: &LowerCtx<'_>) -> Result<(), String> {
+    emitter.emit_u16(thumb::movs_imm8(R0, 1));
+    thumb::emit_epilogue(emitter, ctx.frame_reserve())
+}
+
 // Match the owned scalar contract: a zero divisor returns 1 from this
 // function, rather than producing a normal expression value or raising an
 // implicit language exception. Operands have already been evaluated once.
@@ -709,8 +723,7 @@ fn lower_checked_div_or_mod(
     emitter.emit_u16(thumb::cmp_imm8(R2, 0));
     let nonzero = emitter.len();
     emitter.emit_u32_thumb(thumb::b_cond_wide(COND_NE, 0));
-    emitter.emit_u16(thumb::movs_imm8(R0, 1));
-    thumb::emit_epilogue(emitter, ctx.frame_reserve())?;
+    emit_scalar_failure_return(emitter, ctx)?;
     let divide = emitter.len();
     patch_b_cond(emitter, nonzero, divide)?;
     emitter.emit_u32_thumb(thumb::sdiv(R0, R1, R2));
@@ -1191,5 +1204,149 @@ mod checked_division_tests {
             assert_eq!(&emitter.bytes[12..16], sdiv.bytes.as_slice());
             assert_eq!(emitter.bytes.len(), if modulo { 20 } else { 16 });
         }
+    }
+}
+
+#[cfg(test)]
+mod checked_index_branch_tests {
+    use super::*;
+
+    fn words(emitter: &CodeEmitter) -> Vec<u16> {
+        emitter
+            .bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|word| u16::from_le_bytes(*word))
+            .collect()
+    }
+
+    // These small test functions use forward offsets below 4096 bytes. Decode
+    // the actual instruction displacement independently of the patch helpers.
+    fn forward_target(words: &[u16], site: usize, conditional: bool) -> usize {
+        let high = words[site / 2];
+        let low = words[site / 2 + 1];
+        if conditional {
+            assert_eq!(high & 0xfc3f, 0xf000);
+            assert_eq!(low & 0xf800, 0x8000);
+        } else {
+            assert_eq!(high, 0xf000);
+            assert_eq!(low & 0xf800, 0xb800);
+        }
+        site + 4 + usize::from(low & 0x07ff) * 2
+    }
+
+    fn assert_bounds_return_paths(emitter: &CodeEmitter, frame: u32) {
+        let words = words(emitter);
+        let negative_cmp = words
+            .iter()
+            .position(|word| *word == thumb::cmp_imm8(R2, 0))
+            .unwrap();
+        let upper_cmp = words
+            .iter()
+            .position(|word| *word == thumb::cmp_reg(R2, R3))
+            .unwrap();
+        let failure = words
+            .windows(3)
+            .position(|sequence| {
+                sequence
+                    == [
+                        thumb::movs_imm8(R0, 1),
+                        thumb::add_sp_imm(frame).unwrap(),
+                        thumb::pop(0b1111_0000, true),
+                    ]
+            })
+            .unwrap()
+            * 2;
+        for (comparison, condition) in [(negative_cmp, COND_LT), (upper_cmp, COND_GE)] {
+            let branch = (comparison + 1) * 2;
+            assert_eq!((words[branch / 2] >> 6) & 0xf, u16::from(condition));
+            assert_eq!(forward_target(&words, branch, true), failure);
+        }
+        // A successful access skips the complete failure epilogue.
+        assert_eq!(forward_target(&words, failure - 4, false), failure + 6);
+    }
+
+    #[test]
+    fn checked_reads_compare_fresh_index_flags_and_only_move_success_to_destination() {
+        for index in [
+            Expr::IntLit(-1),
+            Expr::IntLit(0xffffffff),
+            Expr::IntLit(0),
+            Expr::IntLit(1),
+            Expr::Ident("index".into()),
+        ] {
+            let functions = HashMap::new();
+            let structs = HashMap::new();
+            let mut ctx = LowerCtx::new("read", &[], &functions, &structs);
+            ctx.frame_size = 32;
+            ctx.locals.insert(
+                "values".into(),
+                LocalSlot::Array {
+                    base: 8,
+                    elem_size: 4,
+                    len: 1,
+                },
+            );
+            ctx.locals.insert("index".into(), LocalSlot::Scalar(4));
+            let mut emitter = CodeEmitter::new();
+            let mut pending = Vec::new();
+            lower_index_load(
+                &mut emitter,
+                &mut ctx,
+                &Expr::Ident("values".into()),
+                &index,
+                R4,
+                &mut pending,
+            )
+            .unwrap();
+            assert_bounds_return_paths(&emitter, ctx.frame_reserve());
+            let words = words(&emitter);
+            assert_eq!(words.last(), Some(&thumb::mov_low(R4, R0)));
+            assert!(words.contains(&thumb::ldr_imm(R0, R1, 0).unwrap()));
+            assert!(pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn checked_stores_evaluate_value_and_index_calls_once_in_order_before_bounds_return() {
+        let functions = HashMap::new();
+        let structs = HashMap::new();
+        let mut ctx = LowerCtx::new("write", &[], &functions, &structs);
+        ctx.frame_size = 32;
+        ctx.locals.insert(
+            "values".into(),
+            LocalSlot::Array {
+                base: 8,
+                elem_size: 4,
+                len: 1,
+            },
+        );
+        let mut emitter = CodeEmitter::new();
+        let mut pending = Vec::new();
+        let call = |name: &str| Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args: vec![],
+        };
+        lower_index_assign(
+            &mut emitter,
+            &mut ctx,
+            &Expr::Ident("values".into()),
+            &call("index_once"),
+            &call("value_once"),
+            &mut pending,
+        )
+        .unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|call| call.target.as_str())
+                .collect::<Vec<_>>(),
+            ["value_once", "index_once"]
+        );
+        assert!(pending[0].site < pending[1].site);
+        assert_bounds_return_paths(&emitter, ctx.frame_reserve());
+        assert!(words(&emitter).contains(&thumb::str_imm(R4, R1, 0).unwrap()));
+        assert_eq!(ctx.call_arg_depth, 0);
     }
 }

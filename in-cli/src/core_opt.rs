@@ -158,7 +158,7 @@ fn walk_expr<F: FnMut(&Expr)>(e: &Expr, f: &mut F) {
 }
 
 /// Whether evaluation can observe effects or leave the current function.
-/// Checked division and remainder can return early on a zero divisor, just as
+/// Checked indexing, division and remainder can return early on failure, just as
 /// calls and structured values can carry effects or nonlocal exits. Retain their
 /// evaluation when removing bindings or substituting function bodies.
 fn expr_has_effects(e: &Expr) -> bool {
@@ -168,6 +168,7 @@ fn expr_has_effects(e: &Expr) -> bool {
         if matches!(
             n,
             Expr::Call { .. }
+                | Expr::Index { .. }
                 | Expr::Block { .. }
                 | Expr::Conditional { .. }
                 | Expr::MatchValue { .. }
@@ -2586,6 +2587,31 @@ mod tests {
             }
             assert!(calls.contains("external_answer"));
         }
+    }
+
+    #[test]
+    fn checked_indexing_retains_bounds_failure_exits() {
+        let indexed = Expr::Index {
+            base: Box::new(ident("values")),
+            index: Box::new(Expr::IntLit(9)),
+        };
+        assert!(expr_has_effects(&indexed));
+        let absorbed = bin("*", Expr::IntLit(0), indexed.clone());
+        assert_eq!(simplify_expr(absorbed.clone()), absorbed);
+        let mut body = vec![
+            Stmt::Let("ignored".into(), Some(Typ::Int), indexed),
+            Stmt::Return(Some(Expr::IntLit(42))),
+        ];
+        assert!(fold_body_to_expr(&body, &[]).is_none());
+        dce_body(&mut body);
+        assert!(matches!(body.first(), Some(Stmt::Let(..))));
+        assert_eq!(
+            fold_expr(Expr::Index {
+                base: Box::new(Expr::ArrayLit(vec![Expr::IntLit(42)])),
+                index: Box::new(Expr::IntLit(0))
+            }),
+            Expr::IntLit(42)
+        );
     }
 
     #[test]

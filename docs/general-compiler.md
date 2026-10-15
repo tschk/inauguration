@@ -44,7 +44,10 @@ For owned functions returning `Int`, integer division or remainder by zero
 returns `1` immediately from that function. A caller continues with that result.
 ARM64, x86 and Thumb preserve this scalar contract. Optimization retains the
 evaluation and function boundary of division and remainder, including unused
-bindings and arithmetic that otherwise discards their value.
+bindings and arithmetic that otherwise discards their value. Checked array
+indexing follows the same current-function failure contract for negative or
+out-of-range indices; optimization preserves those checks and their function
+boundaries too.
 
 AArch64 lowering branches `break` and `continue` to the innermost loop's exit
 and next iteration, including vector loops. `.in` range-loop expansion advances the

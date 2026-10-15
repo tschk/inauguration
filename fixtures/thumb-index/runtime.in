@@ -1,0 +1,140 @@
+fn mark(value: Int) -> Int {
+  store32(0x38000000, load32(0x38000000) * 10 + value);
+  return value;
+}
+fn read(index: Int) -> Int {
+  let values: [Int] = [42, 43];
+  return values[index];
+}
+fn literal_negative() -> Int {
+  let values: [Int] = [42, 43];
+  return 100 + values[-1];
+}
+fn literal_carrier() -> Int {
+  let values: [Int] = [42, 43];
+  return 100 + values[0xffffffff];
+}
+fn write(index: Int) -> Int {
+  let values: [Int] = [42, 43];
+  let value = mark(1);
+  let at = mark(index);
+  values[at] = value;
+  mark(3);
+  return values[0];
+}
+fn absorbed() -> Int {
+  let values: [Int] = [42, 43];
+  return 42 + 0 * values[9];
+}
+fn absorbed_right() -> Int {
+  let values: [Int] = [42, 43];
+  return 42 + values[9] * 0;
+}
+fn unused() -> Int {
+  let values: [Int] = [42, 43];
+  let ignored = values[9];
+  return 42;
+}
+fn immediate_store_negative() -> Int {
+  let values: [Int] = [42, 43];
+  let value = mark(2);
+  values[-1] = value;
+  mark(3);
+  return 100;
+}
+fn immediate_store_carrier() -> Int {
+  let values: [Int] = [42, 43];
+  let value = mark(2);
+  values[0xffffffff] = value;
+  mark(3);
+  return 100;
+}
+fn read_effect(index: Int) -> Int {
+  let values: [Int] = [42, 43];
+  mark(1);
+  let answer = values[mark(index)];
+  mark(3);
+  return answer;
+}
+fn empty_read() -> Int {
+  let values: [Int] = [];
+  return 100 + values[0];
+}
+fn empty_store() -> Int {
+  let values: [Int] = [];
+  values[0] = 9;
+  return 100;
+}
+fn main() -> Int {
+  if read(0) != 42 {
+    return 2;
+  }
+  if read(2) != 1 {
+    return 3;
+  }
+  if read(-1) != 1 {
+    return 4;
+  }
+  if literal_negative() != 1 {
+    return 5;
+  }
+  if literal_carrier() != 1 {
+    return 6;
+  }
+  if read(9) + 41 != 42 {
+    return 7;
+  }
+  store32(0x38000000, 0);
+  if write(0) != 1 {
+    return 8;
+  }
+  if load32(0x38000000) != 103 {
+    return 9;
+  }
+  store32(0x38000000, 0);
+  if write(9) != 1 {
+    return 10;
+  }
+  if load32(0x38000000) != 19 {
+    return 11;
+  }
+  if absorbed() != 1 {
+    return 12;
+  }
+  if unused() != 1 {
+    return 13;
+  }
+  store32(0x38000000, 0);
+  if write(2) != 1 { return 15; }
+  if load32(0x38000000) != 12 { return 16; }
+  store32(0x38000000, 0);
+  if write(-1) != 1 { return 17; }
+  if load32(0x38000000) != 9 { return 18; }
+  store32(0x38000000, 0);
+  if write(0xffffffff) != 1 { return 19; }
+  if load32(0x38000000) != 9 { return 20; }
+  store32(0x38000000, 0);
+  if immediate_store_negative() != 1 { return 21; }
+  if load32(0x38000000) != 2 { return 22; }
+  store32(0x38000000, 0);
+  if immediate_store_carrier() != 1 { return 23; }
+  if load32(0x38000000) != 2 { return 24; }
+  store32(0x38000000, 0);
+  if read_effect(9) != 1 { return 25; }
+  if load32(0x38000000) != 19 { return 26; }
+  store32(0x38000000, 0);
+  if read_effect(0) != 42 { return 27; }
+  if load32(0x38000000) != 103 { return 28; }
+  if read(0xffffffff) != 1 { return 30; }
+  if absorbed_right() != 1 { return 31; }
+  if empty_read() != 1 { return 32; }
+  if empty_store() != 1 { return 33; }
+  let safe: [Int] = [42, 43];
+  if false && safe[9] == 0 {
+    return 14;
+  }
+  if true || safe[-1] == 0 {
+    return 42;
+  }
+  return 29;
+}
