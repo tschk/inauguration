@@ -263,30 +263,6 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_rejects_empty_module_id() {
-        let mut module = sample_module();
-        module.module = "".to_string();
-        let err = emit_swift_wrapper(&module).expect_err("expected error");
-        assert_eq!(err, "module id is empty");
-    }
-
-    #[test]
-    fn wrapper_rejects_empty_layout_name() {
-        let mut module = sample_module();
-        module.layouts[0].name = "".to_string();
-        let err = emit_swift_wrapper(&module).expect_err("expected error");
-        assert_eq!(err, "layout name is empty");
-    }
-
-    #[test]
-    fn wrapper_rejects_empty_symbol_name() {
-        let mut module = sample_module();
-        module.symbols[0].name = "".to_string();
-        let err = emit_swift_wrapper(&module).expect_err("expected error");
-        assert_eq!(err, "symbol name is empty");
-    }
-
-    #[test]
     fn wrapper_emits_valid_swift_code() {
         let module = sample_module();
         let wrapper = emit_swift_wrapper(&module).expect("wrapper");

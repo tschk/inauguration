@@ -175,8 +175,6 @@ mod tests {
 
     #[test]
     fn test_load_dynamic_module_abi_mismatch() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("test_abi_mismatch.so");
         let c_code = r#"
             #include <stdint.h>
             struct RawModuleVTable {
@@ -207,7 +205,7 @@ mod tests {
                 return &vtable;
             }
         "#;
-        compile_dummy_library(c_code, &path);
+        let path = compile_c_fixture(c_code, "test_abi_mismatch.so");
 
         let result = load_dynamic_module(&path);
 
@@ -223,8 +221,6 @@ mod tests {
 
     #[test]
     fn test_load_dynamic_module_success() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("test_success.so");
         let c_code = format!(
             r#"
             #include <stdint.h>
@@ -258,7 +254,7 @@ mod tests {
         "#,
             crate::boundary_ir::IN_ABI_VERSION
         );
-        compile_dummy_library(&c_code, &path);
+        let path = compile_c_fixture(&c_code, "test_success.so");
 
         let result = load_dynamic_module(&path);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
