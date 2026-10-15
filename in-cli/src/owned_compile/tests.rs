@@ -45,6 +45,41 @@ fn default_request(
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
+fn owned_dynamic_string_concat_preserves_payloads_and_operand_order() {
+    let original = "var trace:Int=0;\nvar word:String=\"λ\0\";\nfn left()->String{trace=trace*10+1;return word;}\nfn right()->String{trace=trace*10+2;return \"雪\";}\nfn stringentry()->String{return (left()+right())+\"!\";}\nfn main()->Int{let result=stringentry();if result==\"λ\0雪!\" && trace==12{return 42;}return 0;}";
+    let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+    for text in [original, canonical.as_str()] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("dynamic-string-concat.in");
+            fs::write(&source, text).unwrap();
+            let mut request = default_request(
+                source.clone(),
+                CompileTarget::Jit,
+                Some("stringentry"),
+                None,
+            );
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?} {text}: {report:?}");
+            assert_eq!(report.eval_result, Some(EvalValue::Str("λ\0雪!".into())));
+            request.entry = Some("main".into());
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?} {text}: {report:?}");
+            assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
 fn owned_typed_string_globals_preserve_layout_values_and_mutability() {
     for (original, expected) in [
         (

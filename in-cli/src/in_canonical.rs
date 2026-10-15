@@ -203,7 +203,15 @@ fn format_expr(expr: &Expr) -> String {
         Expr::UnitLit => "()".into(),
         Expr::IntLit(n) => n.to_string(),
         Expr::FloatLit(f) => f.0.to_string(),
-        Expr::StringLit(value) => format!("{value:?}"),
+        Expr::StringLit(value) => format!(
+            "\"{}\"",
+            value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t")
+        ),
         Expr::BoolLit(value) => value.to_string(),
         Expr::Ident(name) => name.clone(),
         Expr::Unary { op, expr, .. } => {
@@ -378,6 +386,24 @@ fn format_match(scrutinee: &Expr, arms: &[MatchArm], depth: usize, indent: &str,
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canonical_string_literals_roundtrip_control_bytes_and_unicode() {
+        for value in ["\0", "\u{1}\u{7}\u{1b}", "\\0\\u{1}", "λ雪\n\r\t\"\\"] {
+            let literal = super::format_expr(&crate::core_ir::Expr::StringLit(value.into()));
+            assert_eq!(
+                crate::core_ir::decode_string_literal(&literal).as_deref(),
+                Some(value)
+            );
+            let source = format!("const word:String={literal};\nfn main()->String{{return word;}}");
+            let canonical = super::canonicalize_in_source(&source).unwrap();
+            assert_eq!(
+                crate::in_lang_parse::parse_in_source(&canonical).unwrap(),
+                crate::in_lang_parse::parse_in_source(&source).unwrap(),
+                "{value:?}: {canonical:?}"
+            );
+        }
+    }
+
     use super::*;
     use crate::in_lang_parse::parse_in_source;
 

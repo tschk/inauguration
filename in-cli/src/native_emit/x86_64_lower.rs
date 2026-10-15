@@ -2531,6 +2531,15 @@ fn scalar_expr_type_with_bindings(
         }
 
         Expr::Binary { op, lhs, rhs }
+            if op == "+"
+                && [lhs, rhs].into_iter().all(|value| {
+                    scalar_expr_type_with_bindings(value, ctx, bindings)
+                        .is_some_and(|typ| typ.canonical() == Typ::String)
+                }) =>
+        {
+            Some(Typ::String)
+        }
+        Expr::Binary { op, lhs, rhs }
             if matches!(
                 op.as_str(),
                 "+" | "-" | "*" | "/" | "+=" | "-=" | "*=" | "/="
@@ -2557,6 +2566,22 @@ fn lower_binary_expr(
     rhs: &Expr,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    let string_concat = op == "+"
+        && [lhs, rhs].into_iter().all(|value| {
+            scalar_expr_type(value, ctx).is_some_and(|typ| typ.canonical() == Typ::String)
+        });
+    // shortcut: allocating String concat needs the hosted ABI; add a target runtime before freestanding support.
+    if string_concat
+        && (x86_64::is_32bit()
+            || !ctx.runtime_error_slot
+            || ctx.string_layout != X86StringLayout::Instring
+            || ctx.is_interrupt)
+    {
+        return Err(
+            "x86_64-lower: String concatenation requires the hosted 64-bit Instring JIT runtime"
+                .into(),
+        );
+    }
     if matches!(op, "&&" | "||") {
         lower_expr_into(emitter, ctx, lhs, RAX, pending_calls)?;
         emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
@@ -2596,6 +2621,25 @@ fn lower_binary_expr(
         }
         emitter.emit_insns(&x86_64::load_i64(RAX, i64::from(!equal)));
         emitter.patch_u32(end + 1, (emitter.len() as i32 - end as i32 - 5) as u32);
+        if target_reg != RAX {
+            emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+        }
+        return Ok(());
+    }
+
+    if string_concat {
+        let wrapper =
+            jit_stdlib_wrapper("str-concat").ok_or("missing String concat runtime alias")?;
+        let ptr = crate::native_emit::native_link::resolve_native_fn(wrapper)
+            .or_else(|| {
+                // Public low-level JIT lowering may run before a JitRuntime is constructed.
+                crate::native_emit::native_link::bootstrap_jit_native();
+                crate::native_emit::native_link::resolve_native_fn(wrapper)
+            })
+            .ok_or("x86_64-lower: String concat runtime wrapper unavailable")?;
+        emitter.emit_insns(&x86_64::mov_rr(RDI, RDX));
+        emitter.emit_insns(&x86_64::mov_rr(RSI, RAX));
+        emit_aligned_host_call(emitter, ptr);
         if target_reg != RAX {
             emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
         }
@@ -3479,6 +3523,19 @@ fn lower_call_args(
     Ok(())
 }
 
+/// Call a hosted C-ABI wrapper with argument registers already staged.
+fn emit_aligned_host_call(emitter: &mut CodeEmitter, ptr: *const u8) {
+    emitter.emit_insns(&x86_64::load_i64(RAX, ptr as i64));
+    // Operand spills and Harden frames may leave the stack unaligned for C calls.
+    emitter.emit_insns(&x86_64::mov_rr(11, x86_64::REG_SP));
+    emitter.emit_insns(&x86_64::load_i64(10, -16));
+    emitter.emit_insns(&x86_64::and_rr(x86_64::REG_SP, 10));
+    emitter.emit_insns(&x86_64::sub_rsp_i8(16));
+    emitter.emit_insns(&x86_64::mov_m_r(x86_64::REG_SP, 0, 11));
+    emitter.emit_insns(&[0xFF, 0xD0]);
+    emitter.emit_insns(&x86_64::mov_r_m(x86_64::REG_SP, x86_64::REG_SP, 0));
+}
+
 fn lower_call_expr(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -3639,15 +3696,7 @@ fn lower_call_expr(
                 );
             }
             lower_call_args(emitter, ctx, args, &target_name, pending_calls)?;
-            emitter.emit_insns(&x86_64::load_i64(RAX, ptr as i64));
-            // Operand spills and Harden frames may leave the stack unaligned for C calls.
-            emitter.emit_insns(&x86_64::mov_rr(11, x86_64::REG_SP));
-            emitter.emit_insns(&x86_64::load_i64(10, -16));
-            emitter.emit_insns(&x86_64::and_rr(x86_64::REG_SP, 10));
-            emitter.emit_insns(&x86_64::sub_rsp_i8(16));
-            emitter.emit_insns(&x86_64::mov_m_r(x86_64::REG_SP, 0, 11));
-            emitter.emit_insns(&[0xFF, 0xD0]);
-            emitter.emit_insns(&x86_64::mov_r_m(x86_64::REG_SP, x86_64::REG_SP, 0));
+            emit_aligned_host_call(emitter, ptr);
             emit_stack_cleanup(emitter, args.len());
             if target_reg != RAX {
                 emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
@@ -4688,6 +4737,131 @@ mod tests {
                 assert_eq!(actual, Some(expected), "{layout:?}: match {text:?}");
             }
         }
+    }
+
+    #[cfg(all(target_arch = "x86_64", unix))]
+    #[test]
+    fn string_concat_executes_with_real_payloads_and_ordered_nested_calls() {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let _profile = antidecomp::ProfileGuard::new(profile);
+            let module = crate::in_lang_parse::parse_in_source(
+            "fn concat(left:String,right:String)->String{return left+right;}\nfn main()->Int{return 42;}",
+        )
+        .unwrap();
+            let result = lower_module(&module, "concat").unwrap();
+            let offsets: Vec<_> = result
+                .exports
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect();
+            let relocations: Vec<_> = result
+                .relocations
+                .iter()
+                .map(|site| (*site, result.codegen_base))
+                .collect();
+            let mut runtime = crate::jit_runtime::JitRuntime::new();
+            runtime.load(&result.code, &offsets, &relocations).unwrap();
+            for (left, right, expected) in [
+                ("λ", "雪", "λ雪"),
+                ("", "", ""),
+                ("", "right", "right"),
+                ("a\0", "\0b", "a\0\0b"),
+            ] {
+                let mut a = Vec::new();
+                let mut b = Vec::new();
+                append_string_payload(&mut a, left, X86StringLayout::Instring).unwrap();
+                append_string_payload(&mut b, right, X86StringLayout::Instring).unwrap();
+                let args = [a.as_ptr() as i64, b.as_ptr() as i64];
+                let actual = unsafe { runtime.invoke("concat", &args) }.unwrap();
+                // Fail safely on the old address-add implementation before dereferencing its result.
+                assert_ne!(actual, args[0].wrapping_add(args[1]));
+                assert_ne!(actual, 0);
+                let length = unsafe { std::ptr::read_unaligned(actual as *const u64) } as usize;
+                assert_eq!(length, expected.len());
+                let bytes =
+                    unsafe { std::slice::from_raw_parts((actual as *const u8).add(8), length) };
+                assert_eq!(bytes, expected.as_bytes());
+            }
+            let module = crate::in_lang_parse::parse_in_source(
+                r#"
+var trace:Int=0
+fn left()->String {trace=trace*10+1;return "λ";}
+fn right()->String {trace=trace*10+2;return "雪";}
+fn concat()->String {return (left()+right())+"!";}
+fn read()->Int {return trace;}
+fn main()->Int {return 42;}
+"#,
+            )
+            .unwrap();
+            let result = lower_module(&module, "concat").unwrap();
+            let offsets: Vec<_> = result
+                .exports
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect();
+            let relocations: Vec<_> = result
+                .relocations
+                .iter()
+                .map(|site| (*site, result.codegen_base))
+                .collect();
+            let mut runtime = crate::jit_runtime::JitRuntime::new();
+            runtime
+                .load_with_data_relocations(
+                    &result.code,
+                    &offsets,
+                    &relocations,
+                    &result.data,
+                    &result.global_relocs,
+                    &result.data_relocations,
+                )
+                .unwrap();
+            let actual = unsafe { runtime.invoke("concat", &[]) }.unwrap();
+            assert_eq!(unsafe { runtime.invoke("read", &[]) }, Some(12));
+            assert_ne!(actual, 0);
+            let length = unsafe { std::ptr::read_unaligned(actual as *const u64) } as usize;
+            assert_eq!(length, "λ雪!".len());
+            assert_eq!(
+                unsafe { std::slice::from_raw_parts((actual as *const u8).add(8), length) },
+                "λ雪!".as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn string_concat_refuses_non_hosted_layouts_and_modes() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "fn concat(left:String,right:String)->String{return left+right;}\nfn main()->Int{return 42;}",
+        )
+        .unwrap();
+        for (layout, runtime) in [
+            (X86StringLayout::Cstring, true),
+            (X86StringLayout::Instring, false),
+        ] {
+            assert!(
+                lower_module_impl(&module, "concat", 0, 0, layout, runtime)
+                    .err()
+                    .unwrap()
+                    .contains("hosted 64-bit Instring")
+            );
+        }
+        struct WidthGuard(bool);
+        impl Drop for WidthGuard {
+            fn drop(&mut self) {
+                x86_64::set_32bit(self.0);
+            }
+        }
+        let _guard = WidthGuard(x86_64::is_32bit());
+        x86_64::set_32bit(true);
+        assert!(
+            lower_module_impl(&module, "concat", 0, 0, X86StringLayout::Instring, true)
+                .err()
+                .unwrap()
+                .contains("hosted 64-bit Instring")
+        );
     }
 
     #[test]
