@@ -3471,30 +3471,32 @@ mod tests {
     #[test]
     fn optimize_performs_inlining_and_dce() {
         let mut decls = vec![
-            make_fn(
+            make_fn_with_params(
                 "inline_me",
+                vec![],
+                Typ::Int,
                 vec![
                     Stmt::Let("a".into(), Some(Typ::Int), Expr::IntLit(10)),
                     Stmt::Return(Some(ident("a"))),
-                    // Dead code
+                ],
+            ),
+            make_fn_with_params(
+                "kernel_entry",
+                vec![],
+                Typ::Int,
+                vec![
+                    Stmt::Return(Some(call("inline_me", vec![]))),
                     Stmt::Let("b".into(), Some(Typ::Int), Expr::IntLit(20)),
                 ],
             ),
-            make_fn("kernel_entry", vec![Stmt::Expr(call("inline_me", vec![]))]),
         ];
         optimize(&mut decls);
-        // After optimization:
-        // 1. `inline_me` is small enough to be inlined into `kernel_entry`.
-        // 2. Dead code in `inline_me` is removed.
-        // 3. Since `inline_me` is now only a callee (but wait, it was inlined, so it's not called),
-        //    is it removed by dead function elimination? Yes, if not referenced.
         assert_eq!(decls.len(), 1);
-        if let Decl::Function { name, body, .. } = &decls[0] {
-            assert_eq!(name, "kernel_entry");
-            // Body should contain the inlined returning '10' logic, or maybe just simplified
-            // if we propagate the constant. Actually let's just assert length and name.
-            assert!(!body.is_empty());
-        }
+        let Decl::Function { name, body, .. } = &decls[0] else {
+            panic!("expected entry function");
+        };
+        assert_eq!(name, "kernel_entry");
+        assert_eq!(body, &vec![Stmt::Return(Some(Expr::IntLit(10)))]);
     }
 
     #[test]
