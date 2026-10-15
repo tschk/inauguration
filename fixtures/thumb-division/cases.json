@@ -1,0 +1,58 @@
+[
+  {
+    "name": "div-3",
+    "expected": 42
+  },
+  {
+    "name": "div-4",
+    "expected": 42
+  },
+  {
+    "name": "div-7",
+    "expected": 42
+  },
+  {
+    "name": "later-stack-arg-nonzero",
+    "expected": 42
+  },
+  {
+    "name": "later-stack-arg-zero",
+    "expected": 1
+  },
+  {
+    "name": "nested-zero",
+    "expected": 42
+  },
+  {
+    "name": "rem-5",
+    "expected": 42
+  },
+  {
+    "name": "rem-6",
+    "expected": 42
+  },
+  {
+    "name": "rem-8",
+    "expected": 42
+  },
+  {
+    "name": "zero-div",
+    "expected": 1
+  },
+  {
+    "name": "zero-rem",
+    "expected": 1
+  },
+  {
+    "name": "effect-div",
+    "expected": 42
+  },
+  {
+    "name": "effect-rem",
+    "expected": 42
+  },
+  {
+    "name": "optimizer-exits",
+    "expected": 42
+  }
+]

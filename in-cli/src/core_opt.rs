@@ -157,10 +157,11 @@ fn walk_expr<F: FnMut(&Expr)>(e: &Expr, f: &mut F) {
     crate::core_ir::for_each_expr_child(e, &mut |child| walk_expr(child, f));
 }
 
-/// Whether an expression (or any subexpression) contains a function call.
-/// Calls may have observable side effects (I/O, MMIO, allocation), so an
-/// unused binding whose initializer calls must not be dead-code-eliminated.
-fn expr_has_call(e: &Expr) -> bool {
+/// Whether evaluation can observe effects or leave the current function.
+/// Checked division and remainder can return early on a zero divisor, just as
+/// calls and structured values can carry effects or nonlocal exits. Retain their
+/// evaluation when removing bindings or substituting function bodies.
+fn expr_has_effects(e: &Expr) -> bool {
     let mut has = false;
     walk_expr(e, &mut |n| {
         // Cloning allocates; substitution must not duplicate its storage or evaluation.
@@ -171,6 +172,7 @@ fn expr_has_call(e: &Expr) -> bool {
                 | Expr::Conditional { .. }
                 | Expr::MatchValue { .. }
         ) || matches!(n, Expr::Unary {op, ..} if op == "vector-clone")
+            || matches!(n, Expr::Binary {op, ..} if matches!(op.as_str(), "/" | "%" | "div" | "mod"))
         {
             has = true;
         }
@@ -510,7 +512,7 @@ fn fold_body_to_expr(body: &[Stmt], params: &[(String, Typ)]) -> Option<Expr> {
     let mut env: HashMap<String, Expr> = HashMap::new();
     for stmt in &body[..body.len() - 1] {
         match stmt {
-            Stmt::Let(name, _, e) if !expr_has_call(e) => {
+            Stmt::Let(name, _, e) if !expr_has_effects(e) => {
                 let e = replace_in_expr(e.clone(), &env);
                 env.insert(name.clone(), e);
             }
@@ -519,7 +521,7 @@ fn fold_body_to_expr(body: &[Stmt], params: &[(String, Typ)]) -> Option<Expr> {
     }
     match body.last() {
         // ponytail: effectful returns need parameter/local snapshots before substitution is safe.
-        Some(Stmt::Return(Some(ret))) if !expr_has_call(ret) => {
+        Some(Stmt::Return(Some(ret))) if !expr_has_effects(ret) => {
             let ret = replace_in_expr(ret.clone(), &env);
             let mut bound = true;
             walk_expr(&ret, &mut |e| match e {
@@ -585,7 +587,9 @@ fn inline_in_expr_limited(
 ) -> Expr {
     map_expr(e, &mut |e| match e {
         // Substitution must not duplicate or discard argument calls.
-        Expr::Call { callee, args, .. } if depth < max_depth && !args.iter().any(expr_has_call) => {
+        Expr::Call { callee, args, .. }
+            if depth < max_depth && !args.iter().any(expr_has_effects) =>
+        {
             let name = match *callee {
                 Expr::Ident(ref n) => n.clone(),
                 other => {
@@ -620,7 +624,7 @@ fn inline_in_expr_limited(
 /// Replace a call-to-small-fn with its return value (for let-bindings).
 fn fold_call_ret(e: Expr, cand: &[&String], fns: &HashMap<String, Decl>) -> Expr {
     if let Expr::Call { callee, args, .. } = &e {
-        if args.iter().any(expr_has_call) {
+        if args.iter().any(expr_has_effects) {
             return e;
         }
         if let Expr::Ident(name) = callee.as_ref() {
@@ -800,7 +804,7 @@ fn simplify_binary_expr(
         return original;
     }
     // Absorbing identities must retain calls, mutation, and nonlocal block exits.
-    if expr_has_call(lhs) || expr_has_call(rhs) {
+    if expr_has_effects(lhs) || expr_has_effects(rhs) {
         return original;
     }
     if let (Expr::IntLit(a), Expr::IntLit(b)) = (lhs, rhs) {
@@ -1533,7 +1537,7 @@ fn dce_body(stmts: &mut Vec<Stmt>) {
         collect_used(stmts, &mut s);
         s
     };
-    stmts.retain(|s| !matches!(s, Stmt::Let(n, _, e) if !used.contains(n) && !expr_has_call(e)));
+    stmts.retain(|s| !matches!(s, Stmt::Let(n, _, e) if !used.contains(n) && !expr_has_effects(e)));
 
     // Recurse
     for s in stmts.iter_mut() {
@@ -2581,6 +2585,38 @@ mod tests {
                 }
             }
             assert!(calls.contains("external_answer"));
+        }
+    }
+
+    #[test]
+    fn checked_integer_operations_retain_failure_exits_through_optimization() {
+        for op in ["/", "%", "div", "mod"] {
+            let checked = bin(op, ident("value"), ident("zero"));
+            assert!(expr_has_effects(&checked));
+            for expression in [
+                bin("*", Expr::IntLit(0), checked.clone()),
+                bin("*", checked.clone(), Expr::IntLit(0)),
+            ] {
+                assert_eq!(simplify_expr(expression.clone()), expression, "{op}");
+            }
+            let mut body = vec![
+                Stmt::Let("unused".into(), Some(Typ::Int), checked.clone()),
+                Stmt::Return(Some(Expr::IntLit(42))),
+            ];
+            assert!(
+                fold_body_to_expr(
+                    &body,
+                    &[("value".into(), Typ::Int), ("zero".into(), Typ::Int)]
+                )
+                .is_none()
+            );
+            dce_body(&mut body);
+            assert!(matches!(body.first(), Some(Stmt::Let(_, _, value)) if value == &checked));
+            // Successful literal operations still fold before effect-sensitive DCE.
+            assert_eq!(
+                fold_expr(bin(op, Expr::IntLit(8), Expr::IntLit(2))),
+                Expr::IntLit(if matches!(op, "%" | "mod") { 0 } else { 4 })
+            );
         }
     }
 

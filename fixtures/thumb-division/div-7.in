@@ -1,0 +1,1 @@
+fn main()->Int{store32(0x38001000,-2147483648);store32(0x38001004,-1);let result=load32(0x38001000)/load32(0x38001004);if result==-2147483648{return 42;}return 0;}

@@ -1,0 +1,16 @@
+fn left_div(a:Int,b:Int)->Int{return 100+0*(a/b);}
+fn right_div(a:Int,b:Int)->Int{return 100+(a/b)*0;}
+fn left_rem(a:Int,b:Int)->Int{return 100+0*(a%b);}
+fn right_rem(a:Int,b:Int)->Int{return 100+(a%b)*0;}
+fn unused_div(a:Int,b:Int)->Int{let unused=a/b;return 100;}
+fn unused_rem(a:Int,b:Int)->Int{let unused=a%b;return 100;}
+fn main()->Int{
+ store32(0x38001000,0);
+ if left_div(9,load32(0x38001000))!=1{return 0;}
+ if right_div(9,load32(0x38001000))!=1{return 0;}
+ if left_rem(9,load32(0x38001000))!=1{return 0;}
+ if right_rem(9,load32(0x38001000))!=1{return 0;}
+ if unused_div(9,load32(0x38001000))!=1{return 0;}
+ if unused_rem(9,load32(0x38001000))!=1{return 0;}
+ return 42;
+}

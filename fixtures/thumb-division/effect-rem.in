@@ -1,0 +1,3 @@
+fn operand(digit:Int,value:Int)->Int{let round=0;while round<1{round+=1;}store32(0x38001008,load32(0x38001008)*10+digit);return value;}
+fn calculate()->Int{let result=operand(1,9) % operand(2,0);store32(0x38001008,load32(0x38001008)*10+3);return 100+result;}
+fn main()->Int{store32(0x38001008,0);let result=calculate();if result==1{if load32(0x38001008)==12{return 42;}}return 0;}

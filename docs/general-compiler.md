@@ -40,6 +40,12 @@ therefore reach native data emission as initialized scalar values. Calls,
 unresolved names, division by zero, and overflowing negation remain expressions;
 this pass does not execute runtime initializers.
 
+For owned functions returning `Int`, integer division or remainder by zero
+returns `1` immediately from that function. A caller continues with that result.
+ARM64, x86 and Thumb preserve this scalar contract. Optimization retains the
+evaluation and function boundary of division and remainder, including unused
+bindings and arithmetic that otherwise discards their value.
+
 AArch64 lowering branches `break` and `continue` to the innermost loop's exit
 and next iteration, including vector loops. `.in` range-loop expansion advances the
 binding before `continue` on both native backends. AArch64 rejects loop jumps

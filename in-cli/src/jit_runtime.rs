@@ -6345,6 +6345,82 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn optimized_integer_failure_exits_survive_absorption_dce_and_inlining() {
+        let sources = [
+            (
+                "fn main(value:Int,zero:Int)->Int{return 42+0*(value/zero);}",
+                1,
+            ),
+            (
+                "fn main(value:Int,zero:Int)->Int{return 42+(value/zero)*0;}",
+                1,
+            ),
+            (
+                "fn main(value:Int,zero:Int)->Int{return 42+0*(value%zero);}",
+                1,
+            ),
+            (
+                "fn main(value:Int,zero:Int)->Int{return 42+(value%zero)*0;}",
+                1,
+            ),
+            (
+                "fn main(value:Int,zero:Int)->Int{let unused=value/zero;return 42;}",
+                1,
+            ),
+            (
+                "fn main(value:Int,zero:Int)->Int{let unused=value%zero;return 42;}",
+                1,
+            ),
+            (
+                "fn compute(value:Int,zero:Int)->Int{return value/zero;}\nfn main(value:Int,zero:Int)->Int{return compute(value,zero)+41;}",
+                42,
+            ),
+            (
+                "fn compute(value:Int,zero:Int)->Int{let unused=value%zero;return 7;}\nfn main(value:Int,zero:Int)->Int{return compute(value,zero)+41;}",
+                42,
+            ),
+            (
+                "fn ignore(value:Int)->Int{return 42;}\nfn main(value:Int,zero:Int)->Int{return ignore(value/zero);}",
+                1,
+            ),
+            (
+                "fn main(value:Int,zero:Int)->Int{if false && (value/zero==0){return 0;}return 42;}",
+                42,
+            ),
+            (
+                "fn main(value:Int,zero:Int)->Int{if true || (value%zero==0){return 42;}return 0;}",
+                42,
+            ),
+        ];
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for (source, expected) in sources {
+                let canonical = crate::in_canonical::canonicalize_in_source(source).unwrap();
+                for source in [source, canonical.as_str()] {
+                    let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                    crate::lower_core::desugar_module(&mut module);
+                    crate::core_opt::optimize_with_profile(
+                        &mut module.decls,
+                        Some("main"),
+                        profile,
+                    );
+                    let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+                    assert!(report.ok, "{source}: {report:?}");
+                    assert_eq!(
+                        invoke_module(&module, profile, &[7, 0]),
+                        Some(expected),
+                        "{profile:?}: {source}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     #[cfg(unix)]
     fn invalid_data_pointer_fixups_never_publish_jit_functions() {
         for (data, fixups) in [

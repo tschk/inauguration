@@ -1,0 +1,1 @@
+fn main()->Int{store32(0x38001000,0);let divisor=load32(0x38001000);return 100+9%divisor;}

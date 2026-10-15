@@ -1,0 +1,2 @@
+fn calculate(a:Int,b:Int)->Int{let index=0;while index<a{index+=1;}return 100+index/b;}
+fn main()->Int{store32(0x38001000,0);return 41+calculate(9,load32(0x38001000));}

@@ -698,6 +698,30 @@ pub(crate) fn try_lower_mmio(
     }
 }
 
+// Match the owned scalar contract: a zero divisor returns 1 from this
+// function, rather than producing a normal expression value or raising an
+// implicit language exception. Operands have already been evaluated once.
+fn lower_checked_div_or_mod(
+    emitter: &mut CodeEmitter,
+    ctx: &LowerCtx<'_>,
+    modulo: bool,
+) -> Result<(), String> {
+    emitter.emit_u16(thumb::cmp_imm8(R2, 0));
+    let nonzero = emitter.len();
+    emitter.emit_u32_thumb(thumb::b_cond_wide(COND_NE, 0));
+    emitter.emit_u16(thumb::movs_imm8(R0, 1));
+    thumb::emit_epilogue(emitter, ctx.frame_reserve())?;
+    let divide = emitter.len();
+    patch_b_cond(emitter, nonzero, divide)?;
+    emitter.emit_u32_thumb(thumb::sdiv(R0, R1, R2));
+    if modulo {
+        // Native word MIN/-1 wraps; the corresponding remainder is zero.
+        emitter.emit_u16(thumb::muls(R0, R2));
+        emitter.emit_u16(thumb::subs_reg(R0, R1, R0));
+    }
+    Ok(())
+}
+
 pub(crate) fn lower_binary(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -756,15 +780,8 @@ pub(crate) fn lower_binary(
             emitter.emit_u16(thumb::mov_low(R0, R1));
             emitter.emit_u32_thumb(thumb::asrs_reg(R0, R1, R2));
         }
-        "/" => {
-            emitter.emit_u32_thumb(thumb::sdiv(R0, R1, R2));
-        }
-        "%" => {
-            // a % b = a - (a / b) * b
-            emitter.emit_u32_thumb(thumb::sdiv(R0, R1, R2));
-            emitter.emit_u16(thumb::mov_low(R0, R0));
-            emitter.emit_u16(thumb::muls(R0, R2));
-            emitter.emit_u16(thumb::subs_reg(R0, R1, R0));
+        "/" | "%" => {
+            lower_checked_div_or_mod(emitter, ctx, op == "%")?;
         }
         "==" | "!=" | "<" | "<=" | ">" | ">=" => {
             emitter.emit_u16(thumb::cmp_reg(R1, R2));
@@ -1136,6 +1153,43 @@ mod dynamic_bitnot_tests {
                 vec![thumb::ldr_sp(R0, offset).unwrap(), thumb::mvns(R4, R0)]
             );
             assert!(pending.is_empty());
+        }
+    }
+}
+
+#[cfg(test)]
+mod checked_division_tests {
+    use super::*;
+
+    #[test]
+    fn division_and_remainder_guard_zero_before_sdiv_and_restore_current_frame() {
+        let functions = HashMap::new();
+        let structs = HashMap::new();
+        let mut ctx = LowerCtx::new("divide", &[], &functions, &structs);
+        ctx.frame_size = 32;
+        for modulo in [false, true] {
+            let mut emitter = CodeEmitter::new();
+            lower_checked_div_or_mod(&mut emitter, &ctx, modulo).unwrap();
+            let words = emitter
+                .bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|word| u16::from_le_bytes(*word))
+                .collect::<Vec<_>>();
+            assert_eq!(words[0], thumb::cmp_imm8(R2, 0));
+            // The nonzero branch skips the complete failure return, landing
+            // at SDIV; the zero path restores this function's frame first.
+            let mut encoded = CodeEmitter::new();
+            encoded.emit_u32_thumb(thumb::b_cond_wide(COND_NE, 3));
+            assert_eq!(&emitter.bytes[2..6], encoded.bytes.as_slice());
+            assert_eq!(words[3], thumb::movs_imm8(R0, 1));
+            assert_eq!(words[4], thumb::add_sp_imm(ctx.frame_reserve()).unwrap());
+            assert_eq!(words[5], thumb::pop(0b1111_0000, true));
+            let mut sdiv = CodeEmitter::new();
+            sdiv.emit_u32_thumb(thumb::sdiv(R0, R1, R2));
+            assert_eq!(&emitter.bytes[12..16], sdiv.bytes.as_slice());
+            assert_eq!(emitter.bytes.len(), if modulo { 20 } else { 16 });
         }
     }
 }
