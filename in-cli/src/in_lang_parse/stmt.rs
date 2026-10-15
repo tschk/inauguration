@@ -364,16 +364,15 @@ fn parse_try_stmt_inner(rest: &str, context: &mut LoopParseContext<'_>) -> Resul
     let mut catches = Vec::new();
     let mut pos = close + 1;
     while pos < rest.len() {
-        let tail = trim(&rest[pos..]);
+        let tail = rest[pos..].trim_start();
         let Some(catch_rest) = tail.strip_prefix("catch") else {
             break;
         };
-        let catch_rest = trim(catch_rest);
+        let catch_rest = catch_rest.trim_start();
         if catch_rest.is_empty() {
             break;
         }
-        let open_rel = catch_rest
-            .find('{')
+        let open_rel = find_struct_init_open_brace(catch_rest)
             .ok_or_else(|| ".in: `catch` needs `{` body".to_string())?;
         let raw_pattern = trim(&catch_rest[..open_rel]);
         let pattern = raw_pattern
@@ -384,14 +383,15 @@ fn parse_try_stmt_inner(rest: &str, context: &mut LoopParseContext<'_>) -> Resul
         if pattern.is_empty() {
             return Err(".in: `catch` pattern missing".into());
         }
-        let abs_open = pos + rest[pos..].find('{').expect("catch open brace");
-        let (catch_inner, catch_close) = brace_content_bounds_after_open(rest, abs_open)
+        // Keeping the suffix end preserves byte offsets through inter-catch whitespace.
+        let catch_start = rest.len() - catch_rest.len();
+        let (catch_inner, catch_close) = brace_content_bounds_after_open(catch_rest, open_rel)
             .ok_or_else(|| ".in: unclosed `catch` body".to_string())?;
         catches.push(crate::core_ir::CatchArm {
             pattern: pattern.to_string(),
             body: parse_function_body_with_context(catch_inner, context)?,
         });
-        pos = catch_close + 1;
+        pos = catch_start + catch_close + 1;
     }
     Ok(Stmt::Try {
         body: parse_function_body_with_context(body_inner, context)?,
@@ -491,9 +491,8 @@ fn parse_for_expanded(s: &str, context: &mut LoopParseContext<'_>) -> Result<Vec
     let rest = trim(s)
         .strip_prefix("for ")
         .ok_or_else(|| ".in: internal for parse".to_string())?;
-    let open = rest
-        .find('{')
-        .ok_or_else(|| ".in: `for` needs `{` body".to_string())?;
+    let open =
+        find_struct_init_open_brace(rest).ok_or_else(|| ".in: `for` needs `{` body".to_string())?;
     let header = trim(&rest[..open]);
     let parts: Vec<&str> = header.splitn(2, " in ").collect();
     if parts.len() != 2 {
@@ -554,6 +553,60 @@ mod match_arm_boundary_tests {
         assert_eq!(
             find_match_arm_body_open("Entry{text:\"a,b\"").unwrap_err(),
             ".in: unclosed match arm pattern or body"
+        );
+    }
+}
+
+#[cfg(test)]
+mod for_header_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn iterator_headers_skip_quoted_braces_before_the_body() {
+        for (source, iterator) in [
+            (
+                r#"for item in ["a{b","c"] {42;}"#,
+                Expr::ArrayLit(vec![
+                    Expr::StringLit("a{b".into()),
+                    Expr::StringLit("c".into()),
+                ]),
+            ),
+            (
+                r#"for item in values("a{b") {42;}"#,
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("values".into())),
+                    args: vec![Expr::StringLit("a{b".into())],
+                },
+            ),
+            (
+                r#"for item in values("a\"{b}") {42;}"#,
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("values".into())),
+                    args: vec![Expr::StringLit("a\"{b}".into())],
+                },
+            ),
+        ] {
+            let mut context = LoopParseContext::new(source);
+            let actual = parse_for_expanded(source, &mut context).unwrap();
+            let expected = crate::lower_core::expand_for_loop(
+                "item".into(),
+                iterator,
+                vec![Stmt::Expr(Expr::IntLit(42))],
+                &mut 0,
+            );
+            assert_eq!(actual, expected, "{source}");
+            assert!(context.error.is_none(), "{source}");
+        }
+    }
+
+    #[test]
+    fn iterator_quoted_braces_survive_canonical_roundtrip() {
+        let original = "fn values(text:String)->[Int]{return [20,22];}\nfn main()->Int{let sum=0;for value in values(\"a{b\") {sum=sum+value;}return sum;}";
+        let parsed = crate::in_lang_parse::parse_in_source(original).unwrap();
+        let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+        assert_eq!(
+            crate::in_lang_parse::parse_in_source(&canonical).unwrap(),
+            parsed
         );
     }
 }

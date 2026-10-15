@@ -3128,3 +3128,36 @@ fn legacy_standard_import_bindings_keep_catalog_parameter_and_return_types() {
         );
     }
 }
+
+#[test]
+fn catch_pattern_braces_and_escapes_preserve_multiple_handler_boundaries() {
+    for literal in [r#""a{b""#, r#""a}b""#, r#""escaped\"{,}雪""#] {
+        for parenthesized in [false, true] {
+            let pattern = if parenthesized {
+                format!("({literal})")
+            } else {
+                literal.to_string()
+            };
+            let source = format!(
+                "fn main()->Int {{try {{throw {literal};}} catch \"not {{ this\" {{return 1;}}\n  catch {pattern} {{return 42;}}  catch _ {{return 0;}}  }}  \n"
+            );
+            let before =
+                parse_in_source(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let Decl::Function { body, .. } = &before.decls[0] else {
+                panic!("{before:?}")
+            };
+            let Stmt::Try { catches, .. } = &body[0] else {
+                panic!("{body:?}")
+            };
+            assert_eq!(catches.len(), 3);
+            assert_eq!(catches[0].pattern, r#""not { this""#);
+            assert_eq!(catches[1].pattern, literal);
+            assert_eq!(catches[2].pattern, "_");
+            assert_eq!(catches[1].body, vec![Stmt::Return(Some(Expr::IntLit(42)))]);
+            let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+            let after =
+                parse_in_source(&canonical).unwrap_or_else(|error| panic!("{canonical}: {error}"));
+            assert_eq!(before.decls, after.decls, "{source}\n{canonical}");
+        }
+    }
+}

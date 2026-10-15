@@ -6485,3 +6485,77 @@ fn owned_rust_string_array_statics_execute_reads() {
     }
     fs::remove_file(source).unwrap();
 }
+
+#[test]
+fn owned_quoted_catch_patterns_preserve_original_and_canonical_execution() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    for literal in [r#""a{b""#, r#""a}b""#, r#""escaped\"{,}雪""#] {
+        let original = format!(
+            "fn main()->Int {{try {{throw {literal};}} catch \"different {{ pattern\" {{return 1;}}\n catch ({literal}) {{return 42;}} catch _ {{return 0;}}}}\n"
+        );
+        let canonical = crate::in_canonical::canonicalize_in_source(&original).unwrap();
+        for text in [original.as_str(), canonical.as_str()] {
+            let source = temp_path("quoted-catch-boundary.in");
+            fs::write(&source, text).unwrap();
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut request =
+                    default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{profile:?}: {text}: {report:?}");
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{profile:?}: {text}"
+                );
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+#[test]
+fn owned_for_headers_preserve_quoted_braces_and_iterator_evaluation() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    for original in [
+        r#"fn main()->Int{let count=0;for text in ["a{b","雪}c"] {if text=="a{b" || text=="雪}c"{count=count+1;}}return count+40;}"#,
+        r#"var calls:Int=0;
+fn values(text:String)->[Int]{calls=calls+1;if text=="λ\"{雪}"{return [20,22];}return [0,0];}
+fn main()->Int{let sum=0;for value in values("λ\"{雪}") {sum=sum+value;}if calls==1{return sum;}return 0;}"#,
+    ] {
+        let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+        for (form, text) in [("original", original), ("canonical", canonical.as_str())] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let source = temp_path("for-header-values.in");
+                fs::write(&source, text).unwrap();
+                let mut request =
+                    default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                fs::remove_file(source).unwrap();
+                assert!(report.success, "{form}/{profile:?}/{text}: {report:?}");
+                assert_eq!(
+                    report.reason_code.as_deref(),
+                    Some("jit-executed"),
+                    "{report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{form}/{profile:?}/{text}: {report:?}"
+                );
+            }
+        }
+    }
+}
