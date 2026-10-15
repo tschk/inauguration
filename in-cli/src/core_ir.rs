@@ -639,11 +639,13 @@ pub(crate) fn decode_string_literal(quoted: &str) -> Option<String> {
             esc = false;
         } else if c == '\\' {
             esc = true;
+        } else if c == '"' {
+            return None;
         } else {
             processed.push(c);
         }
     }
-    Some(processed)
+    (!esc).then_some(processed)
 }
 
 impl MatchPattern {
@@ -1557,6 +1559,31 @@ mod tests {
             MatchPattern::parse("\"hello\"").unwrap(),
             MatchPattern::StringPat("hello".to_string())
         );
+    }
+
+    #[test]
+    fn string_boundaries_reject_interior_quotes_and_incomplete_escapes() {
+        for source in [r#""a"b""#, r#""a\""#] {
+            assert_eq!(decode_string_literal(source), None, "{source}");
+            assert!(MatchPattern::parse(source).is_err(), "{source}");
+        }
+        for (source, value) in [
+            (r#""a\"b""#, "a\"b"),
+            (r#""a\\""#, "a\\"),
+            (r#""\q""#, r"\q"),
+            (r#""line\nnext""#, "line\nnext"),
+            ("\"\"", ""),
+        ] {
+            assert_eq!(
+                decode_string_literal(source).as_deref(),
+                Some(value),
+                "{source}"
+            );
+            assert_eq!(
+                MatchPattern::parse(source),
+                Ok(MatchPattern::StringPat(value.into()))
+            );
+        }
     }
 
     #[test]

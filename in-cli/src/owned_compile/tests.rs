@@ -5527,3 +5527,47 @@ fn owned_global_field_projection_does_not_discard_constructor_effects() {
         }
     }
 }
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn malformed_string_literals_and_patterns_refuse_execution() {
+    let mut sources = vec![("in", r#"fn main()->String{return "a"b"c";}"#.to_string())];
+    for pattern in [r#""a"b""#, r#""a\""#] {
+        sources.push((
+            "icore",
+            serde_json::json!({
+                "icoreVersion":2,
+                "decls":[{"kind":"function","name":"main","params":[],"return":"Int","body":[{
+                    "kind":"match","scrutinee":{"kind":"string","value":"a"},
+                    "arms":[{"pattern":pattern,"body":[{"kind":"return","value":42}]},
+                            {"pattern":"_","body":[{"kind":"return","value":0}]}]
+                }]}]
+            })
+            .to_string(),
+        ));
+    }
+    for (extension, source) in sources {
+        let path = temp_path(&format!("malformed-string.{extension}"));
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        assert!(!report.success, "{report:?}");
+        assert!(report.eval_result.is_none(), "{report:?}");
+        let reason = report.reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("pattern") || reason.contains("unresolved identifier"),
+            "{report:?}"
+        );
+        fs::remove_file(path).unwrap();
+    }
+}
