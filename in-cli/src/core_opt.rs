@@ -450,7 +450,7 @@ fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: 
     }
     detect_ptr_refs(decls, &mut ptr_refs);
 
-    let candidates: Vec<String> = functions
+    let candidates: Vec<&String> = functions
         .iter()
         .filter(|(n, d)| {
             matches!(
@@ -468,7 +468,7 @@ fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: 
                         && !has_cf(body)
             )
         })
-        .map(|(n, _)| n.clone())
+        .map(|(n, _)| n)
         .collect();
     if candidates.is_empty() {
         return;
@@ -516,7 +516,7 @@ fn fold_body_to_expr(body: &[Stmt], params: &[(String, Typ)]) -> Option<Expr> {
 
 fn inline_body_limited(
     stmts: Vec<Stmt>,
-    cand: &[String],
+    cand: &[&String],
     fns: &HashMap<String, Decl>,
     depth: u32,
     max_depth: u32,
@@ -558,7 +558,7 @@ fn inline_body_limited(
 
 fn inline_in_expr_limited(
     e: Expr,
-    cand: &[String],
+    cand: &[&String],
     fns: &HashMap<String, Decl>,
     depth: u32,
     max_depth: u32,
@@ -575,7 +575,7 @@ fn inline_in_expr_limited(
                     };
                 }
             };
-            if cand.contains(&name) {
+            if cand.contains(&&name) {
                 if let Some(Decl::Function { body, params, .. }) = fns.get(&name) {
                     if let Some(ret) = fold_body_to_expr(body, params) {
                         let mut sub = HashMap::new();
@@ -598,13 +598,13 @@ fn inline_in_expr_limited(
 }
 
 /// Replace a call-to-small-fn with its return value (for let-bindings).
-fn fold_call_ret(e: Expr, cand: &[String], fns: &HashMap<String, Decl>) -> Expr {
+fn fold_call_ret(e: Expr, cand: &[&String], fns: &HashMap<String, Decl>) -> Expr {
     if let Expr::Call { callee, args, .. } = &e {
         if args.iter().any(expr_has_call) {
             return e;
         }
         if let Expr::Ident(name) = callee.as_ref() {
-            if cand.contains(name) {
+            if cand.contains(&name) {
                 if let Some(Decl::Function { body, params, .. }) = fns.get(name) {
                     if let Some(ret) = fold_body_to_expr(body, params) {
                         let mut sub = HashMap::new();
