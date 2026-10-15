@@ -659,14 +659,75 @@ fn prefix_module_decls(mut decls: Vec<Decl>, module: &str, file: &syn::File) -> 
         .flatten()
         .collect();
     rewrite_global_references(&mut decls, &globals, file);
+    // Prefix old lexical names bottom-up; crate paths stay deferred until the root.
+    let nominal_names: HashMap<_, _> = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Struct { name, .. } | Decl::Class { name, .. } | Decl::Interface { name, .. } => {
+                Some((name.clone(), format!("{module}::{name}")))
+            }
+            _ => None,
+        })
+        .collect();
+    let associated_names: HashMap<_, _> = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Function { name, .. } if name.contains("::") => {
+                Some((name.clone(), format!("{module}::{name}")))
+            }
+            _ => None,
+        })
+        .collect();
+    for decl in &mut decls {
+        let associated = matches!(decl, Decl::Function { .. });
+        let name = match decl {
+            Decl::Function { name, .. } | Decl::Struct { name, .. } | Decl::Global { name, .. } => {
+                name.as_str()
+            }
+            _ => continue,
+        };
+        let mut scope = name.rsplit_once("::").map(|(scope, _)| scope).unwrap_or("");
+        if associated {
+            let mut owner = scope;
+            loop {
+                if nominal_names.contains_key(owner) {
+                    scope = owner
+                        .rsplit_once("::")
+                        .map(|(scope, _)| scope)
+                        .unwrap_or("");
+                    break;
+                }
+                let Some((parent, _)) = owner.rsplit_once("::") else {
+                    break;
+                };
+                owner = parent;
+            }
+        }
+        let scope = scope.to_string();
+        let resolve = |name: &str, mapping: &HashMap<String, String>| {
+            let local = if scope.is_empty() {
+                name.to_string()
+            } else {
+                format!("{scope}::{name}")
+            };
+            mapping
+                .get(&local)
+                .or_else(|| {
+                    (scope.is_empty() || name.starts_with(&format!("{scope}::")))
+                        .then(|| mapping.get(name))
+                        .flatten()
+                })
+                .cloned()
+        };
+        crate::core_bindings::rewrite_nominal_names(
+            std::slice::from_mut(decl),
+            &|name| resolve(name, &nominal_names),
+            &|name| resolve(name, &associated_names),
+        );
+    }
     for decl in &mut decls {
         match decl {
-            Decl::Function { name, .. } | Decl::Struct { name, .. }
-                if !name.contains("::") || !name.starts_with(module) =>
-            {
-                *name = format!("{module}::{name}");
-            }
-            Decl::Global { name, .. } => {
+            Decl::Function { name, .. } | Decl::Struct { name, .. } | Decl::Global { name, .. } => {
                 *name = format!("{module}::{name}");
             }
             _ => {}
@@ -1240,6 +1301,15 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
             });
         }
     }
+    let resolve_self = |name: &str| {
+        if name == "Self" {
+            Some(self_type.clone())
+        } else {
+            name.strip_prefix("Self::")
+                .map(|member| format!("{self_type}::{member}"))
+        }
+    };
+    crate::core_bindings::rewrite_nominal_names(&mut decls, &resolve_self, &resolve_self);
     decls
 }
 
@@ -3568,6 +3638,53 @@ fn main() {
             );
         }
     }
+    #[test]
+    fn nested_nominal_prefixing_preserves_lexical_scope_and_crate_paths() {
+        let module = parse_rust_source("mod outer{pub struct Parent{value:i64} mod inner{fn invalid()->Parent{Parent{value:0}} fn absolute()->i64{crate::root()}}} fn root()->i64{42}").unwrap();
+        let Decl::Function { ret, .. } = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function{name,..} if name=="outer::inner::invalid"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(ret, &Typ::Named("Parent".into()));
+        let Decl::Function { body, .. } = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function{name,..} if name=="outer::inner::absolute"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert!(
+            matches!(body.last(), Some(Stmt::Return(Some(Expr::Call{callee,..}))) if matches!(callee.as_ref(),Expr::Ident(name) if name=="crate::root")),
+            "{body:?}"
+        );
+    }
+
+    #[test]
+    fn self_names_reach_vector_types_and_macro_lowered_initializers() {
+        let module = parse_rust_source(
+            "struct Thing{value:i64} impl Thing{fn wrap()->Vec<Self>{vec![Self{value:42}]}}",
+        )
+        .unwrap();
+        let Decl::Function { ret, body, .. } = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function{name,..} if name=="Thing::wrap"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(ret, &Typ::Vector(Box::new(Typ::Named("Thing".into()))));
+        assert!(
+            matches!(body.last(), Some(Stmt::Return(Some(Expr::ArrayLit(items)))) if matches!(items.as_slice(), [Expr::StructInit{name, ..}] if name=="Thing")),
+            "{body:?}"
+        );
+    }
+
     #[test]
     fn anonymous_constants_keep_distinct_internal_names_and_initializers() {
         let module = parse_rust_source("const _:i64=1; const _:i64=2; fn main()->i64{42}").unwrap();

@@ -35,10 +35,21 @@ pub(crate) fn qualify_module_decls(decls: &mut [Decl], module: &str) {
             }
             _ => continue,
         };
-        // Flattened Type::method symbols retain the lexical module of their owner.
-        if associated && types.contains(&scope) {
-            if let Some((module, _)) = scope.rsplit_once("::") {
-                scope = module.to_string();
+        // Flattened inherent and trait method symbols retain their owner's module.
+        if associated {
+            let mut owner = Some(scope.as_str());
+            let mut lexical = None;
+            while let Some(candidate) = owner {
+                if types.contains(candidate) {
+                    lexical = candidate
+                        .rsplit_once("::")
+                        .map(|(module, _)| module.to_string());
+                    break;
+                }
+                owner = candidate.rsplit_once("::").map(|(parent, _)| parent);
+            }
+            if let Some(module) = lexical {
+                scope = module;
             }
         }
         let mut candidates = HashSet::new();
@@ -80,7 +91,12 @@ pub(crate) fn qualify_module_decls(decls: &mut [Decl], module: &str) {
             }
             _ => {}
         }
-        declaration(decl, &scope, root, &types, &HashSet::new());
+        let type_name = |name: &str| resolve(name, &scope, root, &types);
+        let names = NominalNames {
+            type_name: &type_name,
+            value_name: &|_| None,
+        };
+        declaration(decl, &names, &HashSet::new());
     }
 }
 
@@ -114,7 +130,15 @@ fn resolve(name: &str, scope: &str, root: &str, known: &HashSet<String>) -> Opti
         return Some(candidate);
     }
     let candidate = format!("{scope}::{name}");
-    known.contains(&candidate).then_some(candidate)
+    if known.contains(&candidate) {
+        return Some(candidate);
+    }
+    // Frontends may already prefix nested names relative to the crate root.
+    if name.contains("::") {
+        let candidate = format!("{root}::{name}");
+        return known.contains(&candidate).then_some(candidate);
+    }
+    None
 }
 
 fn references(
@@ -128,68 +152,82 @@ fn references(
         .filter_map(|name| resolve(&name, scope, root, known).map(|target| (name, target)))
         .collect()
 }
-fn typ(
-    value: &mut Typ,
-    scope: &str,
-    root: &str,
-    known: &HashSet<String>,
-    generics: &HashSet<String>,
+struct NominalNames<'a> {
+    type_name: &'a dyn Fn(&str) -> Option<String>,
+    value_name: &'a dyn Fn(&str) -> Option<String>,
+}
+
+/// Rewrite contextual nominal names without changing declarations or member names.
+/// Value resolution is for nominal paths such as `Self::new`, not local bindings.
+pub(crate) fn rewrite_nominal_names(
+    decls: &mut [Decl],
+    resolve_type: &impl Fn(&str) -> Option<String>,
+    resolve_value: &impl Fn(&str) -> Option<String>,
 ) {
+    let names = NominalNames {
+        type_name: resolve_type,
+        value_name: resolve_value,
+    };
+    for decl in decls {
+        declaration(decl, &names, &HashSet::new());
+    }
+}
+
+fn typ(value: &mut Typ, names: &NominalNames<'_>, generics: &HashSet<String>) {
     match value {
         Typ::Named(name) if !generics.contains(name) => {
             if let Some(fields) = crate::core_ir::tuples::fields(name) {
                 let mut items: Vec<_> = fields.into_iter().map(|(_, typ)| typ).collect();
                 for item in &mut items {
-                    typ(item, scope, root, known, generics);
+                    typ(item, names, generics);
                 }
                 *value = crate::core_ir::tuples::typ(&items);
                 return;
             }
-            if let Some(target) = resolve(name, scope, root, known) {
+            if let Some(target) = (names.type_name)(name) {
                 *name = target;
             }
         }
-        Typ::Array(item) | Typ::Vector(item) => typ(item, scope, root, known, generics),
+        Typ::Array(item) | Typ::Vector(item) => typ(item, names, generics),
         _ => {}
     }
 }
-fn pattern(source: &mut String, scope: &str, root: &str, known: &HashSet<String>) {
-    fn walk(value: &mut MatchPattern, scope: &str, root: &str, known: &HashSet<String>) {
+fn pattern(source: &mut String, names: &NominalNames<'_>, generics: &HashSet<String>) {
+    fn walk(value: &mut MatchPattern, names: &NominalNames<'_>, generics: &HashSet<String>) {
         match value {
             MatchPattern::StructPat { name, fields } => {
                 let mut value = Typ::Named(name.clone());
-                typ(&mut value, scope, root, known, &HashSet::new());
+                typ(&mut value, names, generics);
                 if let Typ::Named(target) = value {
                     *name = target;
                 }
                 for (_, value) in fields {
-                    walk(value, scope, root, known);
+                    walk(value, names, generics);
                 }
             }
             MatchPattern::TuplePat(items) | MatchPattern::ArrayPat(items) => {
                 for item in items {
-                    walk(item, scope, root, known);
+                    walk(item, names, generics);
                 }
             }
             _ => {}
         }
     }
     if let Ok(mut value) = MatchPattern::parse(source) {
-        walk(&mut value, scope, root, known);
+        walk(&mut value, names, generics);
         *source = super::render_pattern(&value);
     }
 }
-fn expr(
-    value: &mut Expr,
-    scope: &str,
-    root: &str,
-    known: &HashSet<String>,
-    generics: &HashSet<String>,
-) {
+fn expr(value: &mut Expr, names: &NominalNames<'_>, generics: &HashSet<String>) {
     match value {
+        Expr::Ident(name) => {
+            if let Some(target) = (names.value_name)(name) {
+                *name = target;
+            }
+        }
         Expr::StructInit { name, .. } => {
             let mut value = Typ::Named(name.clone());
-            typ(&mut value, scope, root, known, generics);
+            typ(&mut value, names, generics);
             if let Typ::Named(target) = value {
                 *name = target;
             }
@@ -198,50 +236,42 @@ fn expr(
             params, ret, body, ..
         } => {
             for (_, value) in params {
-                typ(value, scope, root, known, generics);
+                typ(value, names, generics);
             }
-            typ(ret, scope, root, known, generics);
-            statements(body, scope, root, known, generics);
+            typ(ret, names, generics);
+            statements(body, names, generics);
             return;
         }
-        Expr::Block { body, .. } => statements(body, scope, root, known, generics),
+        Expr::Block { body, .. } => statements(body, names, generics),
         Expr::MatchValue { arms, .. } => {
             for arm in arms {
-                pattern(&mut arm.pattern, scope, root, known);
+                pattern(&mut arm.pattern, names, generics);
             }
         }
         _ => {}
     }
-    crate::core_ir::for_each_expr_child_mut(value, &mut |value| {
-        expr(value, scope, root, known, generics)
-    });
+    crate::core_ir::for_each_expr_child_mut(value, &mut |value| expr(value, names, generics));
 }
-fn statements(
-    body: &mut [Stmt],
-    scope: &str,
-    root: &str,
-    known: &HashSet<String>,
-    generics: &HashSet<String>,
-) {
+fn statements(body: &mut [Stmt], names: &NominalNames<'_>, generics: &HashSet<String>) {
     for stmt in body {
         match stmt {
             Stmt::Let(_, annotation, value) => {
                 if let Some(annotation) = annotation {
-                    typ(annotation, scope, root, known, generics);
+                    typ(annotation, names, generics);
                 }
-                expr(value, scope, root, known, generics);
+                expr(value, names, generics);
             }
             Stmt::Assign(_, value)
             | Stmt::Expr(value)
             | Stmt::Return(Some(value))
-            | Stmt::Throw(value) => expr(value, scope, root, known, generics),
+            | Stmt::Throw(value) => expr(value, names, generics),
             Stmt::FieldAssign { base, value, .. } => {
-                expr(base, scope, root, known, generics);
-                expr(value, scope, root, known, generics);
+                expr(base, names, generics);
+                expr(value, names, generics);
             }
             Stmt::IndexAssign { base, index, value } => {
                 for value in [base, index, value] {
-                    expr(value, scope, root, known, generics);
+                    expr(value, names, generics);
                 }
             }
             Stmt::If {
@@ -249,44 +279,38 @@ fn statements(
                 then_body,
                 else_body,
             } => {
-                expr(cond, scope, root, known, generics);
-                statements(then_body, scope, root, known, generics);
-                statements(else_body, scope, root, known, generics);
+                expr(cond, names, generics);
+                statements(then_body, names, generics);
+                statements(else_body, names, generics);
             }
             Stmt::Loop { cond, body, .. } => {
                 if let Some(cond) = cond {
-                    expr(cond, scope, root, known, generics);
+                    expr(cond, names, generics);
                 }
-                statements(body, scope, root, known, generics);
+                statements(body, names, generics);
             }
             Stmt::Match { scrutinee, arms } => {
-                expr(scrutinee, scope, root, known, generics);
+                expr(scrutinee, names, generics);
                 for arm in arms {
-                    pattern(&mut arm.pattern, scope, root, known);
+                    pattern(&mut arm.pattern, names, generics);
                     if let Some(guard) = &mut arm.guard {
-                        expr(guard, scope, root, known, generics);
+                        expr(guard, names, generics);
                     }
-                    statements(&mut arm.body, scope, root, known, generics);
+                    statements(&mut arm.body, names, generics);
                 }
             }
             Stmt::Try { body, catches } => {
-                statements(body, scope, root, known, generics);
+                statements(body, names, generics);
                 for catch in catches {
-                    pattern(&mut catch.pattern, scope, root, known);
-                    statements(&mut catch.body, scope, root, known, generics);
+                    pattern(&mut catch.pattern, names, generics);
+                    statements(&mut catch.body, names, generics);
                 }
             }
             _ => {}
         }
     }
 }
-fn declaration(
-    decl: &mut Decl,
-    scope: &str,
-    root: &str,
-    known: &HashSet<String>,
-    outer: &HashSet<String>,
-) {
+fn declaration(decl: &mut Decl, names: &NominalNames<'_>, outer: &HashSet<String>) {
     let mut generics = outer.clone();
     match decl {
         Decl::Function { type_params, .. }
@@ -300,25 +324,25 @@ fn declaration(
             params, ret, body, ..
         } => {
             for (_, value) in params {
-                typ(value, scope, root, known, &generics);
+                typ(value, names, &generics);
             }
-            typ(ret, scope, root, known, &generics);
-            statements(body, scope, root, known, &generics);
+            typ(ret, names, &generics);
+            statements(body, names, &generics);
         }
         Decl::Global {
             typ: annotation,
             init,
             ..
         } => {
-            typ(annotation, scope, root, known, &generics);
+            typ(annotation, names, &generics);
             if let Some(value) = init {
-                expr(value, scope, root, known, &generics);
+                expr(value, names, &generics);
             }
         }
         Decl::Struct { name, fields, .. } => {
             let tuple = crate::core_ir::tuples::fields(name).is_some();
             for (_, value) in fields.iter_mut() {
-                typ(value, scope, root, known, &generics);
+                typ(value, names, &generics);
             }
             if tuple {
                 if let Typ::Named(target) = crate::core_ir::tuples::typ(
@@ -339,13 +363,13 @@ fn declaration(
             ..
         } => {
             for (_, value) in fields {
-                typ(value, scope, root, known, &generics);
+                typ(value, names, &generics);
             }
             for method in methods {
-                declaration(method, scope, root, known, &generics);
+                declaration(method, names, &generics);
             }
             for name in extends.iter_mut().chain(implements) {
-                if let Some(target) = resolve(name, scope, root, known) {
+                if let Some(target) = (names.type_name)(name) {
                     *name = target;
                 }
             }
@@ -353,9 +377,9 @@ fn declaration(
         Decl::Interface { methods, .. } => {
             for method in methods {
                 for (_, value) in &mut method.params {
-                    typ(value, scope, root, known, &generics);
+                    typ(value, names, &generics);
                 }
-                typ(&mut method.ret, scope, root, known, &generics);
+                typ(&mut method.ret, names, &generics);
             }
         }
         _ => {}
@@ -374,6 +398,103 @@ mod tests {
             type_params: vec![],
         }
     }
+    #[test]
+    fn contextual_nominal_rewrite_is_exact_and_preserves_non_names() {
+        let resolve = |name: &str| {
+            if name == "Self" {
+                Some("Thing".into())
+            } else {
+                name.strip_prefix("Self::")
+                    .map(|tail| format!("Thing::{tail}"))
+            }
+        };
+        let tuple = crate::core_ir::tuples::typ(&[Typ::Named("Self".into()), Typ::Int]);
+        let mut decls = vec![Decl::Function {
+            name: "Thing::new".into(),
+            params: vec![("self".into(), Typ::Named("Self".into()))],
+            ret: tuple,
+            type_params: vec![],
+            body: vec![
+                Stmt::Let(
+                    "Selfish".into(),
+                    Some(Typ::Named("Selfish".into())),
+                    Expr::StringLit("Self::new".into()),
+                ),
+                Stmt::Expr(Expr::ArrayLit(vec![Expr::StructInit {
+                    name: "Self".into(),
+                    fields: vec![("Self".into(), Expr::IntLit(42))],
+                }])),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("Self::new".into())),
+                    args: vec![],
+                }),
+                Stmt::Expr(Expr::Field {
+                    base: Box::new(Expr::Ident("self".into())),
+                    name: "Self".into(),
+                }),
+                Stmt::Match {
+                    scrutinee: Expr::Ident("self".into()),
+                    arms: vec![crate::core_ir::MatchArm {
+                        pattern: "Self { value: local }".into(),
+                        guard: None,
+                        body: vec![Stmt::Expr(Expr::Ident("Selfish".into()))],
+                    }],
+                },
+            ],
+        }];
+        rewrite_nominal_names(&mut decls, &resolve, &resolve);
+        let Decl::Function {
+            name,
+            params,
+            ret,
+            body,
+            ..
+        } = &decls[0]
+        else {
+            panic!()
+        };
+        assert_eq!(name, "Thing::new");
+        assert_eq!(params[0].1, Typ::Named("Thing".into()));
+        assert_eq!(
+            ret,
+            &crate::core_ir::tuples::typ(&[Typ::Named("Thing".into()), Typ::Int])
+        );
+        assert!(
+            matches!(&body[0],Stmt::Let(name,Some(Typ::Named(typ)),Expr::StringLit(text)) if name=="Selfish"&&typ=="Selfish"&&text=="Self::new")
+        );
+        assert!(
+            matches!(&body[1],Stmt::Expr(Expr::ArrayLit(items)) if matches!(&items[0],Expr::StructInit {name,fields} if name=="Thing" && fields[0].0=="Self"))
+        );
+        assert!(
+            matches!(&body[2],Stmt::Expr(Expr::Call {callee,..}) if matches!(callee.as_ref(),Expr::Ident(name) if name=="Thing::new"))
+        );
+        assert!(matches!(&body[3],Stmt::Expr(Expr::Field {name,..}) if name=="Self"));
+        let Stmt::Match { arms, .. } = &body[4] else {
+            panic!()
+        };
+        assert!(
+            matches!(MatchPattern::parse(&arms[0].pattern).unwrap(),MatchPattern::StructPat {name,..} if name=="Thing")
+        );
+    }
+
+    #[test]
+    fn nominal_type_rewrite_respects_generic_parameters() {
+        let mut decls = vec![Decl::Function {
+            name: "generic".into(),
+            params: vec![("value".into(), Typ::Named("Alias".into()))],
+            ret: Typ::Generic("Alias".into()),
+            type_params: vec!["Alias".into()],
+            body: vec![],
+        }];
+        let original = decls.clone();
+        rewrite_nominal_names(
+            &mut decls,
+            &|name| (name == "Alias").then(|| "Thing".into()),
+            &|_| None,
+        );
+        assert_eq!(decls, original);
+    }
+
     #[test]
     fn dependencies_keep_distinct_helpers_and_lexical_shadows() {
         for module in ["first", "second"] {
@@ -531,6 +652,24 @@ mod tests {
     }
 
     #[test]
+    fn prequalified_nested_trait_method_names_keep_owner_schema_and_helpers() {
+        let source = "mod child {pub struct Thing {pub x:i64} pub trait Read {fn read(&self)->i64;} fn helper()->i64 {20} impl Read for Thing {fn read(&self)->i64 {helper()+self.x}}} fn main()->i64 {42}";
+        let mut module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        qualify_module_decls(&mut module.decls, "dep");
+        let Decl::Function {params,body,..}=module.decls.iter().find(|decl|matches!(decl,Decl::Function {name,..} if name.contains("Thing::Read::read"))).unwrap() else {panic!()};
+        assert_eq!(params[0].1, Typ::Named("dep::child::Thing".into()));
+        let mut names = HashSet::new();
+        super::super::reserve_body(body, &mut names);
+        assert!(names.contains("dep::child::helper"));
+        let mut normalized =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &module);
+        crate::lower_core::desugar_module(&mut normalized);
+        crate::typecheck::TypeChecker::new()
+            .check_module(&normalized)
+            .unwrap();
+    }
+
+    #[test]
     fn tuple_shapes_qualify_embedded_local_structs_structurally() {
         let original = crate::core_ir::tuples::typ(&[Typ::Named("Pair".into()), Typ::Int]);
         let Typ::Named(original_name) = &original else {
@@ -651,9 +790,11 @@ mod tests {
         let mut source = super::super::render_pattern(&original);
         pattern(
             &mut source,
-            "dep",
-            "dep",
-            &HashSet::from(["dep::Pair".into()]),
+            &NominalNames {
+                type_name: &|name| (name == "Pair").then(|| "dep::Pair".into()),
+                value_name: &|_| None,
+            },
+            &HashSet::new(),
         );
         let mut expected = original;
         let MatchPattern::StructPat { name, .. } = &mut expected else {

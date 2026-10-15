@@ -6036,6 +6036,46 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn rust_self_types_follow_the_owning_impl_through_runtime_values() {
+        for source in [
+            "mod outer{pub struct Thing{pub value:i64} trait Read{fn read(value:Self)->i64;} impl Read for Thing{fn read(value:Self)->i64{value.value}} impl Thing{pub fn answer()->i64{<Self as Read>::read(Self{value:42})}}} fn main()->i64{outer::Thing::answer()}",
+            "mod outer{pub mod outer{pub struct Thing{pub value:i64} impl Thing{fn from(value:i64)->Self{Self{value}} pub fn new()->Self{Self::from(42)}}}} fn main()->i64{outer::outer::Thing::new().value}",
+            "struct Thing{value:i64} impl Thing{fn new()->Self{Self{value:42}}} fn main()->i64{Thing::new().value}",
+            "struct Thing{value:i64} impl Thing{fn from(value:i64)->Self{Self{value}} fn new()->Self{Self::from(42)}} fn main()->i64{Thing::new().value}",
+            "struct Thing{value:i64} impl Thing{fn identity(value:Self)->Self{value} fn new()->Self{Self::identity(Self{value:42})}} fn main()->i64{Thing::new().value}",
+            "struct Thing{value:i64} impl Thing{fn new()->Self{let build=||->Self{Self{value:42}};build()}} fn main()->i64{Thing::new().value}",
+            "struct Thing{value:i64} impl Thing{fn new()->Self{let build=||{let inner=||->Self{Self{value:42}};inner()};build()}} fn main()->i64{Thing::new().value}",
+            "struct Thing{value:i64} impl Thing{fn read(value:Self)->i64{match value{Self{value}=>value}}} fn main()->i64{Thing::read(Thing{value:42})}",
+            "struct Thing{value:i64} impl Thing{fn read(&self)->i64{self.value} fn new()->Self{Self{value:42}}} fn main()->i64{let thing=Thing::new();Thing::read(&thing)}",
+            "mod outer{pub struct Thing{pub value:i64} impl Thing{pub fn new()->Self{let build=||->Self{Self{value:42}};build()}}} fn main()->i64{outer::Thing::new().value}",
+            "struct Thing{value:i64,Selfish:i64} impl Thing{fn new()->Self{Self{value:20,Selfish:22}} fn read(&self)->i64{if \"Self::read\"==\"Self::read\"{self.value+self.Selfish}else{0}}} fn main()->i64{let thing=Thing::new();Thing::read(&thing)}",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut normalized =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            crate::lower_core::desugar_module(&mut normalized);
+            let report = crate::core_ir_verifier::verify_for_entry(&normalized, "main");
+            assert!(report.ok, "{source}: {report:?}; {normalized:?}");
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut optimized = normalized.clone();
+                crate::core_opt::optimize_with_profile(&mut optimized.decls, Some("main"), profile);
+                let report = crate::core_ir_verifier::verify_for_entry(&optimized, "main");
+                assert!(report.ok, "{source} {profile:?}: {report:?}; {optimized:?}");
+                assert_eq!(
+                    invoke_module(&optimized, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn jit_runtime_new_is_empty() {
         let rt = JitRuntime::new();
         assert_eq!(rt.function_count(), 0);

@@ -568,8 +568,21 @@ fn split_match_pat_args(inner: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut start = 0usize;
     let mut depth = 0i32;
+    let mut quoted = false;
+    let mut escaped = false;
     for (i, c) in inner.char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                quoted = false;
+            }
+            continue;
+        }
         match c {
+            '"' => quoted = true,
             '(' | '{' | '[' => depth += 1,
             ')' | '}' | ']' => depth -= 1,
             ',' if depth == 0 => {
@@ -1671,6 +1684,44 @@ mod tests {
     fn split_nested_args() {
         let args = split_match_pat_args("(1, 2), 3");
         assert_eq!(args, vec!["(1, 2)", "3"]);
+    }
+
+    #[test]
+    fn quoted_pattern_separators_roundtrip_without_changing_shape() {
+        for value in [
+            "a,b",
+            "[({",
+            "])}",
+            "quote\",comma",
+            "slash\\",
+            "slash\\\",comma",
+            "line\n,next",
+        ] {
+            let pattern = MatchPattern::StructPat {
+                name: "dep::Entry".into(),
+                fields: vec![
+                    ("text".into(), MatchPattern::StringPat(value.into())),
+                    (
+                        "nested".into(),
+                        MatchPattern::TuplePat(vec![
+                            MatchPattern::ArrayPat(vec![
+                                MatchPattern::StringPat(value.into()),
+                                MatchPattern::IntPat(7),
+                            ]),
+                            MatchPattern::IntPat(42),
+                        ]),
+                    ),
+                ],
+            };
+            let rendered = crate::core_bindings::render_pattern(&pattern);
+            assert_eq!(MatchPattern::parse(&rendered), Ok(pattern), "{rendered}");
+            let string =
+                crate::core_bindings::render_pattern(&MatchPattern::StringPat(value.into()));
+            assert_eq!(
+                split_match_pat_args(&format!("{string}, 42")),
+                vec![string, "42".into()]
+            );
+        }
     }
 
     #[test]
