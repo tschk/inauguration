@@ -566,7 +566,7 @@ dependencies = [
  "tree-sitter-javascript",
  "tree-sitter-julia",
  "tree-sitter-kotlin-ng",
- "tree-sitter-lolcat",
+ "tree-sitter-lolcode",
  "tree-sitter-lua",
  "tree-sitter-nim",
  "tree-sitter-objc",
@@ -1386,10 +1386,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 
 [[package]]
-name = "tree-sitter-lolcat"
-version = "0.0.1"
+name = "tree-sitter-lolcode"
+version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06aa281f4f31bd765b6d29dc87d60ecfc6e4aaec8a40ad0d937243eed855b2cd"
+checksum = "bbf2adad8b8968d5c12b51a4038e341bb2e9295db5290848b4eca2f4907e1fca"
 dependencies = [
  "cc",
  "tree-sitter-language",
