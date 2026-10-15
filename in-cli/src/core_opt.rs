@@ -761,8 +761,8 @@ fn fold_int_constants(op: &str, a: i64, b: i64) -> Option<Expr> {
         "add" | "+" => a.checked_add(b).map(Expr::IntLit),
         "sub" | "-" => a.checked_sub(b).map(Expr::IntLit),
         "mul" | "*" => a.checked_mul(b).map(Expr::IntLit),
-        "div" | "/" if b != 0 && !(a == i64::MIN && b == -1) => Some(Expr::IntLit(a / b)),
-        "mod" | "%" if b != 0 => Some(Expr::IntLit(a % b)),
+        "div" | "/" => a.checked_div(b).map(Expr::IntLit),
+        "mod" | "%" => a.checked_rem(b).map(Expr::IntLit),
         _ => None,
     }
 }
@@ -2929,6 +2929,28 @@ mod tests {
     }
 
     // ─── Algebraic Simplification ──────────────────────────────────────
+
+    #[test]
+    fn simplify_preserves_undefined_integer_division_and_remainder() {
+        for op in ["%", "mod", "/", "div"] {
+            for (lhs, rhs) in [(i64::MIN, -1), (42, 0)] {
+                let expr = bin(op, Expr::IntLit(lhs), Expr::IntLit(rhs));
+                assert_eq!(simplify_expr(expr.clone()), expr, "{op}: {lhs}, {rhs}");
+                assert_eq!(fold_expr(expr.clone()), expr, "{op}: {lhs}, {rhs}");
+            }
+        }
+    }
+
+    #[test]
+    fn simplify_folds_signed_remainders() {
+        for op in ["%", "mod"] {
+            for (lhs, rhs, expected) in [(-7, 3, -1), (7, -3, 1), (-7, -3, -1)] {
+                let expr = bin(op, Expr::IntLit(lhs), Expr::IntLit(rhs));
+                assert_eq!(simplify_expr(expr.clone()), Expr::IntLit(expected));
+                assert_eq!(fold_expr(expr), Expr::IntLit(expected));
+            }
+        }
+    }
 
     #[test]
     fn simplify_add_zero_identity() {
