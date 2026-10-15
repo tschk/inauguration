@@ -105,6 +105,7 @@ pub(crate) fn parse_module_from_blocks(
             if let Some(eq) = rest.find('=') {
                 let lhs = trim(&rest[..eq]);
                 let rhs = trim(&rest[eq + 1..]);
+                let rhs = trim(rhs.strip_suffix(';').unwrap_or(rhs));
                 let (name, typ) = if let Some(colon) = lhs.rfind(':') {
                     (
                         trim(&lhs[..colon]).to_string(),
@@ -130,6 +131,7 @@ pub(crate) fn parse_module_from_blocks(
             if let Some(eq) = rest.find('=') {
                 let lhs = trim(&rest[..eq]);
                 let rhs = trim(&rest[eq + 1..]);
+                let rhs = trim(rhs.strip_suffix(';').unwrap_or(rhs));
                 let (name, typ) = if let Some(colon) = lhs.rfind(':') {
                     (
                         trim(&lhs[..colon]).to_string(),
