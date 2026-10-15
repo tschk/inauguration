@@ -73,7 +73,7 @@ use tree_sitter_holyc;
 use tree_sitter_julia;
 #[cfg(feature = "parse-extended")]
 use tree_sitter_kotlin_ng;
-use tree_sitter_lolcat;
+use tree_sitter_lolcode;
 use tree_sitter_lua;
 use tree_sitter_nim;
 #[cfg(feature = "parse-extended")]
@@ -138,7 +138,7 @@ fn try_lang_for(id: ParserId) -> Option<Language> {
         ParserId::R => tree_sitter_r::LANGUAGE.into(),
         #[cfg(feature = "parse-extended")]
         ParserId::V => tree_sitter_v::LANGUAGE.into(),
-        ParserId::Lolcode => tree_sitter_lolcat::LANGUAGE.into(),
+        ParserId::Lolcode => tree_sitter_lolcode::LANGUAGE.into(),
         ParserId::Crystal => tree_sitter_crystal::LANGUAGE.into(),
         ParserId::Nim => tree_sitter_nim::LANGUAGE.into(),
         _ => return None,
@@ -5034,12 +5034,14 @@ sub main {
   IF U SAY SO
 KTHXBYE
 "#;
-        let m = parse_lang(
-            try_lang_for(ParserId::Lolcode).unwrap(),
-            src,
-            extract_lolcat,
-        )
-        .expect("ok");
+        let language = try_lang_for(ParserId::Lolcode).expect("LOLCODE grammar available");
+        let mut parser = Parser::new();
+        parser
+            .set_language(&language)
+            .expect("load LOLCODE grammar");
+        let tree = parser.parse(src, None).expect("parse LOLCODE fixture");
+        assert!(!tree.root_node().has_error(), "LOLCODE parse has errors");
+        let m = parse_lang(language, src, extract_lolcat).expect("ok");
         let add = m
             .decls
             .iter()
