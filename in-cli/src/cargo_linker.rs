@@ -547,6 +547,133 @@ libc = { path = "dummy-dep" }
     }
 
     #[test]
+    fn test_compile_cargo_dependencies_proc_macro() -> std::io::Result<()> {
+        let temp = TempDirGuard::new();
+        let cargo_toml = temp.path.join("Cargo.toml");
+        let src_dir = temp.path.join("src");
+        fs::create_dir_all(&src_dir)?;
+        let lib_rs = src_dir.join("lib.rs");
+
+        let dep_dir = temp.path.join("proc_macro_dep");
+        let dep_src_dir = dep_dir.join("src");
+        fs::create_dir_all(&dep_src_dir)?;
+        let dep_cargo_toml = dep_dir.join("Cargo.toml");
+        let dep_lib_rs = dep_src_dir.join("lib.rs");
+
+        fs::write(
+            &dep_cargo_toml,
+            r#"[package]
+name = "proc_macro_dep"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+"#,
+        )?;
+        fs::write(&dep_lib_rs, "pub fn macro_func() {}")?;
+
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "dummy-pkg"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+proc_macro_dep = { path = "proc_macro_dep" }
+"#,
+        )?;
+        fs::write(&lib_rs, "pub fn foo() {}")?;
+
+        let modules = compile_cargo_dependencies(&temp.path);
+
+        assert!(
+            modules.is_empty(),
+            "Expected proc-macro dependencies to be skipped"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_cargo_dependencies_transitive() -> std::io::Result<()> {
+        let temp = TempDirGuard::new();
+        let cargo_toml = temp.path.join("Cargo.toml");
+        let src_dir = temp.path.join("src");
+        fs::create_dir_all(&src_dir)?;
+        let lib_rs = src_dir.join("lib.rs");
+
+        let direct_dir = temp.path.join("direct_dep");
+        let direct_src_dir = direct_dir.join("src");
+        fs::create_dir_all(&direct_src_dir)?;
+        let direct_cargo_toml = direct_dir.join("Cargo.toml");
+        let direct_lib_rs = direct_src_dir.join("lib.rs");
+
+        let trans_dir = temp.path.join("transitive_dep");
+        let trans_src_dir = trans_dir.join("src");
+        fs::create_dir_all(&trans_src_dir)?;
+        let trans_cargo_toml = trans_dir.join("Cargo.toml");
+        let trans_lib_rs = trans_src_dir.join("lib.rs");
+
+        fs::write(
+            &trans_cargo_toml,
+            r#"[package]
+name = "transitive_dep"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )?;
+        fs::write(&trans_lib_rs, "pub fn transitive_func() {}")?;
+
+        fs::write(
+            &direct_cargo_toml,
+            r#"[package]
+name = "direct_dep"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+transitive_dep = { path = "../transitive_dep" }
+"#,
+        )?;
+        fs::write(&direct_lib_rs, "pub fn direct_func() {}")?;
+
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "dummy-pkg"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+direct_dep = { path = "direct_dep" }
+"#,
+        )?;
+        fs::write(&lib_rs, "pub fn foo() {}")?;
+
+        let modules = compile_cargo_dependencies(&temp.path);
+
+        assert_eq!(
+            modules.len(),
+            2,
+            "Expected both direct and transitive dependencies to be compiled"
+        );
+        let has_direct = modules.iter().any(|(name, _)| name == "direct_dep");
+        let has_transitive = modules.iter().any(|(name, _)| name == "transitive_dep");
+        assert!(
+            has_direct,
+            "Expected 'direct_dep' to be in the compiled dependencies"
+        );
+        assert!(
+            has_transitive,
+            "Expected 'transitive_dep' to be in the compiled dependencies"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_compile_cargo_dependencies_no_cargo_toml() {
         let temp = TempDirGuard::new();
         let modules = compile_cargo_dependencies(&temp.path);
