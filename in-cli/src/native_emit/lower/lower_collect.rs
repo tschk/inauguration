@@ -50,8 +50,14 @@ pub(crate) fn collect_functions(
     }
     // Update call targets in all function bodies
     let module_names = crate::core_bindings::module_names(&module.decls);
+    let references = crate::core_bindings::function_references(&module.decls);
     for func in functions.values_mut() {
-        crate::core_bindings::normalize_function(&mut func.params, &mut func.body, &module_names);
+        crate::core_bindings::normalize_function_with_references(
+            &mut func.params,
+            &mut func.body,
+            &module_names,
+            &references,
+        );
         rename_calls(&mut func.body, &name_map);
     }
     let fallible = crate::core_effects::fallible_functions(functions.values().map(|info| {

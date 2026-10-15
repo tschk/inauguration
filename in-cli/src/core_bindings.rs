@@ -16,19 +16,67 @@ pub(crate) fn module_names(decls: &[Decl]) -> HashSet<String> {
         .collect()
 }
 
-pub(crate) fn normalize_decls(decls: &mut [Decl]) {
+/// Resolve only spellings actually present in this module. Exact declarations
+/// win over the surface underscore-to-kebab alias; lexical scopes override these
+/// references during normalization.
+pub(crate) fn function_references(decls: &[Decl]) -> HashMap<String, String> {
+    fn gather(decls: &[Decl], spellings: &mut HashSet<String>) {
+        for decl in decls {
+            match decl {
+                Decl::Function { body, .. } => reserve_body(body, spellings),
+                Decl::Global {
+                    init: Some(expr), ..
+                } => reserve_expr(expr, spellings),
+                Decl::Class { methods, .. } => gather(methods, spellings),
+                _ => {}
+            }
+        }
+    }
     let names = module_names(decls);
-    normalize_members(decls, &names);
+    let functions: HashSet<_> = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Function { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut spellings = HashSet::new();
+    gather(decls, &mut spellings);
+    spellings
+        .into_iter()
+        .filter_map(|spelling| {
+            if names.contains(&spelling) || functions.contains(&spelling) {
+                return None;
+            }
+            let canonical = spelling.replace('_', "-");
+            (canonical != spelling && functions.contains(&canonical))
+                .then_some((spelling, canonical))
+        })
+        .collect()
 }
 
-fn normalize_members(decls: &mut [Decl], names: &HashSet<String>) {
+pub(crate) fn normalize_decls(decls: &mut [Decl]) {
+    let names = module_names(decls);
+    let references = function_references(decls);
+    normalize_members(decls, &names, &references);
+}
+
+fn normalize_members(
+    decls: &mut [Decl],
+    names: &HashSet<String>,
+    references: &HashMap<String, String>,
+) {
     for decl in decls {
         match decl {
-            Decl::Function { params, body, .. } => normalize_function(params, body, names),
-            Decl::Class { methods, .. } => normalize_members(methods, names),
+            Decl::Function { params, body, .. } => {
+                normalize_function_with_references(params, body, names, references)
+            }
+            // Methods are not module-level functions until class desugaring.
+            // Preserve their member lookup for that phase; normalize only locals.
+            Decl::Class { methods, .. } => normalize_members(methods, names, &HashMap::new()),
             Decl::Global {
                 init: Some(expr), ..
-            } => normalize_initializer_with_references(expr, names, &HashMap::new()),
+            } => normalize_initializer_with_references(expr, names, references),
             _ => {}
         }
     }
@@ -542,5 +590,229 @@ mod tests {
         };
         assert_ne!(name, &params[0].0);
         assert_eq!(lhs.as_ref(), &Expr::Ident(params[0].0.clone()));
+    }
+}
+
+#[cfg(test)]
+mod function_alias_tests {
+    use super::*;
+
+    fn function(name: &str, params: Vec<(String, Typ)>, body: Vec<Stmt>) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params,
+            ret: Typ::Int,
+            body,
+            type_params: vec![],
+        }
+    }
+
+    fn returned_name(decl: &Decl) -> &str {
+        let Decl::Function { body, .. } = decl else {
+            panic!("function");
+        };
+        let Some(Stmt::Return(Some(Expr::Ident(name)))) = body.last() else {
+            panic!("return: {body:?}");
+        };
+        name
+    }
+
+    #[test]
+    fn class_members_do_not_create_or_block_module_function_aliases() {
+        let mut decls = vec![
+            function(
+                "helper-name",
+                vec![],
+                vec![Stmt::Return(Some(Expr::IntLit(42)))],
+            ),
+            function(
+                "main",
+                vec![],
+                vec![Stmt::Return(Some(Expr::Ident("helper_name".into())))],
+            ),
+            function(
+                "unresolved",
+                vec![],
+                vec![Stmt::Return(Some(Expr::Ident("private_name".into())))],
+            ),
+            Decl::Class {
+                name: "Thing".into(),
+                fields: vec![],
+                visibility: crate::core_ir::Visibility::Private,
+                extends: None,
+                implements: vec![],
+                type_params: vec![],
+                methods: vec![
+                    function(
+                        "helper_name",
+                        vec![],
+                        vec![Stmt::Return(Some(Expr::Ident("helper_name".into())))],
+                    ),
+                    function(
+                        "private-name",
+                        vec![],
+                        vec![Stmt::Return(Some(Expr::IntLit(1)))],
+                    ),
+                ],
+            },
+        ];
+        let refs = function_references(&decls);
+        assert_eq!(
+            refs.get("helper_name").map(String::as_str),
+            Some("helper-name")
+        );
+        assert!(!refs.contains_key("private_name"));
+        normalize_decls(&mut decls);
+        assert_eq!(returned_name(&decls[1]), "helper-name");
+        assert_eq!(returned_name(&decls[2]), "private_name");
+        let Decl::Class { methods, .. } = &decls[3] else {
+            panic!("class");
+        };
+        assert_eq!(returned_name(&methods[0]), "helper_name");
+    }
+
+    #[test]
+    fn observed_function_aliases_normalize_values_calls_and_initializers_idempotently() {
+        let mut decls = vec![
+            function(
+                "helper-name-more",
+                vec![],
+                vec![Stmt::Return(Some(Expr::IntLit(42)))],
+            ),
+            function(
+                "main",
+                vec![],
+                vec![Stmt::Return(Some(Expr::Call {
+                    callee: Box::new(Expr::Ident("helper_name-more".into())),
+                    args: vec![],
+                }))],
+            ),
+            Decl::Global {
+                name: "callback".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(Expr::Ident("helper-name_more".into()))),
+                mutable: true,
+                constant_value: false,
+            },
+        ];
+        // Direct backend APIs normalize their cloned function bodies too, even
+        // when no optimizer has run over the original module.
+        let direct = crate::core_ir::UnifiedModule::new(decls[..2].to_vec());
+        assert!(
+            crate::native_emit::lower::lower_module(
+                &direct,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .is_ok()
+        );
+        assert!(crate::native_emit::x86_64_lower::lower_module(&direct, "main").is_ok());
+        let references = function_references(&decls);
+        assert_eq!(
+            references.get("helper_name-more").map(String::as_str),
+            Some("helper-name-more")
+        );
+        assert_eq!(
+            references.get("helper-name_more").map(String::as_str),
+            Some("helper-name-more")
+        );
+        assert_eq!(references.len(), 2);
+        normalize_decls(&mut decls);
+        assert!(matches!(&decls[1], Decl::Function { body, .. }
+            if matches!(body.last(), Some(Stmt::Return(Some(Expr::Call { callee, .. })))
+                if matches!(callee.as_ref(), Expr::Ident(name) if name == "helper-name-more"))));
+        assert!(matches!(&decls[2], Decl::Global { init: Some(init), .. }
+            if matches!(init.as_ref(), Expr::Ident(name) if name == "helper-name-more")));
+        let once = decls.clone();
+        normalize_decls(&mut decls);
+        assert_eq!(decls, once);
+    }
+
+    #[test]
+    fn exact_module_names_and_lexical_bindings_override_function_aliases() {
+        let alias = "helper_name";
+        let value = || Expr::Ident(alias.into());
+        let mut decls = vec![
+            function(
+                "helper-name",
+                vec![],
+                vec![Stmt::Return(Some(Expr::IntLit(42)))],
+            ),
+            function(
+                "parameter",
+                vec![(alias.into(), Typ::Int)],
+                vec![Stmt::Return(Some(value()))],
+            ),
+            function(
+                "local",
+                vec![],
+                vec![
+                    Stmt::Let(alias.into(), Some(Typ::Int), Expr::IntLit(7)),
+                    Stmt::Return(Some(value())),
+                ],
+            ),
+            function(
+                "closure",
+                vec![],
+                vec![Stmt::Expr(Expr::Closure {
+                    params: vec![(alias.into(), Typ::Int)],
+                    ret: Typ::Int,
+                    body: vec![Stmt::Return(Some(value()))],
+                    captures: vec![],
+                })],
+            ),
+            function(
+                "pattern",
+                vec![],
+                vec![Stmt::Match {
+                    scrutinee: Expr::IntLit(9),
+                    arms: vec![crate::core_ir::MatchArm {
+                        pattern: alias.into(),
+                        guard: Some(Expr::Binary {
+                            op: "==".into(),
+                            lhs: Box::new(value()),
+                            rhs: Box::new(Expr::IntLit(9)),
+                        }),
+                        body: vec![Stmt::Return(Some(value()))],
+                    }],
+                }],
+            ),
+        ];
+        normalize_decls(&mut decls);
+        assert_eq!(returned_name(&decls[1]), alias);
+        assert_eq!(returned_name(&decls[2]), alias);
+        assert!(matches!(&decls[3], Decl::Function { body, .. }
+            if matches!(&body[0], Stmt::Expr(Expr::Closure { body, .. })
+                if matches!(body.last(), Some(Stmt::Return(Some(Expr::Ident(name)))) if name == alias))));
+        assert!(matches!(&decls[4], Decl::Function { body, .. }
+            if matches!(&body[0], Stmt::Match { arms, .. }
+                if arms[0].pattern == alias && matches!(arms[0].body.last(), Some(Stmt::Return(Some(Expr::Ident(name)))) if name == alias)
+                    && matches!(&arms[0].guard, Some(Expr::Binary { lhs, .. }) if matches!(lhs.as_ref(), Expr::Ident(name) if name == alias)))));
+        decls.push(function(
+            alias,
+            vec![],
+            vec![Stmt::Return(Some(Expr::IntLit(1)))],
+        ));
+        decls.push(function("exact", vec![], vec![Stmt::Return(Some(value()))]));
+        assert!(!function_references(&decls).contains_key(alias));
+        normalize_decls(&mut decls);
+        assert_eq!(returned_name(decls.last().unwrap()), alias);
+        decls.pop();
+        decls.pop();
+        decls.push(Decl::Global {
+            name: alias.into(),
+            typ: Typ::Int,
+            init: Some(Box::new(Expr::IntLit(3))),
+            mutable: true,
+            constant_value: false,
+        });
+        decls.push(function(
+            "exact_global",
+            vec![],
+            vec![Stmt::Return(Some(value()))],
+        ));
+        assert!(!function_references(&decls).contains_key(alias));
+        normalize_decls(&mut decls);
+        assert_eq!(returned_name(decls.last().unwrap()), alias);
     }
 }

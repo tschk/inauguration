@@ -20,50 +20,7 @@ use crate::native_emit::global_data::{
 use crate::native_emit::x86_64::{self, CodeEmitter, RAX, RBP, RBX, RCX, RDI, RDX, RSI};
 use std::collections::HashMap;
 
-/// Core IR stdlib call name -> C-ABI wrapper registered in the JIT symbol cache.
-fn jit_stdlib_wrapper(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "join" => "in_vec_join",
-        "chain" | "extend" => "in_vec_extend",
-        "push" => "in_vec_push",
-        "push-str" => "in_vec_push_words",
-        "print" => "in_print",
-        "read-file" => "in_fs_read_to_string",
-        "write-file" => "in_fs_write",
-        "fs-exists" => "in_fs_exists",
-        "create-dir" => "in_fs_create_dir",
-        "remove-file" => "in_fs_remove_file",
-        "process-run" => "in_process_run",
-        "env-get" => "in_env_var",
-        "env-set" => "in_env_set_var",
-        "env-has" => "in_env_has",
-        "env-temp-dir" => "in_env_temp_dir",
-        "env-current-dir" => "in_env_current_dir",
-        "path-join" => "in_path_join",
-        "path-dirname" => "in_path_dirname",
-        "path-basename" => "in_path_basename",
-        "path-extname" => "in_path_extname",
-        "path-normalize" => "in_path_normalize",
-        "str-concat" => "in_str_concat",
-        "str-eq" => "in_str_eq",
-        "json-stringify" => "in_json_stringify",
-        "str-table-has" => "in_str_table_has",
-        "str-table-get-int" => "in_str_table_get_int",
-        "str-contains" => "in_str_contains",
-        "str-starts-with" => "in_str_starts_with",
-        "str-ends-with" => "in_str_ends_with",
-        "str-index-of" => "in_str_index_of",
-        "str-is-int" => "in_str_is_int",
-        "str-slice" => "in_str_slice",
-        "str-split-lines" => "in_str_split_lines",
-        "str-split-spaces" => "in_str_split_spaces",
-        "str-tokenize-expr" => "in_str_tokenize_expr",
-        "str-to-int" => "in_str_to_int",
-        "str-trim" => "in_str_trim",
-        "array-len" => "in_array_len",
-        _ => return None,
-    })
-}
+use crate::native_emit::stdlib_wrappers::wrapper as jit_stdlib_wrapper;
 
 pub const X86_64_TRIPLE: &str = "x86_64-unknown-none";
 
@@ -668,8 +625,14 @@ fn collect_functions(module: &UnifiedModule) -> Result<HashMap<String, FunctionI
         name_map.insert(orig, unique.clone());
     }
     let module_names = crate::core_bindings::module_names(&module.decls);
+    let references = crate::core_bindings::function_references(&module.decls);
     for func in functions.values_mut() {
-        crate::core_bindings::normalize_function(&mut func.params, &mut func.body, &module_names);
+        crate::core_bindings::normalize_function_with_references(
+            &mut func.params,
+            &mut func.body,
+            &module_names,
+            &references,
+        );
         rename_calls(&mut func.body, &name_map);
     }
     let fallible = crate::core_effects::fallible_functions(functions.values().map(|info| {
@@ -2841,6 +2804,13 @@ fn lower_builtin_call(
     {
         return Err("canonical atomic intrinsic name is redeclared".into());
     }
+    if ctx
+        .functions
+        .get(target_name)
+        .is_some_and(|function| !function.body.is_empty())
+    {
+        return Ok(false);
+    }
     if !ctx.functions.contains_key(target_name) {
         if let Some(order) = crate::core_atomic::ordering(&Expr::Call {
             callee: Box::new(Expr::Ident(target_name.into())),
@@ -3563,7 +3533,11 @@ fn lower_call_expr(
     if matches!(
         target_name.as_str(),
         "vector-push" | "vector-extend" | "vector-clear"
-    ) {
+    ) && !ctx
+        .functions
+        .get(&target_name)
+        .is_some_and(|function| !function.body.is_empty())
+    {
         let expected_args = if target_name == "vector-clear" { 1 } else { 2 };
         if args.len() != expected_args {
             return Err(format!(
@@ -3701,35 +3675,19 @@ fn lower_call_expr(
                     "x86_64-lower: JIT stdlib wrappers require 64-bit register arguments".into(),
                 );
             }
-            let params = crate::core_ir_verifier::intrinsic_param_types(&base);
-            if let Some(declared) = ctx.functions.get(&target_name)
-                && (params.is_none_or(|params| {
-                    declared.params.len() != params.len()
-                        || declared
-                            .params
-                            .iter()
-                            .zip(params)
-                            .any(|((_, actual), expected)| {
-                                actual.canonical() != expected.canonical()
-                            })
-                }) || crate::core_ir_verifier::intrinsic_return_type(&base)
-                    .is_none_or(|expected| declared.ret.canonical() != expected.canonical()))
-            {
-                return Err(format!(
-                    "x86_64-lower: incompatible JIT stdlib declaration `{target_name}`"
-                ));
-            }
-            if let Some(params) = params
-                && (args.len() != params.len()
-                    || args.iter().zip(params).any(|(arg, expected)| {
-                        scalar_expr_type(arg, ctx)
-                            .is_none_or(|actual| actual.canonical() != expected.canonical())
-                    }))
-            {
-                return Err(format!(
-                    "x86_64-lower: incompatible JIT stdlib arguments for `{target_name}`"
-                ));
-            }
+            crate::native_emit::stdlib_wrappers::validate_scalar_call(
+                wrapper,
+                ctx.functions
+                    .get(&target_name)
+                    .map(|declared| (declared.params.as_slice(), &declared.ret)),
+                args.iter().map(|arg| scalar_expr_type(arg, ctx)),
+            )
+            .map_err(|error| {
+                format!(
+                    "x86_64-lower: incompatible JIT stdlib {} `{target_name}`",
+                    error.category()
+                )
+            })?;
             lower_call_args(emitter, ctx, args, &target_name, pending_calls)?;
             emit_aligned_host_call(emitter, ptr);
             emit_stack_cleanup(emitter, args.len());
@@ -5012,7 +4970,13 @@ fn main() -> void { return }
             crate::native_emit::native_link::bootstrap_jit_native();
             let result = lower_module(&module, "main").expect("lower");
             let native = lower_native_module(&module, "main").expect("native lower");
-            assert_eq!(native.externs, [name]);
+            assert_eq!(native.externs, ["process-run"]);
+            assert!(
+                native
+                    .extern_calls
+                    .iter()
+                    .all(|(target, _)| target == "process-run")
+            );
             let has_call_rax = result.code.windows(2).any(|w| w == [0xFF, 0xD0]);
             let has_unresolved_rel32 = result.code.windows(5).any(|w| w == [0xE8, 0, 0, 0, 0]);
             assert!(has_call_rax, "stdlib extern must lower to call rax");

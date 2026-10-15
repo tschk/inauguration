@@ -6247,3 +6247,124 @@ fn main()->Int{word="changed";original=1;flag=false;number=2.5;if selected!="Î»é
         }
     }
 }
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_declared_function_aliases_preserve_overrides_and_exact_collisions() {
+    for original in [
+        "var calls:Int=0;\nfn env-temp-dir()->Int{calls+=1;return 42;}\nfn main()->Int{let result=env_temp_dir();if calls!=1{return 0;}return result;}",
+        "fn answer-name-more()->Int{return 42;}\nfn main()->Int{return answer_name-more();}",
+        "fn answer-name()->Int{return 0;}\nfn answer_name()->Int{return 42;}\nfn main()->Int{return answer_name();}",
+    ] {
+        let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+        for text in [original, canonical.as_str()] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let source = temp_path("function-alias.in");
+                fs::write(&source, text).unwrap();
+                let mut request =
+                    default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{profile:?} {text}: {report:?}");
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{profile:?} {text}"
+                );
+                fs::remove_file(source).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_aliased_incompatible_wrapper_declarations_remain_refused() {
+    let source = temp_path("aliased-wrapper-contract.in");
+    fs::write(
+        &source,
+        "extern rust fn env-temp-dir()->Float;\nfn main()->Float{return env_temp_dir();}\n",
+    )
+    .unwrap();
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        let mut request = default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(!report.success, "{profile:?}: {report:?}");
+        assert!(
+            report
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("incompatible"),
+            "{profile:?}: {report:?}"
+        );
+    }
+    fs::remove_file(source).unwrap();
+}
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_defined_intrinsics_keep_effects_and_override_inline_and_host_calls() {
+    let original = "var calls:Int=0;\nfn env-temp-dir()->Int{calls+=1;return 42;}\nfn process-run(value:Int)->Int{calls+=1;return value;}\nfn str-len(value:Int)->Int{calls+=1;return value;}\nfn vector-clear(value:Int)->Int{calls+=1;return value;}\nfn main()->Int{if env_temp_dir()!=42 || process_run(42)!=42 || str_len(42)!=42 || vector_clear(42)!=42 || calls!=4{return 0;}return 42;}";
+    let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+    for text in [original, canonical.as_str()] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("defined-intrinsic-override.in");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?}: {report:?}");
+            assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{profile:?}");
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("defined-intrinsic-override");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{profile:?}: {report:?}"
+                );
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42)
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}

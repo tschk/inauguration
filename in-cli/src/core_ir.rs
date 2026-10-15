@@ -748,12 +748,12 @@ impl MatchPattern {
                 });
             }
         }
-        // Wildcard discard keeps a lone `_`; all other names are kebab-case.
+        // A lone `_` discards; other source identifiers bind a value.
         if s == "_"
             || (!s.is_empty()
                 && s.chars().enumerate().all(|(i, c)| match (i, c) {
-                    (0, ch) => ch.is_ascii_alphabetic(),
-                    (_, ch) => ch.is_ascii_alphanumeric() || ch == '-',
+                    (0, ch) => ch.is_ascii_alphabetic() || ch == '_',
+                    (_, ch) => ch.is_ascii_alphanumeric() || ch == '-' || ch == '_',
                 }))
         {
             return Ok(MatchPattern::IdentPat(s.to_string()));
@@ -1588,10 +1588,16 @@ mod tests {
 
     #[test]
     fn match_pattern_ident() {
-        assert_eq!(
-            MatchPattern::parse("x").unwrap(),
-            MatchPattern::IdentPat("x".to_string())
-        );
+        for name in ["x", "helper_name", "_value", "mixed_name-more", "value2"] {
+            let pattern = MatchPattern::parse(name).unwrap();
+            assert_eq!(pattern, MatchPattern::IdentPat(name.into()));
+            assert_eq!(
+                pattern.typed_bindings(&Typ::Int, &|_| None).unwrap(),
+                vec![(name.into(), Typ::Int)]
+            );
+        }
+        assert_eq!(MatchPattern::parse("_").unwrap(), MatchPattern::WildPat);
+        assert!(MatchPattern::parse("2value").is_err());
     }
 
     #[test]

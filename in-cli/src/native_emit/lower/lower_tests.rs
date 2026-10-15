@@ -361,7 +361,7 @@ fn lowers_string_len_to_aarch64_ldr_offset_8() {
 fn lowers_string_contains_to_native_wrapper_call() {
     let mut emitter = CodeEmitter::new();
     let structs = HashMap::new();
-    let strings = HashMap::new();
+    let strings = HashMap::from([(String::new(), 0)]);
     let mut pending_inrt_calls = Vec::new();
     let mut pending_strings = Vec::new();
     let globals = HashMap::new();
@@ -379,11 +379,30 @@ fn lowers_string_contains_to_native_wrapper_call() {
     .unwrap();
     let functions = HashMap::new();
     let mut pending_calls = Vec::new();
-    let result = lower_stdlib::lower_stdlib_call(
+    let invalid = lower_stdlib::lower_stdlib_call(
         &mut emitter,
         &mut ctx,
         "String::contains",
         &[Expr::IntLit(0), Expr::IntLit(0)],
+        0,
+        &functions,
+        &mut pending_calls,
+        "test",
+    )
+    .unwrap_err();
+    assert!(
+        invalid.contains("incompatible stdlib arguments"),
+        "{invalid}"
+    );
+    assert_eq!(emitter.len(), 0);
+    let result = lower_stdlib::lower_stdlib_call(
+        &mut emitter,
+        &mut ctx,
+        "String::contains",
+        &[
+            Expr::StringLit(String::new()),
+            Expr::StringLit(String::new()),
+        ],
         0,
         &functions,
         &mut pending_calls,

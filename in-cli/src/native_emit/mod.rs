@@ -17,6 +17,7 @@ pub mod qemu_harness;
 pub mod raw;
 pub mod sci;
 pub mod source_emit;
+mod stdlib_wrappers;
 pub mod target;
 pub mod thumb;
 pub mod thumb_lower;

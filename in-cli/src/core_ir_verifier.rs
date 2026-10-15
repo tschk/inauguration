@@ -211,6 +211,7 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("env-get", IntrinsicRet::String),
     ("env-has", IntrinsicRet::Bool),
     ("env-set", IntrinsicRet::Void),
+    ("env-remove", IntrinsicRet::Void),
     ("env-temp-dir", IntrinsicRet::String),
     ("env-current-dir", IntrinsicRet::String),
     ("process-run", IntrinsicRet::String),
@@ -359,12 +360,17 @@ pub(crate) fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
         .replace('_', "-");
     Some(match name.as_str() {
         "str-concat" | "str-eq" | "str-contains" | "str-starts-with" | "str-ends-with"
-        | "str-index-of" | "path-join" | "write-file" | "env-set" => &[Typ::String, Typ::String],
+        | "str-index-of" | "path-join" | "write-file" | "env-set" | "str-table-has" => {
+            &[Typ::String, Typ::String]
+        }
         "str-len" | "str-trim" | "str-split-lines" | "str-split-spaces" | "str-tokenize-expr"
         | "str-to-int" | "str-is-int" | "print" | "process-run" | "read-file" | "fs-exists"
         | "create-dir" | "remove-file" | "env-get" | "env-has" | "path-dirname"
-        | "path-basename" | "path-extname" | "path-normalize" | "json-stringify" => &[Typ::String],
+        | "path-basename" | "path-extname" | "path-normalize" | "json-stringify" | "env-remove" => {
+            &[Typ::String]
+        }
         "env-temp-dir" | "env-current-dir" => &[],
+        "str-table-get-int" => &[Typ::String, Typ::String, Typ::String],
         "str-slice" | "str-substr" => &[Typ::String, Typ::Int, Typ::Int],
         "print-int"
         | "to-string"

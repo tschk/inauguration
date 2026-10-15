@@ -21,21 +21,38 @@ fn emit_stdlib_wrapper_call(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
     wrapper: &str,
+    target: &str,
     args: &[Expr],
     rd: u8,
     functions: &std::collections::HashMap<String, FunctionInfo>,
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if args.len() > 8 {
+        return Err(
+            "native-lower: stdlib wrappers require at most eight register arguments".into(),
+        );
+    }
+    crate::native_emit::stdlib_wrappers::validate_scalar_call(
+        wrapper,
+        functions
+            .get(target)
+            .map(|declared| (declared.params.as_slice(), &declared.ret)),
+        args.iter()
+            .map(|arg| super::lower_expr::native_expr_type(arg, ctx, functions)),
+    )
+    .map_err(|error| {
+        format!(
+            "native-lower: incompatible stdlib {} `{target}`",
+            error.category()
+        )
+    })?;
     let temp_base = ctx.acquire_call_arg_temps(fn_name)?;
     for (i, arg) in args.iter().enumerate() {
-        if i >= 8 {
-            break;
-        }
         lower_expr_into(emitter, ctx, arg, 0, functions, pending_calls, fn_name)?;
         emitter.emit_u32(aarch64::str64(0, REG_SP, ctx.call_arg_temps[temp_base + i]));
     }
-    for i in 0..args.len().min(8) {
+    for i in 0..args.len() {
         emitter.emit_u32(aarch64::ldr64(
             i as u8,
             REG_SP,
@@ -899,6 +916,12 @@ pub(crate) fn lower_stdlib_call(
     if crate::core_atomic::signature(target).is_some() && functions.contains_key(target) {
         return Err("canonical atomic intrinsic name is redeclared".into());
     }
+    if functions
+        .get(target)
+        .is_some_and(|function| !function.body.is_empty())
+    {
+        return Ok(false);
+    }
     if !functions.contains_key(target) {
         if let Some(order) = crate::core_atomic::ordering(&Expr::Call {
             callee: Box::new(Expr::Ident(target.into())),
@@ -1018,6 +1041,30 @@ pub(crate) fn lower_stdlib_call(
     } else {
         cleaned.replace('_', "-")
     };
+    // Validate recognized scalar callees before argc dispatch guards can fall through.
+    let selected = if cleaned_kebab == "print"
+        && matches!(args.first(), Some(Expr::IntLit(_) | Expr::BoolLit(_)))
+    {
+        Some("in_print_int")
+    } else {
+        crate::native_emit::stdlib_wrappers::wrapper(&cleaned_kebab)
+    };
+    if let Some(wrapper) = selected {
+        crate::native_emit::stdlib_wrappers::validate_scalar_call(
+            wrapper,
+            functions
+                .get(target)
+                .map(|declared| (declared.params.as_slice(), &declared.ret)),
+            args.iter()
+                .map(|arg| super::lower_expr::native_expr_type(arg, ctx, functions)),
+        )
+        .map_err(|error| {
+            format!(
+                "native-lower: incompatible stdlib {} `{target}`",
+                error.category()
+            )
+        })?;
+    }
     match cleaned_kebab.as_str() {
         "display" if args.len() == 1 => {
             lower_expr_into(
@@ -1085,6 +1132,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_env_var",
+                target,
                 args,
                 rd,
                 functions,
@@ -1098,6 +1146,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_env_temp_dir",
+                target,
                 args,
                 rd,
                 functions,
@@ -1111,6 +1160,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_env_current_dir",
+                target,
                 args,
                 rd,
                 functions,
@@ -1124,6 +1174,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_fs_read_to_string",
+                target,
                 args,
                 rd,
                 functions,
@@ -1137,6 +1188,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_fs_exists",
+                target,
                 args,
                 rd,
                 functions,
@@ -1150,6 +1202,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_fs_write",
+                target,
                 args,
                 rd,
                 functions,
@@ -1163,6 +1216,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_fs_create_dir",
+                target,
                 args,
                 rd,
                 functions,
@@ -1176,6 +1230,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_fs_remove_file",
+                target,
                 args,
                 rd,
                 functions,
@@ -1189,6 +1244,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_env_set_var",
+                target,
                 args,
                 rd,
                 functions,
@@ -1197,11 +1253,12 @@ pub(crate) fn lower_stdlib_call(
             )?;
             return Ok(true);
         }
-        "std::env::remove_var" if args.len() == 1 => {
+        "std::env::remove_var" | "env-remove" if args.len() == 1 => {
             emit_stdlib_wrapper_call(
                 emitter,
                 ctx,
                 "in_env_remove_var",
+                target,
                 args,
                 rd,
                 functions,
@@ -1221,6 +1278,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 wrapper,
+                target,
                 args,
                 rd,
                 functions,
@@ -1235,6 +1293,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_print_int",
+                target,
                 args,
                 rd,
                 functions,
@@ -1255,6 +1314,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_fs_read_to_string",
+                target,
                 args,
                 rd,
                 functions,
@@ -1268,6 +1328,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_fs_write",
+                target,
                 args,
                 rd,
                 functions,
@@ -1281,6 +1342,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_fs_exists",
+                target,
                 args,
                 rd,
                 functions,
@@ -1294,6 +1356,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_fs_create_dir",
+                target,
                 args,
                 rd,
                 functions,
@@ -1307,6 +1370,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_fs_remove_file",
+                target,
                 args,
                 rd,
                 functions,
@@ -1320,6 +1384,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_process_run",
+                target,
                 args,
                 rd,
                 functions,
@@ -1333,6 +1398,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_env_var",
+                target,
                 args,
                 rd,
                 functions,
@@ -1346,6 +1412,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_env_set_var",
+                target,
                 args,
                 rd,
                 functions,
@@ -1359,6 +1426,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_env_has",
+                target,
                 args,
                 rd,
                 functions,
@@ -1372,6 +1440,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_env_temp_dir",
+                target,
                 args,
                 rd,
                 functions,
@@ -1385,6 +1454,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_env_current_dir",
+                target,
                 args,
                 rd,
                 functions,
@@ -1398,6 +1468,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_path_join",
+                target,
                 args,
                 rd,
                 functions,
@@ -1411,6 +1482,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_path_dirname",
+                target,
                 args,
                 rd,
                 functions,
@@ -1424,6 +1496,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_path_basename",
+                target,
                 args,
                 rd,
                 functions,
@@ -1437,6 +1510,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_path_extname",
+                target,
                 args,
                 rd,
                 functions,
@@ -1450,6 +1524,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_path_normalize",
+                target,
                 args,
                 rd,
                 functions,
@@ -1463,6 +1538,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_concat",
+                target,
                 args,
                 rd,
                 functions,
@@ -1476,6 +1552,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_eq",
+                target,
                 args,
                 rd,
                 functions,
@@ -1489,6 +1566,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_json_stringify",
+                target,
                 args,
                 rd,
                 functions,
@@ -1502,6 +1580,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_table_has",
+                target,
                 args,
                 rd,
                 functions,
@@ -1515,6 +1594,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_table_get_int",
+                target,
                 args,
                 rd,
                 functions,
@@ -1528,6 +1608,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_contains",
+                target,
                 args,
                 rd,
                 functions,
@@ -1541,6 +1622,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_starts_with",
+                target,
                 args,
                 rd,
                 functions,
@@ -1554,6 +1636,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_ends_with",
+                target,
                 args,
                 rd,
                 functions,
@@ -1584,6 +1667,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_trim",
+                target,
                 args,
                 rd,
                 functions,
@@ -1597,6 +1681,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_split_lines",
+                target,
                 args,
                 rd,
                 functions,
@@ -1610,6 +1695,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_split_spaces",
+                target,
                 args,
                 rd,
                 functions,
@@ -1623,6 +1709,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_tokenize_expr",
+                target,
                 args,
                 rd,
                 functions,
@@ -1636,6 +1723,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_to_int",
+                target,
                 args,
                 rd,
                 functions,
@@ -1649,6 +1737,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_is_int",
+                target,
                 args,
                 rd,
                 functions,
@@ -1662,6 +1751,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_index_of",
+                target,
                 args,
                 rd,
                 functions,
@@ -1675,6 +1765,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_str_slice",
+                target,
                 args,
                 rd,
                 functions,
@@ -1688,6 +1779,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 "in_int_to_string",
+                target,
                 args,
                 rd,
                 functions,
@@ -2047,6 +2139,7 @@ pub(crate) fn lower_stdlib_call(
                 emitter,
                 ctx,
                 wrapper,
+                target,
                 args,
                 rd,
                 functions,
@@ -2425,5 +2518,149 @@ pub(crate) fn lower_stdlib_call(
         }
         // Default: not a recognized stdlib intrinsic
         _ => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod scalar_wrapper_contract_tests {
+    use super::*;
+    use crate::core_ir::{Decl, UnifiedModule};
+    use crate::native_emit::lower::{NativeLinkage, lower_module};
+    #[test]
+    fn scalar_wrapper_calls_refuse_incompatible_declarations_and_keep_definitions() {
+        for (name, params, ret, args) in [
+            ("env-temp-dir", vec![], Typ::Float, vec![]),
+            (
+                "env-temp-dir",
+                vec![("unexpected".into(), Typ::Int)],
+                Typ::String,
+                vec![Expr::IntLit(1)],
+            ),
+            ("std::env::temp_dir", vec![], Typ::Float, vec![]),
+            (
+                "process-run",
+                vec![("command".into(), Typ::Int)],
+                Typ::Int,
+                vec![Expr::IntLit(1)],
+            ),
+        ] {
+            let module = UnifiedModule::new(vec![
+                Decl::Function {
+                    name: name.into(),
+                    params,
+                    ret: ret.clone(),
+                    body: vec![],
+                    type_params: vec![],
+                },
+                Decl::Function {
+                    name: "main".into(),
+                    params: vec![],
+                    ret,
+                    body: vec![Stmt::Return(Some(Expr::Call {
+                        callee: Box::new(Expr::Ident(name.into())),
+                        args,
+                    }))],
+                    type_params: vec![],
+                },
+            ]);
+            assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+            let error = lower_module(&module, "main", NativeLinkage::Executable).unwrap_err();
+            assert!(error.contains("incompatible stdlib declaration"), "{error}");
+        }
+        for name in ["env-temp-dir", "process-run"] {
+            let source = if name == "process-run" {
+                "fn process-run(command:Int)->Int{return command;}\nfn main()->Int{return process-run(42);}".to_string()
+            } else {
+                "fn env-temp-dir()->Int{return 42;}\nfn main()->Int{return env-temp-dir();}"
+                    .to_string()
+            };
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let result = lower_module(&module, "main", NativeLinkage::Executable).unwrap();
+            assert!(result.degradations.is_empty(), "{:?}", result.degradations);
+            assert!(
+                !result
+                    .code
+                    .chunks_exact(4)
+                    .any(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()) == 0xd63f01e0),
+                "defined override emitted host wrapper"
+            );
+        }
+    }
+    #[test]
+    fn scalar_wrapper_aliases_validate_actuals_and_keep_native_refusals() {
+        for name in ["process-run", "std::env::var", "env-temp-dir"] {
+            let source = format!("fn main()->String{{return {name}(1);}}\n");
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let error = lower_module(&module, "main", NativeLinkage::Executable).unwrap_err();
+            assert!(error.contains("incompatible stdlib arguments"), "{error}");
+        }
+        for expression in [
+            "std::env::remove_var(1)",
+            "str-table-has(1,2)",
+            "str-table-get-int(1,2,3)",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(&format!(
+                "fn main()->Int{{{expression};return 42;}}"
+            ))
+            .unwrap();
+            let error = lower_module(&module, "main", NativeLinkage::Executable).unwrap_err();
+            assert!(error.contains("incompatible stdlib arguments"), "{error}");
+        }
+        let module = crate::in_lang_parse::parse_in_source(
+            "fn main()->void{std::env::remove_var(\"UNUSED_LOWER_ONLY_KEY\");return;}",
+        )
+        .unwrap();
+        lower_module(&module, "main", NativeLinkage::Executable).unwrap();
+        let module = crate::in_lang_parse::parse_in_source(
+            "import std.env;\nfn main()->String{return env-temp-dir();}\n",
+        )
+        .unwrap();
+        lower_module(&module, "main", NativeLinkage::Executable).unwrap();
+        let error = crate::native_emit::lower::lower_native_module(
+            &module,
+            "main",
+            NativeLinkage::Executable,
+        )
+        .unwrap_err();
+        assert!(error.contains("has no native runtime"), "{error}");
+    }
+
+    #[test]
+    fn wrapper_staging_refuses_excess_register_arguments_before_emitting_code() {
+        let structs = std::collections::HashMap::new();
+        let strings = std::collections::HashMap::new();
+        let globals = std::collections::HashMap::new();
+        let global_types = std::collections::HashMap::new();
+        let functions = std::collections::HashMap::new();
+        let mut inrt = Vec::new();
+        let mut string_refs = Vec::new();
+        let mut ctx = LowerCtx::new(
+            &[],
+            &structs,
+            &strings,
+            &globals,
+            &global_types,
+            &mut inrt,
+            &mut string_refs,
+            "main",
+        )
+        .unwrap();
+        let mut emitter = CodeEmitter::new();
+        let mut pending = Vec::new();
+        let args = vec![Expr::IntLit(1); 9];
+        let error = emit_stdlib_wrapper_call(
+            &mut emitter,
+            &mut ctx,
+            "in_print",
+            "print",
+            &args,
+            0,
+            &functions,
+            &mut pending,
+            "main",
+        )
+        .unwrap_err();
+        assert!(error.contains("eight register arguments"), "{error}");
+        assert_eq!(emitter.len(), 0);
     }
 }
