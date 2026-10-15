@@ -48,32 +48,11 @@ impl CargoManifest {
     }
 }
 
-static MANIFEST_CACHE: std::sync::LazyLock<Mutex<HashMap<PathBuf, (Instant, Arc<CargoManifest>)>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-
+/// Read current package and library-path declarations; source edits must be
+/// visible immediately to the long-lived compiler process.
 pub fn get_manifest(crate_dir: &Path) -> Option<Arc<CargoManifest>> {
-    let toml_path = crate_dir.join("Cargo.toml");
-    let key = toml_path.clone();
-
-    if let Ok(cache) = MANIFEST_CACHE.lock() {
-        if let Some((timestamp, manifest)) = cache.get(&key) {
-            if timestamp.elapsed() < METADATA_CACHE_TTL {
-                return Some(Arc::clone(manifest));
-            }
-        }
-    }
-
-    if let Ok(content) = std::fs::read_to_string(&toml_path) {
-        let manifest = Arc::new(CargoManifest::parse(&content));
-
-        if let Ok(mut cache) = MANIFEST_CACHE.lock() {
-            cache.insert(key, (Instant::now(), Arc::clone(&manifest)));
-        }
-
-        return Some(manifest);
-    }
-
-    None
+    let content = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
+    Some(Arc::new(CargoManifest::parse(&content)))
 }
 
 /// Cached cargo metadata (avoids re-running `cargo metadata` every compile).
@@ -766,5 +745,37 @@ direct_dep = { path = "direct_dep" }
             find_crate_root(&temp.path),
             Err("no crate root found".to_string())
         );
+    }
+
+    #[test]
+    fn manifest_rewrites_refresh_package_name_and_library_path() -> std::io::Result<()> {
+        let temp = TempDirGuard::new();
+        let first = temp.path.join("first.rs");
+        let second = temp.path.join("second.rs");
+        fs::write(&first, "pub fn first() {}")?;
+        fs::write(&second, "pub fn second() {}")?;
+        let manifest = temp.path.join("Cargo.toml");
+        fs::write(
+            &manifest,
+            "[package]\nname = \"first-package\"\n[lib]\npath = \"first.rs\"\n",
+        )?;
+        assert_eq!(
+            crate_package_name(&temp.path).as_deref(),
+            Some("first-package")
+        );
+        assert_eq!(find_crate_root(&temp.path), Ok(first.clone()));
+
+        // Keep both source files so a stale cached library path still exists.
+        fs::write(
+            &manifest,
+            "[package]\nname = \"other-package\"\n[lib]\npath = \"second.rs\"\n",
+        )?;
+        assert!(first.exists() && second.exists());
+        assert_eq!(
+            crate_package_name(&temp.path).as_deref(),
+            Some("other-package")
+        );
+        assert_eq!(find_crate_root(&temp.path), Ok(second));
+        Ok(())
     }
 }
