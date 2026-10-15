@@ -6256,6 +6256,73 @@ fn main()->Int{word="changed";original=1;flag=false;number=2.5;if selected!="λ�
     ),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
+fn owned_array_initializers_snapshot_earlier_scalar_and_string_values() {
+    let original = r#"var word:String="λ雪";
+var seed:Int=20;
+var flag:Bool=true;
+var number:Float=1.5;
+var words:[[String]]=[[word,""]];
+var values:[Int]=[seed,22];
+var flags:[[Bool]]=[[flag]];
+var numbers:[[Float]]=[[number]];
+var sentinel:Int=42;
+fn stringentry()->String{word="changed";return words[0][0];}
+fn main()->Int{word="changed";seed=1;flag=false;number=2.5;if words[0][0]!="λ雪" || words[0][1]!="" || values[0]+values[1]!=42 || !flags[0][0] || numbers[0][0]!=1.5 || sentinel!=42{return 0;}values[0]=21;if seed!=1 || values[0]!=21{return 0;}return 42;}
+"#;
+    let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+    for text in [original, canonical.as_str()] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("array-initial-snapshots.in");
+            fs::write(&source, text).unwrap();
+            let mut request = default_request(
+                source.clone(),
+                CompileTarget::Jit,
+                Some("stringentry"),
+                None,
+            );
+            request.profile = profile;
+            for (entry, expected) in [
+                ("stringentry", EvalValue::Str("λ雪".into())),
+                ("main", EvalValue::Int(42)),
+            ] {
+                request.entry = Some(entry.into());
+                let report = compile_owned(&request);
+                assert!(report.success, "{profile:?}/{entry}: {report:?}");
+                assert_eq!(report.eval_result, Some(expected), "{profile:?}/{entry}");
+            }
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("array-initial-snapshots");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{profile:?}: {report:?}"
+                );
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42)
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
 fn owned_declared_function_aliases_preserve_overrides_and_exact_collisions() {
     for original in [
         "var calls:Int=0;\nfn env-temp-dir()->Int{calls+=1;return 42;}\nfn main()->Int{let result=env_temp_dir();if calls!=1{return 0;}return result;}",
