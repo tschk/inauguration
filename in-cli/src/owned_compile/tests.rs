@@ -3419,7 +3419,7 @@ fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
         return;
     }
     let path = temp_path("rust-static-ir-only.rs");
-    fs::write(&path, "struct Bag { value: i64 } static VALUES: [&str;1]=[\"hi\"]; fn main() -> Bag { return Bag { value: 42 }; }").unwrap();
+    fs::write(&path, "struct Bag { value: i64 } static VALUES: [Bag;1]=[Bag { value: 42 }]; fn main() -> Bag { return Bag { value: 42 }; }").unwrap();
     let report = compile_owned(&default_request(
         path.clone(),
         CompileTarget::Jit,
@@ -3443,7 +3443,7 @@ fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
     let path = temp_path("rust-static-executable.rs");
     fs::write(
         &path,
-        "static VALUES: [&str;1]=[\"hi\"]; fn main() -> i64 { return 42; }",
+        "struct Bag { value: i64 } static VALUES: [Bag;1]=[Bag { value: 42 }]; fn main() -> i64 { return 42; }",
     )
     .unwrap();
     let report = compile_owned(&default_request(
@@ -6367,4 +6367,121 @@ fn owned_defined_intrinsics_keep_effects_and_override_inline_and_host_calls() {
             fs::remove_file(source).unwrap();
         }
     }
+}
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_string_array_globals_preserve_nested_values_and_mutable_slots() {
+    let original = r#"var before:Int=20;
+var words:[String]=["λ","雪",""];
+var nested:[[String]]=[["left","right"],["tail"]];
+var after:Int=22;
+fn stringentry()->String{return nested[1][0];}
+fn main()->Int{if before+after!=42 || words[0]!="λ" || words[1]!="雪" || words[2]!="" || nested[0][1]!="right" || stringentry()!="tail"{return 0;}words[0]="changed";if words[0]=="changed" && words[1]=="雪"{return 42;}return 0;}"#;
+    let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+    for text in [original, canonical.as_str()] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("string-array-globals.in");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?} {text}: {report:?}");
+            assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{profile:?}");
+            request.entry = Some("stringentry".into());
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?}: {report:?}");
+            assert_eq!(report.eval_result, Some(EvalValue::Str("tail".into())));
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("string-array-globals");
+                request.entry = Some("main".into());
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{profile:?}: {report:?}"
+                );
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42)
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_string_array_globals_return_embedded_nul_payloads() {
+    let expected = "λ\0雪";
+    let original =
+        format!("var words:[String]=[\"{expected}\",\"\"];\nfn main()->String{{return words[0];}}");
+    let canonical = crate::in_canonical::canonicalize_in_source(&original).unwrap();
+    for text in [original.as_str(), canonical.as_str()] {
+        let source = temp_path("string-array-nul.in");
+        fs::write(&source, text).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?} {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Str(expected.into())),
+                "{profile:?}"
+            );
+        }
+        fs::remove_file(source).unwrap();
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_rust_string_array_statics_execute_reads() {
+    let source = temp_path("rust-string-array-static.rs");
+    fs::write(&source,r#"static WORDS: [&str;2]=["λ","雪"]; fn main()->i64{if WORDS[0]=="λ" && WORDS[1]=="雪"{return 42;}return 0;}"#).unwrap();
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        let mut request = default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(report.success, "{profile:?} {report:?}");
+        assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{profile:?}");
+    }
+    fs::remove_file(source).unwrap();
 }

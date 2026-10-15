@@ -278,3 +278,5 @@ Package binding materialization preserves explicit zero-argument signatures, inc
 Both native backends validate cataloged scalar stdlib calls against the selected runtime wrapper before staging arguments. Explicit declarations must match the catalog ABI, actual arguments must match its types and arity, and ARM wrapper staging rejects more than eight arguments. Defined functions retain precedence over wrapper and inline-builtin matching; reserved atomic names retain their redeclaration checks.
 
 Known underscore-to-kebab function references normalize before optimization and in direct backend entry paths. Exact declarations and lexical bindings retain precedence, keeping reachability, Harden symbol rewriting, ABI checks, and calls on one function identity. Pattern bindings accept underscores while a lone `_` remains a wildcard.
+
+Stored String arrays accept literal elements, including nested literal arrays. Element pointers use the same deferred payload relocation as scalar Strings, while nested array headers retain relative offsets. Runtime calls and stored-global references inside array initializers remain refused.

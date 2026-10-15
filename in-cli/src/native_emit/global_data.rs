@@ -108,11 +108,12 @@ fn array_storage_size(init: Option<&Expr>) -> usize {
             .sum::<usize>()
 }
 
-fn append_array(
+fn append_array<'a>(
     data: &mut Vec<u8>,
     elem: &Typ,
-    init: Option<&Expr>,
+    init: Option<&'a Expr>,
     name: &str,
+    strings: &mut Vec<(u64, &'a str)>,
 ) -> Result<(), String> {
     let items = match init {
         Some(Expr::ArrayLit(items)) => items.as_slice(),
@@ -124,9 +125,12 @@ fn append_array(
         }
     };
     let elem = elem.canonical();
-    if !matches!(elem, Typ::Int | Typ::Float | Typ::Bool | Typ::Array(_)) {
+    if !matches!(
+        elem,
+        Typ::Int | Typ::Float | Typ::Bool | Typ::String | Typ::Array(_)
+    ) {
         return Err(format!(
-            "unsupported native initializer for global `{name}`; expected numeric or boolean array elements"
+            "unsupported native initializer for global `{name}`; expected scalar string, numeric, boolean, or nested array elements"
         ));
     }
     let header = data.len();
@@ -138,10 +142,15 @@ fn append_array(
             (Typ::Int, Expr::IntLit(value)) => *value,
             (Typ::Float, Expr::FloatLit(value)) => value.0.to_bits() as i64,
             (Typ::Bool, Expr::BoolLit(value)) => i64::from(*value),
+            (Typ::String, Expr::StringLit(value)) => {
+                // Array slots carry absolute payload pointers, rebased like String globals.
+                strings.push(((header + 16 + index * 8) as u64, value));
+                0
+            }
             (Typ::Array(child), Expr::ArrayLit(_)) => {
                 // Relative child headers keep static data relocatable.
                 let offset = (data.len() - header) as i64;
-                append_array(data, child, Some(item), name)?;
+                append_array(data, child, Some(item), name, strings)?;
                 offset
             }
             _ => {
@@ -288,7 +297,7 @@ pub(crate) fn build_data_section(
             }
             if let Typ::Array(elem) = typ.canonical() {
                 data.resize(offset as usize, 0);
-                append_array(&mut data, &elem, init.as_deref(), name)?;
+                append_array(&mut data, &elem, init.as_deref(), name, &mut strings)?;
                 continue;
             }
             if let Some(kind) = crate::core_atomic::Kind::from_type(typ)
@@ -380,6 +389,102 @@ mod tests {
             init: init.map(Box::new),
             mutable: true,
             constant_value: false,
+        }
+    }
+
+    #[test]
+    fn string_arrays_keep_relative_children_and_relocatable_payload_slots() {
+        let text = "λ\0雪";
+        let module = UnifiedModule::new(vec![
+            global("before", Typ::Int, Some(Expr::IntLit(20))),
+            global(
+                "words",
+                Typ::Array(Box::new(Typ::String)),
+                Some(Expr::ArrayLit(vec![
+                    Expr::StringLit(text.into()),
+                    Expr::StringLit(String::new()),
+                ])),
+            ),
+            global(
+                "nested",
+                Typ::Array(Box::new(Typ::Array(Box::new(Typ::String)))),
+                Some(Expr::ArrayLit(vec![Expr::ArrayLit(vec![Expr::StringLit(
+                    "tail".into(),
+                )])])),
+            ),
+            global("after", Typ::Int, Some(Expr::IntLit(22))),
+        ]);
+        let globals = collect_globals(&module, &HashMap::new());
+        for layout in [StringLayout::Instring, StringLayout::Cstring] {
+            let mut section = build_data_section(&module, &globals, layout).unwrap();
+            let word = |data: &[u8], offset: u64| {
+                u64::from_le_bytes(
+                    data[offset as usize..offset as usize + 8]
+                        .try_into()
+                        .unwrap(),
+                )
+            };
+            assert_eq!(word(&section.bytes, globals["before"]), 20);
+            assert_eq!(word(&section.bytes, globals["after"]), 22);
+            assert_eq!(word(&section.bytes, globals["words"]), 2);
+            let nested = globals["nested"];
+            let child = nested + word(&section.bytes, nested + 16);
+            assert_eq!(word(&section.bytes, child), 1);
+            assert_eq!(section.pointer_fixups.len(), 3);
+            let slots = [globals["words"] + 16, globals["words"] + 24, child + 16];
+            for (slot, expected) in slots.into_iter().zip([text, "", "tail"]) {
+                let target = section
+                    .pointer_fixups
+                    .iter()
+                    .find(|(at, _)| *at == slot)
+                    .unwrap()
+                    .1;
+                assert!(target >= globals["after"] + 8);
+                let payload = target as usize
+                    + if layout == StringLayout::Instring {
+                        8
+                    } else {
+                        0
+                    };
+                assert_eq!(
+                    &section.bytes[payload..payload + expected.len()],
+                    expected.as_bytes()
+                );
+                if layout == StringLayout::Instring {
+                    assert_eq!(word(&section.bytes, target), expected.len() as u64);
+                } else {
+                    assert_eq!(section.bytes[payload + expected.len()], 0);
+                }
+            }
+            apply_data_relocations(
+                &mut section.bytes,
+                &section.pointer_fixups,
+                0x1000,
+                u64::MAX,
+            )
+            .unwrap();
+            for (slot, target) in &section.pointer_fixups {
+                assert_eq!(word(&section.bytes, *slot), 0x1000 + target);
+            }
+        }
+    }
+
+    #[test]
+    fn string_array_initializers_still_refuse_calls_and_wrong_element_types() {
+        for value in [
+            Expr::IntLit(42),
+            Expr::Call {
+                callee: Box::new(Expr::Ident("make".into())),
+                args: vec![],
+            },
+        ] {
+            let module = UnifiedModule::new(vec![global(
+                "words",
+                Typ::Array(Box::new(Typ::String)),
+                Some(Expr::ArrayLit(vec![value])),
+            )]);
+            let globals = collect_globals(&module, &HashMap::new());
+            assert!(build_data_section(&module, &globals, StringLayout::Instring).is_err());
         }
     }
 
