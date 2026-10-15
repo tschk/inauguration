@@ -8,12 +8,52 @@ pub(super) fn extract_c(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String>
     let mut decls = c_globals(src, root)?;
     let mut functions = Vec::new();
     collect_kinds(root, &["function_definition"], &mut functions);
-    decls.extend(
-        functions
-            .into_iter()
-            .filter_map(|node| c_like_function_decl(src, node)),
-    );
+    for node in functions {
+        validate_c_definition_parameters(src, node)?;
+        if let Some(function) = c_like_function_decl(src, node) {
+            decls.push(function);
+        }
+    }
     Ok(decls)
+}
+
+// Parameter extraction models fixed arity only. Validate before extraction so
+// unsupported source signatures cannot silently lose parameters.
+fn validate_c_definition_parameters(src: &[u8], definition: Node<'_>) -> Result<(), String> {
+    let name = c_like_fn_name(src, definition).unwrap_or_else(|| "<anonymous>".into());
+    let function = definition
+        .child_by_field_name("declarator")
+        .and_then(|declarator| named_descendant(declarator, "function_declarator"))
+        .ok_or_else(|| format!("unsupported C-like definition declarator `{name}`"))?;
+    let parameters = function
+        .child_by_field_name("parameters")
+        .or_else(|| first_named(function, "parameter_list"))
+        .ok_or_else(|| format!("missing C-like definition parameters `{name}`"))?;
+    let mut cursor = parameters.walk();
+    // C++ represents `...` as an anonymous token; inspect all children so
+    // named-child extraction cannot silently discard variadic parameters.
+    let nodes: Vec<_> = parameters
+        .children(&mut cursor)
+        .filter(|node| !matches!(node.kind(), "(" | ")" | "," | "comment"))
+        .collect();
+    if nodes.len() == 1 && node_txt(src, nodes[0]).trim() == "void" {
+        return Ok(());
+    }
+    for (index, parameter) in nodes.into_iter().enumerate() {
+        if parameter.kind() != "parameter_declaration" {
+            return Err(format!(
+                "unsupported variadic or K&R C-like definition `{name}`"
+            ));
+        }
+        let (_, typ) = c_one_parameter(src, parameter, index)
+            .ok_or_else(|| format!("unsupported void parameter in C-like definition `{name}`"))?;
+        if typ.canonical() == Typ::Void {
+            return Err(format!(
+                "unsupported named or mixed void parameter in C-like definition `{name}`"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn c_globals(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {
@@ -113,8 +153,11 @@ pub(super) fn extract_cpp_with_classes(src: &[u8], root: Node<'_>) -> Result<Vec
         let is_class_method = f
             .parent()
             .is_some_and(|p| p.kind() == "field_declaration_list");
-        if !is_class_method && let Some(d) = c_like_function_decl(src, f) {
-            decls.push(d);
+        if !is_class_method {
+            validate_c_definition_parameters(src, f)?;
+            if let Some(d) = c_like_function_decl(src, f) {
+                decls.push(d);
+            }
         }
     }
 
@@ -1080,5 +1123,89 @@ mod empty_definition_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod definition_parameter_tests {
+    use super::*;
+
+    fn parse(source: &str, cpp: bool) -> Result<Vec<Decl>, String> {
+        let mut parser = tree_sitter::Parser::new();
+        let language = if cpp {
+            tree_sitter_cpp::LANGUAGE.into()
+        } else {
+            tree_sitter_c::LANGUAGE.into()
+        };
+        parser.set_language(&language).expect("C-family grammar");
+        let tree = parser.parse(source, None).expect("C-family tree");
+        if tree.root_node().has_error() {
+            return Err("invalid C-family syntax".into());
+        }
+        if cpp {
+            extract_cpp_with_classes(source.as_bytes(), tree.root_node())
+        } else {
+            extract_c(source.as_bytes(), tree.root_node())
+        }
+    }
+
+    #[test]
+    fn fixed_definition_signatures_and_empty_void_bodies_are_preserved() {
+        for cpp in [false, true] {
+            for (source, count) in [
+                ("void answer() {}", 0),
+                ("void answer(void) {}", 0),
+                ("void answer(long long value, void *pointer) {}", 2),
+            ] {
+                let decls = parse(source, cpp).expect("supported fixed definition");
+                assert!(matches!(&decls[0], Decl::Function { params, body, .. }
+                    if params.len() == count && matches!(body.as_slice(), [Stmt::Return(None)])));
+            }
+        }
+    }
+
+    #[test]
+    fn lossy_definition_parameter_forms_are_refused() {
+        for cpp in [false, true] {
+            for source in [
+                "void answer(long long value, ...) {}",
+                "void answer(void named) {}",
+                "void answer(void, long long value) {}",
+                "void answer(long long value, void) {}",
+            ] {
+                let error = match parse(source, cpp) {
+                    Err(error) => error,
+                    Ok(decls) => {
+                        panic!("lossy signature accepted (cpp={cpp}): {source}; {decls:?}")
+                    }
+                };
+                assert!(
+                    error.contains("definition") || error.contains("syntax"),
+                    "{error}"
+                );
+            }
+        }
+        let error = parse("void answer(value) long long value; {}", false)
+            .expect_err("K&R definition must refuse");
+        assert!(error.contains("K&R"), "{error}");
+    }
+
+    #[test]
+    fn class_methods_keep_the_existing_extraction_path() {
+        let decls = parse(
+            "class Example { public: void method(void) {} }; void answer(void) {}",
+            true,
+        )
+        .expect("class and free function");
+        assert!(
+            decls
+                .iter()
+                .any(|decl| matches!(decl, Decl::Class { methods, .. } if !methods.is_empty()))
+        );
+        assert!(
+            decls
+                .iter()
+                .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "answer"))
+        );
     }
 }
