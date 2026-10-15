@@ -10,6 +10,9 @@ func TestNewCalculator(t *testing.T) {
 
 	calc2 := NewCalculator()
 	calc1.Add(5)
+	if calc1.value != 5 {
+		t.Error("Expected calc1 value to be 5, got", calc1.value)
+	}
 	if calc2.value != 0 {
 		t.Error("Expected second Calculator value to remain 0, got", calc2.value)
 	}
