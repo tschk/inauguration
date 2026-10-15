@@ -2538,10 +2538,10 @@ mod tests {
             let Stmt::Return(Some(Expr::Binary { lhs, .. })) = &mut body[0] else {
                 panic!("return");
             };
-            *lhs = Box::new(Expr::Unary {
+            **lhs = Expr::Unary {
                 op: "int-cast-u8".into(),
                 expr: lhs.clone(),
-            });
+            };
             assert_eq!(
                 invoke_module(&module, profile, &[]),
                 Some(42),
@@ -5739,8 +5739,7 @@ mod tests {
             "unsupported",
             crate::native_emit::NativeLinkage::Executable,
         )
-        .err()
-        .expect("recursive values are unsupported");
+        .expect_err("recursive values are unsupported");
         assert!(
             error.contains("recursive aggregate value layout"),
             "{error}"

@@ -105,7 +105,7 @@ fn expr(value: &mut Expr, aliases: &HashMap<String, String>, own: &HashSet<Strin
             {
                 if !own.contains(prefix) {
                     if let Some(kind) = Kind::from_type(&Typ::Named(prefix.into())) {
-                        *callee = Box::new(Expr::Ident(kind.intrinsic(op)));
+                        **callee = Expr::Ident(kind.intrinsic(op));
                     }
                 }
             }

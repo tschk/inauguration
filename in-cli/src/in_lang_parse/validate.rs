@@ -1,133 +1,6 @@
 use crate::core_ir::{Decl, Expr, MethodSig, Stmt, Typ, UnifiedModule, looks_like_int_literal};
 use std::collections::{HashMap, HashSet};
 
-#[cfg(test)]
-mod value_scope_tests {
-    use super::*;
-
-    #[test]
-    fn constants_respect_body_bindings_and_restore_branch_scopes() {
-        let ident = || Expr::Ident("answer".into());
-        let mut body = vec![
-            Stmt::If {
-                cond: Expr::BoolLit(true),
-                then_body: vec![
-                    Stmt::Let("answer".into(), None, ident()),
-                    Stmt::Return(Some(ident())),
-                ],
-                else_body: vec![Stmt::Return(Some(ident()))],
-            },
-            Stmt::Expr(ident()),
-            Stmt::Let("answer".into(), None, ident()),
-            Stmt::Return(Some(ident())),
-        ];
-        let mut consts = HashMap::from([("answer".into(), Expr::IntLit(42))]);
-        replace_body_idents(&mut body, &mut consts);
-        let Stmt::If {
-            then_body,
-            else_body,
-            ..
-        } = &body[0]
-        else {
-            panic!("if")
-        };
-        assert!(matches!(&then_body[0], Stmt::Let(_, _, Expr::IntLit(42))));
-        assert!(matches!(&then_body[1], Stmt::Return(Some(Expr::Ident(name))) if name == "answer"));
-        assert!(matches!(
-            &else_body[0],
-            Stmt::Return(Some(Expr::IntLit(42)))
-        ));
-        assert!(matches!(&body[1], Stmt::Expr(Expr::IntLit(42))));
-        assert!(matches!(&body[2], Stmt::Let(_, _, Expr::IntLit(42))));
-        assert!(matches!(&body[3], Stmt::Return(Some(Expr::Ident(name))) if name == "answer"));
-    }
-
-    #[test]
-    fn constants_respect_parameters_closures_patterns_and_catches() {
-        let mut module = UnifiedModule::new(vec![
-            Decl::Global {
-                name: "answer".into(),
-                typ: Typ::Int,
-                init: Some(Box::new(Expr::IntLit(42))),
-                mutable: false,
-                constant_value: true,
-            },
-            Decl::Function {
-                name: "parameter".into(),
-                params: vec![("answer".into(), Typ::Int)],
-                ret: Typ::Int,
-                body: vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
-                type_params: vec![],
-            },
-        ]);
-        inline_const_values(&mut module);
-        assert!(matches!(&module.decls[1], Decl::Function { body, .. }
-            if matches!(&body[0], Stmt::Return(Some(Expr::Ident(name))) if name == "answer")));
-        let consts = HashMap::from([("answer".into(), Expr::IntLit(42))]);
-        let mut closure = Expr::Closure {
-            params: vec![("answer".into(), Typ::Int)],
-            ret: Typ::Int,
-            body: vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
-            captures: vec![],
-        };
-        let expected = closure.clone();
-        replace_idents(&mut closure, &consts);
-        assert_eq!(closure, expected);
-        let mut body = vec![
-            Stmt::Match {
-                scrutinee: Expr::Ident("answer".into()),
-                arms: vec![crate::core_ir::MatchArm {
-                    pattern: "answer".into(),
-                    guard: Some(Expr::Ident("answer".into())),
-                    body: vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
-                }],
-            },
-            Stmt::Try {
-                body: vec![Stmt::Expr(Expr::Ident("answer".into()))],
-                catches: vec![crate::core_ir::CatchArm {
-                    pattern: "answer".into(),
-                    body: vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
-                }],
-            },
-        ];
-        replace_body_idents(&mut body, &mut consts.clone());
-        assert!(
-            matches!(&body[0], Stmt::Match { scrutinee: Expr::IntLit(42), arms }
-            if matches!(&arms[0].guard, Some(Expr::Ident(name)) if name == "answer")
-                && matches!(&arms[0].body[0], Stmt::Return(Some(Expr::Ident(name))) if name == "answer"))
-        );
-        assert!(matches!(&body[1], Stmt::Try { body, catches, .. }
-            if matches!(&body[0], Stmt::Expr(Expr::IntLit(42)))
-                && matches!(&catches[0].body[0], Stmt::Return(Some(Expr::Ident(name))) if name == "answer")));
-    }
-
-    #[test]
-    fn block_values_keep_inference_and_constants_in_local_scope() {
-        let mut value = Expr::Block {
-            body: vec![Stmt::Let(
-                "answer".into(),
-                None,
-                Expr::Ident("answer".into()),
-            )],
-            result: Some(Box::new(Expr::Ident("answer".into()))),
-        };
-        let consts = HashMap::from([("answer".into(), Expr::IntLit(42))]);
-        replace_idents(&mut value, &consts);
-        assert!(matches!(&value, Expr::Block { body, result: Some(result) }
-            if matches!(body.as_slice(), [Stmt::Let(_, _, Expr::IntLit(42))])
-                && matches!(result.as_ref(), Expr::Ident(name) if name == "answer")));
-        let env = HashMap::from([("answer".into(), Typ::Float)]);
-        assert_eq!(
-            infer_in_expr_type(&value, &env, &HashMap::new(), &HashMap::new()),
-            Some(Typ::Int)
-        );
-        assert_eq!(env.get("answer"), Some(&Typ::Float));
-        let mut outside = Expr::Ident("answer".into());
-        replace_idents(&mut outside, &consts);
-        assert_eq!(outside, Expr::IntLit(42));
-    }
-}
-
 pub(crate) fn collect_top_level_type_names(module: &UnifiedModule) -> Vec<String> {
     module
         .decls
@@ -1033,5 +906,132 @@ pub fn inline_const_values(module: &mut UnifiedModule) {
             }
             replace_body_idents(body, &mut inner);
         }
+    }
+}
+
+#[cfg(test)]
+mod value_scope_tests {
+    use super::*;
+
+    #[test]
+    fn constants_respect_body_bindings_and_restore_branch_scopes() {
+        let ident = || Expr::Ident("answer".into());
+        let mut body = vec![
+            Stmt::If {
+                cond: Expr::BoolLit(true),
+                then_body: vec![
+                    Stmt::Let("answer".into(), None, ident()),
+                    Stmt::Return(Some(ident())),
+                ],
+                else_body: vec![Stmt::Return(Some(ident()))],
+            },
+            Stmt::Expr(ident()),
+            Stmt::Let("answer".into(), None, ident()),
+            Stmt::Return(Some(ident())),
+        ];
+        let mut consts = HashMap::from([("answer".into(), Expr::IntLit(42))]);
+        replace_body_idents(&mut body, &mut consts);
+        let Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } = &body[0]
+        else {
+            panic!("if")
+        };
+        assert!(matches!(&then_body[0], Stmt::Let(_, _, Expr::IntLit(42))));
+        assert!(matches!(&then_body[1], Stmt::Return(Some(Expr::Ident(name))) if name == "answer"));
+        assert!(matches!(
+            &else_body[0],
+            Stmt::Return(Some(Expr::IntLit(42)))
+        ));
+        assert!(matches!(&body[1], Stmt::Expr(Expr::IntLit(42))));
+        assert!(matches!(&body[2], Stmt::Let(_, _, Expr::IntLit(42))));
+        assert!(matches!(&body[3], Stmt::Return(Some(Expr::Ident(name))) if name == "answer"));
+    }
+
+    #[test]
+    fn constants_respect_parameters_closures_patterns_and_catches() {
+        let mut module = UnifiedModule::new(vec![
+            Decl::Global {
+                name: "answer".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(Expr::IntLit(42))),
+                mutable: false,
+                constant_value: true,
+            },
+            Decl::Function {
+                name: "parameter".into(),
+                params: vec![("answer".into(), Typ::Int)],
+                ret: Typ::Int,
+                body: vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
+                type_params: vec![],
+            },
+        ]);
+        inline_const_values(&mut module);
+        assert!(matches!(&module.decls[1], Decl::Function { body, .. }
+            if matches!(&body[0], Stmt::Return(Some(Expr::Ident(name))) if name == "answer")));
+        let consts = HashMap::from([("answer".into(), Expr::IntLit(42))]);
+        let mut closure = Expr::Closure {
+            params: vec![("answer".into(), Typ::Int)],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
+            captures: vec![],
+        };
+        let expected = closure.clone();
+        replace_idents(&mut closure, &consts);
+        assert_eq!(closure, expected);
+        let mut body = vec![
+            Stmt::Match {
+                scrutinee: Expr::Ident("answer".into()),
+                arms: vec![crate::core_ir::MatchArm {
+                    pattern: "answer".into(),
+                    guard: Some(Expr::Ident("answer".into())),
+                    body: vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
+                }],
+            },
+            Stmt::Try {
+                body: vec![Stmt::Expr(Expr::Ident("answer".into()))],
+                catches: vec![crate::core_ir::CatchArm {
+                    pattern: "answer".into(),
+                    body: vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
+                }],
+            },
+        ];
+        replace_body_idents(&mut body, &mut consts.clone());
+        assert!(
+            matches!(&body[0], Stmt::Match { scrutinee: Expr::IntLit(42), arms }
+            if matches!(&arms[0].guard, Some(Expr::Ident(name)) if name == "answer")
+                && matches!(&arms[0].body[0], Stmt::Return(Some(Expr::Ident(name))) if name == "answer"))
+        );
+        assert!(matches!(&body[1], Stmt::Try { body, catches, .. }
+            if matches!(&body[0], Stmt::Expr(Expr::IntLit(42)))
+                && matches!(&catches[0].body[0], Stmt::Return(Some(Expr::Ident(name))) if name == "answer")));
+    }
+
+    #[test]
+    fn block_values_keep_inference_and_constants_in_local_scope() {
+        let mut value = Expr::Block {
+            body: vec![Stmt::Let(
+                "answer".into(),
+                None,
+                Expr::Ident("answer".into()),
+            )],
+            result: Some(Box::new(Expr::Ident("answer".into()))),
+        };
+        let consts = HashMap::from([("answer".into(), Expr::IntLit(42))]);
+        replace_idents(&mut value, &consts);
+        assert!(matches!(&value, Expr::Block { body, result: Some(result) }
+            if matches!(body.as_slice(), [Stmt::Let(_, _, Expr::IntLit(42))])
+                && matches!(result.as_ref(), Expr::Ident(name) if name == "answer")));
+        let env = HashMap::from([("answer".into(), Typ::Float)]);
+        assert_eq!(
+            infer_in_expr_type(&value, &env, &HashMap::new(), &HashMap::new()),
+            Some(Typ::Int)
+        );
+        assert_eq!(env.get("answer"), Some(&Typ::Float));
+        let mut outside = Expr::Ident("answer".into());
+        replace_idents(&mut outside, &consts);
+        assert_eq!(outside, Expr::IntLit(42));
     }
 }

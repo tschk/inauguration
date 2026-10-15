@@ -125,7 +125,7 @@ pub(crate) fn normalize_initializer_with_references(
         declared: HashSet::new(),
         next: 0,
     };
-    bindings.expr(expr, &mut references.clone());
+    bindings.expr(expr, references);
 }
 
 pub(crate) fn reserve_expr(expr: &Expr, names: &mut HashSet<String>) {

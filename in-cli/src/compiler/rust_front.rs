@@ -115,7 +115,7 @@ fn register_explicit_vector_constructors(module: &mut UnifiedModule) {
                 | "alloc::vec::Vec::with_capacity"
         ) {
             if args.len() == 1 && !(name == "Vec::with_capacity" && shadowed) {
-                *callee = Box::new(Expr::Ident(crate::core_ir::VECTOR_ALLOCATION.into()));
+                **callee = Expr::Ident(crate::core_ir::VECTOR_ALLOCATION.into());
             }
             return;
         }
@@ -163,11 +163,11 @@ fn register_explicit_vector_constructors(module: &mut UnifiedModule) {
             return;
         };
         if matches!(item, syn::Type::Infer(_)) {
-            *callee = Box::new(Expr::Ident(if owner.ends_with("::with_capacity") {
+            **callee = Expr::Ident(if owner.ends_with("::with_capacity") {
                 crate::core_ir::VECTOR_ALLOCATION.into()
             } else {
                 owner
-            }));
+            });
             return;
         }
         // References need an ownership model; do not erase them into scalar elements.

@@ -526,7 +526,7 @@ fn apply(body: &mut [Stmt], constraints: &HashMap<String, Option<Typ>>) -> bool 
         match stmt {
             Stmt::Let(name, Some(Typ::Vector(item)), _) if matches!(item.as_ref(), Typ::Generic(name) if name == "_") => {
                 if let Some(Some(typ)) = constraints.get(name) {
-                    *item = Box::new(typ.clone());
+                    **item = typ.clone();
                     changed = true;
                 }
             }

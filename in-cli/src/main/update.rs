@@ -65,7 +65,7 @@ fn verify_update_artifact(messages: &[u8], install_root: Option<&Path>) -> Resul
             let executable = value.get("executable")?.as_str()?;
             Some((std::path::PathBuf::from(executable), version.to_string()))
         })
-        .last()
+        .next_back()
         .ok_or_else(|| {
             InError::Message(
                 "cargo install reported success without an `in` executable artifact".into(),

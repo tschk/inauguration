@@ -1267,7 +1267,7 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
             e
         }
         Expr::Unary { op, expr, .. } => {
-            if crate::core_ir::integer_cast_spec(&op).is_some() {
+            if crate::core_ir::integer_cast_spec(op).is_some() {
                 let value = match expr.as_ref() {
                     Expr::IntLit(value) => Some(Expr::IntLit(*value)),
                     Expr::BoolLit(value) => Some(Expr::IntLit(i64::from(*value))),
@@ -1275,7 +1275,7 @@ pub(crate) fn fold_expr(e: Expr) -> Expr {
                 };
                 if let Some(value) = value {
                     return map_expr(
-                        crate::core_ir::integer_cast_expr(value, &op).unwrap(),
+                        crate::core_ir::integer_cast_expr(value, op).unwrap(),
                         &mut |expr| fold_expr(expr),
                     );
                 }
@@ -1378,10 +1378,10 @@ fn propagate_constants(decls: &mut [Decl]) {
 }
 
 fn is_propagatable_const(e: &Expr) -> bool {
-    match e {
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) => true,
-        _ => false,
-    }
+    matches!(
+        e,
+        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_)
+    )
 }
 
 fn collect_assigned_names(s: &Stmt, assigned: &mut HashSet<String>) {

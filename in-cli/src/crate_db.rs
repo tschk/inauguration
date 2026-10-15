@@ -158,13 +158,13 @@ impl CrateDb {
         let exports: Vec<String> = parsed
             .decls
             .iter()
-            .filter_map(|d| match d {
+            .map(|d| match d {
                 Decl::Function { name, .. }
                 | Decl::Struct { name, .. }
                 | Decl::Global { name, .. }
                 | Decl::Class { name, .. }
                 | Decl::Interface { name, .. }
-                | Decl::Component { name, .. } => Some(name.clone()),
+                | Decl::Component { name, .. } => name.clone(),
             })
             .collect();
 

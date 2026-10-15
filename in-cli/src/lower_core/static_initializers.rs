@@ -736,7 +736,7 @@ pub(super) fn fold_static_initializers(decls: &mut [Decl]) {
             crate::core_bindings::normalize_initializer_with_references(
                 init,
                 &names,
-                &mut HashMap::new(),
+                &HashMap::new(),
             );
         }
     }
@@ -777,7 +777,7 @@ pub(super) fn fold_static_initializers(decls: &mut [Decl]) {
                 strict: false,
             };
             if let Some(value) = eval.expr(init, &mut HashMap::new()) {
-                *init = Box::new(value);
+                **init = value;
             }
         }
     }

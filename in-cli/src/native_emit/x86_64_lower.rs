@@ -284,7 +284,7 @@ impl<'a> LowerCtx<'a> {
                 // Frame offsets grow downward; reverse allocation keeps declared
                 // fields in increasing memory order from the struct address.
                 let fields =
-                    crate::native_emit::struct_layout::x86_fields(self.structs, &struct_name)
+                    crate::native_emit::struct_layout::x86_fields(self.structs, struct_name)
                         .unwrap_or(fields);
                 for (field, _field_ty) in fields.into_iter().rev() {
                     // ponytail: all struct fields map to scalar slots
@@ -1362,11 +1362,8 @@ fn lower_stmt(
                 emitter.emit_insns(&x86_64::zero_reg(RAX));
             }
             store_local_error_type(emitter, ctx, name, expr)?;
-            match ctx.locals.get(name) {
-                Some(StackSlot::Scalar(offset)) => {
-                    emitter.emit_insns(&x86_64::str64(RAX, *offset as u16));
-                }
-                _ => {}
+            if let Some(StackSlot::Scalar(offset)) = ctx.locals.get(name) {
+                emitter.emit_insns(&x86_64::str64(RAX, *offset as u16));
             }
             Ok(())
         }
@@ -2936,7 +2933,7 @@ fn lower_builtin_call(
             if target_reg != RAX {
                 emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
             }
-            return Ok(true);
+            Ok(true)
         }
         "vector-capacity" if args.len() == 1 => {
             if !matches!(scalar_expr_type(&args[0], ctx), Some(Typ::Vector(_))) {
@@ -2948,7 +2945,7 @@ fn lower_builtin_call(
             emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
             emitter.emit_insns(&x86_64::mov_r_m(target_reg, target_reg, 8));
             emitter.patch_u32(empty + 2, emitter.len() - empty - 6);
-            return Ok(true);
+            Ok(true)
         }
         "array-len" | "array_len" if args.len() == 1 => {
             if let Expr::Ident(name) = &args[0]
@@ -3808,7 +3805,7 @@ fn store_struct_value(
             .iter()
             .map(|(name, &slot)| (name.clone(), slot))
             .collect();
-        ordered.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        ordered.sort_unstable_by_key(|a| std::cmp::Reverse(a.1));
         let staged: Vec<_> = ordered.iter().map(|(_, _)| ctx.alloc_slot()).collect();
         for ((field, _), &slot) in ordered.iter().zip(&staged) {
             lower_field_access(emitter, ctx, RAX, expr, field, pending_calls)?;

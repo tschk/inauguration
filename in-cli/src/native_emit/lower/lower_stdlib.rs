@@ -2580,8 +2580,10 @@ mod scalar_wrapper_contract_tests {
             assert!(
                 !result
                     .code
-                    .chunks_exact(4)
-                    .any(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()) == 0xd63f01e0),
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|bytes| u32::from_le_bytes(*bytes) == 0xd63f01e0),
                 "defined override emitted host wrapper"
             );
         }

@@ -637,8 +637,10 @@ mod tests {
             .unwrap()
             .bytes;
         let words = data
-            .chunks_exact(8)
-            .map(|word| i64::from_le_bytes(word.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|word| i64::from_le_bytes(*word))
             .collect::<Vec<_>>();
         assert_eq!(words, [7, 2, 2, 32, 64, 2, 2, 20, 22, 0, 0, 9]);
     }
@@ -654,8 +656,10 @@ mod tests {
             .unwrap()
             .bytes;
         let words: Vec<_> = data
-            .chunks_exact(8)
-            .map(|bytes| i64::from_le_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|bytes| i64::from_le_bytes(*bytes))
             .collect();
         assert_eq!(words, vec![7, 2, 2, 20, 22, 9]);
     }
@@ -811,8 +815,10 @@ mod tests {
             .unwrap()
             .bytes;
         let words = data
-            .chunks_exact(8)
-            .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|bytes| u64::from_le_bytes(*bytes))
             .collect::<Vec<_>>();
         assert_eq!(words, vec![3, 1.5_f64.to_bits(), 1]);
         let empty =

@@ -647,10 +647,10 @@ fn integer_cast_projection_executes_operand_once() {
     let Stmt::Return(Some(Expr::Binary { lhs, .. })) = &mut body[0] else {
         panic!("return");
     };
-    *lhs = Box::new(Expr::Unary {
+    **lhs = Expr::Unary {
         op: "int-cast-u8".into(),
         expr: lhs.clone(),
-    });
+    };
     for target in [
         "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "isize", "usize",
     ] {

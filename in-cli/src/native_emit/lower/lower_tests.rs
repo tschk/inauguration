@@ -125,8 +125,7 @@ fn assert_contains_divide_failure_path(code: &[u8], branch_distance: i32) {
 fn raw_native_lowering_refuses_unknown_field_write() {
     let module = crate::compiler::rust_front::parse_rust_source("struct Point { x: i64 } fn main() -> i64 { let mut point: Point = Point { x: 0 }; point.missing = 42; return 42; }").unwrap();
     let error = lower_module(&module, "main", NativeLinkage::Executable)
-        .err()
-        .expect("unknown field must fail lowering");
+        .expect_err("unknown field must fail lowering");
     assert!(error.contains("field `missing` not found"), "{error}");
 }
 
@@ -2793,8 +2792,7 @@ fn raw_conditional_lowering_rejects_condition_and_branch_type_mismatches() {
             else_expr: Box::new(else_expr),
         }))];
         let arm_error = lower_module(&module, "answer", NativeLinkage::Executable)
-            .err()
-            .expect("ARM must reject raw mismatch");
+            .expect_err("ARM must reject raw mismatch");
         let x86_error = crate::native_emit::x86_64_lower::lower_module(&module, "answer")
             .err()
             .expect("x86 must reject raw mismatch");

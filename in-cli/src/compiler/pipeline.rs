@@ -261,7 +261,7 @@ impl Compiler {
         let out = dir.join("artifact");
         let host_macho = self.backend == BackendKind::AArch64MachO
             && cfg!(all(target_os = "macos", target_arch = "aarch64"));
-        if !host_macho && crate::owned_compile::pure_entry_exit_code(&unified, entry).is_none() {
+        if !host_macho && crate::owned_compile::pure_entry_exit_code(unified, entry).is_none() {
             return Err(CompileError::Backend(
                 "cross-target executable emission requires a pure scalar exit entry".into(),
             ));

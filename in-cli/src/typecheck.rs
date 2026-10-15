@@ -517,7 +517,7 @@ impl TypeChecker {
         let Some(intrinsic) = expected.vector_allocation_intrinsic() else {
             return false;
         };
-        *callee = Box::new(Expr::Ident(intrinsic.into()));
+        **callee = Expr::Ident(intrinsic.into());
         true
     }
 
@@ -665,7 +665,7 @@ impl TypeChecker {
                 None
             };
             if let Some(target) = target {
-                *callee = Box::new(Expr::Ident(target));
+                **callee = Expr::Ident(target);
             } else if matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
                 && facts.functions.get(method).is_some_and(|(params, _)| {
                     params.len() == args.len()
@@ -677,38 +677,38 @@ impl TypeChecker {
                         })
                 })
             {
-                *callee = Box::new(Expr::Ident(method.into()));
+                **callee = Expr::Ident(method.into());
             } else if method == "push"
                 && args.len() == 2
                 && matches!(&receiver, Typ::Vector(item) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
                     && self.expr_type(&args[1], facts, env).is_some_and(|actual| is_compatible(item, &actual)))
             {
-                *callee = Box::new(Expr::Ident("vector-push".into()));
+                **callee = Expr::Ident("vector-push".into());
             } else if method == "extend"
                 && args.len() == 2
                 && matches!(&receiver, Typ::Vector(item) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool)
                     && self.expr_type(&args[1], facts, env).is_some_and(|actual| receiver.accepts_vector_source(&args[1], &actual)))
             {
-                *callee = Box::new(Expr::Ident("vector-extend".into()));
+                **callee = Expr::Ident("vector-extend".into());
             } else if method == "clear"
                 && args.len() == 1
                 && matches!(&receiver, Typ::Vector(item) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
             {
-                *callee = Box::new(Expr::Ident("vector-clear".into()));
+                **callee = Expr::Ident("vector-clear".into());
             } else if method == "capacity" && args.len() == 1 && matches!(receiver, Typ::Vector(_))
             {
-                *callee = Box::new(Expr::Ident("vector-capacity".into()));
+                **callee = Expr::Ident("vector-capacity".into());
             } else if method == "len"
                 && matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
             {
-                *callee = Box::new(Expr::Ident(
+                **callee = Expr::Ident(
                     if receiver == Typ::String {
                         "str-len"
                     } else {
                         "array-len"
                     }
                     .into(),
-                ));
+                );
             } else if method == "is_empty"
                 && matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
             {
@@ -744,11 +744,11 @@ impl TypeChecker {
             } else if crate::core_atomic::Kind::from_type(&receiver).is_some()
                 || matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
             {
-                *callee = Box::new(Expr::Ident(if matches!(receiver, Typ::Vector(_)) {
+                **callee = Expr::Ident(if matches!(receiver, Typ::Vector(_)) {
                     format!("Vec::{method}")
                 } else {
                     format!("__method__{method}")
-                }));
+                });
             }
         }
         if let Expr::Call { callee, args } = expr {
@@ -764,7 +764,7 @@ impl TypeChecker {
             };
             if let Some(function) = captures.and_then(|captures| facts.closure_target(captures)) {
                 args.insert(0, callee.as_ref().clone());
-                *callee = Box::new(Expr::Ident(function.to_string()));
+                **callee = Expr::Ident(function.to_string());
             }
             if let Expr::Ident(name) = callee.as_ref() {
                 if let Some(op) = name
@@ -778,10 +778,10 @@ impl TypeChecker {
                         .filter(|typ| !matches!(typ, Typ::Named(name) if facts.structs.contains_key(name)))
                         .and_then(crate::core_atomic::Kind::from_type)
                     {
-                        *callee = Box::new(Expr::Ident(kind.intrinsic(op)));
+                        **callee = Expr::Ident(kind.intrinsic(op));
                     } else if let Some(Typ::Named(owner))=args.first().and_then(|arg|self.expr_type(arg,facts,env)) {
                         for candidate in [format!("{owner}::{op}"),format!("{owner}_{op}")] {
-                            if facts.functions.contains_key(&candidate) {*callee=Box::new(Expr::Ident(candidate));break;}
+                            if facts.functions.contains_key(&candidate) {**callee = Expr::Ident(candidate);break;}
                         }
                     }
                 }
@@ -836,14 +836,14 @@ impl TypeChecker {
                 Some(Typ::Vector(_) | Typ::Array(_) | Typ::String)
             )
         {
-            *callee = Box::new(Expr::Ident(
+            **callee = Expr::Ident(
                 if self.expr_type(source, facts, env) == Some(Typ::String) {
                     "str-len"
                 } else {
                     "array-len"
                 }
                 .into(),
-            ));
+            );
         }
         if let Expr::Call { callee, args } = expr
             && matches!(callee.as_ref(), Expr::Ident(name) if (name == "clone" || name == "Vec::clone") && !facts.functions.contains_key(name) && !facts.functions.contains_key("clone"))
