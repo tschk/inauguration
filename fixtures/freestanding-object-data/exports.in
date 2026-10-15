@@ -1,0 +1,3 @@
+extern asm fn external_answer() -> Int
+fn other_export() -> Int { return 0 }
+fn main() -> Int { return external_answer() + other_export() }

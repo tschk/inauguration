@@ -1,0 +1,8 @@
+var counter: Int = 41
+var zero: Int = 0
+fn main() -> Int {
+  if zero != 0 { return 1 }
+  counter = counter + 1
+  zero = counter
+  return zero
+}

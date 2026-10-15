@@ -1436,19 +1436,14 @@ fn dual_emit_writes_runtime_and_harden_artifacts() {
         runtime_bytes, harden_bytes,
         "runtime and harden artifacts must differ"
     );
-    let has_hashed = |bytes: &[u8]| {
-        bytes
-            .windows(3)
-            .any(|w| w[0] == b'_' && w[1] == b'H' && w[2].is_ascii_hexdigit())
-    };
-    assert!(
-        !has_hashed(&runtime_bytes),
-        "runtime artifact must not contain _H hashed symbols"
-    );
-    assert!(
-        has_hashed(&harden_bytes),
-        "harden artifact should contain _H hashed symbols"
-    );
+    for name in [b"\0mix\0".as_slice(), b"\0gate\0".as_slice()] {
+        for artifact in [&runtime_bytes, &harden_bytes] {
+            assert!(
+                artifact.windows(name.len()).any(|symbol| symbol == name),
+                "both library profiles must preserve exported helper names"
+            );
+        }
+    }
     assert_eq!(
         &harden_bytes[..4.min(harden_bytes.len())],
         b"\x7fELF",

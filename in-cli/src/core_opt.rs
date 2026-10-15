@@ -100,7 +100,10 @@ pub fn optimize_with_linkage_and_semantics(
             // so each state still receives junk noise afterward at the outer level.
             harden_cfg_dispatch_lite(decls);
             harden_junk_stmts(decls);
-            harden_hash_symbols(decls, entry);
+            // Keep names stable when every retained function is a potential export.
+            if !keep_all_functions {
+                harden_hash_symbols(decls, entry);
+            }
         }
     }
 }
@@ -2511,8 +2514,12 @@ fn harden_hash_symbols(decls: &mut [Decl], entry: Option<&str>) {
     let entry = entry.unwrap_or("main");
     let mut rename: HashMap<String, String> = HashMap::new();
     for d in decls.iter() {
-        if let Decl::Function { name, .. } = d {
-            if name == entry || is_stdlib_or_reserved(name) || name.starts_with("_H") {
+        if let Decl::Function { name, body, .. } = d {
+            if body.is_empty()
+                || name == entry
+                || is_stdlib_or_reserved(name)
+                || name.starts_with("_H")
+            {
                 continue;
             }
             let h = fnv1a64(name);
@@ -2541,6 +2548,41 @@ fn harden_hash_symbols(decls: &mut [Decl], entry: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hardened_link_surfaces_preserve_exports_and_external_names() {
+        let source = "extern asm fn external_answer()->Int\nfn other_export()->Int{return 20;}\nfn main()->Int{return external_answer()+other_export();}";
+        for keep_all in [false, true] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            optimize_with_linkage(
+                &mut module.decls,
+                Some("main"),
+                EmitProfile::Harden,
+                keep_all,
+            );
+            assert!(module.decls.iter().any(|decl| matches!(decl, Decl::Function {name,body,..} if name=="external_answer" && body.is_empty())));
+            if keep_all {
+                assert!(
+                    module.decls.iter().any(
+                        |decl| matches!(decl, Decl::Function {name,..} if name=="other_export")
+                    )
+                );
+            }
+            let mut calls = HashSet::new();
+            for body in fn_bodies_mut(&mut module.decls) {
+                for statement in body {
+                    map_stmt_mut(statement, &mut |expression| {
+                        if let Expr::Call { callee, .. } = expression
+                            && let Expr::Ident(name) = callee.as_ref()
+                        {
+                            calls.insert(name.clone());
+                        }
+                    });
+                }
+            }
+            assert!(calls.contains("external_answer"));
+        }
+    }
 
     #[test]
     fn word32_optimizations_keep_invalid_carriers_visible() {

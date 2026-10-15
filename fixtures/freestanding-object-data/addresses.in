@@ -1,0 +1,4 @@
+extern asm fn external_answer() -> Int
+fn target() -> Int { return external_answer() }
+fn other_export() -> Int { return 17 }
+fn main() -> Int { return invoke-native(target) }

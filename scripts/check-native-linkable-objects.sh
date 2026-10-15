@@ -60,4 +60,35 @@ if [[ "$code" -ne 42 ]]; then
   exit 1
 fi
 
+cat > "$TMP/global.in" <<'SRC'
+var count: Int = 41
+extern C fn host_adjust(value: Int) -> Int
+fn answer() -> Int { count = host_adjust(count); return count; }
+fn main() -> void { return; }
+SRC
+cat > "$TMP/global-harness.c" <<'SRC'
+extern long answer(void);
+long host_adjust(long value) { return value + 1; }
+int main(void) { return (int)answer(); }
+SRC
+for profile in default lean harden; do
+  env in compile --path "$TMP/global.in" --target native --target-triple x86_64-unknown-linux-gnu --linkage static-lib --entry answer --profile "$profile" --out "$TMP/global.o" --json > "$TMP/global.json"
+  python3 - "$TMP/global.json" <<'PYREPORT'
+import json
+import sys
+report = json.load(open(sys.argv[1]))
+assert report.get("success") and not report.get("degradations"), report
+PYREPORT
+  # These owned object bodies use absolute references rather than PIC.
+  cc -no-pie "$TMP/global-harness.c" "$TMP/global.o" -o "$TMP/global-harness"
+  set +e
+  "$TMP/global-harness"
+  code=$?
+  set -e
+  if [[ "$code" -ne 42 ]]; then
+    echo "native-linkable-objects: $profile global/external-call exit mismatch: $code" >&2
+    exit 1
+  fi
+done
+
 echo "native linkable object checks passed"

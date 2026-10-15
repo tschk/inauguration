@@ -5,10 +5,10 @@ use crate::native_emit::NativeLinkage;
 use crate::native_emit::coff::{COFF_WINDOWS_TRIPLE, write_exit_process_exe};
 use crate::native_emit::elf::{
     AARCH64_LINUX_TRIPLE, ARMV7_LINUX_GNUEABIHF_TRIPLE, ELF_LINUX_TRIPLE, ElfExecutable, ElfObject,
-    THUMBV8M_MAIN_NONE_EABI_TRIPLE, aarch64_linux_exit_code, arm32_linux_exit_code,
-    arm32_return_i32_object_code, write_aarch64_executable, write_aarch64_relocatable_object,
-    write_arm32_executable, write_arm32_relocatable_object, write_executable,
-    write_i386_relocatable_object, write_thumb_relocatable_object, write_x86_64_relocatable_object,
+    THUMBV8M_MAIN_NONE_EABI_TRIPLE, X86RelocatableObject, aarch64_linux_exit_code,
+    arm32_linux_exit_code, arm32_return_i32_object_code, write_aarch64_executable,
+    write_aarch64_relocatable_object, write_arm32_executable, write_arm32_relocatable_object,
+    write_executable, write_thumb_relocatable_object, write_x86_data_object,
     x86_64_linux_exit_code,
 };
 use crate::native_emit::macho::{MachOImage, MachOLinkage, write_image};
@@ -126,49 +126,64 @@ fn emit_x86_64_pe_executable(request: &NativeObjectRequest<'_>) -> NativeObjectA
     }
 }
 
-fn emit_x86_64_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
-    // Real x86_64 lowering (hosted ABI: instring literals are rejected below
-    // together with globals). External calls stay `call rel32 0` and are
-    // recorded as R_X86_64_PLT32 relocations so `ld` binds them at link
-    // time; every lowered function is exported.
-    crate::native_emit::x86_64::set_32bit(false);
-    let result = match lower_native_module(request.module, request.entry) {
-        Ok(result) => result,
-        Err(_err) => return None,
-    };
-    if !result.relocations.is_empty() {
-        // Any absolute-address site (string/global/function references)
-        // would embed a baked load address that hosted `ld` cannot fix up
-        // (no R_X86_64_64 support in the writer yet). Refuse rather than
-        // emit code that only works at one load address. Code without such
-        // sites is position-independent: rel32 calls and stack access.
-        return None;
+fn x86_object_bytes(
+    result: &crate::native_emit::x86_64_lower::X86_64CompileResult,
+    exports: &[(String, u32)],
+    is_64: bool,
+) -> Result<Vec<u8>, String> {
+    let mut legacy_sites = result.relocations.clone();
+    let mut typed_sites = result
+        .absolute_refs
+        .iter()
+        .map(|reference| reference.site)
+        .collect::<Vec<_>>();
+    legacy_sites.sort_unstable();
+    typed_sites.sort_unstable();
+    if legacy_sites != typed_sites {
+        return Err("x86 object is missing absolute relocation metadata".into());
     }
-    let mut bytes = Vec::new();
-    let object = ElfObject {
-        code: result.code.clone(),
-        export_name: request.entry.to_string(),
-        // Export the entry globally only. Sibling bodies stay in .text but
-        // out of the symbol table so a hosted link against `main` or other
-        // host symbols cannot collide.
-        exports: vec![],
-        undefs: result.externs.clone(),
-        x86_plt_relocs: result
-            .extern_calls
-            .iter()
-            .map(|(symbol, site)| (site + 1, symbol.clone()))
-            .collect(),
-        thumb_calls: vec![],
-        thumb_addr_refs: vec![],
+    let calls = result
+        .extern_calls
+        .iter()
+        .map(|(symbol, site)| {
+            site.checked_add(1)
+                .map(|site| (site, symbol.clone()))
+                .ok_or_else(|| "x86 call relocation offset overflow".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    write_x86_data_object(
+        &X86RelocatableObject {
+            code: &result.code,
+            data: &result.data,
+            exports,
+            undefs: &result.externs,
+            calls: &calls,
+            absolute_refs: &result.absolute_refs,
+            data_relocations: &result.data_relocations,
+        },
+        is_64,
+    )
+}
+
+fn emit_x86_64_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
+    crate::native_emit::x86_64::set_32bit(false);
+    let result = lower_native_module(request.module, request.entry).ok()?;
+    // Keep hosted sibling bodies local to avoid collisions with host symbols.
+    let exports = vec![(request.entry.to_string(), result.entry_offset)];
+    let bytes = match x86_object_bytes(&result, &exports, true) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("x86 ELF object error: {error}");
+            return None;
+        }
     };
-    write_x86_64_relocatable_object(&object, &mut bytes);
     Some(NativeObjectArtifact {
         bytes,
         artifact_kind: "elf-relocatable-object",
         backend_level: "owned-object-subset",
         runtime_level: "none",
         reason_code: NATIVE_OBJECT_SUBSET,
-        reason: "inauguration lowers x86_64 ELF relocatable objects directly (real function bodies; extern calls carry R_X86_64_PLT32 relocations)",
+        reason: "inauguration lowers x86_64 ELF objects with writable data, section-relative absolute references and external call relocations",
         abi_manifest: Some(object_abi_manifest(request)),
     })
 }
@@ -356,64 +371,34 @@ fn emit_x86_64_freestanding_object(
     let is_i386 =
         request.target_triple.starts_with("i386-") || request.target_triple.starts_with("i686-");
     crate::native_emit::x86_64::set_32bit(is_i386);
-    let align_up = |addr: u64, alignment: u64| -> u64 { (addr + alignment - 1) & !(alignment - 1) };
-    // Use real x86_64 lowering for freestanding targets. If a base address was
-    // supplied, lower the module so globals/strings are emitted at the correct
-    // load address (enabling external ld.lld + linker-script workflows).
-    let lower_result = match request.base {
-        Some(code_base) => {
-            match lower_module_with_bases(request.module, request.entry, code_base, code_base) {
-                Ok(temp) => {
-                    let code_size = temp.code.len();
-                    let data_base = align_up(code_base + code_size as u64, 8);
-                    lower_module_with_bases(request.module, request.entry, code_base, data_base)
-                }
-                Err(e) => Err(e),
-            }
+    // ET_REL section relocations determine final placement, independently of --base.
+    let result =
+        lower_module_with_bases(request.module, request.entry, request.base.unwrap_or(0), 0)
+            .ok()?;
+    let bytes = match x86_object_bytes(&result, &result.exports, !is_i386) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("x86 freestanding object error: {error}");
+            return None;
         }
-        None => lower_native_module(request.module, request.entry),
     };
-    match lower_result {
-        Ok(result) => {
-            let mut bytes = Vec::new();
-            let object = ElfObject {
-                code: result.code.clone(),
-                export_name: request.entry.to_string(),
-                exports: result.exports.clone(),
-                undefs: result.externs.clone(),
-                x86_plt_relocs: result
-                    .extern_calls
-                    .iter()
-                    .map(|(symbol, site)| (site + 1, symbol.clone()))
-                    .collect(),
-                thumb_calls: vec![],
-                thumb_addr_refs: vec![],
-            };
-            if is_i386 {
-                write_i386_relocatable_object(&object, &mut bytes);
-            } else {
-                write_x86_64_relocatable_object(&object, &mut bytes);
-            }
-            Some(NativeObjectArtifact {
-                bytes,
-                artifact_kind: "elf-relocatable-object",
-                backend_level: "owned-native-subset-freestanding",
-                runtime_level: "freestanding-none",
-                reason_code: if is_i386 {
-                    "native-i386-unknown-none-freestanding"
-                } else {
-                    "native-x86_64-unknown-none-freestanding"
-                },
-                reason: if is_i386 {
-                    "inauguration owns ELF32 i386 relocatable object emission for real i386 freestanding function bodies"
-                } else {
-                    "inauguration owns ELF64 relocatable object emission for real x86_64 freestanding function bodies"
-                },
-                abi_manifest: Some(object_abi_manifest(request)),
-            })
-        }
-        Err(_) => None,
-    }
+    Some(NativeObjectArtifact {
+        bytes,
+        artifact_kind: "elf-relocatable-object",
+        backend_level: "owned-native-subset-freestanding",
+        runtime_level: "freestanding-none",
+        reason_code: if is_i386 {
+            "native-i386-unknown-none-freestanding"
+        } else {
+            "native-x86_64-unknown-none-freestanding"
+        },
+        reason: if is_i386 {
+            "inauguration owns ELF32 i386 relocatable function bodies, writable data and code/data relocations"
+        } else {
+            "inauguration owns ELF64 x86_64 relocatable function bodies, writable data and code/data relocations"
+        },
+        abi_manifest: Some(object_abi_manifest(request)),
+    })
 }
 
 fn emit_wasm32_module(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
@@ -598,7 +583,27 @@ mod tests {
     }
 
     #[test]
-    fn x86_64_staticlib_object_rejects_absolute_globals() {
+    fn x86_object_adapter_refuses_missing_absolute_reference_metadata() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "var count:Int=41;\nfn main()->Int{count=count+1;return count;}",
+        )
+        .unwrap();
+        crate::native_emit::x86_64::set_32bit(false);
+        let mut result = lower_native_module(&module, "main").unwrap();
+        assert!(!result.data.is_empty());
+        assert!(!result.absolute_refs.is_empty());
+        let bytes = x86_object_bytes(&result, &result.exports, true).unwrap();
+        let repeated = lower_native_module(&module, "main").unwrap();
+        assert_eq!(
+            bytes,
+            x86_object_bytes(&repeated, &repeated.exports, true).unwrap()
+        );
+        result.absolute_refs.clear();
+        assert!(x86_object_bytes(&result, &result.exports, true).is_err());
+    }
+
+    #[test]
+    fn x86_64_staticlib_object_relocates_absolute_string_references() {
         let module = UnifiedModule::with_identity(
             vec![Decl::Function {
                 name: "answer".into(),
@@ -621,9 +626,14 @@ mod tests {
             module_id: "App",
             base: None,
         };
-        // Hosted objects cannot carry absolute string/global references yet;
-        // the backend must refuse rather than emit baked addresses.
-        assert!(emit_native_object(&request).is_none());
+        let artifact = emit_native_object(&request).expect("relocatable string reference");
+        assert!(
+            artifact
+                .bytes
+                .windows(10)
+                .any(|bytes| bytes == b".rela.text")
+        );
+        assert!(artifact.bytes.windows(2).any(|bytes| bytes == b"hi"));
     }
 
     #[test]

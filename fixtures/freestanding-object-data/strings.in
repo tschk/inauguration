@@ -1,0 +1,6 @@
+var text: String = "same"
+var words: [String] = ["λ","same"]
+fn main() -> Int {
+  if text == "same" && words[0] == "λ" && words[1] == text { return 42 }
+  return 0
+}

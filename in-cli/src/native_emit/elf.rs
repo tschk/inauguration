@@ -1,3 +1,6 @@
+mod x86_object;
+pub use x86_object::{X86RelocatableObject, write_x86_data_object};
+
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const ELFCLASS32: u8 = 1;
 const ELFCLASS64: u8 = 2;

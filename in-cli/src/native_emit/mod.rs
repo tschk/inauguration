@@ -55,4 +55,19 @@ pub use thumb_lower::{THUMB_TRIPLE, ThumbCompileResult, lower_module as lower_th
 pub use uf2::{UF2_FAMILY_RP2350_ARM_S, Uf2Options, encode_uf2, write_uf2};
 pub use wasm::{WASM32_UNKNOWN_TRIPLE, WasmModule, write_scalar_i32_module};
 
+/// Section-relative targets retained for relocatable native objects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeSection {
+    Code,
+    Data,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AbsoluteReference {
+    pub site: u32,
+    pub width: u8,
+    pub target_section: NativeSection,
+    pub target_offset: u64,
+}
+
 pub(crate) mod struct_layout;

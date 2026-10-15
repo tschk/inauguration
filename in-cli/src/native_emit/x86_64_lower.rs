@@ -18,6 +18,7 @@ use crate::native_emit::global_data::{
     append_string_payload, apply_data_relocations, build_data_section, collect_globals,
 };
 use crate::native_emit::x86_64::{self, CodeEmitter, RAX, RBP, RBX, RCX, RDI, RDX, RSI};
+use crate::native_emit::{AbsoluteReference, NativeSection};
 use std::collections::HashMap;
 
 use crate::native_emit::stdlib_wrappers::wrapper as jit_stdlib_wrapper;
@@ -72,13 +73,46 @@ fn emit_failure_return(emitter: &mut CodeEmitter, ctx: &mut LowerCtx<'_>) -> Res
     Ok(())
 }
 
+fn patch_absolute_reference(
+    code: &mut [u8],
+    reference: AbsoluteReference,
+    base: u64,
+    is_32bit: bool,
+) -> Result<AbsoluteReference, String> {
+    let expected_width = if is_32bit { 4 } else { 8 };
+    if reference.width != expected_width {
+        return Err(
+            "x86_64-lower: absolute reference width does not match target pointer ABI".into(),
+        );
+    }
+    let address = base
+        .checked_add(reference.target_offset)
+        .ok_or("x86_64-lower: absolute reference address overflow")?;
+    if is_32bit && address > u64::from(u32::MAX) {
+        return Err("x86_64-lower: absolute reference exceeds target pointer address space".into());
+    }
+    let start = usize::try_from(reference.site)
+        .map_err(|_| "x86_64-lower: absolute reference site exceeds host address space")?;
+    let end = start
+        .checked_add(usize::from(reference.width))
+        .ok_or("x86_64-lower: absolute reference site overflow")?;
+    let slot = code
+        .get_mut(start..end)
+        .ok_or("x86_64-lower: absolute reference patch outside code")?;
+    let bytes = address.to_le_bytes();
+    slot.copy_from_slice(&bytes[..usize::from(reference.width)]);
+    Ok(reference)
+}
+
 pub struct X86_64CompileResult {
     pub code: Vec<u8>,
     pub entry_offset: u32,
     pub exports: Vec<(String, u32)>,
-    /// Byte offsets in `code` where 8-byte absolute addresses were written.
+    /// Byte offsets in `code` where target-width absolute addresses were written.
     /// At load time, patch each by adding (actual_base - codegen_base).
     pub relocations: Vec<u32>,
+    /// Validated absolute sites with section-relative targets for object writers.
+    pub absolute_refs: Vec<AbsoluteReference>,
     /// (site, data offset) for every absolute reference to a global slot.
     /// Native linkers rebase these against `.data`; the JIT maps the data
     /// section and rebases to the mapped address. Sites here are excluded
@@ -464,23 +498,24 @@ fn lower_module_impl(
     // Resolve calls — collect string refs, resolve function addresses and calls
     let mut str_refs: Vec<(u32, String)> = Vec::new();
     let mut relocations: Vec<u32> = Vec::new();
+    let mut absolute_refs = Vec::new();
     for call in &all_pending_calls {
         if call.target.starts_with("@addr_") {
             // Function address reference: write absolute address at site
             let fn_name = &call.target[6..];
             if let Some(&func_offset) = function_offsets.get(fn_name) {
-                let abs_addr = code_base + func_offset as u64;
-                let site = call.site as usize;
-                if x86_64::is_32bit() {
-                    if site + 4 <= emitter.bytes.len() {
-                        emitter.bytes[site..site + 4]
-                            .copy_from_slice(&(abs_addr as u32).to_le_bytes());
-                        relocations.push(call.site);
-                    }
-                } else if site + 8 <= emitter.bytes.len() {
-                    emitter.bytes[site..site + 8].copy_from_slice(&abs_addr.to_le_bytes());
-                    relocations.push(call.site);
-                }
+                absolute_refs.push(patch_absolute_reference(
+                    &mut emitter.bytes,
+                    AbsoluteReference {
+                        site: call.site,
+                        width: if x86_64::is_32bit() { 4 } else { 8 },
+                        target_section: NativeSection::Code,
+                        target_offset: u64::from(func_offset),
+                    },
+                    code_base,
+                    x86_64::is_32bit(),
+                )?);
+                relocations.push(call.site);
             } else {
                 return Err(format!(
                     "x86_64-lower: unresolved function address `{fn_name}`"
@@ -506,25 +541,20 @@ fn lower_module_impl(
         }
         for s in &all_strings {
             let offset = append_string_payload(&mut emitter.bytes, s, layout)?;
-            let abs_addr = code_base
-                .checked_add(offset)
-                .ok_or("native string address overflow")?;
-            if x86_64::is_32bit() && abs_addr > u32::MAX as u64 {
-                return Err("native string address exceeds target pointer address space".into());
-            }
             for &(site, ref content) in &str_refs {
                 if content == s {
-                    let site_u = site as usize;
-                    if x86_64::is_32bit() {
-                        if site_u + 4 <= emitter.bytes.len() {
-                            emitter.bytes[site_u..site_u + 4]
-                                .copy_from_slice(&(abs_addr as u32).to_le_bytes());
-                            relocations.push(site);
-                        }
-                    } else if site_u + 8 <= emitter.bytes.len() {
-                        emitter.bytes[site_u..site_u + 8].copy_from_slice(&abs_addr.to_le_bytes());
-                        relocations.push(site);
-                    }
+                    absolute_refs.push(patch_absolute_reference(
+                        &mut emitter.bytes,
+                        AbsoluteReference {
+                            site,
+                            width: if x86_64::is_32bit() { 4 } else { 8 },
+                            target_section: NativeSection::Code,
+                            target_offset: offset,
+                        },
+                        code_base,
+                        x86_64::is_32bit(),
+                    )?);
+                    relocations.push(site);
                 }
             }
         }
@@ -533,27 +563,40 @@ fn lower_module_impl(
     // Patch global-variable references now that the data section address is known.
     let mut global_relocs: Vec<(u32, u64)> = Vec::new();
     for pg in &all_pending_globals {
-        let abs_addr = data_base + pg.offset;
-        let site = pg.site as usize;
+        absolute_refs.push(patch_absolute_reference(
+            &mut emitter.bytes,
+            AbsoluteReference {
+                site: pg.site,
+                width: pg.width,
+                target_section: NativeSection::Data,
+                target_offset: pg.offset,
+            },
+            data_base,
+            x86_64::is_32bit(),
+        )?);
         global_relocs.push((pg.site, pg.offset));
-        if pg.width == 4 && site + 4 <= emitter.bytes.len() {
-            emitter.bytes[site..site + 4].copy_from_slice(&(abs_addr as u32).to_le_bytes());
-            relocations.push(pg.site);
-        } else if pg.width == 8 && site + 8 <= emitter.bytes.len() {
-            emitter.bytes[site..site + 8].copy_from_slice(&abs_addr.to_le_bytes());
-            relocations.push(pg.site);
-        }
+        relocations.push(pg.site);
     }
 
     let entry_offset = function_offsets.get(entry).copied().unwrap_or(0);
-    let exports: Vec<(String, u32)> = function_offsets
+    let mut exports: Vec<(String, u32)> = function_offsets
         .iter()
         .map(|(name, offset)| (name.clone(), *offset))
         .collect();
+    exports.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
     let crate::native_emit::global_data::DataSection {
         bytes: mut data,
         pointer_fixups: data_relocations,
     } = build_data_section(module, &globals, layout)?;
+    for reference in &absolute_refs {
+        let target_len = match reference.target_section {
+            NativeSection::Code => emitter.bytes.len(),
+            NativeSection::Data => data.len(),
+        };
+        if reference.target_offset >= target_len as u64 {
+            return Err("x86_64-lower: absolute reference target outside section".into());
+        }
+    }
     apply_data_relocations(
         &mut data,
         &data_relocations,
@@ -582,6 +625,7 @@ fn lower_module_impl(
         entry_offset,
         exports,
         relocations,
+        absolute_refs,
         global_relocs,
         codegen_base: code_base,
         data,
@@ -4660,6 +4704,95 @@ fn lower_expr_into(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn absolute_references_preserve_code_and_data_targets_in_both_word_modes() {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                x86_64::set_32bit(self.0);
+            }
+        }
+        let _restore = Restore(x86_64::is_32bit());
+        for is_32bit in [false, true] {
+            x86_64::set_32bit(is_32bit);
+            let module = crate::in_lang_parse::parse_in_source(
+                "var count:Int=41;\nfn target()->Int{return 1;}\nfn main()->Int{let pointer=target;let text=\"payload\";count=count+1;return count;}",
+            ).unwrap();
+            let result = lower_module_with_bases(&module, "main", 0x1000, 0x8000).unwrap();
+            assert!(result.exports.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+            let repeated = lower_module_with_bases(&module, "main", 0x1000, 0x8000).unwrap();
+            assert_eq!(result.exports, repeated.exports);
+            let target = result
+                .exports
+                .iter()
+                .find(|(name, _)| name == "target")
+                .unwrap()
+                .1;
+            assert!(
+                result
+                    .absolute_refs
+                    .iter()
+                    .any(|reference| reference.target_section == NativeSection::Code
+                        && reference.target_offset == u64::from(target))
+            );
+            assert!(
+                result
+                    .absolute_refs
+                    .iter()
+                    .any(|reference| reference.target_section == NativeSection::Data)
+            );
+            assert!(
+                result
+                    .absolute_refs
+                    .iter()
+                    .filter(|reference| reference.target_section == NativeSection::Code)
+                    .count()
+                    >= 2
+            );
+            assert_eq!(result.absolute_refs.len(), result.relocations.len());
+            for reference in &result.absolute_refs {
+                assert_eq!(reference.width, if is_32bit { 4 } else { 8 });
+                let base = if reference.target_section == NativeSection::Code {
+                    0x1000
+                } else {
+                    0x8000
+                };
+                let start = reference.site as usize;
+                let mut bytes = [0; 8];
+                bytes[..usize::from(reference.width)]
+                    .copy_from_slice(&result.code[start..start + usize::from(reference.width)]);
+                assert_eq!(u64::from_le_bytes(bytes), base + reference.target_offset);
+            }
+        }
+    }
+
+    #[test]
+    fn absolute_reference_patches_reject_invalid_ranges_and_pointer_widths() {
+        let reference = AbsoluteReference {
+            site: 0,
+            width: 8,
+            target_section: NativeSection::Data,
+            target_offset: 1,
+        };
+        let mut code = [0; 8];
+        assert!(patch_absolute_reference(&mut code, reference, u64::MAX, false).is_err());
+        assert!(patch_absolute_reference(&mut code[..4], reference, 0, false).is_err());
+        assert!(patch_absolute_reference(&mut code, reference, 0, true).is_err());
+        assert!(
+            patch_absolute_reference(
+                &mut code,
+                AbsoluteReference {
+                    width: 4,
+                    ..reference
+                },
+                u64::from(u32::MAX),
+                true
+            )
+            .is_err()
+        );
+        assert_eq!(code, [0; 8]);
+    }
+
     use super::*;
     use crate::core_ir::UnifiedModule;
 
