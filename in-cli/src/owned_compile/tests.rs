@@ -5498,6 +5498,20 @@ fn owned_c_numeric_casts_preserve_value_and_effects() {
     }
     for extension in ["c", "cpp"] {
         for source in [
+            "int main() { int value = 298; return (unsigned char)value; }",
+            "int main() { int value = 298; return (unsigned /* width */ char)value; }",
+            "int main() { int value = -214; return (unsigned char)value; }",
+            "int main() { int value = 65578; return (unsigned short)value; }",
+            "int main() { int value = -65494; return (short unsigned int)value; }",
+            "int main() { int value = -42; return (signed char)value + 84; }",
+            "int main() { int value = -32768; return (signed short)value + 32810; }",
+            "int main() { double value = -42.9; return (signed char)value + 84; }",
+            "int main() { double value = 42.9; return (unsigned char)value; }",
+            "int main() { _Bool value = 1; return (unsigned short)value + 41; }",
+            "int main() { int value = 65834; return (unsigned char)(unsigned short)value; }",
+            "int main() { long long value = 4294967338; return (unsigned int)value; }",
+            "int main() { long long value = 4294967295; return (signed int)value + 43; }",
+            "int calls = 0; int next() { calls++; return 298; } int main() { int value = (const unsigned char)next(); return value + calls - 1; }",
             "int main() { double value = 42.9; return (int)value; }",
             "int main() { int value = 21; return (int)((double)value * 2.0); }",
             "int main() { double value = -0.5; return (int)((double)(int)value + 42.0); }",

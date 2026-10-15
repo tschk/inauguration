@@ -164,11 +164,13 @@ Explicit Rust casts to signed and unsigned 8-, 16-, 32-, and 64-bit integers tru
 
 ## C-style numeric casts
 
-C/C++ `(type)value` casts to primitive numeric types lower through the same typed conversions as implicit value contexts. Nested casts, boolean truth conversion, and qualifiers preserve operand evaluation once. Pointer, reference, object, typedef, void, and extended-precision casts remain refused. Numeric casts use canonical Int64/Float64, with the source-width and unsigned limitations described below.
+C/C++ `(type)value` casts to primitive numeric types lower through shared typed conversions. Explicit signed/unsigned `char`, `short`, and `int` casts retain their 8-, 16-, and 32-bit destinations on supported targets. Unsigned conversion keeps the low bits; signed conversion sign-extends those bits using the targets' two's-complement policy. Nested casts, boolean truth conversion, qualifiers, and comments inside type spellings preserve operand evaluation once. Floating operands truncate toward zero before integer conversion; only finite values whose truncated result fits the destination are within the defined C conversion subset.
+
+The result uses the canonical target-word carrier. General unsigned arithmetic and promotions, implicit source-width conversions, plain `char` signedness, and target-dependent `long` widths remain incomplete. On 32-bit targets an unsigned 32-bit result with its high bit set retains its bits in a signed carrier; later unsigned comparisons or conversions need separate support. Pointer, reference, object, typedef, void, and extended-precision casts remain refused.
 
 ## C-like numeric conversions
 
-Typed C/C++ initializers, assignments, returns, and call arguments convert between canonical signed Int64 and Float64 through shared unary IR operations. Mixed floating arithmetic and comparisons promote integer and boolean operands to Float64. Floating-to-integer conversion truncates toward zero; only finite values whose truncated result fits Int64 have defined cross-backend behavior. Source integer widths, unsigned conversion, and Float32 arithmetic remain outside this canonical subset.
+Typed C/C++ initializers, assignments, returns, and call arguments convert between canonical signed Int64 and Float64 through shared unary IR operations. Mixed floating arithmetic and comparisons promote integer and boolean operands to Float64. Floating-to-integer conversion truncates toward zero; only finite values whose truncated result fits Int64 have defined cross-backend behavior. Implicit source-width integer conversion, general unsigned arithmetic, and Float32 arithmetic remain outside this canonical subset; explicit integer casts retain the widths described above.
 
 ## C-like post-test loops
 

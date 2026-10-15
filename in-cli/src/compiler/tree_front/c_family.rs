@@ -755,6 +755,20 @@ fn c_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
     }
 }
 
+fn c_type_specifier_text(src: &[u8], node: Node<'_>) -> String {
+    if node.kind() == "comment" {
+        return String::new();
+    }
+    if node.child_count() == 0 {
+        return node_txt(src, node).into();
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .map(|child| c_type_specifier_text(src, child))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn c_cast_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
     let descriptor = expr.child_by_field_name("type")?;
     if descriptor.child_by_field_name("declarator").is_some() {
@@ -767,11 +781,31 @@ fn c_cast_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
     {
         return None;
     }
-    let target = match c_typ_from_decl_specifier_text(node_txt(src, specifier)) {
-        Typ::Int => "Int",
-        Typ::Float => "Float",
-        Typ::Bool => "Bool",
-        _ => return None,
+    // These explicit spellings have the same widths on supported native
+    // targets. Plain char signedness and long width require target metadata.
+    let spelling = c_strip_decl_storage(&c_type_specifier_text(src, specifier));
+    let mut words: Vec<_> = spelling.split_whitespace().collect();
+    words.sort_unstable();
+    let narrow = match words.as_slice() {
+        ["char", "signed"] => Some("i8"),
+        ["char", "unsigned"] => Some("u8"),
+        ["short"] | ["int", "short"] | ["short", "signed"] | ["int", "short", "signed"] => {
+            Some("i16")
+        }
+        ["short", "unsigned"] | ["int", "short", "unsigned"] => Some("u16"),
+        ["int"] | ["signed"] | ["int", "signed"] => Some("i32"),
+        ["unsigned"] | ["int", "unsigned"] => Some("u32"),
+        _ => None,
+    };
+    let target = if let Some(narrow) = narrow {
+        narrow
+    } else {
+        match c_typ_from_decl_specifier_text(node_txt(src, specifier)) {
+            Typ::Int => "Int",
+            Typ::Float => "Float",
+            Typ::Bool => "Bool",
+            _ => return None,
+        }
     };
     Some(Expr::Call {
         callee: Box::new(Expr::Ident("c-numeric-cast".into())),
@@ -1146,6 +1180,40 @@ mod definition_parameter_tests {
             extract_cpp_with_classes(source.as_bytes(), tree.root_node())
         } else {
             extract_c(source.as_bytes(), tree.root_node())
+        }
+    }
+
+    #[test]
+    fn explicit_narrow_casts_keep_width_and_signedness_metadata() {
+        for cpp in [false, true] {
+            for (spelling, expected) in [
+                ("signed char", "i8"),
+                ("unsigned char", "u8"),
+                ("short", "i16"),
+                ("signed short int", "i16"),
+                ("const unsigned short", "u16"),
+                ("short unsigned int", "u16"),
+                ("int", "i32"),
+                ("signed", "i32"),
+                ("signed int", "i32"),
+                ("unsigned", "u32"),
+                ("unsigned int", "u32"),
+                ("unsigned /* width */ char", "u8"),
+                ("signed /* width */ short int", "i16"),
+            ] {
+                let source = format!("long long main(void) {{return ({spelling})256;}}");
+                let mut module = crate::core_ir::UnifiedModule::new(parse(&source, cpp).unwrap());
+                let mut targets = Vec::new();
+                crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                    if let Expr::Call { callee, args } = expr
+                        && matches!(callee.as_ref(), Expr::Ident(name) if name == "c-numeric-cast")
+                        && let [_, Expr::StringLit(target)] = args.as_slice()
+                    {
+                        targets.push(target.clone());
+                    }
+                });
+                assert_eq!(targets, [expected], "{source}");
+            }
         }
     }
 

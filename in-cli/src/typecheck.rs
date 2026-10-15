@@ -887,6 +887,23 @@ impl TypeChecker {
             && matches!(callee.as_ref(), Expr::Ident(name) if name == "c-numeric-cast")
         {
             if let [value, Expr::StringLit(target)] = args.as_slice() {
+                if matches!(target.as_str(), "i8" | "u8" | "i16" | "u16" | "i32" | "u32")
+                    && matches!(
+                        self.expr_type(value, facts, env).map(|typ| typ.canonical()),
+                        Some(Typ::Int | Typ::Float | Typ::Bool)
+                    )
+                {
+                    let mut value = value.clone();
+                    self.resolve_c_value(&mut value, &Typ::Int, facts, env);
+                    // Reuse the existing single-evaluation mask/sign-extension
+                    // lowering rather than adding a backend-specific cast.
+                    if let Some(cast) =
+                        crate::core_ir::integer_cast_expr(value, &format!("int-cast-{target}"))
+                    {
+                        *expr = cast;
+                    }
+                    return;
+                }
                 let expected = match target.as_str() {
                     "Int" => Some(Typ::Int),
                     "Float" => Some(Typ::Float),
@@ -3026,6 +3043,69 @@ mod tests {
         )
         .unwrap();
         assert!(!crate::core_ir_verifier::verify_for_entry(&strict, "main").ok);
+    }
+
+    #[test]
+    fn c_narrow_casts_normalize_width_and_preserve_one_operand_use() {
+        use crate::core_ir::{Decl, Expr, Stmt};
+        for (target, value, expected) in [
+            ("u8", 256i64, 0),
+            ("u8", -1, 255),
+            ("u16", 65536, 0),
+            ("u16", -1, 65535),
+            ("i8", -128, -128),
+            ("i8", 127, 127),
+            ("i16", -32768, -32768),
+            ("i16", 32767, 32767),
+            ("i32", 4294967295, -1),
+            ("u32", -1, 4294967295),
+        ] {
+            let source = format!("fn main()->Int{{return c-numeric-cast({value},\"{target}\");}}");
+            let parsed = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let module = super::normalize_module(ParserId::C, &parsed);
+            assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+            let Decl::Function { body, .. } = &module.decls[0] else {
+                panic!("main")
+            };
+            let Stmt::Return(Some(value)) = &body[0] else {
+                panic!("return")
+            };
+            for semantics in [
+                crate::integer_semantics::IntegerSemantics::Word32,
+                crate::integer_semantics::IntegerSemantics::Word64,
+            ] {
+                assert_eq!(
+                    crate::core_opt::map_expr(value.clone(), &mut |expr| {
+                        crate::core_opt::fold_expr_with_semantics(expr, semantics)
+                    }),
+                    Expr::IntLit(semantics.normalize_word(expected).unwrap())
+                );
+            }
+        }
+        let parsed = crate::in_lang_parse::parse_in_source(
+            "fn next()->Int{return 511;}\nfn main()->Int{return c-numeric-cast(next(),\"u8\");}",
+        )
+        .unwrap();
+        let mut module = super::normalize_module(ParserId::C, &parsed);
+        let mut calls = 0;
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            if matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "next"))
+            {
+                calls += 1;
+            }
+        });
+        assert_eq!(calls, 1);
+        for expression in [
+            "c-numeric-cast(42,\"u7\")",
+            "c-numeric-cast(\"text\",\"u8\")",
+        ] {
+            let parsed = crate::in_lang_parse::parse_in_source(&format!(
+                "fn main()->Int{{return {expression};}}"
+            ))
+            .unwrap();
+            let module = super::normalize_module(ParserId::C, &parsed);
+            assert!(!crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        }
     }
 
     #[test]
