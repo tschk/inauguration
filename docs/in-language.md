@@ -228,6 +228,12 @@ This is an unsafe machine-ABI boundary: the caller must supply a valid address w
 
 Ordinary `invoke` / `invoke1` / `invoke2` retain language exception propagation and require its writable runtime context. Use the explicit native boundary for CPU capsules and foreign native functions; do not disable exception checks on ordinary calls.
 
+### Freestanding boot data
+
+For x86_64 `--emit boot`, the image loads contiguously at `0x100000`: a 4096-byte trampoline, a 256-byte boot header, code and exports, then padding and initialized writable data at `0x200000`. The packager refuses code/export overlap with data and physical addresses beyond 4 GiB before replacing the output. Global references and data pointers use that fixed data address; boot code must retain the loaded initializers rather than zeroing them again.
+
+The boot-only header records the data address as little-endian `u64` at offset 64 and byte length at offset 72. Both fields are zero when there is no data. Existing header fields are unchanged. These fields extend the 256-byte boot wrapper, not the separate 64-byte dynamic component format. A kernel must reserve the entire loaded data range before placing its heap. AArch64 and 32-bit x86 boot emission still refuse writable data relocations.
+
 ### Extern and capabilities
 
 ```in

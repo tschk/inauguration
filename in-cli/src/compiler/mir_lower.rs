@@ -230,9 +230,9 @@ pub fn lower_boot_image(
     module: &UnifiedModule,
     entry: &str,
     target_triple: Option<&str>,
-) -> Result<(MirModule, Vec<u8>, Vec<(String, u32)>), String> {
+) -> Result<(MirModule, Vec<u8>, Vec<(String, u32)>, Vec<u8>), String> {
     let triple = target_triple.unwrap_or("x86_64-unknown-none");
-    let (code, exports) = if triple.contains("aarch64") || triple.contains("arm64") {
+    let (code, exports, data) = if triple.contains("aarch64") || triple.contains("arm64") {
         let result = crate::native_emit::lower::lower_module(
             module,
             entry,
@@ -250,6 +250,7 @@ pub fn lower_boot_image(
                 .iter()
                 .map(|s| (s.name.clone(), s.offset))
                 .collect(),
+            Vec::new(),
         )
     } else {
         let is_32bit = triple.starts_with("i386-") || triple.starts_with("i686-");
@@ -262,15 +263,17 @@ pub fn lower_boot_image(
             crate::native_emit::x86_64_lower::X86StringLayout::Cstring,
         )?;
         result.require_resolved_imports()?;
-        if !result.global_relocs.is_empty() || !result.data_relocations.is_empty() {
+        if is_32bit && (!result.data.is_empty() || !result.global_relocs.is_empty()) {
             return Err(
-                "native-lower: x86 boot images do not yet relocate writable globals".into(),
+                "native-lower: 32-bit x86 boot images do not yet relocate writable globals".into(),
             );
         }
-        (result.code, result.exports)
+        // References and payload pointers are already fixed to data_base by
+        // the lowerer. The boot packager must load this data at that address.
+        (result.code, result.exports, result.data)
     };
     let mir_module = MirModule::new();
-    Ok((mir_module, code, exports))
+    Ok((mir_module, code, exports, data))
 }
 
 #[cfg(test)]
@@ -279,21 +282,54 @@ mod tests {
     use crate::core_ir::{CoreModuleIdentity, Typ};
 
     #[test]
-    fn x86_boot_rejects_unresolved_imports_and_unrelocated_globals() {
-        for (source, expected) in [
-            (
-                "fn missing() -> Int {}\nfn main() -> Int { return missing(); }",
-                "unresolved runtime imports: missing",
-            ),
-            (
-                "var count: Int = 3;\nfn main() -> Int { return count; }",
-                "boot images do not yet relocate writable globals",
-            ),
+    fn x86_boot_rejects_unresolved_imports() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "fn missing() -> Int {}\nfn main() -> Int { return missing(); }",
+        )
+        .unwrap();
+        let error = lower_boot_image(&module, "main", Some("x86_64-unknown-none")).unwrap_err();
+        assert!(
+            error.contains("unresolved runtime imports: missing"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn x86_boot_retains_initialized_scalars_and_pointer_payloads() {
+        let scalar = crate::in_lang_parse::parse_in_source(
+            "var count:Int=3;\nfn main()->Int{count=count+39;return count;}",
+        )
+        .unwrap();
+        let (_, code, _, data) =
+            lower_boot_image(&scalar, "main", Some("x86_64-unknown-none")).unwrap();
+        assert!(!code.is_empty());
+        assert_eq!(i64::from_le_bytes(data[..8].try_into().unwrap()), 3);
+        let payload = crate::in_lang_parse::parse_in_source(
+            "var text:String=\"λ\0x\";\nvar values:[String]=[\"same\",\"other\"];\nfn main()->Int{if text==\"λ\0x\" && values[0]==\"same\"{return 42;}return 0;}"
+        )
+        .unwrap();
+        let (_, _, _, data) =
+            lower_boot_image(&payload, "main", Some("x86_64-unknown-none")).unwrap();
+        for (slot, expected) in [
+            (0, "λ\0x\0".as_bytes()),
+            (24, b"same\0".as_slice()),
+            (32, b"other\0".as_slice()),
         ] {
-            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
-            let error = lower_boot_image(&module, "main", Some("x86_64-unknown-none")).unwrap_err();
-            assert!(error.contains(expected), "{error}");
+            let pointer = u64::from_le_bytes(data[slot..slot + 8].try_into().unwrap());
+            let offset = usize::try_from(pointer.checked_sub(0x200000).unwrap()).unwrap();
+            assert_eq!(&data[offset..offset + expected.len()], expected);
         }
+        assert_eq!(u64::from_le_bytes(data[8..16].try_into().unwrap()), 2);
+    }
+
+    #[test]
+    fn x86_boot_preserves_32bit_writable_data_refusal() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "var count:Int=3;\nfn main()->Int{return count;}",
+        )
+        .unwrap();
+        let error = lower_boot_image(&module, "main", Some("i686-unknown-none")).unwrap_err();
+        assert!(error.contains("32-bit x86 boot images"), "{error}");
     }
 
     #[test]

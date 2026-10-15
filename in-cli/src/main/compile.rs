@@ -333,7 +333,7 @@ fn cmd_emit_boot(
         true,
     );
 
-    let (_mir, code, kernel_exports) =
+    let (_mir, code, kernel_exports, data) =
         inauguration::compiler::mir_lower::lower_boot_image(&module, entry_name, target_triple)
             .map_err(|e| InError::Message(format!("lower: {e}")))?;
 
@@ -345,7 +345,7 @@ fn cmd_emit_boot(
     }
     const SCI_HEADER_SIZE: usize = 256;
     const SCI_CODE_OFFSET: usize = 0x100;
-    let mut sci_header = vec![0u8; SCI_HEADER_SIZE];
+    let mut sci_header = [0u8; SCI_HEADER_SIZE];
 
     let target_is_aarch64 = target_triple
         .map(|t| t.contains("aarch64") || t.contains("arm64"))
@@ -386,6 +386,10 @@ fn cmd_emit_boot(
         }
     }
     sci_header[56..64].copy_from_slice(&caps_mask.to_le_bytes());
+    // Boot-only 256-byte wrapper extension (not the SCI v2 manifest):
+    // [64..72] writable data VA, [72..80] initialized data byte length.
+    // Consumers can reserve the complete loaded image before heap allocation.
+    write_boot_data_metadata(&mut sci_header, data.len());
 
     // Kernel export table: lets a dynamic loader register the kernel's
     // functions as symbol providers for dynamically linked components.
@@ -412,12 +416,8 @@ fn cmd_emit_boot(
     table_bytes.extend_from_slice(&name_blob);
     sci_header[40..48].copy_from_slice(&export_table_addr.to_le_bytes());
 
-    let mut image =
-        Vec::with_capacity(tramp_size + SCI_HEADER_SIZE + code.len() + table_bytes.len());
-    image.extend_from_slice(&trampoline_bytes);
-    image.extend_from_slice(&sci_header);
-    image.extend_from_slice(&code);
-    image.extend_from_slice(&table_bytes);
+    let image = pack_boot_sections(&trampoline_bytes, &sci_header, &code, &table_bytes, &data)
+        .map_err(InError::Message)?;
 
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)
@@ -718,5 +718,103 @@ fn print_owned_report(report: &inauguration::owned_compile::OwnedCompileReport) 
     }
     if let Some(hash) = &report.frontend_hash {
         println!("frontend_hash: {hash}");
+    }
+}
+
+fn write_boot_data_metadata(header: &mut [u8; 256], data_len: usize) {
+    let address = if data_len == 0 { 0u64 } else { 0x200000u64 };
+    header[64..72].copy_from_slice(&address.to_le_bytes());
+    header[72..80].copy_from_slice(&(data_len as u64).to_le_bytes());
+}
+
+// Multiboot loads the whole file contiguously at 0x100000. x86 lowering
+// fixes writable globals to 0x200000, so retain that exact file offset.
+fn pack_boot_sections(
+    trampoline: &[u8],
+    header: &[u8],
+    code: &[u8],
+    exports: &[u8],
+    data: &[u8],
+) -> std::result::Result<Vec<u8>, String> {
+    let prefix = [trampoline.len(), header.len(), code.len(), exports.len()]
+        .into_iter()
+        .try_fold(0usize, |sum, len| sum.checked_add(len))
+        .ok_or_else(|| "boot image section size overflow".to_string())?;
+    let data_offset = 0x100000usize;
+    if !data.is_empty() && prefix > data_offset {
+        return Err("boot image code/export sections overlap writable data at 0x200000".into());
+    }
+    let length = if data.is_empty() {
+        prefix
+    } else {
+        data_offset
+            .checked_add(data.len())
+            .ok_or_else(|| "boot image data size overflow".to_string())?
+    };
+    if u64::try_from(length)
+        .ok()
+        .and_then(|n| n.checked_add(0x100000))
+        .is_none_or(|end| end > (u32::MAX as u64) + 1)
+    {
+        return Err("boot image exceeds 32-bit physical address space".into());
+    }
+    let mut image = Vec::new();
+    image
+        .try_reserve_exact(length)
+        .map_err(|error| format!("boot image allocation failed: {error}"))?;
+    image.extend_from_slice(trampoline);
+    image.extend_from_slice(header);
+    image.extend_from_slice(code);
+    image.extend_from_slice(exports);
+    if !data.is_empty() {
+        image.resize(data_offset, 0);
+        image.extend_from_slice(data);
+    }
+    Ok(image)
+}
+
+#[cfg(test)]
+mod boot_data_tests {
+    use super::{pack_boot_sections, write_boot_data_metadata};
+    #[test]
+    fn boot_pack_retains_data_at_fixed_load_address() {
+        let image = pack_boot_sections(&[1], &[2], &[3], &[4], &[5, 6]).unwrap();
+        assert_eq!(&image[..4], &[1, 2, 3, 4]);
+        assert_eq!(image.len(), 0x100002);
+        assert_eq!(&image[0x100000..], &[5, 6]);
+        assert_eq!(
+            pack_boot_sections(&[1], &[], &[], &[], &[]).unwrap(),
+            vec![1]
+        );
+    }
+    #[test]
+    fn boot_data_metadata_preserves_existing_header_fields() {
+        let mut header = [7u8; 256];
+        write_boot_data_metadata(&mut header, 123);
+        assert_eq!(&header[..64], &[7u8; 64]);
+        assert_eq!(
+            u64::from_le_bytes(header[64..72].try_into().unwrap()),
+            0x200000
+        );
+        assert_eq!(u64::from_le_bytes(header[72..80].try_into().unwrap()), 123);
+        assert_eq!(&header[80..], &[7u8; 176]);
+        write_boot_data_metadata(&mut header, 0);
+        assert_eq!(&header[64..80], &[0u8; 16]);
+    }
+
+    #[test]
+    fn boot_pack_refuses_code_export_overlap() {
+        let code = vec![0; 0x100000];
+        assert_eq!(
+            pack_boot_sections(&[], &[], &code, &[], &[2])
+                .unwrap()
+                .len(),
+            0x100001
+        );
+        assert!(
+            pack_boot_sections(&[], &[], &code, &[1], &[2])
+                .unwrap_err()
+                .contains("overlap")
+        );
     }
 }
