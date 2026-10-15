@@ -1053,7 +1053,7 @@ mod tests {
                 assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
                 crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
                 assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
-                if index < 0 || index >= 2 {
+                if !(0..2).contains(&index) {
                     let source = source.replace("fn main()", "fn invalid()");
                     let source = format!(
                         "{source}\nfn main() -> Int {{ let result = invalid(); if result == 1 && calls == 12 {{ return 42; }} return 0; }}"
@@ -1095,7 +1095,7 @@ mod tests {
                 assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
                 crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
                 assert_eq!(invoke_module(&module, profile, &[]), Some(expected));
-                if index < 0 || index >= 2 {
+                if !(0..2).contains(&index) {
                     let source = source.replace("fn main()", "fn invalid()");
                     let source = format!(
                         "{source}\nfn main() -> Int {{ let result = invalid(); if result == 1 && calls == 12 {{ return 42; }} return 0; }}"
