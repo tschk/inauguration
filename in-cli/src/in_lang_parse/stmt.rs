@@ -214,8 +214,7 @@ fn parse_match_stmt(s: &str, context: &mut LoopParseContext<'_>) -> Result<Stmt,
     let rest = trim(s)
         .strip_prefix("match ")
         .ok_or_else(|| ".in: internal match parse".to_string())?;
-    let open = rest
-        .find('{')
+    let open = find_struct_init_open_brace(rest)
         .ok_or_else(|| ".in: `match` needs `{` body".to_string())?;
     let scrutinee = parse_expr_with_context(trim(&rest[..open]), context);
     let (inner, _) = brace_content_bounds_after_open(rest, open)

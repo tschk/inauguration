@@ -351,9 +351,9 @@ fn format_loop(body: &[Stmt], depth: usize, indent: &str, out: &mut String) {
 
 fn format_match(scrutinee: &Expr, arms: &[MatchArm], depth: usize, indent: &str, out: &mut String) {
     out.push_str(indent);
-    out.push_str("match ");
+    out.push_str("match (");
     out.push_str(&format_expr(scrutinee));
-    out.push_str(" {\n");
+    out.push_str(") {\n");
     for arm in arms {
         out.push_str(indent);
         out.push_str("  ");
@@ -495,7 +495,7 @@ fn main() { return; }
         assert!(canonical.contains("let arr: [Int] = [1, 2, 3]"));
         assert!(canonical.contains("arr[0] = 4"));
         assert!(canonical.contains("while p.x < 10 {"));
-        assert!(canonical.contains("match p.y {"));
+        assert!(canonical.contains("match (p.y) {"));
         assert!(canonical.contains("if p.x == 10 {"));
         assert!(canonical.contains("while true {"));
     }

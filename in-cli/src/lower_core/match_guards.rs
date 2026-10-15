@@ -85,6 +85,17 @@ fn expr_has_guard(expr: &Expr) -> bool {
     found
 }
 
+fn match_scrutinee_needs_storage(value: &Expr) -> bool {
+    matches!(
+        value,
+        Expr::ArrayLit(_)
+            | Expr::StructInit { .. }
+            | Expr::Conditional { .. }
+            | Expr::Block { .. }
+            | Expr::MatchValue { .. }
+    )
+}
+
 fn stmt_has_guard(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Let(_, _, expr)
@@ -109,7 +120,8 @@ fn stmt_has_guard(stmt: &Stmt) -> bool {
             cond.as_ref().is_some_and(expr_has_guard) || body.iter().any(stmt_has_guard)
         }
         Stmt::Match { scrutinee, arms } => {
-            expr_has_guard(scrutinee)
+            match_scrutinee_needs_storage(scrutinee)
+                || expr_has_guard(scrutinee)
                 || arms.iter().any(|arm| {
                     arm.guard.is_some()
                         || complex_pattern(&arm.pattern)
@@ -221,9 +233,11 @@ fn lower_body(
             Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
         }
         if let Stmt::Match { scrutinee, arms } = stmt {
-            if arms.iter().any(|arm| {
-                arm.guard.is_some() || (native_patterns && complex_pattern(&arm.pattern))
-            }) {
+            if (native_patterns && match_scrutinee_needs_storage(&scrutinee))
+                || arms.iter().any(|arm| {
+                    arm.guard.is_some() || (native_patterns && complex_pattern(&arm.pattern))
+                })
+            {
                 out.extend(expand_match(
                     scrutinee,
                     arms,
@@ -673,6 +687,31 @@ fn typed_pattern_with_schema<'a>(
 #[cfg(test)]
 mod value_pattern_tests {
     use super::*;
+
+    #[test]
+    fn wildcard_array_scrutinee_is_saved_before_native_arm_dispatch() {
+        let source = "fn tick()->Int{return 42;}\nfn main()->Int{match [tick()] {_ {return 42;}}}";
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        let mut frontend = module.clone();
+        lower_guarded_decls(&mut frontend.decls);
+        assert_eq!(
+            frontend, module,
+            "native storage preparation must not change frontend match structure"
+        );
+        let prepared = prepared_native_module(&module);
+        let Decl::Function { body, .. } = prepared
+            .decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function { name, .. } if name == "main"))
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(
+            matches!(&body[0], Stmt::Let(_, _, Expr::ArrayLit(items)) if matches!(items.as_slice(), [Expr::Call { .. }]))
+        );
+        assert!(!body.iter().any(|stmt| matches!(stmt, Stmt::Match { .. })));
+    }
 
     #[test]
     fn unit_statement_pattern_forces_native_preparation_without_spills() {

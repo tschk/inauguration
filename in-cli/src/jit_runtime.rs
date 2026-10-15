@@ -6135,6 +6135,54 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn match_scrutinee_headers_preserve_nested_braces_and_following_blocks() {
+        for body in [
+            "match (Entry{value:42}) {Entry{value:answer} -> {return answer;} _ {return 0;}}",
+            "match ({let answer:Int=42;Entry{value:answer}}) {Entry{value:answer} -> {return answer;} _ {return 0;}}",
+            "match [tick()] {_ {return calls+41;}}",
+            "match (if true{[tick()]}else{[0]}) {_ {return calls+41;}}",
+            "match ({let value:Int=tick();[value]}) {_ {return calls+41;}}",
+            r#"match "a{b}" {"a{b}" -> {return 42;} _ {return 0;}}"#,
+            "let answer=(match (Entry{value:42}) {Entry{value:value} -> {value} _ {0}});return answer;",
+            "let answer=(match ({let value:Int=42;value}) {42 -> {42} _ {0}});return answer;",
+            "let answer=(match [tick()] {_ {calls+41}});return answer;",
+            r#"let answer=(match "a{b}" {"a{b}" -> {42} _ {0}});return answer;"#,
+            "let answer:Int=0;match (Entry{value:20}) {Entry{value:value} -> {answer=value;} _ {answer=0;}} {answer+=22;}return answer;",
+        ] {
+            let source = format!(
+                "struct Entry{{\n Int value\n}}\nvar calls:Int=0;\nfn tick()->Int{{calls+=1;return 42;}}\nfn main()->Int{{{body}}}"
+            );
+            let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+            for source in [&source, &canonical] {
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                crate::lower_core::desugar_module(&mut module);
+                let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+                assert!(report.ok, "{source}: {report:?}; {module:?}");
+                for profile in [
+                    crate::emit_profile::EmitProfile::Default,
+                    crate::emit_profile::EmitProfile::Lean,
+                    crate::emit_profile::EmitProfile::Harden,
+                ] {
+                    let mut optimized = module.clone();
+                    crate::core_opt::optimize_with_profile(
+                        &mut optimized.decls,
+                        Some("main"),
+                        profile,
+                    );
+                    let report = crate::core_ir_verifier::verify_for_entry(&optimized, "main");
+                    assert!(report.ok, "{source} {profile:?}: {report:?}");
+                    assert_eq!(
+                        invoke_module(&optimized, profile, &[]),
+                        Some(42),
+                        "{source} {profile:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn jit_runtime_new_is_empty() {
         let rt = JitRuntime::new();
         assert_eq!(rt.function_count(), 0);

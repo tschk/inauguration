@@ -40,11 +40,7 @@ fn value_block_ends_with_semicolon(inner: &str) -> bool {
 fn try_parse_control_value(s: &str, context: &mut LoopParseContext<'_>) -> Option<Expr> {
     if let Some(rest) = s.strip_prefix("match ") {
         let rest = trim(rest);
-        let open = if rest.starts_with('(') {
-            find_fn_body_open_brace(rest)?
-        } else {
-            rest.find('{')?
-        };
+        let open = find_struct_init_open_brace(rest)?;
         let (inner, close) = brace_content_bounds_after_open(rest, open)?;
         if !trim(&rest[close + 1..]).is_empty() {
             return None;

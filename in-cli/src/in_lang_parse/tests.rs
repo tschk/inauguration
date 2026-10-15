@@ -2426,3 +2426,63 @@ fn human_statements_keep_keywords_and_distinguish_function_prefixes() {
         "send(value = 1)"
     );
 }
+
+#[test]
+fn match_scrutinee_boundaries_preserve_nested_and_quoted_braces() {
+    for scrutinee in [
+        r#""{""#,
+        r#""quoted\"{[,:""#,
+        "(Entry{value:42})",
+        "({let answer=42;answer})",
+        "[Entry{value:42}]",
+        r#"["{", "}"]"#,
+    ] {
+        for value in [false, true] {
+            let body = if value {
+                format!("let answer=(match {scrutinee} {{_ {{42}}}});return answer;")
+            } else {
+                format!("match {scrutinee} {{_ {{return 42;}}}}")
+            };
+            let source = format!("struct Entry {{Int value}}\nfn main()->Int {{{body}}}\n");
+            let before =
+                parse_in_source(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let function = before
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Function { name, body, .. } if name == "main" => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            let actual = match &function[0] {
+                Stmt::Match { scrutinee, .. } => scrutinee,
+                Stmt::Let(_, _, Expr::MatchValue { scrutinee, .. }) => scrutinee.as_ref(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(actual, &parse_expr(scrutinee), "{source}");
+            let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+            assert!(canonical.contains("match ("), "{canonical}");
+            let after =
+                parse_in_source(&canonical).unwrap_or_else(|error| panic!("{canonical}: {error}"));
+            assert_eq!(before.decls, after.decls, "{source}\n{canonical}");
+        }
+    }
+}
+
+#[test]
+fn match_does_not_steal_a_following_standalone_block() {
+    let source = "fn main()->Int {let value=42;match value {answer: {return answer;}} {0;}}";
+    let before = parse_in_source(source).unwrap();
+    let Decl::Function { body, .. } = &before.decls[0] else {
+        panic!("{before:?}")
+    };
+    assert_eq!(body.len(), 3, "{body:?}");
+    assert!(matches!(&body[1],Stmt::Match {scrutinee:Expr::Ident(name),..} if name == "value"));
+    assert!(matches!(&body[2], Stmt::Expr(Expr::Block { .. })));
+    let canonical = crate::in_canonical::canonicalize_in_source(source).unwrap();
+    assert_eq!(
+        before.decls,
+        parse_in_source(&canonical).unwrap().decls,
+        "{canonical}"
+    );
+}

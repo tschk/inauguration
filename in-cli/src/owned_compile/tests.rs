@@ -5682,3 +5682,46 @@ fn in_multiline_strings_preserve_exact_runtime_text_and_canonical_output() {
         }
     }
 }
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn match_scrutinee_boundaries_execute_without_consuming_following_blocks() {
+    for source in [
+        r#"struct Entry { Int value }
+fn main()->Int {match (Entry{value:42}) {Entry{value:answer}{return answer;}}}"#,
+        r#"fn main()->Int {match ({42}) {42{return 42;} _{return 0;}}}"#,
+        r#"struct Entry { Int value }
+fn main()->Int {match [42] {[answer] {return answer;} _ {return 0;}}}"#,
+        r#"fn main()->Int {match "{" {"{"{return 42;} _{return 0;}}}"#,
+        r#"fn main()->Int {return match "{" {"{"{42} _{0}};}"#,
+        r#"fn main()->Int {let value=42;match value {answer: {return answer;}} {0;}}"#,
+    ] {
+        let path = temp_path("match-header.in");
+        for text in [
+            source.to_string(),
+            crate::in_canonical::canonicalize_in_source(source).unwrap(),
+        ] {
+            fs::write(&path, &text).unwrap();
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut request =
+                    default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{profile:?}: {text}: {report:?}");
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{profile:?}: {text}: {report:?}"
+                );
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
