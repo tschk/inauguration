@@ -12,6 +12,12 @@ use crate::core_ir::{Expr, Typ};
 use crate::inrt::{inrt_builtin_param_slots, is_inrt_builtin};
 use crate::native_emit::aarch64::{self, CodeEmitter};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+// Self-hosting can visit thousands of calls missing from the module table.
+// Keep opt-in tracing finite; explicit IN3002 degradations remain independent.
+const MAX_EXTERNAL_CALL_TRACES: usize = 64;
+static EXTERNAL_CALL_TRACES: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn lower_call(
     emitter: &mut CodeEmitter,
@@ -45,11 +51,14 @@ pub(crate) fn lower_call(
         return Ok(());
     }
     if !functions.contains_key(target) {
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "[TRACE] EXTERNAL path for target={target}, all fns: {:?}",
-            functions.keys().collect::<Vec<_>>()
-        );
+        if crate::config::env_config().debug {
+            let seen = EXTERNAL_CALL_TRACES.fetch_add(1, Ordering::Relaxed);
+            if seen < MAX_EXTERNAL_CALL_TRACES {
+                eprintln!("[TRACE] external call candidate `{target}` in `{fn_name}`");
+            } else if seen == MAX_EXTERNAL_CALL_TRACES {
+                eprintln!("[TRACE] further external-call traces suppressed");
+            }
+        }
         // Load args into registers
         for (i, arg) in args.iter().enumerate() {
             if i > 7 {

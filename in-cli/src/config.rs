@@ -22,6 +22,8 @@ pub fn env_config() -> &'static EnvConfig {
 pub struct EnvConfig {
     /// `IN_SKIP_VERIFY`: skip Core IR verification in the JIT path.
     pub skip_verify: bool,
+    /// `IN_DEBUG`: print bounded native-lowering traces. Off by default.
+    pub debug: bool,
     /// `IN_STRICT_LOWERING`: fail the build when the native lowerer replaced any
     /// function with a runtime trap. Off by default because the self-hosting
     /// path intentionally degrades a small number of stdlib functions.
@@ -45,6 +47,9 @@ impl EnvConfig {
     pub fn from_env() -> Self {
         Self {
             skip_verify: std::env::var("IN_SKIP_VERIFY").is_ok(),
+            debug: std::env::var("IN_DEBUG")
+                .ok()
+                .is_some_and(|v| parse_env_bool(&v)),
             strict_lowering: std::env::var("IN_STRICT_LOWERING")
                 .ok()
                 .is_some_and(|v| parse_env_bool(&v)),

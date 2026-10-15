@@ -280,6 +280,12 @@ pub(crate) fn find_top_level_binary_op<'a>(s: &str, ops: &[&'a str]) -> Option<(
                         // Kebab-case identifiers: `foo-bar` is one name.
                         // Keep numeric subtraction (`1-2`) and spaced minus (`a - b`).
                         if *op == "-" {
+                            // A prefix minus belongs to the following operand,
+                            // not the binary split (e.g. `a + -(b + c)`).
+                            let previous = s[..i].trim_end().chars().next_back();
+                            if previous.is_none_or(|ch| "+-*/%<>=!&|^".contains(ch)) {
+                                continue;
+                            }
                             let prev = s[..i].chars().next_back();
                             let next = s[i + 1..].chars().next();
                             if let (Some(p), Some(n)) = (prev, next) {
