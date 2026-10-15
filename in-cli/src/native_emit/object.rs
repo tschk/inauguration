@@ -182,6 +182,7 @@ fn emit_aarch64_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeOb
     .ok()?;
     // ponytail: add data and CALL26 relocations before accepting globals or external calls.
     if !lowered.global_relocs.is_empty()
+        || !lowered.data_relocations.is_empty()
         || !lowered.external_refs.is_empty()
         || !lowered.degradations.is_empty()
     {
@@ -307,6 +308,7 @@ fn emit_aarch64_macho_archive(request: &NativeObjectRequest<'_>) -> Option<Nativ
     // The object writer has no writable data section; every export must be fully lowered.
     if lowered.exports.is_empty()
         || !lowered.global_relocs.is_empty()
+        || !lowered.data_relocations.is_empty()
         || !lowered.degradations.is_empty()
     {
         return None;

@@ -238,7 +238,7 @@ pub fn lower_boot_image(
             entry,
             crate::native_emit::NativeLinkage::Executable,
         )?;
-        if !result.global_relocs.is_empty() {
+        if !result.global_relocs.is_empty() || !result.data_relocations.is_empty() {
             return Err(
                 "native-lower: AArch64 boot images do not yet relocate writable globals".into(),
             );
@@ -262,7 +262,7 @@ pub fn lower_boot_image(
             crate::native_emit::x86_64_lower::X86StringLayout::Cstring,
         )?;
         result.require_resolved_imports()?;
-        if !result.global_relocs.is_empty() {
+        if !result.global_relocs.is_empty() || !result.data_relocations.is_empty() {
             return Err(
                 "native-lower: x86 boot images do not yet relocate writable globals".into(),
             );

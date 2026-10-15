@@ -69,7 +69,7 @@ fn native_inrt_builtin(wrapper: &str) -> Option<&'static str> {
     }
 }
 
-fn emit_stdlib_wrapper_register_call(
+pub(crate) fn emit_stdlib_wrapper_register_call(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
     wrapper: &str,

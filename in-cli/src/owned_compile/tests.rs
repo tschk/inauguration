@@ -45,6 +45,122 @@ fn default_request(
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
+fn owned_typed_string_globals_preserve_layout_values_and_mutability() {
+    for (original, expected) in [
+        (
+            "const first:String=\"left\";\nvar sentinel:Int=42;\nconst second:String=\"right\";\nfn stringentry()->String{return second;}\nfn main()->Int{if first==\"left\" && second==\"right\" && sentinel==42{return 42;}return 0;}",
+            "right",
+        ),
+        (
+            "const empty:String=\"\";\nconst unicode:String=\"你好🦀\";\nconst multiline:String=\"first\n  //literal\n\n尾\";\nfn stringentry()->String{return multiline;}\nfn main()->Int{if empty==\"\" && unicode==\"你好🦀\" && multiline==\"first\\n  //literal\\n\\n尾\"{return 42;}return 0;}",
+            "first\n  //literal\n\n尾",
+        ),
+        (
+            "var text:String=\"initial\";\nconst other:String=\"other\";\nconst untouched:String=\"constant\";\nfn mutate()->String{if text!=\"initial\"{return \"wrong initial value\";}text=\"changed\";if text!=\"changed\"{return \"wrong replacement\";}text=other;return text;}\nfn stringentry()->String{return mutate();}\nfn main()->Int{let result=mutate();if result==\"other\" && other==\"other\" && untouched==\"constant\"{return 42;}return 0;}",
+            "other",
+        ),
+    ] {
+        let canonical = crate::in_canonical::canonicalize_in_source(original)
+            .unwrap_or_else(|error| panic!("{original}: {error}"));
+        for (form, text) in [("original", original), ("canonical", canonical.as_str())] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let source = temp_path("typed-string-global.in");
+                fs::write(&source, text).unwrap();
+                let mut request = default_request(
+                    source.clone(),
+                    CompileTarget::Jit,
+                    Some("stringentry"),
+                    None,
+                );
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{form} {profile:?} {text}: {report:?}");
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Str(expected.into())),
+                    "{form} {profile:?} {text}"
+                );
+                request.entry = Some("main".into());
+                let report = compile_owned(&request);
+                assert!(report.success, "{form} {profile:?} {text}: {report:?}");
+                assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    let binary = temp_path("typed-string-global-native");
+                    request.target = CompileTarget::Native;
+                    request.out = Some(binary.clone());
+                    let report = compile_owned(&request);
+                    assert!(report.success, "{form} {profile:?} {text}: {report:?}");
+                    assert_eq!(
+                        std::process::Command::new(&binary).status().unwrap().code(),
+                        Some(42),
+                        "{form} {profile:?} {text}"
+                    );
+                    fs::remove_file(binary).unwrap();
+                }
+                fs::remove_file(source).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_typed_string_globals_retain_initializer_and_immutability_refusals() {
+    for (text, code, reason) in [
+        (
+            "var text:String=make();\nfn make()->String{return \"runtime\";}\nfn main()->Int{return 42;}",
+            None,
+            "initializer",
+        ),
+        (
+            "const text:String=42;\nfn main()->Int{return 42;}",
+            Some("verify-type-mismatch"),
+            "initializer expected String",
+        ),
+        (
+            "const text:String=\"fixed\";\nfn main()->Int{text=\"changed\";return 42;}",
+            Some("verify-immutable-global"),
+            "cannot assign to constant global",
+        ),
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("typed-string-global-refusal.in");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(!report.success, "{profile:?} {text}: {report:?}");
+            assert!(report.eval_result.is_none(), "{report:?}");
+            if let Some(code) = code {
+                assert_eq!(report.reason_code.as_deref(), Some(code), "{report:?}");
+            }
+            assert!(
+                report.reason.as_deref().unwrap_or("").contains(reason),
+                "{report:?}"
+            );
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
 fn owned_conditional_headers_preserve_quoted_braces_and_expression_effects() {
     for original in [
         "fn main()->Int {if \"{\"==\"{\" {return 42;} return 0;}",
@@ -3265,7 +3381,7 @@ fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
         return;
     }
     let path = temp_path("rust-static-ir-only.rs");
-    fs::write(&path, "struct Bag { value: i64 } static VALUES: &str=\"hi\"; fn main() -> Bag { return Bag { value: 42 }; }").unwrap();
+    fs::write(&path, "struct Bag { value: i64 } static VALUES: [&str;1]=[\"hi\"]; fn main() -> Bag { return Bag { value: 42 }; }").unwrap();
     let report = compile_owned(&default_request(
         path.clone(),
         CompileTarget::Jit,
@@ -3289,7 +3405,7 @@ fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
     let path = temp_path("rust-static-executable.rs");
     fs::write(
         &path,
-        "static VALUES: &str=\"hi\"; fn main() -> i64 { return 42; }",
+        "static VALUES: [&str;1]=[\"hi\"]; fn main() -> i64 { return 42; }",
     )
     .unwrap();
     let report = compile_owned(&default_request(
@@ -5781,4 +5897,30 @@ fn main()->Int {match [42] {[answer] {return answer;} _ {return 0;}}}"#,
         }
         fs::remove_file(path).unwrap();
     }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn rust_static_string_globals_use_native_data_storage() {
+    let source = temp_path("rust-static-string.rs");
+    fs::write(&source, "static TEXT:&str=\"λ\"; static VALUE:i64=42; fn main()->i64{if TEXT==\"λ\" {return VALUE;}0}").unwrap();
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        let mut request = default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(report.success, "{profile:?}: {report:?}");
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(42)),
+            "{profile:?}: {report:?}"
+        );
+    }
+    fs::remove_file(source).unwrap();
 }

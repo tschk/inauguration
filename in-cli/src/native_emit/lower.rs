@@ -111,6 +111,7 @@ fn build_assembly(
     external_refs: &[(u32, String)],
     error_slot_refs: &[u32],
     data: &[u8],
+    data_relocations: &[(u64, u64)],
     global_relocs: &[(u32, u64)],
     entry: &str,
 ) -> String {
@@ -210,10 +211,18 @@ fn build_assembly(
         ));
     }
 
-    if !global_relocs.is_empty() {
+    if !data.is_empty() {
         asm.push_str("\t.data\n\t.p2align 3\n_inrt_globals:\n");
-        for byte in data {
-            asm.push_str(&format!("\t.byte {byte}\n"));
+        let fixups: HashMap<u64, u64> = data_relocations.iter().copied().collect();
+        let mut offset = 0usize;
+        while offset < data.len() {
+            if let Some(target) = fixups.get(&(offset as u64)) {
+                asm.push_str(&format!("\t.quad _inrt_globals+{target}\n"));
+                offset += 8;
+            } else {
+                asm.push_str(&format!("\t.byte {}\n", data[offset]));
+                offset += 1;
+            }
         }
     }
 
@@ -302,6 +311,8 @@ pub struct LoweredModule {
     pub relocations: Vec<(u32, u64)>,
     /// Writable global data and literal-address sites rebased to it at JIT load.
     pub data: Vec<u8>,
+    /// Data-relative pointer slots and their data-relative payload targets.
+    pub data_relocations: Vec<(u64, u64)>,
     pub global_relocs: Vec<(u32, u64)>,
     /// External symbol names referenced by the code (for native linking).
     /// Each entry is (instruction_offset, symbol_name).
@@ -623,7 +634,14 @@ pub fn lower_module_with_jobs(
     let structs = collect_structs(module);
     let strings = collect_strings(module);
     let globals = super::global_data::collect_globals(module, &structs);
-    let data = super::global_data::build_data_section(module, &globals)?;
+    let super::global_data::DataSection {
+        bytes: data,
+        pointer_fixups: data_relocations,
+    } = super::global_data::build_data_section(
+        module,
+        &globals,
+        super::global_data::StringLayout::Instring,
+    )?;
     let global_types: HashMap<String, Typ> = module
         .decls
         .iter()
@@ -927,6 +945,7 @@ pub fn lower_module_with_jobs(
         function_offsets,
         relocations: Vec::new(), // Code-relative references use PC-relative instructions.
         data,
+        data_relocations,
         global_relocs,
         external_refs,
         degradations,
@@ -1596,3 +1615,16 @@ fn max_aggregate_vector_literal_words(
 
 #[cfg(test)]
 mod lower_tests;
+
+#[cfg(test)]
+mod global_data_assembly_tests {
+    #[test]
+    fn emits_data_pointer_slots_once_without_code_global_references() {
+        let asm = super::build_assembly(&[], &[], &[], &[], &[99; 16], &[(0, 8)], &[], "main");
+        assert!(asm.contains("_inrt_globals:"), "{asm}");
+        assert_eq!(asm.matches(".quad _inrt_globals+8").count(), 1, "{asm}");
+        assert_eq!(asm.matches(".byte 99").count(), 8, "{asm}");
+        let raw = super::build_assembly(&[], &[], &[], &[], &[42], &[], &[], "main");
+        assert!(raw.contains("_inrt_globals:\n\t.byte 42"), "{raw}");
+    }
+}

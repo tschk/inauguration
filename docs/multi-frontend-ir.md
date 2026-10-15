@@ -51,7 +51,7 @@ Rust impl lowering resolves `Self` and `Self::…` against the owning type in si
 
 ## Literal text across source lines
 
-The `.in` normalization, declaration, and surface passes share quote state across physical lines. Braces, comment-looking lines, colons, whitespace, and blank lines inside strings retain their literal meaning. Canonical output retains global declarations and their mutability, types, and initializers. Native global initializer support remains limited to its existing constant-data subset.
+The `.in` normalization, declaration, and surface passes share quote state across physical lines. Braces, comment-looking lines, colons, whitespace, and blank lines inside strings retain their literal meaning. Canonical output retains global declarations and their mutability, types, and initializers. Typed String globals store pointers to aligned literal payloads in the writable data section. Data-to-data relocation metadata rebases these pointers for independent JIT mappings and native assembly; SCI retains its NUL-terminated payload layout. String equality compares contents across distinct payloads, including embedded NUL bytes in the hosted length-prefixed layout. Runtime-call initializers, struct-array storage, and inference for unannotated globals remain separate limitations.
 
 ## Unit values
 

@@ -97,16 +97,12 @@ pub(crate) fn append_string_table(
             emitter.len().is_multiple_of(8),
             "string table entry must be 8-byte aligned"
         );
-        let header_offset = emitter.len() as i64;
-        index_offsets.insert(idx, header_offset);
-        emitter
-            .bytes
-            .extend_from_slice(&(value.len() as u64).to_le_bytes());
-        emitter.bytes.extend_from_slice(value.as_bytes());
-        // Pad to 8-byte alignment for the next entry.
-        while !emitter.len().is_multiple_of(8) {
-            emitter.bytes.push(0);
-        }
+        let header_offset = crate::native_emit::global_data::append_string_payload(
+            &mut emitter.bytes,
+            value,
+            crate::native_emit::global_data::StringLayout::Instring,
+        )?;
+        index_offsets.insert(idx, header_offset as i64);
     }
 
     for p in pending {

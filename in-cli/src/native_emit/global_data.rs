@@ -1,6 +1,101 @@
 use crate::core_ir::{Decl, Expr, Typ, UnifiedModule};
 use std::collections::HashMap;
 
+#[derive(Debug, Default)]
+pub(crate) struct DataSection {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) pointer_fixups: Vec<(u64, u64)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringLayout {
+    Instring,
+    Cstring,
+}
+
+/// Append an aligned immutable string payload and return its data-relative address.
+pub(crate) fn append_string_payload(
+    bytes: &mut Vec<u8>,
+    value: &str,
+    layout: StringLayout,
+) -> Result<u64, String> {
+    let start = bytes
+        .len()
+        .checked_add(7)
+        .map(|size| size & !7)
+        .ok_or("native string payload size overflow")?;
+    let prefix = if layout == StringLayout::Instring {
+        8
+    } else {
+        0
+    };
+    let suffix = if layout == StringLayout::Cstring {
+        1
+    } else {
+        0
+    };
+    let end = start
+        .checked_add(prefix)
+        .and_then(|size| size.checked_add(value.len()))
+        .and_then(|size| size.checked_add(suffix))
+        .and_then(|size| size.checked_add(7))
+        .map(|size| size & !7)
+        .ok_or("native string payload size overflow")?;
+    bytes
+        .try_reserve(end - bytes.len())
+        .map_err(|error| format!("native string payload allocation failed: {error}"))?;
+    bytes.resize(end, 0);
+    if prefix != 0 {
+        bytes[start..start + 8].copy_from_slice(&(value.len() as u64).to_le_bytes());
+    }
+    bytes[start + prefix..start + prefix + value.len()].copy_from_slice(value.as_bytes());
+    Ok(start as u64)
+}
+
+/// Rebase data pointers; callers select their target's maximum pointer address.
+pub(crate) fn apply_data_relocations(
+    bytes: &mut [u8],
+    fixups: &[(u64, u64)],
+    data_base: u64,
+    address_limit: u64,
+) -> Result<(), String> {
+    let len = bytes.len() as u64;
+    if len != 0
+        && data_base
+            .checked_add(len - 1)
+            .is_none_or(|last| last > address_limit)
+    {
+        return Err("native data section exceeds target pointer address space".into());
+    }
+    let mut slots = std::collections::HashSet::with_capacity(fixups.len());
+    for &(slot, target) in fixups {
+        if slot % 8 != 0 || slot.checked_add(8).is_none_or(|end| end > len) {
+            return Err(format!(
+                "native data relocation slot {slot} is unaligned or out of bounds"
+            ));
+        }
+        if !slots.insert(slot) {
+            return Err(format!("native data relocation slot {slot} is duplicated"));
+        }
+        if target >= len {
+            return Err(format!(
+                "native data relocation target {target} is out of bounds"
+            ));
+        }
+        let address = data_base
+            .checked_add(target)
+            .ok_or("native data relocation address overflow")?;
+        if address > address_limit {
+            return Err("native data relocation exceeds target pointer width".into());
+        }
+    }
+    for &(slot, target) in fixups {
+        bytes[slot as usize..slot as usize + 8]
+            .copy_from_slice(&(data_base + target).to_le_bytes());
+    }
+    Ok(())
+}
+
 fn array_storage_size(init: Option<&Expr>) -> usize {
     let Some(Expr::ArrayLit(items)) = init else {
         return 16;
@@ -110,11 +205,13 @@ pub(crate) fn collect_globals(
 pub(crate) fn build_data_section(
     module: &UnifiedModule,
     globals: &HashMap<String, u64>,
-) -> Result<Vec<u8>, String> {
+    layout: StringLayout,
+) -> Result<DataSection, String> {
     if globals.is_empty() {
-        return Ok(Vec::new());
+        return Ok(DataSection::default());
     }
     let mut data = Vec::new();
+    let mut strings = Vec::new();
     for decl in &module.decls {
         if let Decl::Global {
             name,
@@ -125,6 +222,20 @@ pub(crate) fn build_data_section(
         } = decl
         {
             let offset = *globals.get(name).unwrap_or(&0);
+            if typ.canonical() == Typ::String {
+                let value = match init.as_deref() {
+                    Some(Expr::StringLit(value)) => value.as_str(),
+                    None => "",
+                    _ => {
+                        return Err(format!(
+                            "unsupported native initializer for global `{name}`; expected a string literal"
+                        ));
+                    }
+                };
+                data.resize(offset as usize + 8, 0);
+                strings.push((offset, value));
+                continue;
+            }
             if let Typ::Array(elem) = typ.canonical() {
                 data.resize(offset as usize, 0);
                 append_array(&mut data, &elem, init.as_deref(), name)?;
@@ -196,12 +307,167 @@ pub(crate) fn build_data_section(
     while data.len() < max_needed as usize {
         data.push(0);
     }
-    Ok(data)
+    // All global slots and array storage precede payloads, regardless of declaration order.
+    let mut pointer_fixups = Vec::with_capacity(strings.len());
+    for (slot, value) in strings {
+        let target = append_string_payload(&mut data, value, layout)?;
+        pointer_fixups.push((slot, target));
+    }
+    Ok(DataSection {
+        bytes: data,
+        pointer_fixups,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn global(name: &str, typ: Typ, init: Option<Expr>) -> Decl {
+        Decl::Global {
+            name: name.into(),
+            typ,
+            init: init.map(Box::new),
+            mutable: true,
+            constant_value: false,
+        }
+    }
+
+    #[test]
+    fn string_payload_fixups_preserve_interleaved_global_storage() {
+        let text = "λ\0\n";
+        let structs = HashMap::from([(
+            "Pair".into(),
+            vec![("left".into(), Typ::Int), ("right".into(), Typ::Int)],
+        )]);
+        let module = UnifiedModule::new(vec![
+            global("first", Typ::String, Some(Expr::StringLit(text.into()))),
+            global("count", Typ::Int, Some(Expr::IntLit(42))),
+            global("pair", Typ::Named("Pair".into()), Some(Expr::IntLit(0))),
+            global(
+                "numbers",
+                Typ::Array(Box::new(Typ::Int)),
+                Some(Expr::ArrayLit(vec![Expr::IntLit(20), Expr::IntLit(22)])),
+            ),
+            global("last", Typ::String, Some(Expr::StringLit(String::new()))),
+            global("sentinel", Typ::Int, Some(Expr::IntLit(7))),
+        ]);
+        let globals = collect_globals(&module, &structs);
+        for layout in [StringLayout::Instring, StringLayout::Cstring] {
+            let mut section = build_data_section(&module, &globals, layout).unwrap();
+            assert_eq!(section.pointer_fixups.len(), 2);
+            let word = |bytes: &[u8], offset: u64| {
+                u64::from_le_bytes(
+                    bytes[offset as usize..offset as usize + 8]
+                        .try_into()
+                        .unwrap(),
+                )
+            };
+            assert_eq!(word(&section.bytes, globals["count"]), 42);
+            assert_eq!(word(&section.bytes, globals["sentinel"]), 7);
+            assert_eq!(word(&section.bytes, globals["pair.right"]), 0);
+            assert_eq!(word(&section.bytes, globals["numbers"]), 2);
+            assert_eq!(word(&section.bytes, globals["numbers"] + 16), 20);
+            assert_eq!(word(&section.bytes, globals["numbers"] + 24), 22);
+            let start = section.pointer_fixups[0].1 as usize;
+            let empty = section.pointer_fixups[1].1 as usize;
+            assert!(start >= globals["sentinel"] as usize + 8);
+            assert_eq!(start % 8, 0);
+            assert_eq!(empty % 8, 0);
+            let prefix = if layout == StringLayout::Instring {
+                8
+            } else {
+                0
+            };
+            if layout == StringLayout::Instring {
+                assert_eq!(word(&section.bytes, start as u64), text.len() as u64);
+                assert_eq!(word(&section.bytes, empty as u64), 0);
+            } else {
+                assert_eq!(section.bytes[start + text.len()], 0);
+                assert_eq!(section.bytes[empty], 0);
+            }
+            assert_eq!(
+                &section.bytes[start + prefix..start + prefix + text.len()],
+                text.as_bytes()
+            );
+            apply_data_relocations(
+                &mut section.bytes,
+                &section.pointer_fixups,
+                0x1000,
+                u64::MAX,
+            )
+            .unwrap();
+            assert_eq!(
+                word(&section.bytes, globals["first"]),
+                0x1000 + start as u64
+            );
+            assert_eq!(word(&section.bytes, globals["last"]), 0x1000 + empty as u64);
+        }
+    }
+
+    #[test]
+    fn default_empty_string_has_a_real_payload_and_calls_stay_unsupported() {
+        let empty = UnifiedModule::new(vec![global("empty", Typ::String, None)]);
+        let offsets = collect_globals(&empty, &HashMap::new());
+        for layout in [StringLayout::Instring, StringLayout::Cstring] {
+            let data = build_data_section(&empty, &offsets, layout).unwrap();
+            assert_eq!(data.pointer_fixups, [(0, 8)]);
+            assert!(data.bytes[8..].iter().all(|byte| *byte == 0));
+        }
+        for init in [
+            Expr::IntLit(0),
+            Expr::Call {
+                callee: Box::new(Expr::Ident("make".into())),
+                args: vec![],
+            },
+        ] {
+            let module = UnifiedModule::new(vec![global("text", Typ::String, Some(init))]);
+            let offsets = collect_globals(&module, &HashMap::new());
+            assert!(
+                build_data_section(&module, &offsets, StringLayout::Instring)
+                    .unwrap_err()
+                    .contains("expected a string literal")
+            );
+        }
+    }
+
+    #[test]
+    fn data_pointer_relocation_validation_is_atomic_and_checks_target_width() {
+        for (fixups, base, limit) in [
+            (vec![(1, 16)], 0, u64::MAX),
+            (vec![(24, 16)], 0, u64::MAX),
+            (vec![(u64::MAX, 16)], 0, u64::MAX),
+            (vec![(0, 16), (0, 16)], 0, u64::MAX),
+            (vec![(0, 24)], 0, u64::MAX),
+            (vec![(0, u64::MAX)], 0, u64::MAX),
+            (vec![(0, 16)], u64::MAX - 8, u64::MAX),
+            (vec![(0, 16)], u32::MAX as u64, u32::MAX as u64),
+            (vec![(0, 16)], u32::MAX as u64 - 16, u32::MAX as u64),
+            (vec![(0, 16), (8, 24)], 0x1000, u64::MAX),
+        ] {
+            let mut bytes = vec![0xAA; 24];
+            assert!(apply_data_relocations(&mut bytes, &fixups, base, limit).is_err());
+            assert_eq!(
+                bytes, [0xAA; 24],
+                "invalid metadata must not partially patch data"
+            );
+        }
+        let mut bytes = vec![0; 24];
+        apply_data_relocations(
+            &mut bytes,
+            &[(0, 16)],
+            u32::MAX as u64 - 23,
+            u32::MAX as u64,
+        )
+        .unwrap();
+        assert_eq!(
+            u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+            u32::MAX as u64 - 7
+        );
+        // Target offsets are byte addresses; only pointer slots require word alignment.
+        apply_data_relocations(&mut bytes, &[(8, 17)], 0x1000, u64::MAX).unwrap();
+        assert_eq!(u64::from_le_bytes(bytes[8..16].try_into().unwrap()), 0x1011);
+    }
 
     #[test]
     fn nested_headers_use_relative_offsets_and_preserve_neighbors() {
@@ -212,7 +478,9 @@ mod tests {
         let globals = collect_globals(&module, &HashMap::new());
         assert_eq!(globals["items"], 8);
         assert_eq!(globals["after"], 88);
-        let data = build_data_section(&module, &globals).unwrap();
+        let data = build_data_section(&module, &globals, StringLayout::Instring)
+            .unwrap()
+            .bytes;
         let words = data
             .chunks_exact(8)
             .map(|word| i64::from_le_bytes(word.try_into().unwrap()))
@@ -227,7 +495,9 @@ mod tests {
         assert_eq!(globals["before"], 0);
         assert_eq!(globals["items"], 8);
         assert_eq!(globals["after"], 40);
-        let data = build_data_section(&module, &globals).unwrap();
+        let data = build_data_section(&module, &globals, StringLayout::Instring)
+            .unwrap()
+            .bytes;
         let words: Vec<_> = data
             .chunks_exact(8)
             .map(|bytes| i64::from_le_bytes(bytes.try_into().unwrap()))
@@ -260,7 +530,7 @@ mod tests {
             crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
             let globals = collect_globals(&module, &HashMap::new());
             assert!(
-                build_data_section(&module, &globals)
+                build_data_section(&module, &globals, StringLayout::Instring)
                     .unwrap_err()
                     .contains("unsupported native initializer for global `seed`")
             );
@@ -382,7 +652,9 @@ mod tests {
     fn parsed_global_literals_initialize_shared_data() {
         let module = crate::in_lang_parse::parse_in_source("var count: Int = 3;\nvar value: Float = 1.5;\nconst enabled: Bool = true;\nfn main() -> Int { return count; }").expect("parse");
         let globals = collect_globals(&module, &HashMap::new());
-        let data = build_data_section(&module, &globals).unwrap();
+        let data = build_data_section(&module, &globals, StringLayout::Instring)
+            .unwrap()
+            .bytes;
         let words = data
             .chunks_exact(8)
             .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
@@ -391,9 +663,14 @@ mod tests {
         let empty =
             crate::in_lang_parse::parse_in_source("fn main() -> Int { return 0; }").expect("parse");
         assert!(
-            build_data_section(&empty, &collect_globals(&empty, &HashMap::new()))
-                .unwrap()
-                .is_empty()
+            build_data_section(
+                &empty,
+                &collect_globals(&empty, &HashMap::new()),
+                StringLayout::Instring
+            )
+            .unwrap()
+            .bytes
+            .is_empty()
         );
     }
 }

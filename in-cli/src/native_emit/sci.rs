@@ -273,4 +273,21 @@ mod tests {
         let name_pool_first = name_off.min(iname_off);
         assert!(name_pool_first as usize >= import_table_off + 16);
     }
+    #[test]
+    fn sci_string_globals_point_to_cstring_payloads_inside_the_image() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "const label:String=\"λ\";\nvar sentinel:Int=42;\nfn main()->String{return label;}",
+        )
+        .unwrap();
+        let base = 0x40000020;
+        let image = emit_sci_binary(&module, "main", base).unwrap();
+        let exports = u64_at(&image, 40) as usize;
+        // Two global words followed by one aligned NUL-terminated payload.
+        let data = exports - 24;
+        let pointer = u64_at(&image, data);
+        assert_eq!(pointer, base + data as u64 + 16);
+        assert_eq!(u64_at(&image, data + 8), 42);
+        assert_eq!(cstr_at(&image, pointer - base), "λ");
+        assert_eq!(&image[data + 16..data + 19], "λ\0".as_bytes());
+    }
 }

@@ -12,7 +12,11 @@
 
 use crate::core_ir::{Decl, Expr, LoopKind, MatchArm, MatchPattern, Stmt, Typ, UnifiedModule};
 use crate::native_emit::antidecomp;
-use crate::native_emit::global_data::{build_data_section, collect_globals};
+/// Layout of emitted string payloads; retained under the existing public x86 API name.
+pub use crate::native_emit::global_data::StringLayout as X86StringLayout;
+use crate::native_emit::global_data::{
+    append_string_payload, apply_data_relocations, build_data_section, collect_globals,
+};
 use crate::native_emit::x86_64::{self, CodeEmitter, RAX, RBP, RBX, RCX, RDI, RDX, RSI};
 use std::collections::HashMap;
 
@@ -127,6 +131,8 @@ pub struct X86_64CompileResult {
     pub codegen_base: u64,
     /// Initialised data section bytes (global variable initial values).
     pub data: Vec<u8>,
+    /// Data-relative pointer slots and their data-relative payload targets.
+    pub data_relocations: Vec<(u64, u64)>,
     /// Undefined symbols (externs) — names of functions called but not
     /// defined in this module. Resolved at link time.
     pub externs: Vec<String>,
@@ -162,6 +168,7 @@ struct FunctionInfo {
 }
 
 struct LowerCtx<'a> {
+    string_layout: X86StringLayout,
     /// Map local name → stack offset (negative from RBP)
     locals: HashMap<String, StackSlot>,
     scalar_types: HashMap<String, Typ>,
@@ -230,6 +237,7 @@ impl<'a> LowerCtx<'a> {
         globals: HashMap<String, u64>,
     ) -> Self {
         let mut ctx = Self {
+            string_layout: X86StringLayout::Instring,
             locals: HashMap::new(),
             scalar_types: HashMap::new(),
             empty_struct_bases: HashMap::new(),
@@ -386,17 +394,6 @@ pub fn lower_native_module(
     lower_module_with_bases(module, entry, 0x101100, 0x200000)
 }
 
-/// Layout of string-literal data in the emitted artifact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum X86StringLayout {
-    /// Hosted JIT ABI: `{ u64 byte length, bytes }` — the runtime instring
-    /// representation read by `decode_jit_string` / `instring_from_ptr`.
-    Instring,
-    /// Freestanding ABI: NUL-terminated bytes; a string's value address is
-    /// its first byte. Used by the SCI and boot-image emitters.
-    Cstring,
-}
-
 /// Lower a Core IR module to x86_64 machine code for a specific load layout.
 ///
 /// `code_base` is the virtual address of the first instruction in `code`.
@@ -490,6 +487,7 @@ fn lower_module_impl(
             &mut all_pending_calls,
             is_interrupt,
             runtime_error_slot,
+            layout,
         )?;
         all_pending_globals.extend(pending);
     }
@@ -537,10 +535,14 @@ fn lower_module_impl(
         while !emitter.len().is_multiple_of(8) {
             emitter.bytes.push(0x90);
         }
-        let code_end = emitter.len();
-        let mut str_offset = 0u64;
         for s in &all_strings {
-            let abs_addr = code_base + code_end as u64 + str_offset;
+            let offset = append_string_payload(&mut emitter.bytes, s, layout)?;
+            let abs_addr = code_base
+                .checked_add(offset)
+                .ok_or("native string address overflow")?;
+            if x86_64::is_32bit() && abs_addr > u32::MAX as u64 {
+                return Err("native string address exceeds target pointer address space".into());
+            }
             for &(site, ref content) in &str_refs {
                 if content == s {
                     let site_u = site as usize;
@@ -554,35 +556,6 @@ fn lower_module_impl(
                         emitter.bytes[site_u..site_u + 8].copy_from_slice(&abs_addr.to_le_bytes());
                         relocations.push(site);
                     }
-                }
-            }
-            // Payload layout depends on the target artifact kind.
-            let start = code_end as usize + str_offset as usize;
-            match layout {
-                X86StringLayout::Instring => {
-                    // Length-prefixed payload (`decode_jit_string` reads u64
-                    // len then bytes).
-                    let padded = (8 + s.len() + 7) & !7;
-                    let end = start + padded;
-                    if end > emitter.bytes.len() {
-                        emitter.bytes.resize(end, 0);
-                    }
-                    emitter.bytes[start..start + 8]
-                        .copy_from_slice(&(s.len() as u64).to_le_bytes());
-                    emitter.bytes[start + 8..start + 8 + s.len()].copy_from_slice(s.as_bytes());
-                    str_offset += padded as u64;
-                }
-                X86StringLayout::Cstring => {
-                    // NUL-terminated payload; the referenced address is the
-                    // first byte of the string.
-                    let padded = (s.len() + 1 + 7) & !7;
-                    let end = start + padded;
-                    if end > emitter.bytes.len() {
-                        emitter.bytes.resize(end, 0);
-                    }
-                    emitter.bytes[start..start + s.len()].copy_from_slice(s.as_bytes());
-                    emitter.bytes[start + s.len()] = 0;
-                    str_offset += padded as u64;
                 }
             }
         }
@@ -608,7 +581,20 @@ fn lower_module_impl(
         .iter()
         .map(|(name, offset)| (name.clone(), *offset))
         .collect();
-    let data = build_data_section(module, &globals)?;
+    let crate::native_emit::global_data::DataSection {
+        bytes: mut data,
+        pointer_fixups: data_relocations,
+    } = build_data_section(module, &globals, layout)?;
+    apply_data_relocations(
+        &mut data,
+        &data_relocations,
+        data_base,
+        if x86_64::is_32bit() {
+            u32::MAX as u64
+        } else {
+            u64::MAX
+        },
+    )?;
 
     // Build externs list: calls to functions not defined in this module
     let mut externs: Vec<String> = Vec::new();
@@ -630,6 +616,7 @@ fn lower_module_impl(
         global_relocs,
         codegen_base: code_base,
         data,
+        data_relocations,
         externs,
         extern_calls,
     })
@@ -1047,6 +1034,7 @@ fn lower_function(
     pending_calls: &mut Vec<PendingCall>,
     is_interrupt: bool,
     runtime_error_slot: bool,
+    string_layout: X86StringLayout,
 ) -> Result<Vec<PendingGlobal>, String> {
     super::lower::ensure_unit_sequence_layout(&func.ret)?;
     for (_, typ) in &func.params {
@@ -1078,6 +1066,7 @@ fn lower_function(
             .entry(name.clone())
             .or_insert_with(|| typ.clone());
     }
+    ctx.string_layout = string_layout;
     ctx.is_interrupt = is_interrupt;
     ctx.runtime_error_slot = runtime_error_slot;
     ctx.ret_typ = func.ret.clone();
@@ -1779,7 +1768,7 @@ fn lower_stmt(
                         emitter.emit_insns(&x86_64::push_r(RAX));
                         lower_string_lit(emitter, RCX, &value, pending_calls)?;
                         emitter.emit_insns(&x86_64::pop_r(RAX));
-                        type_misses.extend(emit_string_match_test(emitter)?);
+                        type_misses.extend(emit_string_match_test(emitter, ctx.string_layout)?);
                         None
                     }
                     MatchPattern::WildPat => None,
@@ -1935,17 +1924,40 @@ fn lower_loop(
     Ok(())
 }
 
-fn emit_string_match_test(emitter: &mut CodeEmitter) -> Result<Vec<u32>, String> {
+fn emit_string_match_test(
+    emitter: &mut CodeEmitter,
+    layout: X86StringLayout,
+) -> Result<Vec<u32>, String> {
     if x86_64::is_32bit() {
         return Err("x86_64-lower: string matching requires 64-bit mode".into());
     }
-    // Preserve RAX for later arms; R8/R9 walk the two length-prefixed payloads.
+    // Preserve RAX for later arms; R8/R9 walk the two payloads.
     let mut misses = Vec::with_capacity(3);
     emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
     misses.push(emitter.len());
     emitter.emit_insns(&x86_64::jcc_near(4, 0));
+    emitter.emit_insns(&x86_64::test_rr(RCX, RCX));
+    misses.push(emitter.len());
+    emitter.emit_insns(&x86_64::jcc_near(4, 0));
     emitter.emit_insns(&x86_64::mov_rr(8, RAX));
     emitter.emit_insns(&x86_64::mov_rr(9, RCX));
+    if layout == X86StringLayout::Cstring {
+        let head = emitter.len();
+        emitter.emit_insns(&x86_64::movzx_m8(RDX, 8));
+        emitter.emit_insns(&x86_64::movzx_m8(RCX, 9));
+        emitter.emit_insns(&x86_64::cmp_rr(RDX, RCX));
+        misses.push(emitter.len());
+        emitter.emit_insns(&x86_64::jcc_near(5, 0));
+        emitter.emit_insns(&x86_64::test_rr(RDX, RDX));
+        let end = emitter.len();
+        emitter.emit_insns(&x86_64::jcc_near(4, 0));
+        emitter.emit_insns(&x86_64::add_rmi8(8, 1));
+        emitter.emit_insns(&x86_64::add_rmi8(9, 1));
+        let back = emitter.len();
+        emitter.emit_insns(&x86_64::jmp_rel32(head as i32 - back as i32 - 5));
+        emitter.patch_u32(end + 2, (emitter.len() as i32 - end as i32 - 6) as u32);
+        return Ok(misses);
+    }
     emitter.emit_insns(&x86_64::mov_r_m(10, 8, 0));
     emitter.emit_insns(&x86_64::mov_r_m(11, 9, 0));
     emitter.emit_insns(&x86_64::cmp_rr(10, 11));
@@ -2063,7 +2075,7 @@ fn lower_match(
             emitter.emit_insns(&x86_64::push_r(RAX));
             lower_string_lit(emitter, RCX, &pat, pending_calls)?;
             emitter.emit_insns(&x86_64::pop_r(RAX));
-            let mut not_equal = emit_string_match_test(emitter)?;
+            let mut not_equal = emit_string_match_test(emitter, ctx.string_layout)?;
             not_equal.extend(type_miss);
 
             for stmt in &arm.body {
@@ -2565,6 +2577,30 @@ fn lower_binary_expr(
     emitter.emit_insns(&x86_64::push_r(RAX));
     lower_expr_into(emitter, ctx, rhs, RAX, pending_calls)?;
     emitter.emit_insns(&x86_64::pop_r(RDX));
+
+    if matches!(op, "==" | "!=" | "===" | "!==")
+        && [lhs, rhs].into_iter().all(|value| {
+            scalar_expr_type(value, ctx).is_some_and(|typ| typ.canonical() == Typ::String)
+        })
+    {
+        // Operands were evaluated once, left-to-right, above. The shared matcher
+        // consumes RAX/RCX and leaves mismatch branches for its caller to resolve.
+        emitter.emit_insns(&x86_64::mov_rr(RCX, RDX));
+        let misses = emit_string_match_test(emitter, ctx.string_layout)?;
+        let equal = matches!(op, "==" | "===");
+        emitter.emit_insns(&x86_64::load_i64(RAX, i64::from(equal)));
+        let end = emitter.len();
+        emitter.emit_insns(&x86_64::jmp_rel32(0));
+        for site in misses {
+            emitter.patch_u32(site + 2, (emitter.len() as i32 - site as i32 - 6) as u32);
+        }
+        emitter.emit_insns(&x86_64::load_i64(RAX, i64::from(!equal)));
+        emitter.patch_u32(end + 1, (emitter.len() as i32 - end as i32 - 5) as u32);
+        if target_reg != RAX {
+            emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+        }
+        return Ok(());
+    }
 
     // ponytail: Float uses the owned integer ABI; typed C FFI needs XMM argument/return marshalling.
     let lhs_float = scalar_expr_type(lhs, ctx) == Some(Typ::Float);
@@ -4560,6 +4596,99 @@ fn lower_expr_into(
 mod tests {
     use super::*;
     use crate::core_ir::UnifiedModule;
+
+    #[cfg(all(target_arch = "x86_64", unix))]
+    #[test]
+    fn string_comparisons_execute_by_content_in_both_layouts() {
+        for layout in [X86StringLayout::Instring, X86StringLayout::Cstring] {
+            for op in ["==", "!=", "===", "!=="] {
+                let module = UnifiedModule::new(vec![Decl::Function {
+                    name: "compare".into(),
+                    params: vec![("left".into(), Typ::String), ("right".into(), Typ::String)],
+                    ret: Typ::Bool,
+                    type_params: vec![],
+                    body: vec![Stmt::Return(Some(Expr::Binary {
+                        op: op.into(),
+                        lhs: Box::new(Expr::Ident("left".into())),
+                        rhs: Box::new(Expr::Ident("right".into())),
+                    }))],
+                }]);
+                let result =
+                    lower_module_with_bases_layout(&module, "compare", 0, 0, layout).unwrap();
+                let offsets: Vec<_> = result
+                    .exports
+                    .iter()
+                    .map(|(name, offset)| (name.clone(), *offset, 0))
+                    .collect();
+                let mut runtime = crate::jit_runtime::JitRuntime::new();
+                runtime.load(&result.code, &offsets, &[]).unwrap();
+                for (left, right, equal) in [
+                    ("", "", true),
+                    ("λ雪", "λ雪", true),
+                    ("a", "ab", false),
+                    ("ab", "ac", false),
+                ] {
+                    let mut left_bytes = Vec::new();
+                    let mut right_bytes = Vec::new();
+                    append_string_payload(&mut left_bytes, left, layout).unwrap();
+                    append_string_payload(&mut right_bytes, right, layout).unwrap();
+                    let actual = unsafe {
+                        runtime.invoke(
+                            "compare",
+                            &[left_bytes.as_ptr() as i64, right_bytes.as_ptr() as i64],
+                        )
+                    };
+                    let expected = if matches!(op, "==" | "===") {
+                        equal
+                    } else {
+                        !equal
+                    };
+                    assert_eq!(
+                        actual,
+                        Some(i64::from(expected)),
+                        "{layout:?}: {left:?} {op} {right:?}"
+                    );
+                }
+            }
+            let module = UnifiedModule::new(vec![Decl::Function {
+                name: "match_string".into(),
+                params: vec![("text".into(), Typ::String)],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![Stmt::Match {
+                    scrutinee: Expr::Ident("text".into()),
+                    arms: [("\"first\"", 1), ("\"λ\"", 42), ("_", 0)]
+                        .into_iter()
+                        .map(|(pattern, value)| MatchArm {
+                            pattern: pattern.into(),
+                            guard: None,
+                            body: vec![Stmt::Return(Some(Expr::IntLit(value)))],
+                        })
+                        .collect(),
+                }],
+            }]);
+            let result =
+                lower_module_with_bases_layout(&module, "match_string", 0, 0, layout).unwrap();
+            let offsets: Vec<_> = result
+                .exports
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect();
+            let relocations: Vec<_> = result
+                .relocations
+                .iter()
+                .map(|site| (*site, result.codegen_base))
+                .collect();
+            let mut runtime = crate::jit_runtime::JitRuntime::new();
+            runtime.load(&result.code, &offsets, &relocations).unwrap();
+            for (text, expected) in [("λ", 42), ("first", 1), ("", 0), ("λ雪", 0)] {
+                let mut bytes = Vec::new();
+                append_string_payload(&mut bytes, text, layout).unwrap();
+                let actual = unsafe { runtime.invoke("match_string", &[bytes.as_ptr() as i64]) };
+                assert_eq!(actual, Some(expected), "{layout:?}: match {text:?}");
+            }
+        }
+    }
 
     #[test]
     fn optimized_global_expressions_emit_initialized_data() {

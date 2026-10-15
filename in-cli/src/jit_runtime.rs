@@ -501,7 +501,8 @@ impl JitRuntime {
     /// image; this pass rewrites it to the actually-mapped data address so
     /// executed code reads and writes real globals instead of unmapped
     /// memory. Sites listed here are skipped by the code-relative relocation
-    /// pass.
+    /// pass. For data containing pointers, pass its relocation metadata to
+    /// [`Self::load_with_data_relocations`] instead.
     pub fn load_with_globals(
         &mut self,
         code: &[u8],
@@ -510,6 +511,31 @@ impl JitRuntime {
         data: &[u8],
         global_relocs: &[(u32, u64)],
     ) -> Result<(), String> {
+        self.load_with_data_relocations(
+            code,
+            function_offsets,
+            relocations,
+            data,
+            global_relocs,
+            &[],
+        )
+    }
+
+    /// Load globals with data-relative pointers rebased to the mapped data section.
+    /// Each `(slot_offset, target_offset)` in `data_relocations` names byte offsets
+    /// within `data`; its aligned eight-byte slot receives the mapped target address.
+    pub fn load_with_data_relocations(
+        &mut self,
+        code: &[u8],
+        function_offsets: &[(String, u32, u32)],
+        relocations: &[(u32, u64)],
+        data: &[u8],
+        global_relocs: &[(u32, u64)],
+        data_relocations: &[(u64, u64)],
+    ) -> Result<(), String> {
+        if data.is_empty() && !data_relocations.is_empty() {
+            return Err("jit: data relocations require a data section".into());
+        }
         if self.error_page.is_none() {
             return Err("jit: error page allocation failed".into());
         }
@@ -568,6 +594,13 @@ impl JitRuntime {
             }
             mapped_data = Some(data_page);
             let actual_data_base = data_ptr as u64;
+            let mapped = unsafe { std::slice::from_raw_parts_mut(data_ptr, data.len()) };
+            crate::native_emit::global_data::apply_data_relocations(
+                mapped,
+                data_relocations,
+                actual_data_base,
+                usize::MAX as u64,
+            )?;
             for &(site, offset) in global_relocs {
                 let site = site as usize;
                 if site + 8 <= code.len() {
@@ -1500,12 +1533,13 @@ mod tests {
                 .map(|site| (*site, lowered.codegen_base))
                 .collect::<Vec<_>>();
             let mut rt = JitRuntime::new();
-            rt.load_with_globals(
+            rt.load_with_data_relocations(
                 &lowered.code,
                 &offsets,
                 &relocations,
                 &lowered.data,
                 &lowered.global_relocs,
+                &lowered.data_relocations,
             )
             .unwrap();
             let ptr = unsafe { rt.invoke("main", &[]) }.unwrap() as *mut u64;
@@ -2361,12 +2395,13 @@ mod tests {
             .map(|site| (*site, lowered.codegen_base))
             .collect::<Vec<_>>();
         let mut rt = JitRuntime::new();
-        rt.load_with_globals(
+        rt.load_with_data_relocations(
             &lowered.code,
             &offsets,
             &relocations,
             &lowered.data,
             &lowered.global_relocs,
+            &lowered.data_relocations,
         )
         .unwrap();
         rt
@@ -6004,12 +6039,13 @@ mod tests {
                     .map(|site| (*site, lowered.codegen_base))
                     .collect::<Vec<_>>();
                 let mut rt = JitRuntime::new();
-                rt.load_with_globals(
+                rt.load_with_data_relocations(
                     &lowered.code,
                     &offsets,
                     &relocations,
                     &lowered.data,
                     &lowered.global_relocs,
+                    &lowered.data_relocations,
                 )
                 .expect("load");
                 let entry = rt.functions.read().unwrap()["main"].entry;
@@ -6223,6 +6259,98 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn string_global_relocations_preserve_bytes_mutation_and_runtime_isolation() {
+        let text = "λ\0line\nnext";
+        let source = format!(
+            "const expected:String=\"{text}\";\nvar counter:Int=0;\nvar current:String=\"{text}\";\nvar marker:Int=20;\nvar empty:String=\"\";\nfn main()->Int{{if expected!=\"{text}\"{{return 0;}}if empty!=\"\"{{return 0;}}if marker!=20{{return 0;}}if counter==0{{if current!=\"{text}\"{{return 0;}}current=\"changed\";counter+=1;return marker+22;}}if current!=\"changed\"{{return 0;}}counter+=1;return marker+counter+21;}}"
+        );
+        let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+        let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+        assert!(report.ok, "{report:?}");
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut optimized = module.clone();
+            crate::core_opt::optimize_with_profile(&mut optimized.decls, Some("main"), profile);
+            let runtime = runtime_for_module(&optimized, profile);
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]) },
+                Some(42),
+                "first {profile:?}"
+            );
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]) },
+                Some(43),
+                "second {profile:?}"
+            );
+            // Keep both runtimes alive so their data sections occupy distinct mappings.
+            let independent = runtime_for_module(&optimized, profile);
+            assert_eq!(
+                unsafe { independent.invoke("main", &[]) },
+                Some(42),
+                "independent {profile:?}"
+            );
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]) },
+                Some(44),
+                "original remains independent {profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn string_equality_evaluates_both_operands_once_in_order() {
+        let source = "var calls:Int=0;\nvar word:String=\"same\";\nfn left()->String{calls=calls*10+1;return word;}\nfn right()->String{calls=calls*10+2;return \"same\";}\nfn main()->Int{if left()==right() && calls==12{return 42;}return 0;}";
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        crate::lower_core::desugar_module(&mut module);
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut optimized = module.clone();
+            crate::core_opt::optimize_with_profile(&mut optimized.decls, Some("main"), profile);
+            assert_eq!(
+                invoke_module(&optimized, profile, &[]),
+                Some(42),
+                "{profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn invalid_data_pointer_fixups_never_publish_jit_functions() {
+        for (data, fixups) in [
+            (vec![], vec![(0, 0)]),
+            (vec![0; 24], vec![(24, 16)]),
+            (vec![0; 24], vec![(0, 24)]),
+            (vec![0; 24], vec![(0, 16), (0, 16)]),
+            (vec![0; 24], vec![(1, 16)]),
+        ] {
+            let mut runtime = JitRuntime::new();
+            let result = runtime.load_with_data_relocations(
+                &[0],
+                &[("main".into(), 0, 1)],
+                &[],
+                &data,
+                &[],
+                &fixups,
+            );
+            assert!(result.is_err(), "{fixups:?}");
+            assert_eq!(
+                runtime.function_count(),
+                0,
+                "invalid fixups must not publish an entry"
+            );
         }
     }
 

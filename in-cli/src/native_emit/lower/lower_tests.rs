@@ -776,12 +776,13 @@ fn main() -> Int {
             .collect::<Vec<_>>();
         let mut runtime = crate::jit_runtime::JitRuntime::new();
         runtime
-            .load_with_globals(
+            .load_with_data_relocations(
                 &lowered.code,
                 &offsets,
                 &lowered.relocations,
                 &lowered.data,
                 &lowered.global_relocs,
+                &lowered.data_relocations,
             )
             .unwrap();
         assert_eq!(unsafe { runtime.invoke("main", &[]) }.unwrap(), 42);
@@ -1165,12 +1166,13 @@ fn jit_shares_writable_globals_across_functions() {
                 .map(|(name, offset)| (name.clone(), *offset, 0))
                 .collect::<Vec<_>>();
             let mut rt = crate::jit_runtime::JitRuntime::new();
-            rt.load_with_globals(
+            rt.load_with_data_relocations(
                 &lowered.code,
                 &offsets,
                 &lowered.relocations,
                 &lowered.data,
                 &lowered.global_relocs,
+                &lowered.data_relocations,
             )
             .expect("load");
             assert_eq!(
@@ -2973,7 +2975,7 @@ fn indirect_calls_stage_addresses_arguments_and_forward_backward_references() {
         let x86 = crate::native_emit::x86_64_lower::lower_module(&module, "main")
             .expect("x86 indirect code");
         #[cfg(target_arch = "aarch64")]
-        let (code, relocations, offsets, data, globals) = (
+        let (code, relocations, offsets, data, globals, data_relocations) = (
             &arm.code,
             &arm.relocations,
             arm.function_offsets
@@ -2982,6 +2984,7 @@ fn indirect_calls_stage_addresses_arguments_and_forward_backward_references() {
                 .collect::<Vec<_>>(),
             &arm.data,
             &arm.global_relocs,
+            &arm.data_relocations,
         );
         #[cfg(target_arch = "x86_64")]
         let x86_relocations = x86
@@ -2990,7 +2993,7 @@ fn indirect_calls_stage_addresses_arguments_and_forward_backward_references() {
             .map(|site| (*site, x86.codegen_base))
             .collect::<Vec<_>>();
         #[cfg(target_arch = "x86_64")]
-        let (code, relocations, offsets, data, globals) = (
+        let (code, relocations, offsets, data, globals, data_relocations) = (
             &x86.code,
             &x86_relocations,
             x86.exports
@@ -2999,12 +3002,20 @@ fn indirect_calls_stage_addresses_arguments_and_forward_backward_references() {
                 .collect::<Vec<_>>(),
             &x86.data,
             &x86.global_relocs,
+            &x86.data_relocations,
         );
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         {
             let mut runtime = crate::jit_runtime::JitRuntime::new();
             runtime
-                .load_with_globals(code, &offsets, relocations, data, globals)
+                .load_with_data_relocations(
+                    code,
+                    &offsets,
+                    relocations,
+                    data,
+                    globals,
+                    data_relocations,
+                )
                 .expect("load indirect code");
             assert_eq!(
                 unsafe { runtime.invoke("main", &[]).expect("invoke indirect code") },

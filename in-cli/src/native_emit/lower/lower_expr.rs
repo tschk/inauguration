@@ -1075,6 +1075,37 @@ pub(crate) fn lower_binary(
         return Ok(());
     }
 
+    if matches!(op, "==" | "!=" | "===" | "!==")
+        && native_expr_type(lhs, ctx, functions).map(|typ| typ.canonical()) == Some(Typ::String)
+        && native_expr_type(rhs, ctx, functions).map(|typ| typ.canonical()) == Some(Typ::String)
+    {
+        let base = ctx.acquire_call_arg_slots(fn_name, 2)?;
+        for (index, value) in [lhs, rhs].into_iter().enumerate() {
+            lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
+            emitter.emit_u32(aarch64::str64(
+                0,
+                aarch64::REG_SP,
+                ctx.call_arg_temps[base + index],
+            ));
+        }
+        for index in 0..2 {
+            emitter.emit_u32(aarch64::ldr64(
+                index as u8,
+                aarch64::REG_SP,
+                ctx.call_arg_temps[base + index],
+            ));
+        }
+        let result =
+            super::lower_stdlib::emit_stdlib_wrapper_register_call(emitter, ctx, "in_str_eq", rd);
+        ctx.release_call_arg_temps();
+        result?;
+        if matches!(op, "!=" | "!==") {
+            emitter.emit_u32(aarch64::cmp_reg64(rd, aarch64::REG_XZR));
+            lower_comparison_result(emitter, rd, "==", false)?;
+        }
+        return Ok(());
+    }
+
     let is_float = matches!(native_expr_type(lhs, ctx, functions), Some(Typ::Float))
         || matches!(native_expr_type(rhs, ctx, functions), Some(Typ::Float));
     if is_float {

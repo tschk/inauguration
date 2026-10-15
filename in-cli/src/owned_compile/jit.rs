@@ -250,6 +250,7 @@ pub fn compile_jit(
             native_emit::lower::LoweredModule {
                 code: result.code,
                 data: result.data,
+                data_relocations: result.data_relocations,
                 global_relocs: result.global_relocs,
                 entry_offset: Some(result.entry_offset),
                 exports: vec![],
@@ -315,12 +316,13 @@ pub fn compile_jit(
     // Build function offset table for all compiled functions
 
     let mut rt = jit_runtime::JitRuntime::new();
-    rt.load_with_globals(
+    rt.load_with_data_relocations(
         &lowered.code,
         &function_offsets,
         &lowered.relocations,
         &lowered.data,
         &lowered.global_relocs,
+        &lowered.data_relocations,
     )
     .map_err(|e| format!("jit-load-failed: {e}"))?;
 

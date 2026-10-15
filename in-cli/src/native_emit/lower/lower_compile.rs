@@ -107,6 +107,7 @@ pub fn compile_native_artifact_with_report(
             &lowered.external_refs,
             &lowered.error_slot_refs,
             &lowered.data,
+            &lowered.data_relocations,
             &lowered.global_relocs,
             entry,
         );
@@ -165,7 +166,7 @@ pub fn compile_native_artifact_with_report(
     }
 
     // ponytail: writable globals need data relocations in library/object writers.
-    if !lowered.global_relocs.is_empty() {
+    if !lowered.global_relocs.is_empty() || !lowered.data_relocations.is_empty() {
         return Err(
             "native-lower: writable globals require the macOS executable assembly path".into(),
         );
