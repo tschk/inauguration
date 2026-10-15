@@ -93,6 +93,12 @@ pub(crate) struct Facts {
 }
 
 impl Facts {
+    pub(crate) fn function_signature(&self, name: &str) -> Option<(&[(String, Typ)], &Typ)> {
+        self.functions
+            .get(name)
+            .map(|(params, ret)| (params.as_slice(), ret))
+    }
+
     pub(crate) fn pattern_fields(&self, name: &str) -> Option<&[(String, Typ)]> {
         self.structs.get(name).map(Vec::as_slice)
     }
@@ -2447,7 +2453,7 @@ fn is_builtin_fn(name: &str) -> bool {
             | "store8" | "store16" | "store32" | "store64"
             | "hlt" | "cli" | "sti" | "pause"
             | "lidt" | "invlpg" | "read-cr2" | "read-cr3"
-            | "invoke" | "invoke1" | "invoke2"
+            | "invoke" | "invoke1" | "invoke2" | "invoke-native" | "invoke-native1" | "invoke-native2" | "invoke_native" | "invoke_native1" | "invoke_native2"
     )
 }
 
@@ -2459,7 +2465,8 @@ fn builtin_return_type(name: &str) -> Typ {
         "len" | "str-len" | "array-len" | "array_len" | "vector-capacity" | "bool-to-int"
         | "to-int" | "str-to-int" | "str-index-of" | "str-table-get-int" | "inb" | "inl"
         | "load8" | "load16" | "load32" | "load64" | "read-cr2" | "read-cr3" | "invoke"
-        | "invoke1" | "invoke2" => Typ::Int,
+        | "invoke1" | "invoke2" | "invoke-native" | "invoke-native1" | "invoke-native2"
+        | "invoke_native" | "invoke_native1" | "invoke_native2" => Typ::Int,
         "str-eq" | "str-contains" | "str-starts-with" | "str-is-int" | "str-table-has"
         | "int-to-bool" => Typ::Bool,
         "str-concat" | "str-trim" | "str-slice" | "to-string" => Typ::String,

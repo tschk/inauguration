@@ -225,7 +225,18 @@ pub(crate) fn lower_stmt(
             ctx.emitted_return = true;
             Ok(())
         }
-        Stmt::Let(name, _, expr) => lower_store_local(emitter, ctx, name, expr, pending),
+        Stmt::Let(name, annotation, expr) => {
+            let typ = annotation.clone().or_else(|| {
+                crate::typecheck::TypeChecker::new().expr_type(expr, &ctx.facts, &ctx.local_types)
+            });
+            lower_store_local(emitter, ctx, name, expr, pending)?;
+            if let Some(typ) = typ {
+                ctx.local_types.insert(name.clone(), typ);
+            } else {
+                ctx.local_types.remove(name);
+            }
+            Ok(())
+        }
         Stmt::Assign(name, expr) => lower_store_local(emitter, ctx, name, expr, pending),
         Stmt::FieldAssign { base, name, value } => {
             lower_field_assign(emitter, ctx, base, name, value, pending)
@@ -321,6 +332,7 @@ fn lower_if(
     pending: &mut Vec<PendingCall>,
     frame: u32,
 ) -> Result<(), String> {
+    let outer_types = ctx.local_types.clone();
     // evaluate cond → r0; cmp r0, #0; beq else
     lower_expr_into(emitter, ctx, cond, R0, pending)?;
     emitter.emit_u16(thumb::cmp_imm8(R0, 0));
@@ -333,6 +345,7 @@ fn lower_if(
         }
         lower_stmt(emitter, ctx, stmt, pending, frame)?;
     }
+    ctx.local_types = outer_types.clone();
     let then_returned = ctx.emitted_return;
     ctx.emitted_return = false;
 
@@ -363,6 +376,7 @@ fn lower_if(
     } else {
         ctx.emitted_return = false;
     }
+    ctx.local_types = outer_types;
     Ok(())
 }
 
@@ -374,6 +388,7 @@ fn lower_while(
     pending: &mut Vec<PendingCall>,
     frame: u32,
 ) -> Result<(), String> {
+    let outer_types = ctx.local_types.clone();
     let loop_head = emitter.len();
     lower_expr_into(emitter, ctx, cond, R0, pending)?;
     emitter.emit_u16(thumb::cmp_imm8(R0, 0));
@@ -386,6 +401,7 @@ fn lower_while(
         ctx.emitted_return = false; // returns inside loop don't end the function for us
     }
 
+    ctx.local_types = outer_types;
     let b_back = emitter.len();
     emitter.emit_u32_thumb(thumb::b_wide(0));
     patch_b(emitter, b_back, loop_head)?;

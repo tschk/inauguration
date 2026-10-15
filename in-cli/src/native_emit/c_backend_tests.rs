@@ -1281,3 +1281,69 @@ fn c_string_literal_global_comparisons_are_valid_file_scope_constants() {
     let error = emit_c_module(&module).unwrap_err();
     assert!(error.contains("global initializer"), "{error}");
 }
+
+#[test]
+fn raw_native_invoke_c_uses_nonthrowing_integer_abi_and_ordered_operands() {
+    for source in [
+        "fn target()->Int{return 42;}\nfn main()->Int{return invoke-native(target);}",
+        "fn target(value:Int)->Int{return value;}\nfn main()->Int{return invoke_native1(target,42);}",
+        "var calls:Int=0;\nfn target(a:Int,b:Int)->Int{if calls==123{return a+b;}return 0;}\nfn pointer()->Int{calls=calls*10+1;return target;}\nfn first()->Int{calls=calls*10+2;return 20;}\nfn second()->Int{calls=calls*10+3;return 22;}\nfn main()->Int{return invoke-native2(pointer(),first(),second());}",
+        "fn invoke-native(value:Bool)->Int{if value{return 42;}return 0;}\nfn main()->Int{return invoke-native(true);}",
+    ] {
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        for decl in &mut module.decls {
+            if let Decl::Function { name, .. } = decl
+                && name == "main"
+            {
+                *name = "answer".into();
+            }
+        }
+        assert_inferred_c_executes(&module, "return (int)answer();");
+    }
+    let module = crate::in_lang_parse::parse_in_source(
+        "fn target()->Int{return 42;}\nfn main()->Int{return invoke_native(target);}",
+    )
+    .unwrap();
+    let c = emit_c_module(&module).unwrap();
+    assert!(c.contains("int64_t(*)(void)"), "{c}");
+    assert!(c.contains("__builtin_trap()"), "{c}");
+}
+
+#[test]
+fn raw_native_invoke_c_refuses_wrong_types_signatures_and_throwing_targets() {
+    for source in [
+        "fn main()->Int{return invoke-native1(1,true);}",
+        "fn target(value:Bool)->Int{return 42;}\nfn main()->Int{return invoke-native1(target,1);}",
+        "fn target()->Bool{return true;}\nfn main()->Int{return invoke-native(target);}",
+        "fn target()->Int{throw 9;return 42;}\nfn main()->Int{return invoke-native(target);}",
+        "fn main()->Int{return invoke-native2(1,2);}",
+    ] {
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        assert!(emit_c_module(&module).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn raw_native_invoke_c_refuses_nonconstant_global_initializers() {
+    for (name, args) in [
+        ("invoke-native", vec![Expr::IntLit(42)]),
+        ("invoke_native1", vec![Expr::IntLit(42), Expr::IntLit(1)]),
+        (
+            "invoke-native2",
+            vec![Expr::IntLit(42), Expr::IntLit(1), Expr::IntLit(2)],
+        ),
+    ] {
+        let module = UnifiedModule::new(vec![Decl::Global {
+            name: "value".into(),
+            typ: Typ::Int,
+            mutable: true,
+            constant_value: false,
+            init: Some(Box::new(Expr::Call {
+                callee: Box::new(Expr::Ident(name.into())),
+                args,
+            })),
+        }]);
+        let error = emit_c_module(&module).unwrap_err();
+        assert!(error.contains("global initializer"), "{name}: {error}");
+    }
+}

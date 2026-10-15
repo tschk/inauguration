@@ -7058,3 +7058,97 @@ fn owned_nested_scalar_leaf_stores_preserve_receivers_types_and_effects() {
         }
     }
 }
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_raw_native_calls_preserve_scalar_abi_order_and_wrappers() {
+    for text in [
+        "fn answer()->Int{return 42;}\nfn main()->Int{return invoke-native(answer);}",
+        "fn next(value:Int)->Int{return value+1;}\nfn main()->Int{let pointer:Int=next;return invoke_native1(pointer,41);}",
+        "var calls:Int=0;\nfn add(a:Int,b:Int)->Int{return a+b;}\nfn pointer()->Int{calls=calls*10+1;return add;}\nfn first()->Int{calls=calls*10+2;return 20;}\nfn second()->Int{calls=calls*10+3;return 22;}\nfn main()->Int{let value=invoke-native2(pointer(),first(),second());if calls==123{return value;}return 0;}",
+        "fn invoke(pointer:Int)->Int{return invoke-native(pointer);}\nfn invoke1(pointer:Int,value:Int)->Int{return invoke-native1(pointer,value);}\nfn answer()->Int{return 42;}\nfn next(value:Int)->Int{return value+1;}\nfn main()->Int{return invoke(answer)+invoke1(next,41)-42;}",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("raw-native-call.in");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.degradations.is_empty(),
+                "{text}: {report:?}"
+            );
+            assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{text}");
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("raw-native-call");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{text}: {report:?}"
+                );
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42)
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[test]
+fn owned_raw_native_calls_emit_freestanding_objects_and_refuse_bad_contracts() {
+    let source = temp_path("raw-native-contract.in");
+    let artifact = temp_path("raw-native-contract.o");
+    for triple in ["x86_64-unknown-none", "aarch64-unknown-none"] {
+        fs::write(
+            &source,
+            "fn answer()->Int{return 42;}\nfn main()->Int{return invoke-native(answer);}",
+        )
+        .unwrap();
+        let mut request = default_request(
+            source.clone(),
+            CompileTarget::Native,
+            Some("main"),
+            Some(artifact.clone()),
+        );
+        request.target_triple = Some(triple.into());
+        request.linkage = NativeLinkage::StaticLib;
+        let report = compile_owned(&request);
+        assert!(
+            report.success && report.degradations.is_empty(),
+            "{triple}: {report:?}"
+        );
+        assert_eq!(&fs::read(&artifact).unwrap()[..4], b"\x7fELF");
+        for text in [
+            "fn main()->Int{return invoke-native(0);}",
+            "fn main()->Int{return invoke-native1(1,true);}",
+            "fn main()->Int{return invoke-native2(1,42);}",
+            "fn bad(value:Float)->Int{return 42;}\nfn main()->Int{return invoke-native1(bad,41);}",
+            "fn bad(value:Int)->Int{throw 7;return value;}\nfn main()->Int{return invoke-native1(bad,42);}",
+        ] {
+            fs::write(&source, text).unwrap();
+            fs::write(&artifact, b"preserve output").unwrap();
+            let report = compile_owned(&request);
+            assert!(!report.success, "{triple}/{text}: {report:?}");
+            assert_eq!(fs::read(&artifact).unwrap(), b"preserve output");
+        }
+    }
+    fs::remove_file(source).unwrap();
+    fs::remove_file(artifact).unwrap();
+}

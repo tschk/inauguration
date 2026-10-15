@@ -220,6 +220,14 @@ fn main() -> Int {
 
 `for i in 0..8 { … }` is recognized where the front supports bounded ranges.
 
+### Raw native function pointers
+
+`invoke-native(pointer)`, `invoke-native1(pointer, value)`, and `invoke-native2(pointer, first, second)` call a nonthrowing native function with zero, one, or two `Int` parameters and an `Int` result. Underscore spellings are aliases. Target and arguments are evaluated once, left to right.
+
+This is an unsafe machine-ABI boundary: the caller must supply a valid address with the correct target ABI and callee-saved register behavior. It must not point to a function that propagates language exceptions. Known incompatible or throwing targets are refused; a null dynamic target traps. Arbitrary integer addresses cannot prove this contract statically. Integer carriers use the existing backend width: 64 bits in x86_64, AArch64 and C emission, and 32 bits in Thumb.
+
+Ordinary `invoke` / `invoke1` / `invoke2` retain language exception propagation and require its writable runtime context. Use the explicit native boundary for CPU capsules and foreign native functions; do not disable exception checks on ordinary calls.
+
 ### Extern and capabilities
 
 ```in
@@ -300,6 +308,8 @@ fn halt_loop() -> void {
 `load*` / `store*`, `inb` / `outb`, `hlt`, `sti`, `cli`, and friends target freestanding emit paths; availability depends on target and type support in `native-emit`.
 
 ### Expressions and operators
+
+Integer literals support decimal, hexadecimal (`0x`), octal (`0o`) and binary (`0b`) notation; uppercase prefixes are accepted. Invalid digits and overflowing positive literals are refused.
 
 Float literals support decimal and scientific notation, including `1e3`, `1e+3`, and `1.25E-2`. Exponent signs remain part of the literal inside arithmetic expressions; names such as `e` and hexadecimal integers remain ordinary operands.
 

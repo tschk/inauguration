@@ -3229,3 +3229,46 @@ fn brace_postfix_boundaries_preserve_control_flow_statement_separation() {
         assert_eq!(parts.len(), 1, "{body}: {parts:?}");
     }
 }
+
+#[test]
+fn integer_radix_literals_preserve_values_and_refuse_invalid_or_overflowing_digits() {
+    for (source, expected) in [
+        ("493", 493),
+        ("0x1ed", 493),
+        ("0X1ED", 493),
+        ("0o755", 493),
+        ("0O755", 493),
+        ("0b111101101", 493),
+        ("0B111101101", 493),
+        ("0o0", 0),
+        ("0o777777777777777777777", i64::MAX),
+        ("0x7fffffffffffffff", i64::MAX),
+    ] {
+        assert_eq!(parse_expr(source), Expr::IntLit(expected), "{source}");
+    }
+    for source in [
+        "0o",
+        "0O",
+        "0o8",
+        "0o755z",
+        "0o_755",
+        "0b2",
+        "0xg",
+        "0o1000000000000000000000",
+        "0x8000000000000000",
+        "9223372036854775808",
+    ] {
+        assert!(!matches!(parse_expr(source), Expr::IntLit(_)), "{source}");
+    }
+    assert_eq!(
+        parse_expr("-0o755"),
+        Expr::Unary {
+            op: "-".into(),
+            expr: Box::new(Expr::IntLit(493)),
+        }
+    );
+    let module = parse_in_source("fn main()->Int{return 0o755;}").unwrap();
+    let canonical =
+        crate::in_canonical::canonicalize_in_source("fn main()->Int{return 0o755;}").unwrap();
+    assert_eq!(parse_in_source(&canonical).unwrap(), module);
+}

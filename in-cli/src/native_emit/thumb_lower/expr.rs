@@ -120,6 +120,15 @@ pub(crate) fn lower_expr_into(
                     ctx.fn_name
                 ));
             };
+            if crate::core_ir_verifier::is_native_invoke(name) && !ctx.functions.contains_key(name)
+            {
+                if ctx.local_types.contains_key(name) {
+                    return Err(
+                        "thumb-lower: local indirect callee requires a function signature".into(),
+                    );
+                }
+                return lower_native_invoke(emitter, ctx, name, args, dest, pending);
+            }
             if matches!(name.as_str(), "invoke" | "invoke1" | "invoke2") {
                 return lower_invoke(emitter, ctx, args, dest, pending);
             }
@@ -200,6 +209,82 @@ pub(crate) fn lower_call_args(
 
     ctx.release_call_arg_temps();
 
+    if dest != REG_RET {
+        emitter.emit_u16(thumb::mov_low(dest, REG_RET));
+    }
+    Ok(())
+}
+
+fn lower_native_invoke(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    name: &str,
+    args: &[Expr],
+    dest: u8,
+    pending: &mut Vec<PendingCall>,
+) -> Result<(), String> {
+    let expected = match name {
+        "invoke-native" | "invoke_native" => 1,
+        "invoke-native1" | "invoke_native1" => 2,
+        _ => 3,
+    };
+    if args.len() != expected {
+        return Err(format!(
+            "thumb-lower: `{name}` requires {expected} Int arguments"
+        ));
+    }
+    if let Expr::Ident(target) = &args[0]
+        && !ctx.local_types.contains_key(target)
+        && let Some(function) = ctx.functions.get(target)
+    {
+        if let Some(error) =
+            crate::core_ir_verifier::invoke_signature_error(name, &function.params, &function.ret)
+        {
+            return Err(format!("thumb-lower: {error}"));
+        }
+        let throwing =
+            crate::core_effects::fallible_functions(ctx.functions.values().map(|function| {
+                (
+                    function.name.as_str(),
+                    function.body.as_slice(),
+                    &function.ret,
+                    function.params.as_slice(),
+                )
+            }));
+        if throwing.contains(target) {
+            return Err(format!(
+                "thumb-lower: raw native target `{target}` may throw"
+            ));
+        }
+    }
+    let checker = crate::typecheck::TypeChecker::new();
+    if args.iter().any(|arg| {
+        checker
+            .expr_type(arg, &ctx.facts, &ctx.local_types)
+            .map(|typ| typ.canonical())
+            != Some(Typ::Int)
+    }) {
+        return Err(format!("thumb-lower: `{name}` requires Int arguments"));
+    }
+    let base = ctx.acquire_call_arg_temps(args.len())?;
+    for (index, arg) in args.iter().enumerate() {
+        lower_expr_into(emitter, ctx, arg, R0, pending)?;
+        emitter.emit_u16(thumb::str_sp(R0, ctx.call_arg_temps[base + index])?);
+    }
+    // r3 is outside the raw ABI's two argument registers. A null address
+    // traps locally; this ABI never dereferences an error-page carrier.
+    emitter.emit_u16(thumb::ldr_sp(R3, ctx.call_arg_temps[base])?);
+    emitter.emit_u16(thumb::cmp_imm8(R3, 0));
+    emitter.emit_u16(thumb::b_cond_rel8(COND_NE, 0));
+    emitter.emit_u16(0xDE00); // UDF #0
+    for index in 1..args.len() {
+        emitter.emit_u16(thumb::ldr_sp(
+            (index - 1) as u8,
+            ctx.call_arg_temps[base + index],
+        )?);
+    }
+    emitter.emit_u16(thumb::blx_reg(R3));
+    ctx.release_call_arg_temps();
     if dest != REG_RET {
         emitter.emit_u16(thumb::mov_low(dest, REG_RET));
     }
@@ -861,5 +946,77 @@ mod tests {
             "scratch stores out of order: {str_imm_offsets:?}"
         );
         assert_eq!(hits, want);
+    }
+}
+
+#[cfg(test)]
+mod raw_native_tests {
+    use super::super::ctx::FunctionInfo;
+    use super::super::stmt::lower_function;
+    use super::*;
+    use crate::core_ir::Stmt;
+
+    fn compile(params: Vec<(String, Typ)>, args: Vec<Expr>, name: &str) -> Result<Vec<u8>, String> {
+        let function = FunctionInfo {
+            name: "entry".into(),
+            params,
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::Call {
+                callee: Box::new(Expr::Ident(name.into())),
+                args,
+            }))],
+        };
+        let functions = HashMap::from([("entry".into(), function.clone())]);
+        let structs = HashMap::new();
+        let mut emitter = CodeEmitter::new();
+        lower_function(
+            &mut emitter,
+            &function,
+            &functions,
+            &structs,
+            &mut Vec::new(),
+        )?;
+        Ok(emitter.bytes)
+    }
+
+    #[test]
+    fn raw_native_calls_stage_integer_arguments_and_emit_null_udf() {
+        for (name, count) in [
+            ("invoke-native", 1),
+            ("invoke_native1", 2),
+            ("invoke-native2", 3),
+        ] {
+            let args = (0..count).map(|index| Expr::IntLit(42 + index)).collect();
+            let code = compile(vec![], args, name).unwrap();
+            let words: Vec<_> = code
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|word| u16::from_le_bytes([word[0], word[1]]))
+                .collect();
+            assert!(words.contains(&0xDE00), "missing dynamic null trap: {name}");
+            assert!(
+                words.contains(&thumb::blx_reg(R3)),
+                "missing raw call: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_native_calls_refuse_bool_locals_and_wrong_arity() {
+        assert!(
+            compile(
+                vec![("value".into(), Typ::Bool)],
+                vec![Expr::IntLit(1), Expr::Ident("value".into())],
+                "invoke-native1"
+            )
+            .unwrap_err()
+            .contains("Int arguments")
+        );
+        assert!(
+            compile(vec![], vec![Expr::IntLit(1)], "invoke-native2")
+                .unwrap_err()
+                .contains("requires 3")
+        );
     }
 }

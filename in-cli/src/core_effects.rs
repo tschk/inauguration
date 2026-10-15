@@ -259,6 +259,25 @@ pub(crate) fn error_type_tag(typ: &crate::core_ir::Typ) -> Option<i64> {
 mod tests {
     use super::*;
     #[test]
+    fn raw_native_calls_do_not_require_a_language_error_carrier() {
+        let module = crate::in_lang_parse::parse_in_source("fn target(value:Int)->Int{return value+1;}\nfn raw()->Int{return invoke-native1(target,41);}\nfn raw_alias()->Int{return invoke_native1(target,41);}\nfn checked()->Int{return invoke1(target,41);}\nfn main()->Int{return raw();}").unwrap();
+        let functions = module.decls.iter().filter_map(|decl| match decl {
+            crate::core_ir::Decl::Function {
+                name,
+                body,
+                ret,
+                params,
+                ..
+            } => Some((name.as_str(), body.as_slice(), ret, params.as_slice())),
+            _ => None,
+        });
+        assert_eq!(
+            fallible_functions(functions),
+            HashSet::from(["checked".into()])
+        );
+    }
+
+    #[test]
     fn indirect_calls_are_fallible_and_declared_overrides_remain_pure() {
         let module=crate::in_lang_parse::parse_in_source("fn indirect() -> Int { return invoke1(0, 1); }\nfn relay() -> Int { return indirect(); }\nfn aggregate() -> [Int] { return [relay()]; }\nfn invoke2(pointer: Int, first: Int, second: Int) -> Int { return 42; }\nfn shadow() -> Int { return invoke2(0, 0, 0); }\nfn main() -> Int { return 0; }").unwrap();
         let functions = module.decls.iter().filter_map(|decl| match decl {

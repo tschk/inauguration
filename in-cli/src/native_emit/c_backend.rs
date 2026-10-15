@@ -92,6 +92,22 @@ pub fn emit_c_module(module: &UnifiedModule) -> Result<String, String> {
     let checker = TypeChecker::new();
     let facts = Rc::new(checker.collect_decl_facts(&module.decls));
     let mut ctx = Ctx::new(Rc::new(names), facts);
+    ctx.throwing = Rc::new(crate::core_effects::fallible_functions(
+        module.decls.iter().filter_map(|decl| {
+            if let Decl::Function {
+                name,
+                params,
+                ret,
+                body,
+                ..
+            } = decl
+            {
+                Some((name.as_str(), body.as_slice(), ret, params.as_slice()))
+            } else {
+                None
+            }
+        }),
+    ));
     ctx.types = module
         .decls
         .iter()
@@ -361,6 +377,7 @@ static inline int64_t in_float_saturate(double value, unsigned bits, int is_sign
 struct Ctx {
     out: String,
     facts: Rc<Facts>,
+    throwing: Rc<HashSet<String>>,
     reserved: Rc<RefCell<HashSet<String>>>,
     types: HashMap<String, Typ>,
     error: Rc<RefCell<Option<String>>>,
@@ -379,6 +396,7 @@ impl Ctx {
         Self {
             out: String::with_capacity(4096),
             facts,
+            throwing: Rc::new(HashSet::new()),
             reserved: Rc::new(RefCell::new(HashSet::new())),
             types: HashMap::new(),
             error: Rc::new(RefCell::new(None)),
@@ -680,6 +698,7 @@ impl Ctx {
                     ps.join(", ")
                 ));
                 let mut nested = Ctx::new(self.func_names.clone(), self.facts.clone());
+                nested.throwing = self.throwing.clone();
                 nested.error = self.error.clone();
                 nested.reserved = self.reserved.clone();
                 nested.tmp = self.tmp;
@@ -747,7 +766,72 @@ impl Ctx {
         }
     }
 
+    fn raw_native_invoke(&mut self, name: &str, args: &[Expr]) -> String {
+        if self.global_initializer {
+            self.fail("c-backend: raw native call in a global initializer requires runtime initialization".into());
+            return "0".into();
+        }
+        let expected = match name {
+            "invoke-native" | "invoke_native" => 1,
+            "invoke-native1" | "invoke_native1" => 2,
+            _ => 3,
+        };
+        if args.len() != expected {
+            self.fail(format!(
+                "c-backend: `{name}` requires {expected} Int arguments"
+            ));
+            return "0".into();
+        }
+        if let Expr::Ident(target) = &args[0]
+            && !self.types.contains_key(target)
+            && let Some((params, ret)) = self.facts.function_signature(target)
+        {
+            if self.throwing.contains(target) {
+                self.fail(format!("c-backend: raw native target `{target}` may throw"));
+                return "0".into();
+            }
+            if let Some(error) = crate::core_ir_verifier::invoke_signature_error(name, params, ret)
+            {
+                self.fail(format!("c-backend: {error}"));
+                return "0".into();
+            }
+        }
+        let checker = TypeChecker::new();
+        if args.iter().any(|arg| {
+            checker
+                .expr_type(arg, &self.facts, &self.types)
+                .map(|typ| typ.canonical())
+                != Some(Typ::Int)
+        }) {
+            self.fail(format!("c-backend: `{name}` requires Int arguments"));
+            return "0".into();
+        }
+        let mut staged = Vec::with_capacity(args.len());
+        let mut out = String::from("__extension__({ ");
+        for arg in args {
+            let slot = self.fresh("native_arg");
+            let value = self.expr_str(arg);
+            out.push_str(&format!("int64_t {slot} = {value}; "));
+            staged.push(slot);
+        }
+        out.push_str(&format!("if ({} == 0) __builtin_trap(); ", staged[0]));
+        let params = if expected == 1 {
+            "void".into()
+        } else {
+            vec!["int64_t"; expected - 1].join(", ")
+        };
+        out.push_str(&format!(
+            "((int64_t(*)({params}))(uintptr_t){} )({}); }})",
+            staged[0],
+            staged[1..].join(", ")
+        ));
+        out
+    }
+
     fn intrinsic_or_call(&mut self, name: &str, args: &[Expr]) -> String {
+        if crate::core_ir_verifier::is_native_invoke(name) && !self.is_func(name) {
+            return self.raw_native_invoke(name, args);
+        }
         if matches!(name, "array_len" | "array-len")
             && !self.is_func(name)
             && args.first().is_some_and(|arg| {
@@ -882,6 +966,7 @@ fn emit_fn_def(ctx: &mut Ctx, name: &str, params: &[(String, Typ)], ret: &Typ, b
 
     // Build body into a nested buffer so hoisted closures land before the fn.
     let mut body_ctx = Ctx::new(ctx.func_names.clone(), ctx.facts.clone());
+    body_ctx.throwing = ctx.throwing.clone();
     body_ctx.error = ctx.error.clone();
     body_ctx.reserved = ctx.reserved.clone();
     body_ctx.types = ctx.types.clone();

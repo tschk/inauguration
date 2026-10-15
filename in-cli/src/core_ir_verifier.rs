@@ -197,6 +197,12 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("invoke", IntrinsicRet::Int),
     ("invoke1", IntrinsicRet::Int),
     ("invoke2", IntrinsicRet::Int),
+    ("invoke-native", IntrinsicRet::Int),
+    ("invoke-native1", IntrinsicRet::Int),
+    ("invoke-native2", IntrinsicRet::Int),
+    ("invoke_native", IntrinsicRet::Int),
+    ("invoke_native1", IntrinsicRet::Int),
+    ("invoke_native2", IntrinsicRet::Int),
     ("print", IntrinsicRet::Void),
     ("print-int", IntrinsicRet::Void),
     ("display", IntrinsicRet::String),
@@ -319,11 +325,23 @@ pub(crate) fn intrinsic_return_type(name: &str) -> Option<&'static Typ> {
     })
 }
 
+pub(crate) fn is_native_invoke(name: &str) -> bool {
+    matches!(
+        name,
+        "invoke-native"
+            | "invoke-native1"
+            | "invoke-native2"
+            | "invoke_native"
+            | "invoke_native1"
+            | "invoke_native2"
+    )
+}
+
 pub(crate) fn invoke_param_types(name: &str) -> Option<&'static [Typ]> {
     match name {
-        "invoke" => Some(&[Typ::Int]),
-        "invoke1" => Some(&[Typ::Int, Typ::Int]),
-        "invoke2" => Some(&[Typ::Int, Typ::Int, Typ::Int]),
+        "invoke" | "invoke-native" | "invoke_native" => Some(&[Typ::Int]),
+        "invoke1" | "invoke-native1" | "invoke_native1" => Some(&[Typ::Int, Typ::Int]),
+        "invoke2" | "invoke-native2" | "invoke_native2" => Some(&[Typ::Int, Typ::Int, Typ::Int]),
         _ => None,
     }
 }
@@ -1226,6 +1244,15 @@ fn check_expr_with_array_borrow(
                     ));
                 };
                 call_edges.push((fn_name.to_string(), name.clone()));
+                if !facts.declared_functions.contains(name.as_str())
+                    && is_native_invoke(name)
+                    && matches!(args.first(), Some(Expr::IntLit(0)))
+                {
+                    return Err((
+                        "invalid-native-address".into(),
+                        "raw native call target must be nonzero".into(),
+                    ));
+                }
                 if !facts.declared_functions.contains(name.as_str())
                     && !env.contains_key(name)
                     && invoke_param_types(name).is_some()

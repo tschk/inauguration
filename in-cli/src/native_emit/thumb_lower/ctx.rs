@@ -1,4 +1,4 @@
-use crate::core_ir::{Stmt, Typ};
+use crate::core_ir::{Decl, Stmt, Typ};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -26,6 +26,8 @@ pub(crate) enum LocalSlot {
 pub(crate) struct LowerCtx<'a> {
     /// local name → slot descriptor
     pub(crate) locals: HashMap<String, LocalSlot>,
+    pub(crate) local_types: HashMap<String, Typ>,
+    pub(crate) facts: crate::typecheck::Facts,
     pub(crate) frame_size: u32,
     pub(crate) emitted_return: bool,
     /// stack of break-site lists, one per enclosing loop
@@ -73,8 +75,26 @@ impl<'a> LowerCtx<'a> {
         functions: &'a HashMap<String, FunctionInfo>,
         structs: &'a HashMap<String, Vec<(String, Typ)>>,
     ) -> Self {
+        let mut declarations = functions
+            .values()
+            .map(|function| Decl::Function {
+                name: function.name.clone(),
+                params: function.params.clone(),
+                ret: function.ret.clone(),
+                body: Vec::new(),
+                type_params: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        declarations.extend(structs.iter().map(|(name, fields)| Decl::Struct {
+            name: name.clone(),
+            fields: fields.clone(),
+            type_params: Vec::new(),
+        }));
+        let facts = crate::typecheck::TypeChecker::new().collect_decl_facts(&declarations);
         let mut ctx = Self {
             locals: HashMap::new(),
+            local_types: params.iter().cloned().collect(),
+            facts,
             frame_size: 0,
             emitted_return: false,
             break_sites: Vec::new(),
@@ -158,8 +178,9 @@ impl<'a> LowerCtx<'a> {
     }
 
     pub(crate) fn frame_reserve(&self) -> u32 {
-        // keep 8-byte alignment for AAPCS
-        (self.frame_size + 7) & !7
+        // The prologue saves r4-r7/lr (20 bytes). Include that in AAPCS
+        // alignment so the complete frame, not only the local area, is 8-aligned.
+        ((self.frame_size + 20 + 7) & !7) - 20
     }
 }
 
@@ -231,4 +252,74 @@ pub(crate) fn build_struct_layout(
     layout.size = align_up(layout.size, layout.align);
     visited.pop();
     Ok(layout)
+}
+
+#[cfg(test)]
+mod frame_alignment_tests {
+    use super::*;
+
+    #[test]
+    fn complete_thumb_frame_preserves_aapcs_alignment_and_instruction_limit() {
+        let functions = HashMap::new();
+        let structs = HashMap::new();
+        let mut ctx = LowerCtx::new("entry", &[], &functions, &structs);
+        for used in (0..=508).step_by(4) {
+            ctx.frame_size = used;
+            let frame = ctx.frame_reserve();
+            assert!(frame >= used && frame - used < 8);
+            assert_eq!((frame + 20) % 8, 0, "used={used}, frame={frame}");
+            assert!(
+                frame <= 508,
+                "last supported local area must still fit sub-sp"
+            );
+            assert!(crate::native_emit::thumb::sub_sp_imm(frame).is_ok());
+        }
+        ctx.frame_size = 512;
+        assert!(ctx.frame_reserve() > 508);
+    }
+
+    #[test]
+    fn stack_parameters_stay_above_saved_registers_and_aligned_locals() {
+        use crate::core_ir::Expr;
+        use crate::native_emit::thumb::{self, CodeEmitter, R4};
+        let function = FunctionInfo {
+            name: "take".into(),
+            params: (0..6)
+                .map(|index| (format!("p{index}"), Typ::Int))
+                .collect(),
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(Expr::Ident("p4".into())),
+                rhs: Box::new(Expr::Ident("p5".into())),
+            }))],
+        };
+        let functions = HashMap::from([("take".into(), function.clone())]);
+        let structs = HashMap::new();
+        let mut emitter = CodeEmitter::new();
+        super::super::stmt::lower_function(
+            &mut emitter,
+            &function,
+            &functions,
+            &structs,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let words: Vec<_> = emitter
+            .bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect();
+        assert_eq!(
+            words[2] & 0xff80,
+            0xb080,
+            "expected sub sp after saved registers"
+        );
+        let frame = u32::from(words[2] & 0x7f) * 4;
+        assert_eq!((frame + 20) % 8, 0);
+        assert!(words.contains(&thumb::ldr_sp(R4, frame + 20).unwrap()));
+        assert!(words.contains(&thumb::ldr_sp(R4, frame + 24).unwrap()));
+    }
 }

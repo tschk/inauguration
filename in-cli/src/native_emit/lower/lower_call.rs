@@ -33,12 +33,31 @@ pub(crate) fn lower_call(
             "native-lower: unresolved private compiler operation `{target}`"
         ));
     }
-    if matches!(target.as_str(), "invoke" | "invoke1" | "invoke2")
-        && !functions.contains_key(target)
+    if matches!(
+        target.as_str(),
+        "invoke"
+            | "invoke1"
+            | "invoke2"
+            | "invoke-native"
+            | "invoke-native1"
+            | "invoke-native2"
+            | "invoke_native"
+            | "invoke_native1"
+            | "invoke_native2"
+    ) && !functions.contains_key(target)
     {
+        let raw_native = matches!(
+            target.as_str(),
+            "invoke-native"
+                | "invoke-native1"
+                | "invoke-native2"
+                | "invoke_native"
+                | "invoke_native1"
+                | "invoke_native2"
+        );
         let expected = match target.as_str() {
-            "invoke" => 1,
-            "invoke1" => 2,
+            "invoke" | "invoke-native" | "invoke_native" => 1,
+            "invoke1" | "invoke-native1" | "invoke_native1" => 2,
             _ => 3,
         };
         if args.len() != expected {
@@ -52,6 +71,9 @@ pub(crate) fn lower_call(
             && !ctx.globals.contains_key(name)
             && let Some(function) = functions.get(name)
         {
+            if raw_native && function.may_throw {
+                return Err("native-lower: raw native target must be nothrow".into());
+            }
             if function.ret.canonical() != Typ::Int
                 || function.params.len() != expected - 1
                 || function
@@ -87,7 +109,11 @@ pub(crate) fn lower_call(
         ));
         emitter.emit_u32(aarch64::cmp_reg64(16, aarch64::REG_XZR));
         let valid = emitter.emit_insn(aarch64::b_cond(1, 0));
-        super::emit_failure_return(emitter, ctx, fn_name)?;
+        if raw_native {
+            emitter.emit_u32(aarch64::brk(0));
+        } else {
+            super::emit_failure_return(emitter, ctx, fn_name)?;
+        }
         emitter.patch_u32(
             valid,
             aarch64::b_cond(1, emitter.len() as i32 - valid as i32),
@@ -101,7 +127,9 @@ pub(crate) fn lower_call(
         }
         emitter.emit_u32(0xD63F_0000 | (16 << 5));
         ctx.release_call_arg_temps();
-        super::lower_stmt::emit_error_check(emitter, ctx, fn_name)?;
+        if !raw_native {
+            super::lower_stmt::emit_error_check(emitter, ctx, fn_name)?;
+        }
         if rd != 0 {
             emitter.emit_u32(aarch64::mov_reg64(rd, 0));
         }

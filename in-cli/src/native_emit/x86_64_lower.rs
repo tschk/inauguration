@@ -3257,13 +3257,25 @@ fn lower_builtin_call(
             }
             Ok(true)
         }
-        "invoke" | "invoke1" | "invoke2" if !ctx.functions.contains_key(target_name) => {
+        "invoke" | "invoke1" | "invoke2" | "invoke-native" | "invoke-native1"
+        | "invoke-native2" | "invoke_native" | "invoke_native1" | "invoke_native2"
+            if !ctx.functions.contains_key(target_name) =>
+        {
             if x86_64::is_32bit() {
                 return Err("x86_64-lower: indirect Int calls require 64-bit mode".into());
             }
+            let raw_native = matches!(
+                target_name,
+                "invoke-native"
+                    | "invoke-native1"
+                    | "invoke-native2"
+                    | "invoke_native"
+                    | "invoke_native1"
+                    | "invoke_native2"
+            );
             let expected = match target_name {
-                "invoke" => 1,
-                "invoke1" => 2,
+                "invoke" | "invoke-native" | "invoke_native" => 1,
+                "invoke1" | "invoke-native1" | "invoke_native1" => 2,
                 _ => 3,
             };
             if args.len() != expected {
@@ -3276,6 +3288,9 @@ fn lower_builtin_call(
                 && !ctx.globals.contains_key(name)
                 && let Some(function) = ctx.functions.get(name)
             {
+                if raw_native && function.may_throw {
+                    return Err("x86_64-lower: raw native target must be nothrow".into());
+                }
                 if function.ret.canonical() != Typ::Int
                     || function.params.len() != expected - 1
                     || function
@@ -3306,13 +3321,21 @@ fn lower_builtin_call(
             emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 0));
             let valid = emitter.len();
             emitter.emit_insns(&x86_64::jcc_near(0x05, 0));
-            emit_failure_return(emitter, ctx)?;
+            if raw_native {
+                emitter.emit_insns(&[0x0F, 0x0B]); // UD2: no language error carrier exists.
+            } else {
+                emit_failure_return(emitter, ctx)?;
+            }
             emitter.patch_u32(valid + 2, emitter.len() - valid - 6);
             for (slot, reg) in staged[1..].iter().zip([RDI, RSI]) {
                 emitter.emit_insns(&x86_64::ldr64(reg, *slot as u16));
             }
-            emitter.emit_insns(&[0xFF, 0xD0]);
-            emit_error_check(emitter, ctx)?;
+            if raw_native {
+                emit_aligned_indirect_host_call(emitter);
+            } else {
+                emitter.emit_insns(&[0xFF, 0xD0]);
+                emit_error_check(emitter, ctx)?;
+            }
             if target_reg != RAX {
                 emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
             }
@@ -3487,6 +3510,11 @@ fn lower_call_args(
 /// Call a hosted C-ABI wrapper with argument registers already staged.
 fn emit_aligned_host_call(emitter: &mut CodeEmitter, ptr: *const u8) {
     emitter.emit_insns(&x86_64::load_i64(RAX, ptr as i64));
+    emit_aligned_indirect_host_call(emitter);
+}
+
+/// Call the native SysV target in RAX without any language error-page contract.
+fn emit_aligned_indirect_host_call(emitter: &mut CodeEmitter) {
     // Operand spills and Harden frames may leave the stack unaligned for C calls.
     emitter.emit_insns(&x86_64::mov_rr(11, x86_64::REG_SP));
     emitter.emit_insns(&x86_64::load_i64(10, -16));

@@ -231,9 +231,13 @@ pub(crate) fn parse_expr_with_context(s: &str, context: &mut LoopParseContext<'_
     if let Ok(n) = s.parse::<i64>() {
         return Expr::IntLit(n);
     }
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        if let Ok(n) = i64::from_str_radix(hex, 16) {
-            return Expr::IntLit(n);
+    for (lower, upper, radix) in [("0x", "0X", 16), ("0o", "0O", 8), ("0b", "0B", 2)] {
+        if let Some(digits) = s.strip_prefix(lower).or_else(|| s.strip_prefix(upper))
+            && !digits.is_empty()
+            && (radix == 16 || digits.chars().all(|digit| digit.is_digit(radix)))
+            && let Ok(value) = i64::from_str_radix(digits, radix)
+        {
+            return Expr::IntLit(value);
         }
     }
     if let Some(value) = crate::core_ir::decode_string_literal(s) {
