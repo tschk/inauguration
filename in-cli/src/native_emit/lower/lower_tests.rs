@@ -292,16 +292,20 @@ fn lowers_string_len_to_aarch64_ldr_offset_8() {
     let mut emitter = CodeEmitter::new();
     let structs = HashMap::new();
     let strings = HashMap::new();
+    let globals = GlobalLayout::default();
     let mut pending_static_arrays = Vec::new();
     let mut pending_inrt_calls = Vec::new();
     let mut pending_strings = Vec::new();
+    let mut pending_global_literals = Vec::new();
     let mut ctx = LowerCtx::new(
         &[],
         &structs,
         &strings,
+        &globals,
         &mut pending_static_arrays,
         &mut pending_inrt_calls,
         &mut pending_strings,
+        &mut pending_global_literals,
         "test",
     )
     .unwrap();
@@ -326,16 +330,20 @@ fn lowers_string_contains_to_native_wrapper_call() {
     let mut emitter = CodeEmitter::new();
     let structs = HashMap::new();
     let strings = HashMap::new();
+    let globals = GlobalLayout::default();
     let mut pending_static_arrays = Vec::new();
     let mut pending_inrt_calls = Vec::new();
     let mut pending_strings = Vec::new();
+    let mut pending_global_literals = Vec::new();
     let mut ctx = LowerCtx::new(
         &[],
         &structs,
         &strings,
+        &globals,
         &mut pending_static_arrays,
         &mut pending_inrt_calls,
         &mut pending_strings,
+        &mut pending_global_literals,
         "test",
     )
     .unwrap();
@@ -965,6 +973,80 @@ fn jit_executes_vec_for() {
         .expect("invoke")
     };
     assert_eq!(result, 15);
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn jit_vec_for_continue_skips_and_break_stops_iteration() {
+    let value_is = |expected| Expr::Binary {
+        op: "==".into(),
+        lhs: Box::new(Expr::Ident("value".into())),
+        rhs: Box::new(Expr::IntLit(expected)),
+    };
+    let module = UnifiedModule {
+        identity: Default::default(),
+        decls: vec![Decl::Function {
+            name: "main".into(),
+            params: vec![("values".into(), Typ::Named("Vec".into()))],
+            ret: Typ::Int,
+            body: vec![
+                Stmt::Let("sum".into(), Some(Typ::Int), Expr::IntLit(0)),
+                Stmt::Loop {
+                    kind: LoopKind::For {
+                        binding: "value".into(),
+                    },
+                    cond: Some(Expr::Ident("values".into())),
+                    body: vec![
+                        Stmt::If {
+                            cond: value_is(5),
+                            then_body: vec![Stmt::Continue],
+                            else_body: vec![],
+                        },
+                        Stmt::If {
+                            cond: value_is(9),
+                            then_body: vec![Stmt::Break],
+                            else_body: vec![],
+                        },
+                        Stmt::Assign(
+                            "sum".into(),
+                            Expr::Binary {
+                                op: "+".into(),
+                                lhs: Box::new(Expr::Ident("sum".into())),
+                                rhs: Box::new(Expr::Ident("value".into())),
+                            },
+                        ),
+                    ],
+                },
+                Stmt::Return(Some(Expr::Ident("sum".into()))),
+            ],
+            type_params: vec![],
+        }],
+    };
+    let lowered = lower_module(&module, "main", NativeLinkage::Executable).expect("lower");
+    assert!(lowered.degradations.is_empty());
+    let functions = vec![(
+        "main".into(),
+        ENTRY_STUB_SIZE,
+        lowered.code.len() as u32 - ENTRY_STUB_SIZE,
+    )];
+    let values = [3_u64, 5, 7, 9, 11];
+    let mut runtime = crate::jit_runtime::JitRuntime::new();
+    runtime
+        .load(&lowered.code, &functions, &lowered.relocations)
+        .expect("jit load");
+    assert_eq!(
+        unsafe {
+            runtime.invoke(
+                "main",
+                &[
+                    values.as_ptr() as i64,
+                    values.len() as i64,
+                    values.len() as i64,
+                ],
+            )
+        },
+        Some(10)
+    );
 }
 
 #[test]

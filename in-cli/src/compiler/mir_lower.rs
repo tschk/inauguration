@@ -238,6 +238,14 @@ pub fn lower_boot_image(
             entry,
             crate::native_emit::NativeLinkage::Executable,
         )?;
+        if !result.data.is_empty()
+            || module
+                .decls
+                .iter()
+                .any(|decl| matches!(decl, crate::core_ir::Decl::Global { mutable: true, .. }))
+        {
+            return Err("boot image does not support writable AArch64 globals".into());
+        }
         (
             result.code,
             result
