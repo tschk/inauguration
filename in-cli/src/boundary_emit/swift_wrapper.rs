@@ -198,7 +198,7 @@ mod tests {
         let mut module = sample_module();
         module.module.clear();
         let err = emit_swift_wrapper(&module).expect_err("expected error");
-        assert!(err.contains("module id is empty"));
+        assert_eq!(err, "module id is empty");
     }
 
     #[test]
@@ -206,7 +206,7 @@ mod tests {
         let mut module = sample_module();
         module.layouts[0].name.clear();
         let err = emit_swift_wrapper(&module).expect_err("expected error");
-        assert!(err.contains("layout name is empty"));
+        assert_eq!(err, "layout name is empty");
     }
 
     #[test]
@@ -214,7 +214,7 @@ mod tests {
         let mut module = sample_module();
         module.symbols[0].name.clear();
         let err = emit_swift_wrapper(&module).expect_err("expected error");
-        assert!(err.contains("symbol name is empty"));
+        assert_eq!(err, "symbol name is empty");
     }
 
     #[test]
