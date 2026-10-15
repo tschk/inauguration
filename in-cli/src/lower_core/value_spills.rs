@@ -49,8 +49,7 @@ fn expr_needs_spills(expr: &Expr, facts: &crate::typecheck::Facts) -> bool {
     {
         return true;
     }
-    if matches!(expr, Expr::Field { base, .. } if matches!(base.as_ref(), Expr::Call { .. } | Expr::StructInit { .. }))
-    {
+    if matches!(expr, Expr::Field { base, .. } if !is_addressable(base)) {
         return true;
     }
     if let Expr::Call { callee, args } = expr

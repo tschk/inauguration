@@ -2497,7 +2497,9 @@ fn nested_struct_arrays_refuse_unsupported_layouts() {
         assert!(
             error.contains("unsupported field base")
                 || error.contains("incomplete struct initializer")
-                || error.contains("missing struct initializer layout"),
+                || error.contains("missing struct initializer layout")
+                || error.contains("unsupported struct assignment expression")
+                || error.contains("struct value needs an addressable local, constructor, or call"),
             "{error}"
         );
     }
@@ -6907,6 +6909,86 @@ fn main()->Int{return 42;}
             fs::remove_file(&artifact).unwrap();
             fs::remove_file(metadata).unwrap();
             let _ = fs::remove_file(artifact.with_extension("abi.json"));
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_structured_producer_field_projections_preserve_values_and_effects() {
+    for original in [
+        // Both condition directions select the array header from the chosen producer.
+        #[cfg(target_arch = "aarch64")]
+        "struct Holder{[Int] items}\nfn main()->Int{let first=(if true{Holder{items:[20,22]}}else{Holder{items:[0]}}).items;let second=(if false{Holder{items:[0]}}else{Holder{items:[20,22]}}).items;return first[0]+second[1];}",
+        // The projection crosses nested nominal layout and retains adjacent fields.
+        #[cfg(target_arch = "aarch64")]
+        "struct Inner{Int before;[Int] items;Int after}\nstruct Outer{Int before;Inner inner;Int after}\nfn main()->Int{let values=(if true{Outer{before:1,inner:Inner{before:2,items:[20,22],after:3},after:4}}else{Outer{before:0,inner:Inner{before:0,items:[0],after:0},after:0}}).inner.items;return values[0]+values[1];}",
+        // Scalar/String fields share the same root preservation rule.
+        "struct Entry{Int value;String text;Bool ready;Float weight}\nfn main()->Int{let value=(if true{Entry{value:42,text:\"λ雪\",ready:true,weight:1.5}}else{Entry{value:0,text:\"wrong\",ready:false,weight:0.0}}).value;let text=(if false{Entry{value:0,text:\"wrong\",ready:false,weight:0.0}}else{Entry{value:42,text:\"λ雪\",ready:true,weight:1.5}}).text;if text==\"λ雪\"{return value;}return 0;}",
+        // A block producer keeps its lexical locals and evaluates once.
+        #[cfg(target_arch = "aarch64")]
+        "struct Holder{[Int] items}\nvar calls:Int=0;\nfn make()->Holder{calls+=1;return Holder{items:[20,21]};}\nfn main()->Int{let values=({let local=make();local}).items;return values[0]+values[1]+calls;}",
+        // Match-value producer only evaluates the selected arm.
+        #[cfg(target_arch = "aarch64")]
+        "struct Holder{[Int] items}\nvar calls:Int=0;\nfn make()->Holder{calls+=1;return Holder{items:[20,21]};}\nfn fail()->Holder{throw 9;return Holder{items:[0]};}\nfn main()->Int{let values=(match 1{0 -> {fail()} _ -> {make()}}).items;return values[0]+values[1]+calls;}",
+        // Every constructor field runs, including unprojected siblings; the
+        // unselected conditional branch must not run or throw.
+        #[cfg(target_arch = "aarch64")]
+        "struct Holder{Int before;[Int] items;Int after}\nvar calls:Int=0;\nfn before()->Int{calls=calls*10+1;return 0;}\nfn after()->Int{calls=calls*10+2;return 0;}\nfn fail()->Holder{throw 9;return Holder{before:0,items:[0],after:0};}\nfn main()->Int{let values=(if true{Holder{before:before(),items:[20,22],after:after()}}else{fail()}).items;if calls!=12{return 0;}return values[0]+values[1];}",
+        // A throwing selected producer cannot commit a field replacement.
+        #[cfg(target_arch = "aarch64")]
+        "struct Holder{[Int] items}\nfn fail()->Holder{throw 9;return Holder{items:[0]};}\nfn main()->Int{let saved=Holder{items:[20,22]};try{saved.items=(if true{fail()}else{Holder{items:[0]}}).items;return 0;}catch 9{return saved.items[0]+saved.items[1];}return 0;}",
+    ] {
+        let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+        for text in [original, canonical.as_str()] {
+            let source = temp_path("producer-field-projection.in");
+            fs::write(&source, text).unwrap();
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut request =
+                    default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{profile:?}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{profile:?}: {text}"
+                );
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    let artifact = temp_path("producer-field-projection-native");
+                    request.target = CompileTarget::Native;
+                    request.out = Some(artifact.clone());
+                    let report = compile_owned(&request);
+                    assert!(
+                        report.success && report.degradations.is_empty(),
+                        "{profile:?}: {report:?}"
+                    );
+                    assert_eq!(
+                        std::process::Command::new(&artifact)
+                            .status()
+                            .unwrap()
+                            .code(),
+                        Some(42)
+                    );
+                    fs::remove_file(&artifact).unwrap();
+                    let _ = fs::remove_file(artifact.with_extension("abi.json"));
+                }
+            }
+            fs::remove_file(source).unwrap();
         }
     }
 }
