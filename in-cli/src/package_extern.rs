@@ -206,7 +206,7 @@ mod tests {
         fs::create_dir_all(&install_path).expect("vendor dir");
         fs::write(
             install_path.join(INSTALLED_PACKAGE_METADATA),
-            r#"{"ecosystem":"pypi","name":"flask","version":"vendor","registry":"path","install_path":"vendor/pypi/flask","exports":["flask_greet"],"bindings":[{"symbol":"flask_greet","returns":"string","invoke":{"program":"python3","args":["-c","from greet import greet; import sys; sys.stdout.write(greet())"]}}]}"#,
+            r#"{"ecosystem":"pypi","name":"flask","version":"vendor","registry":"path","install_path":"vendor/pypi/flask","exports":["flask_greet","env-temp-dir","read-file"],"bindings":[{"symbol":"flask_greet","returns":"string","invoke":{"program":"python3","args":["-c","from greet import greet; import sys; sys.stdout.write(greet())"]}},{"symbol":"env-temp-dir","returns":"int","invoke":{"program":"python3","args":["-c","print(42)"]}},{"symbol":"read-file","returns":"bool","invoke":{"program":"python3","args":["-c","print(True)"]}}]}"#,
         )
         .expect("metadata");
         fs::write(
@@ -222,9 +222,21 @@ mod tests {
         let manifest = crate::package_manifest::load_package_manifest(&temp).expect("manifest");
         let bindings =
             package_import_bindings_for_semantic_import("pip:flask", &temp, &manifest, None);
-        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings.len(), 3);
         assert_eq!(bindings[0].name, "flask_greet");
         assert_eq!(bindings[0].language, "python");
+        for (binding, expected) in bindings.iter().zip([
+            crate::core_ir::Typ::String,
+            crate::core_ir::Typ::Int,
+            crate::core_ir::Typ::Bool,
+        ]) {
+            let declaration = crate::in_lang_parse::surface::binding_decl(binding);
+            assert!(
+                matches!(declaration, crate::core_ir::Decl::Function { params, ret, .. }
+                if params.is_empty() && ret == expected),
+                "{binding:?}"
+            );
+        }
         let _ = fs::remove_dir_all(temp);
     }
 }

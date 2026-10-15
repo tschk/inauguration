@@ -272,3 +272,5 @@ Local `.in` file imports retain canonical file identity until merging completes.
 The public JIT accepts macOS AArch64 and x86_64 hosts independently of native artifact support. Hosted x86 JIT calls resolve explicit bodyless stdlib declarations through the same wrapper table as undeclared builtin spellings; user-defined function bodies retain precedence. Native emission retains external import records.
 
 Stored scalar and String globals may initialize from earlier compatible globals in declaration order. Each initializer takes an initial-value snapshot in independent storage; later assignments do not change the copied global. Type inference can resolve forward names, but stored forward reads, cycles, runtime calls, and aggregate-reference initializers remain refused. Constants excluded from runtime storage must be folded before native data emission.
+
+Package binding materialization preserves explicit zero-argument signatures, including their return types, when a symbol shares a name with a standard-library function. Legacy named imports without signature metadata retain their catalog ABI.

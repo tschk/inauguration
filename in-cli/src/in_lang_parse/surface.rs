@@ -104,8 +104,9 @@ pub fn in_standard_import_bindings(import: &str) -> Vec<InExternBinding> {
 }
 
 pub(crate) fn binding_decl(binding: &InExternBinding) -> Decl {
-    // General extern with explicit params: use them directly
-    if !binding.params.is_empty() {
+    // Explicit signatures include zero-argument functions. Bindings without
+    // signature metadata use the legacy named-import catalog below.
+    if !binding.params.is_empty() || binding.ret.is_some() {
         return Decl::Function {
             name: binding.name.clone(),
             params: binding.params.clone(),

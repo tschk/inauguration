@@ -3074,3 +3074,57 @@ fn import_deduplication_uses_canonical_file_identity_for_path_aliases() {
     assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn explicit_zero_argument_extern_bindings_keep_their_declared_signature() {
+    for (header, expected) in [
+        ("env-temp-dir()->Float", Typ::Float),
+        ("read-file()->Bool", Typ::Bool),
+        ("custom()->String", Typ::String),
+        ("arg-count()", Typ::Void),
+    ] {
+        let declaration = format!("extern rust fn {header};");
+        let binding = super::decl::parse_extern_fn_block(&declaration).unwrap();
+        assert!(binding.params.is_empty());
+        assert_eq!(binding.ret, Some(expected.clone()));
+        let lowered = super::surface::binding_decl(&binding);
+        assert!(
+            matches!(&lowered, Decl::Function { params, ret, .. }
+            if params.is_empty() && ret == &expected),
+            "{declaration}: {lowered:?}"
+        );
+        // Public extern parsing already preserves this ABI; keep it consistent
+        // with package/surface binding materialization.
+        let source = format!("{declaration}\nfn main()->Int{{return 42;}}\n");
+        let module = parse_in_source(&source).unwrap();
+        assert!(module.decls.contains(&lowered), "{source}: {module:?}");
+        let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+        assert_eq!(parse_in_source(&canonical).unwrap().decls, module.decls);
+    }
+}
+
+#[test]
+fn legacy_standard_import_bindings_keep_catalog_parameter_and_return_types() {
+    for (name, params, ret) in [
+        ("env-temp-dir", vec![], Typ::String),
+        ("arg-count", vec![], Typ::Int),
+        (
+            "read-file",
+            vec![(String::from("path"), Typ::String)],
+            Typ::String,
+        ),
+        (
+            "print",
+            vec![(String::from("text"), Typ::String)],
+            Typ::Void,
+        ),
+    ] {
+        let binding = super::surface::std_binding(name, vec![]);
+        assert!(binding.params.is_empty() && binding.ret.is_none());
+        assert!(
+            matches!(super::surface::binding_decl(&binding), Decl::Function { params: actual, ret: actual_ret, .. }
+            if actual == params && actual_ret == ret),
+            "{name}"
+        );
+    }
+}
