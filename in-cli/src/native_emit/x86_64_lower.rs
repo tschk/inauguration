@@ -286,7 +286,14 @@ impl<'a> LowerCtx<'a> {
                 let fields =
                     crate::native_emit::struct_layout::x86_fields(self.structs, struct_name)
                         .unwrap_or(fields);
-                for (field, _field_ty) in fields.into_iter().rev() {
+                for (field, field_ty) in fields.into_iter().rev() {
+                    if field_ty.canonical() == Typ::Void {
+                        return Err(
+                            "x86_64-lower: unit aggregate fields require a zero-width layout"
+                                .into(),
+                        );
+                    }
+                    super::lower::ensure_unit_sequence_layout(&field_ty)?;
                     // ponytail: all struct fields map to scalar slots
                     slots.insert(field.clone(), self.alloc_slot());
                 }

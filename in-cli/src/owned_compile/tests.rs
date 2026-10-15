@@ -253,7 +253,10 @@ fn owned_conditional_headers_preserve_quoted_braces_and_expression_effects() {
 
 #[test]
 #[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 fn unit_aggregate_layouts_refuse_until_zero_width_storage_is_supported() {
