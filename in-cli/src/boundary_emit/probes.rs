@@ -164,6 +164,15 @@ mod tests {
     }
 
     #[test]
+    fn rejects_layout_probe_generation_error() {
+        let mut module = sample_module();
+        // Force an error during layout probe generation by breaking a layout
+        module.layouts[0].name.clear();
+        let err = emit_layout_probes(&module).expect_err("expected error");
+        assert!(err.contains("layout name is empty"));
+    }
+
+    #[test]
     fn probes_emit_abi_types() {
         let module = sample_module();
         let probes = emit_layout_probes(&module).expect("probes");
