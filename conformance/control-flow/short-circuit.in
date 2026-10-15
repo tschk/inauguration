@@ -1,0 +1,22 @@
+// @expect parse: ok
+// @expect bytecode: executes
+// @expect result: 42
+// @expect has-function: main
+
+fn both(flag: Bool, zero: Int) -> Bool {
+  return flag && (9 / zero == 0);
+}
+
+fn either(flag: Bool, zero: Int) -> Bool {
+  return flag || (9 / zero == 0);
+}
+
+fn main() -> Int {
+  if both(false, 0) {
+    return 11;
+  }
+  if either(true, 0) {
+    return 42;
+  }
+  return 99;
+}
