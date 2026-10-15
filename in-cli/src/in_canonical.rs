@@ -306,13 +306,11 @@ fn format_expr(expr: &Expr) -> String {
         ),
         Expr::BoolLit(value) => value.to_string(),
         Expr::Ident(name) => name.clone(),
-        Expr::Unary { op, expr, .. } => {
-            let mut out = op.clone();
-            out.push_str(&format_expr(expr));
-            out
-        }
+        // Preserve expression boundaries independently of the surrounding
+        // operator or postfix call/index/field position.
+        Expr::Unary { op, expr, .. } => format!("({op}{})", format_expr(expr)),
         Expr::Binary { op, lhs, rhs, .. } => {
-            format!("{} {} {}", format_expr(lhs), op, format_expr(rhs))
+            format!("({} {} {})", format_expr(lhs), op, format_expr(rhs))
         }
         Expr::StructInit { name, fields, .. } => {
             let rendered = fields
@@ -570,6 +568,41 @@ fn main()->Int{return 42;}
     }
 
     #[test]
+    fn canonical_operator_grouping_preserves_nested_and_postfix_expressions() {
+        for source in [
+            "!(read_once() != 0)",
+            "!!(read_once() != 0)",
+            "~(left() | right())",
+            "-(left() + right())",
+            "(left() + right()) * other()",
+            "left() - (right() - other())",
+            "left() / (right() * other())",
+            "(left() || right()) && other()",
+            "left() << (right() + other())",
+            "accept(!(read_once() != 0), left() - (right() - other()))",
+            "values[(left() + right()) * other()]",
+            "(left() + right())[index()]",
+            "(left() + right()).field",
+            "(!flag).field",
+            "(!flag)[index()]",
+            "(!flag)(argument())",
+            "(left() + right())(argument())",
+        ] {
+            let original = crate::in_lang_parse::parse_expr(source);
+            let canonical = format_expr(&original);
+            assert_eq!(
+                crate::in_lang_parse::parse_expr(&canonical),
+                original,
+                "{source}: {canonical}"
+            );
+            assert_eq!(
+                format_expr(&crate::in_lang_parse::parse_expr(&canonical)),
+                canonical
+            );
+        }
+    }
+
+    #[test]
     fn canonical_closure_expression_operands_roundtrip() {
         for source in [
             "fn(value:Float)->Float{return value;}",
@@ -803,9 +836,13 @@ fn main() { return; }
         assert!(canonical.contains("p.x = 3"));
         assert!(canonical.contains("let arr: [Int] = [1, 2, 3]"));
         assert!(canonical.contains("arr[0] = 4"));
-        assert!(canonical.contains("while (p.x < 10) {"));
+        assert!(canonical.contains("while ((p.x < 10)) {"));
         assert!(canonical.contains("match (p.y) {"));
-        assert!(canonical.contains("if (p.x == 10) {"));
+        assert!(canonical.contains("if ((p.x == 10)) {"));
         assert!(canonical.contains("while (true) {"));
+        assert_eq!(
+            parse_in_source(&canonical).unwrap(),
+            parse_in_source(src).unwrap()
+        );
     }
 }

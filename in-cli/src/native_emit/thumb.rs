@@ -259,6 +259,12 @@ pub fn eors(rd: u8, rm: u8) -> u16 {
     0x4040 | ((rm as u16) << 3) | rd as u16
 }
 
+/// `mvns rd, rm` (bitwise complement, low registers).
+pub fn mvns(rd: u8, rm: u8) -> u16 {
+    debug_assert!(rd < 8 && rm < 8);
+    0x43C0 | ((rm as u16) << 3) | rd as u16
+}
+
 /// `rsbs rd, rn, #0` (negate)
 pub fn rsbs0(rd: u8, rn: u8) -> u16 {
     debug_assert!(rd < 8 && rn < 8);
@@ -494,6 +500,16 @@ mod tests {
         // high halfword first in stream via emit_u32_thumb
         assert_eq!((enc >> 16) & 0xF800, 0xF000);
         assert_eq!(enc & 0xD000, 0xD000);
+    }
+
+    #[test]
+    fn encodes_bitwise_complement_with_distinct_low_registers() {
+        assert_eq!(mvns(R0, R0), 0x43c0);
+        assert_eq!(mvns(R1, R4), 0x43e1);
+        assert_eq!(mvns(R7, R7), 0x43ff);
+        let mut emitter = CodeEmitter::new();
+        emitter.emit_u16(mvns(R1, R4));
+        assert_eq!(emitter.bytes, [0xe1, 0x43]);
     }
 
     #[test]

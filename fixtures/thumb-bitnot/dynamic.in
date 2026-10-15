@@ -1,0 +1,70 @@
+fn read_once() -> Int {
+  store32(0x38000004, load32(0x38000004) + 1);
+  return load32(0x38000000);
+}
+fn main() -> Int {
+  store32(0x38000000, 0x12345678);
+  store32(0x38000004, 0);
+  if ~read_once() != 0xedcba987 {
+    return 1;
+  }
+  if load32(0x38000004) != 1 {
+    return 2;
+  }
+  // A dynamic false branch must not evaluate its complement operand.
+  if load32(0x38000004) == 0 {
+    let skipped: Int = ~read_once();
+    return skipped;
+  }
+  if load32(0x38000004) != 1 {
+    return 6;
+  }
+  store32(0x38000000, 0);
+  if ~load32(0x38000000) != -1 {
+    return 3;
+  }
+  store32(0x38000000, 0xffffffff);
+  if ~load32(0x38000000) != 0 {
+    return 4;
+  }
+  store32(0x38000000, 0x80000000);
+  if ~load32(0x38000000) != 0x7fffffff {
+    return 5;
+  }
+  // Logical NOT consumes a typed Bool produced by a dynamic comparison.
+  store32(0x38000000, 17);
+  store32(0x38000004, 0);
+  if !(read_once() != 0) {
+    return 7;
+  }
+  if load32(0x38000004) != 1 {
+    return 8;
+  }
+  store32(0x38000000, 0);
+  if !(read_once() != 0) != true {
+    return 9;
+  }
+  if load32(0x38000004) != 2 {
+    return 10;
+  }
+  store32(0x38000000, 0xffffffff);
+  if !(read_once() != 0) {
+    return 11;
+  }
+  if !!(read_once() != 0) != true {
+    return 12;
+  }
+  if load32(0x38000004) != 4 {
+    return 13;
+  }
+  if load32(0x38000004) == 0 {
+    let skipped_not: Bool = !(read_once() != 0);
+    if skipped_not {
+      return 14;
+    }
+  }
+  if load32(0x38000004) != 4 {
+    return 15;
+  }
+  return 42;
+}

@@ -3310,3 +3310,11 @@ fn signed_integer_minimum_is_consistent_across_radices_and_canonicalization() {
         assert!(!matches!(parse_expr(literal), Expr::IntLit(_)), "{literal}");
     }
 }
+
+#[test]
+fn dynamic_thumb_bitnot_fixture_canonicalizes_to_identical_core_ir() {
+    let source = include_str!("../../../fixtures/thumb-bitnot/dynamic.in");
+    let original = parse_in_source(source).unwrap();
+    let canonical = crate::in_canonical::canonicalize_in_source(source).unwrap();
+    assert_eq!(parse_in_source(&canonical).unwrap(), original);
+}

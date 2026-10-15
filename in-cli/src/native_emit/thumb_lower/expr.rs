@@ -95,10 +95,15 @@ pub(crate) fn lower_expr_into(
                     }
                     Ok(())
                 }
+                "~" | "bitnot" => {
+                    emitter.emit_u16(thumb::mvns(dest, R0));
+                    Ok(())
+                }
                 "!" | "not" => {
                     // !x → x == 0
                     emitter.emit_u16(thumb::cmp_imm8(R0, 0));
-                    emitter.emit_u16(thumb::movs_imm8(R0, 0));
+                    // MOVW preserves the comparison flags consumed by BNE.
+                    emitter.emit_u32_thumb(thumb::movw(R0, 0));
                     let bne = emitter.len();
                     emitter.emit_u32_thumb(thumb::b_cond_wide(COND_NE, 0));
                     emitter.emit_u16(thumb::movs_imm8(R0, 1));
@@ -1070,6 +1075,67 @@ mod outgoing_stack_argument_tests {
             assert_eq!(words.last(), Some(&thumb::add_sp_imm(bytes).unwrap()));
             assert_eq!(pending.len(), 1);
             assert_eq!(pending[0].target, "take");
+        }
+    }
+}
+
+#[cfg(test)]
+mod dynamic_bitnot_tests {
+    use super::*;
+
+    #[test]
+    fn logical_not_preserves_comparison_flags_and_requested_register() {
+        for op in ["!", "not"] {
+            let functions = HashMap::new();
+            let structs = HashMap::new();
+            let mut ctx = LowerCtx::new("logical_not", &[], &functions, &structs);
+            let offset = ctx.alloc_slot();
+            ctx.locals.insert("value".into(), LocalSlot::Scalar(offset));
+            let mut emitter = CodeEmitter::new();
+            let mut pending = Vec::new();
+            let expression = Expr::Unary {
+                op: op.into(),
+                expr: Box::new(Expr::Ident("value".into())),
+            };
+            lower_expr_into(&mut emitter, &mut ctx, &expression, R4, &mut pending).unwrap();
+            let mut prefix = CodeEmitter::new();
+            prefix.emit_u16(thumb::ldr_sp(R0, offset).unwrap());
+            prefix.emit_u16(thumb::cmp_imm8(R0, 0));
+            prefix.emit_u32_thumb(thumb::movw(R0, 0));
+            assert!(emitter.bytes.starts_with(&prefix.bytes));
+            assert_eq!(emitter.bytes.len(), 16);
+            assert_eq!(&emitter.bytes[14..], &thumb::mov_low(R4, R0).to_le_bytes());
+            assert!(pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn bitnot_aliases_read_operand_once_and_write_requested_register() {
+        for op in ["~", "bitnot"] {
+            let functions = HashMap::new();
+            let structs = HashMap::new();
+            let mut ctx = LowerCtx::new("complement", &[], &functions, &structs);
+            let offset = ctx.alloc_slot();
+            ctx.locals.insert("value".into(), LocalSlot::Scalar(offset));
+            let mut emitter = CodeEmitter::new();
+            let mut pending = Vec::new();
+            let expression = Expr::Unary {
+                op: op.into(),
+                expr: Box::new(Expr::Ident("value".into())),
+            };
+            lower_expr_into(&mut emitter, &mut ctx, &expression, R4, &mut pending).unwrap();
+            let words = emitter
+                .bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|word| u16::from_le_bytes(*word))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                words,
+                vec![thumb::ldr_sp(R0, offset).unwrap(), thumb::mvns(R4, R0)]
+            );
+            assert!(pending.is_empty());
         }
     }
 }
