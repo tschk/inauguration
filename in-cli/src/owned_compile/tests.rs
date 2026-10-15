@@ -5575,6 +5575,147 @@ fn owned_c_numeric_casts_preserve_value_and_effects() {
 }
 
 #[test]
+fn raw_unsigned_word_operations_preserve_values_and_checked_failure_effects() {
+    use crate::core_ir::Expr;
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (op, expected) in [("udiv", i64::MAX), ("urem", 1), ("lshr", i64::MAX)] {
+        for zero in [false, true] {
+            if zero && op == "lshr" {
+                continue;
+            }
+            let right = if zero { 0 } else { 2 };
+            let expected = if op == "lshr" {
+                4611686018427387903
+            } else {
+                expected
+            };
+            let tail = if zero {
+                "let result=helper(); if trace==12 && result==1 {return 42;} return 7;".to_owned()
+            } else {
+                format!(
+                    "let result=helper(); if trace==123 && result=={expected} {{return 42;}} return 7;"
+                )
+            };
+            let source = format!(
+                "var trace:Int=0;\nfn left()->Int{{trace=trace*10+1;return -1;}}\nfn right()->Int{{trace=trace*10+2;return {right};}}\nfn helper()->Int{{let answer=left()/right();trace=trace*10+3;return answer;}}\nfn main()->Int{{{tail}}}"
+            );
+            let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                if let Expr::Binary { op: operator, .. } = expr
+                    && operator == "/"
+                {
+                    *operator = op.into();
+                }
+            });
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut request = default_request(
+                    PathBuf::from("raw-unsigned.in"),
+                    CompileTarget::Jit,
+                    Some("main"),
+                    None,
+                );
+                request.profile = profile;
+                let result = super::jit::compile_jit(&module, "UnsignedEffects", &request).unwrap();
+                assert_eq!(
+                    result.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{op}: zero={zero}: {profile:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn owned_c_unsigned_expressions_refuse_unrepresented_mixed_integer_ranks() {
+    for extension in ["c", "cpp"] {
+        for source in [
+            "int main(){unsigned int value=1; long long other=-1; if(value>other)return 42;return 7;}",
+            "int main(){unsigned int value=1; if(value<4294967295)return 42;return 7;}",
+            "int main(){unsigned int value=1; return value+4294967296U;}",
+        ] {
+            let path = temp_path(&format!("c-unsigned-unknown-rank.{extension}"));
+            fs::write(&path, source).unwrap();
+            let report = compile_owned(&default_request(
+                path.clone(),
+                CompileTarget::Jit,
+                Some("main"),
+                None,
+            ));
+            fs::remove_file(path).unwrap();
+            assert!(!report.success, "{source}: {report:?}");
+            assert!(
+                report
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("unsupported-c-integer-rank")),
+                "{source}: {report:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn owned_c_unsigned_integer_expressions_preserve_width_order_and_effects() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for extension in ["c", "cpp"] {
+        for source in [
+            "int main(){unsigned int value=4294967295; if(value>0)return 42;return 7;}",
+            "int main(){unsigned int value=1; if(value>-1)return 7;return 42;}",
+            "int main(){unsigned int value=4294967295; if(value+1==0)return 42;return 7;}",
+            "int main(){if(0xffffffff>0 && 1U < -1 && 4294967295u > 0)return 42;return 7;}",
+            "int main(){unsigned int value=4294967295; if((value+2)*2-4==4294967294U)return 42;return 7;}",
+            "int main(){unsigned int value=4294967295; if(value/2==2147483647 && value%2==1)return 42;return 7;}",
+            "int main(){unsigned int value=2147483648U; if((value>>31)==1 && (value<<1)==0)return 42;return 7;}",
+            "int main(){unsigned int value=1; if(-value==4294967295U && ~value==4294967294U)return 42;return 7;}",
+            "int main(){unsigned int value=4294967295; int negative=-1; if(value==negative && !(value!=negative))return 42;return 7;}",
+            "int main(){unsigned char value=255; if(value+1==256 && -value==-255)return 42;return 7;}",
+            "int main(){unsigned int value=4294967295; double other=4294967295.0; if(value==other)return 42;return 7;}",
+            "unsigned int source(){return 4294967295U;} int main(){if(source()>0 && source()/2==2147483647)return 42;return 7;}",
+            "int calls=0; unsigned int source(){calls++;return 4294967295U;} int main(){if(source()/2==2147483647 && calls==1)return 42;return 7;}",
+            "int calls=0; unsigned int source(){calls++;return 4294967295U;} int main(){if(1 || source()>0){if(calls==0)return 42;}return 7;}",
+            "int main(){unsigned int value=1; if(value+!0==2)return 42;return 7;}",
+            "int main(){unsigned int value=4294967295U; value++; if(value!=0)return 7; value--; if(value!=4294967295U)return 7; value+=2; value*=2; if(value==2)return 42;return 7;}",
+            "int main(){if(-1U==4294967295U && 1U < -1U)return 42;return 7;}",
+            "int main(){unsigned char small=0; unsigned int value=1; value+=~small; if(value==0)return 42;return 7;}",
+            "int main(){unsigned char small=1; unsigned int value=1; value+=-small; if(value==0)return 42;return 7;}",
+            "int main(){unsigned char small=255; if(+small+1==256 && +1U < -1)return 42;return 7;}",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let path = temp_path(&format!("c-unsigned-expressions.{extension}"));
+                fs::write(&path, source).unwrap();
+                let mut request =
+                    default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                fs::remove_file(path).unwrap();
+                assert!(
+                    report.success,
+                    "{extension}: {profile:?}: {source}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{extension}: {profile:?}: {source}: {report:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn owned_c_numeric_casts_refuse_pointer_object_and_extended_types() {
     for extension in ["c", "cpp"] {
         for source in [

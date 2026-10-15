@@ -173,7 +173,7 @@ fn expr_has_effects(e: &Expr) -> bool {
                 | Expr::Conditional { .. }
                 | Expr::MatchValue { .. }
         ) || matches!(n, Expr::Unary {op, ..} if op == "vector-clone")
-            || matches!(n, Expr::Binary {op, ..} if matches!(op.as_str(), "/" | "%" | "div" | "mod"))
+            || matches!(n, Expr::Binary {op, ..} if matches!(op.as_str(), "/" | "%" | "div" | "mod" | "udiv" | "urem"))
         {
             has = true;
         }
@@ -793,7 +793,7 @@ fn simplify_binary_expr(
     ) {
         return original;
     }
-    if matches!(op, "shl" | "<<" | "shr" | ">>")
+    if matches!(op, "shl" | "<<" | "shr" | ">>" | "lshr")
         && let Expr::IntLit(count) = rhs
         && !(0..if semantics == IntegerSemantics::Word32 {
             32
@@ -968,7 +968,7 @@ fn simplify_binary_expr(
                 return lhs.clone();
             }
         }
-        "shl" | "<<" | "shr" | ">>" => {
+        "shl" | "<<" | "shr" | ">>" | "lshr" => {
             if is_zero(rhs) {
                 return lhs.clone();
             }
@@ -2616,7 +2616,7 @@ mod tests {
 
     #[test]
     fn checked_integer_operations_retain_failure_exits_through_optimization() {
-        for op in ["/", "%", "div", "mod"] {
+        for op in ["/", "%", "div", "mod", "udiv", "urem"] {
             let checked = bin(op, ident("value"), ident("zero"));
             assert!(expr_has_effects(&checked));
             for expression in [
@@ -2641,7 +2641,11 @@ mod tests {
             // Successful literal operations still fold before effect-sensitive DCE.
             assert_eq!(
                 fold_expr(bin(op, Expr::IntLit(8), Expr::IntLit(2))),
-                Expr::IntLit(if matches!(op, "%" | "mod") { 0 } else { 4 })
+                Expr::IntLit(if matches!(op, "%" | "mod" | "urem") {
+                    0
+                } else {
+                    4
+                })
             );
         }
     }

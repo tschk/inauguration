@@ -374,6 +374,14 @@ static inline int64_t in_float_saturate(double value, unsigned bits, int is_sign
     Ok(ctx.out)
 }
 
+fn word_failure_return(ret: &Typ) -> Option<&'static str> {
+    match ret.canonical() {
+        Typ::Int | Typ::Bool => Some("return 1;"),
+        Typ::Void => Some("return;"),
+        _ => None,
+    }
+}
+
 struct Ctx {
     out: String,
     facts: Rc<Facts>,
@@ -388,6 +396,7 @@ struct Ctx {
     hoisted: Vec<String>,
     tmp: u32,
     ret_is_void: bool,
+    word_failure_return: Option<&'static str>,
     global_initializer: bool,
 }
 
@@ -406,6 +415,7 @@ impl Ctx {
             hoisted: Vec::new(),
             tmp: 0,
             ret_is_void: false,
+            word_failure_return: None,
             global_initializer: false,
         }
     }
@@ -577,6 +587,41 @@ impl Ctx {
                     "add" | "+" => format!("({} + {})", l, r),
                     "sub" | "-" => format!("({} - {})", l, r),
                     "mul" | "*" => format!("({} * {})", l, r),
+                    "udiv" | "urem" | "lshr" => {
+                        if self.global_initializer {
+                            self.fail("c-backend: unsigned operation in a global initializer requires constant folding".into());
+                            return "0".into();
+                        }
+                        let failure = if matches!(op.as_str(), "udiv" | "urem") {
+                            let Some(failure) = self.word_failure_return else {
+                                self.fail("c-backend: checked unsigned division requires an Int, Bool, or Void function return".into());
+                                return "0".into();
+                            };
+                            Some(failure)
+                        } else {
+                            None
+                        };
+                        // The C projection uses a 64-bit Int carrier. Capture
+                        // both operands in source order before unsigned math.
+                        let left = self.fresh("unsigned_left");
+                        let right = self.fresh("unsigned_right");
+                        let operator = match op.as_str() {
+                            "udiv" => "/",
+                            "urem" => "%",
+                            _ => ">>",
+                        };
+                        let right_value = if op == "lshr" {
+                            format!("({right} & 63)")
+                        } else {
+                            right.clone()
+                        };
+                        let guard = failure
+                            .map(|failure| format!("if ({right} == 0) {{ {failure} }} "))
+                            .unwrap_or_default();
+                        format!(
+                            "({{ uint64_t {left} = (uint64_t)({l}); uint64_t {right} = (uint64_t)({r}); {guard}(int64_t)({left} {operator} {right_value}); }})"
+                        )
+                    }
                     "div" | "/" => format!("({} / {})", l, r),
                     "mod" | "%" => format!("({} % {})", l, r),
                     "band" | "&" => format!("({} & {})", l, r),
@@ -706,6 +751,7 @@ impl Ctx {
                 nested.types.extend(params.iter().cloned());
                 nested.global_names = self.global_names.clone();
                 nested.ret_is_void = matches!(ret.canonical(), Typ::Void);
+                nested.word_failure_return = word_failure_return(ret);
                 nested.indent_lvl = 1;
                 for cap in captures {
                     let n = sanitize_ident(cap);
@@ -974,6 +1020,7 @@ fn emit_fn_def(ctx: &mut Ctx, name: &str, params: &[(String, Typ)], ret: &Typ, b
     body_ctx.global_names = ctx.global_names.clone();
     body_ctx.tmp = ctx.tmp;
     body_ctx.ret_is_void = matches!(ret.canonical(), Typ::Void);
+    body_ctx.word_failure_return = word_failure_return(ret);
     body_ctx.indent_lvl = 1;
 
     let mut locals: Vec<(String, String)> = Vec::new();

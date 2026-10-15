@@ -3071,3 +3071,17 @@ fn raw_indirect_calls_reject_wrong_arity_and_non_int_abi() {
         );
     }
 }
+
+#[test]
+fn unsigned_word_ops_use_unsigned_aarch64_encodings() {
+    for (op, expected) in [
+        ("udiv", 0x9AC1_0800),
+        ("urem", 0x9AC1_0802),
+        ("lshr", 0x9AC1_2400),
+    ] {
+        let module = return_binary_module(op, -1, 2);
+        let lowered =
+            lower_module(&module, "main", NativeLinkage::Executable).expect("unsigned lower");
+        assert!(code_contains_insn(&lowered.code, expected), "{op}");
+    }
+}

@@ -1125,6 +1125,18 @@ pub(crate) fn lower_binary(
         "%" => {
             return lower_checked_div_or_mod(emitter, ctx, rd, lhs_reg, rhs_reg, true, fn_name);
         }
+        "udiv" | "urem" => {
+            return lower_checked_word_div_or_mod(
+                emitter,
+                ctx,
+                rd,
+                lhs_reg,
+                rhs_reg,
+                (op == "urem", true),
+                fn_name,
+            );
+        }
+        "lshr" => aarch64::lsr_reg64(rd, lhs_reg, rhs_reg),
         "??" => {
             lower_truthy_result(emitter, lhs_reg);
             lower_truthy_result(emitter, rhs_reg);
@@ -1352,7 +1364,9 @@ fn native_expr_type_with_bindings(
                 native_expr_type_with_bindings(rhs, ctx, functions, bindings),
             )
         }
-        Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "<<" | ">>" | "%") => {
+        Expr::Binary { op, lhs, rhs }
+            if matches!(op.as_str(), "<<" | ">>" | "%" | "lshr" | "udiv" | "urem") =>
+        {
             if native_expr_type_with_bindings(lhs, ctx, functions, bindings) == Some(Typ::Int)
                 && native_expr_type_with_bindings(rhs, ctx, functions, bindings) == Some(Typ::Int)
             {
@@ -1441,14 +1455,35 @@ pub(crate) fn lower_checked_div_or_mod(
     modulo: bool,
     fn_name: &str,
 ) -> Result<(), String> {
+    lower_checked_word_div_or_mod(emitter, ctx, rd, lhs_reg, rhs_reg, (modulo, false), fn_name)
+}
+
+fn lower_checked_word_div_or_mod(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    rd: u8,
+    lhs_reg: u8,
+    rhs_reg: u8,
+    mode: (bool, bool),
+    fn_name: &str,
+) -> Result<(), String> {
+    let (modulo, unsigned) = mode;
     emitter.emit_u32(aarch64::cmp_reg64(rhs_reg, aarch64::REG_XZR));
     let failure_branch = emitter.emit_insn(aarch64::b_cond(0, 0));
     if modulo {
         let quotient_reg = pick_scratch(&[rd, lhs_reg, rhs_reg]);
-        emitter.emit_u32(aarch64::sdiv64(quotient_reg, lhs_reg, rhs_reg));
+        emitter.emit_u32(if unsigned {
+            aarch64::udiv64(quotient_reg, lhs_reg, rhs_reg)
+        } else {
+            aarch64::sdiv64(quotient_reg, lhs_reg, rhs_reg)
+        });
         emitter.emit_u32(aarch64::msub64(rd, quotient_reg, rhs_reg, lhs_reg));
     } else {
-        emitter.emit_u32(aarch64::sdiv64(rd, lhs_reg, rhs_reg));
+        emitter.emit_u32(if unsigned {
+            aarch64::udiv64(rd, lhs_reg, rhs_reg)
+        } else {
+            aarch64::sdiv64(rd, lhs_reg, rhs_reg)
+        });
     }
     let end_branch = emitter.emit_insn(aarch64::b(0));
     let failure_offset = emitter.len() as i32;

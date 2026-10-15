@@ -750,6 +750,7 @@ fn lower_checked_div_or_mod(
     emitter: &mut CodeEmitter,
     ctx: &LowerCtx<'_>,
     modulo: bool,
+    unsigned: bool,
 ) -> Result<(), String> {
     emitter.emit_u16(thumb::cmp_imm8(R2, 0));
     let nonzero = emitter.len();
@@ -757,9 +758,13 @@ fn lower_checked_div_or_mod(
     emit_scalar_failure_return(emitter, ctx)?;
     let divide = emitter.len();
     patch_b_cond(emitter, nonzero, divide)?;
-    emitter.emit_u32_thumb(thumb::sdiv(R0, R1, R2));
+    emitter.emit_u32_thumb(if unsigned {
+        thumb::udiv(R0, R1, R2)
+    } else {
+        thumb::sdiv(R0, R1, R2)
+    });
     if modulo {
-        // Native word MIN/-1 wraps; the corresponding remainder is zero.
+        // Subtract the quotient product using native word arithmetic.
         emitter.emit_u16(thumb::muls(R0, R2));
         emitter.emit_u16(thumb::subs_reg(R0, R1, R0));
     }
@@ -824,8 +829,20 @@ pub(crate) fn lower_binary(
             emitter.emit_u16(thumb::mov_low(R0, R1));
             emitter.emit_u32_thumb(thumb::asrs_reg(R0, R1, R2));
         }
-        "/" | "%" => {
-            lower_checked_div_or_mod(emitter, ctx, op == "%")?;
+        "lshr" => {
+            // Match target-word shifts: Cortex-M otherwise uses the low byte
+            // and produces zero for counts at least 32.
+            emitter.emit_u16(thumb::movs_imm8(R3, 31));
+            emitter.emit_u16(thumb::ands(R2, R3));
+            emitter.emit_u32_thumb(thumb::lsrs_reg(R0, R1, R2));
+        }
+        "/" | "%" | "udiv" | "urem" => {
+            lower_checked_div_or_mod(
+                emitter,
+                ctx,
+                matches!(op, "%" | "urem"),
+                matches!(op, "udiv" | "urem"),
+            )?;
         }
         "==" | "!=" | "<" | "<=" | ">" | ">=" => {
             emitter.emit_u16(thumb::cmp_reg(R1, R2));
@@ -1206,14 +1223,14 @@ mod checked_division_tests {
     use super::*;
 
     #[test]
-    fn division_and_remainder_guard_zero_before_sdiv_and_restore_current_frame() {
+    fn signed_and_unsigned_division_guard_zero_and_restore_current_frame() {
         let functions = HashMap::new();
         let structs = HashMap::new();
         let mut ctx = LowerCtx::new("divide", &[], &functions, &structs);
         ctx.frame_size = 32;
-        for modulo in [false, true] {
+        for (modulo, unsigned) in [(false, false), (true, false), (false, true), (true, true)] {
             let mut emitter = CodeEmitter::new();
-            lower_checked_div_or_mod(&mut emitter, &ctx, modulo).unwrap();
+            lower_checked_div_or_mod(&mut emitter, &ctx, modulo, unsigned).unwrap();
             let words = emitter
                 .bytes
                 .as_chunks::<2>()
@@ -1223,18 +1240,51 @@ mod checked_division_tests {
                 .collect::<Vec<_>>();
             assert_eq!(words[0], thumb::cmp_imm8(R2, 0));
             // The nonzero branch skips the complete failure return, landing
-            // at SDIV; the zero path restores this function's frame first.
+            // at the divide; the zero path restores this function's frame first.
             let mut encoded = CodeEmitter::new();
             encoded.emit_u32_thumb(thumb::b_cond_wide(COND_NE, 3));
             assert_eq!(&emitter.bytes[2..6], encoded.bytes.as_slice());
             assert_eq!(words[3], thumb::movs_imm8(R0, 1));
             assert_eq!(words[4], thumb::add_sp_imm(ctx.frame_reserve()).unwrap());
             assert_eq!(words[5], thumb::pop(0b1111_0000, true));
-            let mut sdiv = CodeEmitter::new();
-            sdiv.emit_u32_thumb(thumb::sdiv(R0, R1, R2));
-            assert_eq!(&emitter.bytes[12..16], sdiv.bytes.as_slice());
+            let mut divide = CodeEmitter::new();
+            divide.emit_u32_thumb(if unsigned {
+                thumb::udiv(R0, R1, R2)
+            } else {
+                thumb::sdiv(R0, R1, R2)
+            });
+            assert_eq!(&emitter.bytes[12..16], divide.bytes.as_slice());
+            if modulo {
+                assert_eq!(words[8], thumb::muls(R0, R2));
+                assert_eq!(words[9], thumb::subs_reg(R0, R1, R0));
+            }
             assert_eq!(emitter.bytes.len(), if modulo { 20 } else { 16 });
         }
+    }
+
+    #[test]
+    fn logical_right_shift_uses_lsrs_after_staged_operands() {
+        let functions = HashMap::new();
+        let structs = HashMap::new();
+        let mut ctx = LowerCtx::new("shift", &[], &functions, &structs);
+        ctx.scratch_temps = vec![0, 4];
+        let mut emitter = CodeEmitter::new();
+        lower_binary(
+            &mut emitter,
+            &mut ctx,
+            "lshr",
+            &Expr::IntLit(-1),
+            &Expr::IntLit(1),
+            R0,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let mut shift = CodeEmitter::new();
+        shift.emit_u16(thumb::movs_imm8(R3, 31));
+        shift.emit_u16(thumb::ands(R2, R3));
+        shift.emit_u32_thumb(thumb::lsrs_reg(R0, R1, R2));
+        assert!(emitter.bytes.ends_with(&shift.bytes));
+        assert_eq!(ctx.scratch_depth, 0);
     }
 }
 

@@ -553,7 +553,7 @@ fn c_update(src: &[u8], expr: Node<'_>) -> Option<Stmt> {
         Expr::Binary {
             op: op.into(),
             lhs: Box::new(Expr::Ident(name)),
-            rhs: Box::new(Expr::IntLit(1)),
+            rhs: Box::new(c_number_literal("1")?),
         },
     ))
 }
@@ -791,7 +791,7 @@ fn c_else_body(src: &[u8], n: Node<'_>) -> Vec<Stmt> {
 fn c_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
     match expr.kind() {
         "identifier" => Some(Expr::Ident(node_txt(src, expr).trim().to_string())),
-        "number_literal" => parse_c_number_literal(node_txt(src, expr)),
+        "number_literal" => c_number_literal(node_txt(src, expr)),
         "string_literal" => Some(Expr::StringLit(
             node_txt(src, expr).trim().trim_matches('"').to_string(),
         )),
@@ -953,6 +953,46 @@ fn c_peel_statement_shell<'a>(n: Node<'a>) -> Option<Node<'a>> {
         }
         _ => Some(n),
     }
+}
+
+// Source integer kinds survive until C promotion resolution. Keep the value
+// parser independent: a valid literal need not have a representable C32 kind.
+fn c_number_literal(text: &str) -> Option<Expr> {
+    let text = text.trim();
+    if let Some(positive) = text.strip_prefix('+') {
+        return c_number_literal(positive);
+    }
+    if let Some(positive) = text.strip_prefix('-') {
+        return Some(Expr::Unary {
+            op: "-".into(),
+            expr: Box::new(c_number_literal(positive)?),
+        });
+    }
+    let value = parse_c_number_literal(text)?;
+    let Expr::IntLit(integer) = &value else {
+        return Some(value);
+    };
+    let text = text.trim();
+    let number = text.trim_end_matches(['u', 'U', 'l', 'L']);
+    let suffix = &text[number.len()..];
+    let kind = if suffix.contains(['l', 'L']) {
+        None
+    } else if suffix.eq_ignore_ascii_case("u") {
+        (0..=i64::from(u32::MAX)).contains(integer).then_some("u32")
+    } else if (0..=i64::from(i32::MAX)).contains(integer) {
+        Some("i32")
+    } else if number.starts_with('0') && (0..=i64::from(u32::MAX)).contains(integer) {
+        Some("u32")
+    } else {
+        None
+    };
+    Some(match kind {
+        Some(kind) => Expr::Unary {
+            op: format!("c-integer-literal-{kind}"),
+            expr: Box::new(value),
+        },
+        None => value,
+    })
 }
 
 fn parse_c_number_literal(text: &str) -> Option<Expr> {
@@ -1178,6 +1218,14 @@ mod empty_definition_tests {
                     })
                     .expect("noop definition");
                 assert!(matches!(body.as_slice(), [Stmt::Return(None)]));
+                // Source-only numeric metadata is consumed by the shared C
+                // normalization stage before either native backend runs.
+                let parser = if cpp {
+                    crate::parser_registry::ParserId::Cpp
+                } else {
+                    crate::parser_registry::ParserId::C
+                };
+                let module = crate::typecheck::normalize_module(parser, &module);
                 let thumb = crate::native_emit::thumb_lower::lower_module(&module, "main")
                     .expect("lower empty void definition to Thumb");
                 assert!(!thumb.code.is_empty());
@@ -1410,6 +1458,100 @@ mod definition_parameter_tests {
         assert!(
             matches!(primitive, Decl::Function {params,ret,..} if *ret == Typ::Named("#integer-u8".into()) && params[0].1 == Typ::Named("#integer-u8".into()))
         );
+    }
+
+    #[test]
+    fn generated_increment_operands_keep_c_int_kind() {
+        for cpp in [false, true] {
+            for update in ["value++", "++value", "value--", "--value"] {
+                let decls = parse(
+                    &format!("long long main(void){{unsigned int value=1;{update};return 42;}}"),
+                    cpp,
+                )
+                .unwrap();
+                let Decl::Function { body, .. } = &decls[0] else {
+                    panic!("main")
+                };
+                assert!(
+                    matches!(&body[1], Stmt::Assign(_,Expr::Binary {rhs,..})
+                    if matches!(rhs.as_ref(), Expr::Unary {op,expr}
+                        if op == "c-integer-literal-i32" && matches!(expr.as_ref(), Expr::IntLit(1)))),
+                    "{update}/{cpp}: {body:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn signed_source_literals_keep_the_positive_operand_rank() {
+        for cpp in [false, true] {
+            for literal in ["-1", "-1U", "-2147483648", "-2147483648U"] {
+                let positive = literal.strip_prefix('-').unwrap();
+                let expected = Expr::Unary {
+                    op: "-".into(),
+                    expr: Box::new(c_number_literal(positive).unwrap()),
+                };
+                let decls =
+                    parse(&format!("long long main(void){{return {literal};}}"), cpp).unwrap();
+                assert!(
+                    matches!(&decls[0], Decl::Function {body,..} if body == &vec![Stmt::Return(Some(expected))]),
+                    "{literal}/{cpp}: {decls:?}"
+                );
+            }
+        }
+        assert_eq!(c_number_literal("+1U"), c_number_literal("1U"));
+        assert!(
+            matches!(c_number_literal("-2147483648"), Some(Expr::Unary {expr,..}) if matches!(expr.as_ref(), Expr::IntLit(2147483648)))
+        );
+        assert!(
+            matches!(c_number_literal("-1U"), Some(Expr::Unary {expr,..}) if matches!(expr.as_ref(), Expr::Unary {op,..} if op == "c-integer-literal-u32"))
+        );
+    }
+
+    #[test]
+    fn source_integer_literals_preserve_only_proven_c32_kinds() {
+        for cpp in [false, true] {
+            for (literal, kind, expected) in [
+                ("0", Some("i32"), 0),
+                ("2147483647", Some("i32"), 2147483647),
+                ("2147483648", None, 2147483648),
+                ("42U", Some("u32"), 42),
+                ("4294967295u", Some("u32"), 4294967295),
+                ("4294967296U", None, 4294967296),
+                ("0x7fffffff", Some("i32"), 2147483647),
+                ("0X80000000", Some("u32"), 2147483648),
+                ("0xffffffff", Some("u32"), 4294967295),
+                ("037777777777", Some("u32"), 4294967295),
+                (
+                    "0b10000000000000000000000000000000",
+                    Some("u32"),
+                    2147483648,
+                ),
+                ("42L", None, 42),
+                ("42LL", None, 42),
+                ("42UL", None, 42),
+                ("42llu", None, 42),
+                ("0x100000000", None, 4294967296),
+            ] {
+                let decls =
+                    parse(&format!("long long main(void){{return {literal};}}"), cpp).unwrap();
+                let expected = match kind {
+                    Some(kind) => Expr::Unary {
+                        op: format!("c-integer-literal-{kind}"),
+                        expr: Box::new(Expr::IntLit(expected)),
+                    },
+                    None => Expr::IntLit(expected),
+                };
+                assert!(
+                    matches!(&decls[0], Decl::Function {body,..} if body == &vec![Stmt::Return(Some(expected))]),
+                    "{literal}/{cpp}: {decls:?}"
+                );
+            }
+        }
+        assert!(matches!(c_number_literal("1.5"), Some(Expr::FloatLit(_))));
+        for invalid in ["42uu", "42lL", "0x", "08", "0b102"] {
+            assert_eq!(c_number_literal(invalid), None, "{invalid}");
+        }
     }
 
     #[test]

@@ -424,7 +424,21 @@ fn parse_callee(value: &Value, context: &str) -> Result<Expr, String> {
 fn is_supported_binary_op(op: &str) -> bool {
     matches!(
         op,
-        "+" | "-" | "*" | "/" | "%" | "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+        "+" | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "udiv"
+            | "urem"
+            | "lshr"
+            | "=="
+            | "!="
+            | "<"
+            | ">"
+            | "<="
+            | ">="
+            | "&&"
+            | "||"
     )
 }
 
@@ -807,6 +821,18 @@ mod tests {
 
         assert!(sil.contains("integer_literal $Builtin.Int64, 3"));
         assert!(!sil.contains("builtin_binop"));
+    }
+
+    #[test]
+    fn parses_generic_unsigned_integer_binary_operations() {
+        for op in ["udiv", "urem", "lshr"] {
+            let value = serde_json::json!({"icoreVersion":2,"decls":[{
+                "kind":"function","name":"main","params":[],"return":"Int",
+                "body":[{"kind":"return","value":{"kind":"binary","op":op,"lhs":-1,"rhs":1}}]
+            }]});
+            let module = parse_icore_source(&value.to_string()).expect("unsigned operator");
+            assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+        }
     }
 
     #[test]

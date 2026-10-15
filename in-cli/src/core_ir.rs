@@ -444,6 +444,36 @@ pub(crate) fn integer_cast_expr(value: Expr, op: &str) -> Option<Expr> {
     })
 }
 
+/// Compare unsigned fixed-width values through the signed native Int carrier.
+/// Widths up to 32 work on both word sizes. Width 64 needs target-specific
+/// handling and is deliberately refused here. Each operand occurs once.
+pub(crate) fn unsigned_compare_expr(op: &str, lhs: Expr, rhs: Expr, width: u32) -> Option<Expr> {
+    if !matches!(op, "<" | "<=" | ">" | ">=") {
+        return None;
+    }
+    let cast = match width {
+        8 => "int-cast-i8",
+        16 => "int-cast-i16",
+        32 => "int-cast-i32",
+        _ => return None,
+    };
+    let biased = |value| {
+        integer_cast_expr(
+            Expr::Binary {
+                op: "^".into(),
+                lhs: Box::new(value),
+                rhs: Box::new(Expr::IntLit(1i64 << (width - 1))),
+            },
+            cast,
+        )
+    };
+    Some(Expr::Binary {
+        op: op.into(),
+        lhs: Box::new(biased(lhs)?),
+        rhs: Box::new(biased(rhs)?),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     UnitLit,
@@ -1243,6 +1273,73 @@ pub(crate) fn for_each_expr_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unsigned_fixed_comparisons_preserve_order_on_both_word_sizes() {
+        for width in [8, 16, 32] {
+            let high = 1i64 << (width - 1);
+            let maximum = (1i64 << width) - 1;
+            for (lhs, rhs) in [
+                (0, high),
+                (high, 0),
+                (high - 1, high),
+                (maximum, maximum),
+                (-1, 1),
+            ] {
+                let mask = maximum as u64;
+                let (a, b) = (lhs as u64 & mask, rhs as u64 & mask);
+                for (op, expected) in [("<", a < b), ("<=", a <= b), (">", a > b), (">=", a >= b)] {
+                    let value = super::unsigned_compare_expr(
+                        op,
+                        super::Expr::IntLit(lhs),
+                        super::Expr::IntLit(rhs),
+                        width,
+                    )
+                    .unwrap();
+                    for semantics in [
+                        crate::integer_semantics::IntegerSemantics::Word32,
+                        crate::integer_semantics::IntegerSemantics::Word64,
+                    ] {
+                        let result = crate::core_opt::map_expr(value.clone(), &mut |expr| {
+                            crate::core_opt::fold_expr_with_semantics(expr, semantics)
+                        });
+                        assert_eq!(
+                            result,
+                            super::Expr::BoolLit(expected),
+                            "{width}/{lhs}/{op}/{rhs}/{semantics:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsigned_comparison_keeps_operands_once_and_rejects_unsupported_forms() {
+        let call = |name: &str| super::Expr::Call {
+            callee: Box::new(super::Expr::Ident(name.into())),
+            args: vec![],
+        };
+        let value = super::unsigned_compare_expr("<", call("left"), call("right"), 32).unwrap();
+        let calls = std::cell::RefCell::new(Vec::new());
+        crate::core_opt::map_expr(value, &mut |expr| {
+            if let super::Expr::Call { callee, .. } = &expr
+                && let super::Expr::Ident(name) = callee.as_ref()
+            {
+                calls.borrow_mut().push(name.clone());
+            }
+            expr
+        });
+        assert_eq!(calls.into_inner(), ["left", "right"]);
+        for width in [0, 1, 7, 64, 128] {
+            assert!(
+                super::unsigned_compare_expr("<", call("left"), call("right"), width).is_none()
+            );
+        }
+        for op in ["==", "!=", "+", "lt"] {
+            assert!(super::unsigned_compare_expr(op, call("left"), call("right"), 32).is_none());
+        }
+    }
+
     #[test]
     fn reserved_integer_destination_metadata_has_exact_supported_widths() {
         for width in ["i8", "u8", "i16", "u16", "i32", "u32"] {

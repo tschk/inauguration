@@ -1102,7 +1102,7 @@ fn check_expr_with_array_borrow(
                         ))
                     }
                 }
-                "<<" | ">>" | "%" => {
+                "<<" | ">>" | "%" | "udiv" | "urem" | "lshr" => {
                     require_type(fn_name, "binary operand", &Typ::Int, lhs, facts, env)?;
                     require_type(fn_name, "binary operand", &Typ::Int, rhs, facts, env)
                 }
@@ -1611,7 +1611,9 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
                     Some(Typ::Float)
                 }
                 "&" | "|" | "^" => crate::core_ir::bitwise_result_type(lhs_typ, rhs_typ),
-                "+" | "-" | "*" | "/" | "%" | "<<" | ">>" => Some(Typ::Int),
+                "+" | "-" | "*" | "/" | "%" | "<<" | ">>" | "udiv" | "urem" | "lshr" => {
+                    Some(Typ::Int)
+                }
                 "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => Some(Typ::Bool),
                 _ => None,
             }
@@ -1694,6 +1696,35 @@ mod tests {
     use super::*;
     use crate::core_ir::{Decl, UnifiedModule};
     use crate::core_ir::{Expr, Stmt};
+
+    #[test]
+    fn unsigned_integer_operators_require_integer_operands_and_return_int() {
+        for op in ["udiv", "urem", "lshr"] {
+            for value in [
+                Expr::IntLit(-1),
+                Expr::BoolLit(true),
+                Expr::FloatLit(crate::core_ir::FloatVal(1.0)),
+            ] {
+                let valid = matches!(value, Expr::IntLit(_));
+                let module = UnifiedModule::new(vec![Decl::Function {
+                    name: "main".into(),
+                    params: vec![],
+                    ret: Typ::Int,
+                    body: vec![Stmt::Return(Some(Expr::Binary {
+                        op: op.into(),
+                        lhs: Box::new(value),
+                        rhs: Box::new(Expr::IntLit(1)),
+                    }))],
+                    type_params: vec![],
+                }]);
+                assert_eq!(
+                    verify_for_entry(&module, "main").ok,
+                    valid,
+                    "{op}: {module:?}"
+                );
+            }
+        }
+    }
 
     fn function(name: &str, body: Vec<Stmt>) -> Decl {
         Decl::Function {

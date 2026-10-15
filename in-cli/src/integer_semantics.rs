@@ -23,12 +23,14 @@ impl IntegerSemantics {
     pub fn fold_binary(self, op: &str, a: i64, b: i64) -> Option<Expr> {
         let left = self.normalize_word(a)?;
         // Shift counts are mathematical counts, not signed word carriers.
-        if matches!(op, "shl" | "<<" | "shr" | ">>") {
+        if matches!(op, "shl" | "<<" | "shr" | ">>" | "lshr") {
             let bits = if self == Self::Word32 { 32 } else { 64 };
             if !(0..bits).contains(&b) {
                 return None;
             }
             let value = match (self, op) {
+                (Self::Word32, "lshr") => i64::from(((left as u32) >> b) as i32),
+                (Self::Word64, "lshr") => ((left as u64) >> b) as i64,
                 (Self::Word32, "shl" | "<<") => i64::from((left as i32).wrapping_shl(b as u32)),
                 (Self::Word32, _) => i64::from((left as i32).wrapping_shr(b as u32)),
                 (Self::Word64, "shl" | "<<") => left.checked_shl(b as u32)?,
@@ -37,6 +39,28 @@ impl IntegerSemantics {
             return Some(Expr::IntLit(value));
         }
         let right = self.normalize_word(b)?;
+        if matches!(op, "udiv" | "urem") {
+            let value = match self {
+                Self::Word32 => {
+                    let (a, b) = (left as u32, right as u32);
+                    let value = if op == "udiv" {
+                        a.checked_div(b)?
+                    } else {
+                        a.checked_rem(b)?
+                    };
+                    i64::from(value as i32)
+                }
+                Self::Word64 => {
+                    let (a, b) = (left as u64, right as u64);
+                    (if op == "udiv" {
+                        a.checked_div(b)?
+                    } else {
+                        a.checked_rem(b)?
+                    }) as i64
+                }
+            };
+            return Some(Expr::IntLit(value));
+        }
         let comparison = match op {
             "eq" | "==" => Some(left == right),
             "neq" | "!=" => Some(left != right),
@@ -98,6 +122,49 @@ impl IntegerSemantics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsigned_operations_use_target_bits_and_preserve_invalid_operations() {
+        for semantics in [IntegerSemantics::Word32, IntegerSemantics::Word64] {
+            let half = if semantics == IntegerSemantics::Word32 {
+                i64::from(i32::MAX)
+            } else {
+                i64::MAX
+            };
+            assert_eq!(
+                semantics.fold_binary("udiv", -1, 2),
+                Some(Expr::IntLit(half))
+            );
+            assert_eq!(semantics.fold_binary("urem", -1, 2), Some(Expr::IntLit(1)));
+            assert_eq!(
+                semantics.fold_binary("lshr", -1, 1),
+                Some(Expr::IntLit(half))
+            );
+            assert_eq!(semantics.fold_binary("udiv", -1, 1), Some(Expr::IntLit(-1)));
+            assert_eq!(semantics.fold_binary("urem", -1, 1), Some(Expr::IntLit(0)));
+            assert_eq!(semantics.fold_binary("udiv", 42, 0), None);
+            assert_eq!(semantics.fold_binary("urem", 42, 0), None);
+            assert_eq!(semantics.fold_binary("lshr", 42, -1), None);
+            let width = if semantics == IntegerSemantics::Word32 {
+                32
+            } else {
+                64
+            };
+            assert_eq!(semantics.fold_binary("lshr", -1, width), None);
+            assert_eq!(
+                semantics.fold_binary("lshr", -1, width - 1),
+                Some(Expr::IntLit(1))
+            );
+        }
+        assert_eq!(
+            IntegerSemantics::Word32.fold_binary("udiv", 4294967295, 2),
+            Some(Expr::IntLit(2147483647))
+        );
+        assert_eq!(
+            IntegerSemantics::Word32.fold_binary("udiv", 4294967296, 2),
+            None
+        );
+    }
 
     #[test]
     fn machine_words_wrap_compare_and_shift_at_their_own_width() {

@@ -3080,7 +3080,7 @@ int main(void) {
             Decl::Function { body, .. } => {
                 assert!(matches!(
                     &body[0],
-                    Stmt::Let(name, Some(Typ::Named(typ)), Expr::IntLit(1)) if name == "value" && typ == "#integer-i32"
+                    Stmt::Let(name, Some(Typ::Named(typ)), Expr::Unary {op, expr}) if name == "value" && typ == "#integer-i32" && op == "c-integer-literal-i32" && matches!(expr.as_ref(), Expr::IntLit(1))
                 ));
                 assert!(matches!(
                     &body[1],
@@ -3125,10 +3125,10 @@ int main(void) {
             Decl::Function { body, .. } => assert!(matches!(
                 body.as_slice(),
                 [
-                    Stmt::Let(name, Some(Typ::Named(typ)), Expr::IntLit(1)),
+                    Stmt::Let(name, Some(Typ::Named(typ)), Expr::Unary {op: literal_op, expr: literal}),
                     Stmt::Assign(assign_name, Expr::Binary { op, .. }),
                     Stmt::Return(Some(Expr::Ident(ret_name))),
-                ] if name == "value" && typ == "#integer-i32" && assign_name == "value" && op == "+" && ret_name == "value"
+                ] if name == "value" && typ == "#integer-i32" && literal_op == "c-integer-literal-i32" && matches!(literal.as_ref(), Expr::IntLit(1)) && assign_name == "value" && op == "+" && ret_name == "value"
             )),
             _ => panic!("expected function"),
         }

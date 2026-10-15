@@ -67,7 +67,7 @@ fn scan_expr<'a>(
     if matches!(
         expr,
         Expr::Index { .. } | Expr::Field { .. } | Expr::StructInit { .. }
-    ) || matches!(expr, Expr::Binary { op, .. } if matches!(op.as_str(), "/" | "%" | "/=" | "%="))
+    ) || matches!(expr, Expr::Binary { op, .. } if matches!(op.as_str(), "/" | "%" | "/=" | "%=" | "udiv" | "urem"))
     {
         *checked = true;
     }

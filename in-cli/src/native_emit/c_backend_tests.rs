@@ -294,6 +294,10 @@ fn polyglot_c_and_go_answer_main() {
         crate::compiler::tree_front::parse_polyglot_file(ParserId::C, &c_path).expect("parse c");
     let go_mod =
         crate::compiler::tree_front::parse_polyglot_file(ParserId::Go, &go_path).expect("parse go");
+    let mut c_mod = crate::typecheck::normalize_module(ParserId::C, &c_mod);
+    crate::core_opt::map_decl_exprs_mut(&mut c_mod.decls, &mut |expr| {
+        *expr = crate::core_opt::fold_expr(expr.clone());
+    });
     let c_out = emit_c_module(&c_mod).expect("emit c");
     let go_out = emit_c_module(&go_mod).expect("emit go");
     assert!(c_out.contains("int64_t answer()"), "c answer:\n{c_out}");
@@ -1345,5 +1349,237 @@ fn raw_native_invoke_c_refuses_nonconstant_global_initializers() {
         }]);
         let error = emit_c_module(&module).unwrap_err();
         assert!(error.contains("global initializer"), "{name}: {error}");
+    }
+}
+
+#[test]
+fn unsigned_c_projection_executes_high_bits_and_orders_operands_once() {
+    let binary = |op: &str, left: Expr, right: Expr| Expr::Binary {
+        op: op.into(),
+        lhs: Box::new(left),
+        rhs: Box::new(right),
+    };
+    let call = |name: &str| Expr::Call {
+        callee: Box::new(Expr::Ident(name.into())),
+        args: vec![],
+    };
+    let mut decls = vec![Decl::Global {
+        name: "trace".into(),
+        typ: Typ::Int,
+        init: Some(Box::new(Expr::IntLit(0))),
+        mutable: true,
+        constant_value: false,
+    }];
+    for (name, digit, value) in [("left", 1, -1), ("right", 2, 2)] {
+        decls.push(Decl::Function {
+            name: name.into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![
+                Stmt::Assign(
+                    "trace".into(),
+                    binary(
+                        "+",
+                        binary("*", Expr::Ident("trace".into()), Expr::IntLit(10)),
+                        Expr::IntLit(digit),
+                    ),
+                ),
+                Stmt::Return(Some(Expr::IntLit(value))),
+            ],
+        });
+    }
+    for op in ["udiv", "urem", "lshr"] {
+        decls.push(Decl::Function {
+            name: format!("check_{op}"),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(binary(op, call("left"), call("right"))))],
+        });
+    }
+    decls.push(Decl::Function {
+        name: "shift_count".into(),
+        params: vec![("count".into(), Typ::Int)],
+        ret: Typ::Int,
+        type_params: vec![],
+        body: vec![Stmt::Return(Some(binary(
+            "lshr",
+            Expr::IntLit(-1),
+            Expr::Ident("count".into()),
+        )))],
+    });
+    assert_inferred_c_executes(
+        &UnifiedModule::new(decls),
+        "
+        trace=0; if(check_udiv()!=INT64_MAX || trace!=12)return 1;
+        trace=0; if(check_urem()!=1 || trace!=12)return 2;
+        trace=0; if(check_lshr()!=INT64_C(4611686018427387903) || trace!=12)return 3;
+        if(shift_count(64)!=-1 || shift_count(65)!=INT64_MAX)return 4;
+        return 42;
+    ",
+    );
+}
+
+#[test]
+fn unsigned_global_initializers_require_folding_before_c_projection() {
+    for (op, expected) in [("udiv", i64::MAX), ("urem", 1), ("lshr", i64::MAX)] {
+        let global = |name: &str, init: Expr| Decl::Global {
+            name: name.into(),
+            typ: Typ::Int,
+            init: Some(Box::new(init)),
+            mutable: true,
+            constant_value: false,
+        };
+        let operation = |right| Expr::Binary {
+            op: op.into(),
+            lhs: Box::new(Expr::IntLit(-1)),
+            rhs: Box::new(right),
+        };
+        let module = UnifiedModule::new(vec![
+            global("count", Expr::IntLit(2)),
+            global("result", operation(Expr::Ident("count".into()))),
+        ]);
+        let error =
+            emit_c_module(&module).expect_err("file-scope statement expression must refuse");
+        assert!(
+            error.contains("unsigned operation in a global initializer requires constant folding"),
+            "{op}: {error}"
+        );
+        let count = if op == "lshr" { 1 } else { 2 };
+        let module = UnifiedModule::new(vec![global("result", operation(Expr::IntLit(count)))]);
+        assert_inferred_c_executes(
+            &module,
+            &format!("if(result != INT64_C({expected})) return 7; return 42;"),
+        );
+    }
+}
+
+#[test]
+fn checked_unsigned_c_failure_exits_current_function_after_ordered_operands() {
+    let binary = |op: &str, lhs, rhs| Expr::Binary {
+        op: op.into(),
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    };
+    let call = |name: &str| Expr::Call {
+        callee: Box::new(Expr::Ident(name.into())),
+        args: vec![],
+    };
+    for op in ["udiv", "urem"] {
+        let mut decls = vec![];
+        for name in ["trace", "after"] {
+            decls.push(Decl::Global {
+                name: name.into(),
+                typ: Typ::Int,
+                init: Some(Box::new(Expr::IntLit(0))),
+                mutable: true,
+                constant_value: false,
+            });
+        }
+        for (name, digit, value) in [("left", 1, 42), ("zero", 2, 0)] {
+            decls.push(Decl::Function {
+                name: name.into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![
+                    Stmt::Assign(
+                        "trace".into(),
+                        binary(
+                            "+",
+                            binary("*", Expr::Ident("trace".into()), Expr::IntLit(10)),
+                            Expr::IntLit(digit),
+                        ),
+                    ),
+                    Stmt::Return(Some(Expr::IntLit(value))),
+                ],
+            });
+        }
+        let operation = || binary(op, call("left"), call("zero"));
+        let mut failing_body = vec![
+            Stmt::Expr(operation()),
+            Stmt::Assign("after".into(), Expr::IntLit(1)),
+        ];
+        for (name, ret, result) in [
+            ("fail_word", Typ::Int, Some(Expr::IntLit(7))),
+            ("fail_void", Typ::Void, None),
+            ("fail_bool", Typ::Bool, Some(Expr::BoolLit(false))),
+        ] {
+            let mut body = failing_body.clone();
+            body.push(Stmt::Return(result));
+            decls.push(Decl::Function {
+                name: name.into(),
+                params: vec![],
+                ret,
+                type_params: vec![],
+                body,
+            });
+        }
+        decls.push(Decl::Function {
+            name: "caller".into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(binary(
+                "+",
+                call("fail_word"),
+                Expr::IntLit(41),
+            )))],
+        });
+        failing_body.push(Stmt::Return(Some(Expr::IntLit(7))));
+        decls.push(Decl::Function {
+            name: "make_closure".into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Closure {
+                params: vec![],
+                ret: Typ::Int,
+                body: failing_body,
+                captures: vec![],
+            }))],
+        });
+        assert_inferred_c_executes(
+            &UnifiedModule::new(decls),
+            "
+            if(caller()!=42 || trace!=12 || after!=0)return 2;
+            trace=0; fail_void(); if(trace!=12 || after!=0)return 3;
+            trace=0; if(!fail_bool() || trace!=12 || after!=0)return 4;
+            trace=0; int64_t (*closure)(void)=(int64_t (*)(void))(uintptr_t)make_closure();
+            if(closure()!=1 || trace!=12 || after!=0)return 5;
+            return 42;
+        ",
+        );
+    }
+}
+
+#[test]
+fn checked_unsigned_c_operations_refuse_unsupported_failure_return_abis() {
+    for op in ["udiv", "urem"] {
+        for (ret, value) in [
+            (Typ::Float, Expr::FloatLit(crate::core_ir::FloatVal(1.0))),
+            (Typ::String, Expr::StringLit("text".into())),
+        ] {
+            let module = UnifiedModule::new(vec![Decl::Function {
+                name: "unsupported".into(),
+                params: vec![],
+                ret,
+                type_params: vec![],
+                body: vec![
+                    Stmt::Expr(Expr::Binary {
+                        op: op.into(),
+                        lhs: Box::new(Expr::IntLit(42)),
+                        rhs: Box::new(Expr::IntLit(0)),
+                    }),
+                    Stmt::Return(Some(value)),
+                ],
+            }]);
+            let error = emit_c_module(&module).expect_err("unsupported failure ABI");
+            assert!(
+                error.contains("checked unsigned division requires"),
+                "{op}: {error}"
+            );
+        }
     }
 }

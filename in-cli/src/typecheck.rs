@@ -552,7 +552,21 @@ impl TypeChecker {
         env: &HashMap<String, Typ>,
         promote_c_bool: bool,
         return_type: Option<&Typ>,
-    ) {
+    ) -> Option<CIntegerKind> {
+        let mut c_kind = if promote_c_bool {
+            let typ = match expr {
+                Expr::Binary { .. }
+                | Expr::Unary { .. }
+                | Expr::Conditional { .. }
+                | Expr::Block { .. }
+                | Expr::MatchValue { .. } => None,
+                _ => self.expr_type(expr, facts, env),
+            };
+            c_expression_leaf_kind(expr, typ.as_ref())
+        } else {
+            None
+        };
+        let mut c_operands = [None; 2];
         if let Expr::StructInit { name, fields } = expr
             && let Some(schema) = facts.structs.get(name)
         {
@@ -594,7 +608,8 @@ impl TypeChecker {
             let mut inner = env.clone();
             self.resolve_typed_body(body, facts, &mut inner, return_type, promote_c_bool);
             if let Some(result) = result {
-                self.resolve_typed_expr(result, facts, &inner, promote_c_bool, return_type);
+                c_kind =
+                    self.resolve_typed_expr(result, facts, &inner, promote_c_bool, return_type);
             }
         } else if let Expr::Closure {
             params, ret, body, ..
@@ -610,9 +625,36 @@ impl TypeChecker {
             {
                 *ret = inferred;
             }
+        } else if let Expr::Binary { op, lhs, rhs } = expr {
+            c_operands[0] = self.resolve_typed_expr(lhs, facts, env, promote_c_bool, return_type);
+            c_operands[1] = self.resolve_typed_expr(rhs, facts, env, promote_c_bool, return_type);
+            if promote_c_bool {
+                c_kind = match op.as_str() {
+                    "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => Some(CIntegerKind::I32),
+                    "<<" | ">>" => c_operands[0],
+                    _ => CIntegerKind::common(c_operands[0], c_operands[1]),
+                };
+            }
+        } else if let Expr::Unary { op, expr } = expr {
+            let inner = self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
+            if promote_c_bool && matches!(op.as_str(), "-" | "~" | "+") {
+                c_kind = inner;
+            }
+        } else if let Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } = expr
+        {
+            self.resolve_typed_expr(cond, facts, env, promote_c_bool, return_type);
+            let left = self.resolve_typed_expr(then_expr, facts, env, promote_c_bool, return_type);
+            let right = self.resolve_typed_expr(else_expr, facts, env, promote_c_bool, return_type);
+            if promote_c_bool {
+                c_kind = CIntegerKind::common(left, right);
+            }
         } else {
             crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
-                self.resolve_typed_expr(child, facts, env, promote_c_bool, return_type)
+                self.resolve_typed_expr(child, facts, env, promote_c_bool, return_type);
             });
         }
         if let Expr::Call { callee, args } = expr
@@ -901,6 +943,16 @@ impl TypeChecker {
             }
         }
         if promote_c_bool
+            && let Expr::Unary { op, expr: inner } = expr
+            && matches!(
+                op.as_str(),
+                "c-integer-literal-i32" | "c-integer-literal-u32"
+            )
+        {
+            *expr = *std::mem::replace(inner, Box::new(Expr::UnitLit));
+            return c_kind;
+        }
+        if promote_c_bool
             && let Expr::Call { callee, args } = expr
             && matches!(callee.as_ref(), Expr::Ident(name) if name == "c-numeric-cast")
         {
@@ -925,7 +977,7 @@ impl TypeChecker {
                     *expr = value;
                 }
             }
-            return;
+            return c_kind;
         }
         if promote_c_bool {
             match expr {
@@ -947,7 +999,7 @@ impl TypeChecker {
                 Expr::Unary { op, expr } if op == "!" => {
                     self.resolve_c_value(expr, &Typ::Bool, facts, env)
                 }
-                Expr::Unary { op, expr } if matches!(op.as_str(), "-" | "~") => {
+                Expr::Unary { op, expr } if matches!(op.as_str(), "-" | "~" | "+") => {
                     if self.expr_type(expr, facts, env) == Some(Typ::Bool) {
                         self.resolve_c_value(expr, &Typ::Int, facts, env)
                     }
@@ -1028,6 +1080,24 @@ impl TypeChecker {
                 _ => {} // Verification refuses an unresolved operand type.
             }
         }
+        if promote_c_bool
+            && let Expr::Unary { op, expr: inner } = expr
+            && op == "+"
+        {
+            let typ = self.expr_type(inner, facts, env);
+            if matches!(typ, Some(Typ::Int | Typ::Float | Typ::Bool))
+                || matches!(&typ, Some(Typ::Named(name)) if crate::core_ir::integer_type_name(name).is_some())
+            {
+                *expr = *std::mem::replace(inner, Box::new(Expr::UnitLit));
+            }
+        }
+        if promote_c_bool {
+            let floating = matches!(&*expr, Expr::Binary { lhs, rhs, .. } if [lhs, rhs].iter().any(|operand| self.expr_type(operand, facts, env) == Some(Typ::Float)));
+            if !floating {
+                resolve_c_unsigned_expression(expr, c_kind, c_operands);
+            }
+        }
+        c_kind
     }
 
     fn resolve_typed_body(
@@ -1094,7 +1164,7 @@ impl TypeChecker {
                     }
                 }
                 Stmt::Expr(expr) | Stmt::Throw(expr) => {
-                    self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type)
+                    self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
                 }
                 Stmt::IndexAssign { base, index, value } => {
                     for expr in [&mut *base, &mut *index, &mut *value] {
@@ -1949,7 +2019,7 @@ impl TypeChecker {
                                 });
                             }
                         }
-                        "%" => {
+                        "%" | "udiv" | "urem" | "lshr" => {
                             if l != Typ::Int && is_concrete(&l) {
                                 errors.push(TypeError::TypeMismatch {
                                     context: format!("binary `{op}` lhs in `{fn_name}`"),
@@ -2328,6 +2398,8 @@ impl TypeChecker {
                 }
             }
             Expr::Unary { op, expr, .. } => match op.as_str() {
+                "c-integer-literal-i32" => Some(Typ::Named("#integer-i32".into())),
+                "c-integer-literal-u32" => Some(Typ::Named("#integer-u32".into())),
                 "!" => Some(Typ::Bool),
                 "bool-to-int" | "float-to-int" => Some(Typ::Int),
                 "int-to-float" | "float-cast-f32" | "float-cast-f64" => Some(Typ::Float),
@@ -2336,37 +2408,63 @@ impl TypeChecker {
                 {
                     Some(Typ::Int)
                 }
-                "-" => self.expr_type(expr, facts, env),
+                "-" | "~" | "+" => {
+                    let typ = self.expr_type(expr, facts, env);
+                    if matches!(&typ, Some(Typ::Named(name)) if crate::core_ir::integer_type_name(name).is_some())
+                    {
+                        c_expression_leaf_kind(expr, typ.as_ref()).map(CIntegerKind::typ)
+                    } else {
+                        typ
+                    }
+                }
                 _ => self.expr_type(expr, facts, env),
             },
-            Expr::Binary { op, lhs, rhs, .. } => match op.as_str() {
-                "+" => {
-                    let l = self.expr_type(lhs, facts, env);
-                    let r = self.expr_type(rhs, facts, env);
-                    match (l, r) {
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let left = self.expr_type(lhs, facts, env);
+                let right = self.expr_type(rhs, facts, env);
+                if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>")
+                    && [left.as_ref(), right.as_ref()].iter().any(|typ| matches!(typ, Some(Typ::Named(name)) if crate::core_ir::integer_type_name(name).is_some()))
+                {
+                    let l = c_expression_leaf_kind(lhs, left.as_ref());
+                    let r = c_expression_leaf_kind(rhs, right.as_ref());
+                    let kind = if matches!(op.as_str(), "<<" | ">>") { l } else { CIntegerKind::common(l, r) };
+                    if let Some(kind) = kind { return Some(kind.typ()); }
+                }
+                match op.as_str() {
+                    "udiv" | "urem" | "lshr" => Some(Typ::Int),
+                    "+" => match (left, right) {
                         (Some(Typ::String), Some(Typ::String)) => Some(Typ::String),
                         (Some(Typ::Float), _) | (_, Some(Typ::Float)) => Some(Typ::Float),
                         _ => Some(Typ::Int),
+                    },
+                    "&" | "|" | "^" => crate::core_ir::bitwise_result_type(left, right),
+                    "-" | "*" | "/" | "%" | "<<" | ">>" => {
+                        if left == Some(Typ::Float) || right == Some(Typ::Float) {
+                            Some(Typ::Float)
+                        } else {
+                            Some(Typ::Int)
+                        }
                     }
+                    "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => Some(Typ::Bool),
+                    _ => None,
                 }
-                "&" | "|" | "^" => crate::core_ir::bitwise_result_type(
-                    self.expr_type(lhs, facts, env),
-                    self.expr_type(rhs, facts, env),
-                ),
-                "-" | "*" | "/" | "%" | "<<" | ">>" => {
-                    let l = self.expr_type(lhs, facts, env);
-                    let r = self.expr_type(rhs, facts, env);
-                    if l == Some(Typ::Float) || r == Some(Typ::Float) {
-                        Some(Typ::Float)
-                    } else {
-                        Some(Typ::Int)
-                    }
-                }
-                "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => Some(Typ::Bool),
-                _ => None,
-            },
+            }
             Expr::Call { callee, args } => {
                 if let Expr::Ident(name) = callee.as_ref() {
+                    if name == "c-numeric-cast"
+                        && !facts.functions.contains_key(name)
+                        && let [_, Expr::StringLit(target)] = args.as_slice()
+                    {
+                        return match target.as_str() {
+                            name if c_fixed_integer_name(name) => {
+                                Some(Typ::Named(format!("#integer-{name}")))
+                            }
+                            "Int" => Some(Typ::Int),
+                            "Float" => Some(Typ::Float),
+                            "Bool" => Some(Typ::Bool),
+                            _ => None,
+                        };
+                    }
                     if name == crate::core_ir::tuples::LET_FIELD {
                         let [base, Expr::IntLit(index), Expr::BoolLit(from_end)] = args.as_slice()
                         else {
@@ -2981,6 +3079,124 @@ fn normalize_type(typ: &Typ) -> Typ {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CIntegerKind {
+    I32,
+    U32,
+}
+
+impl CIntegerKind {
+    fn typ(self) -> Typ {
+        Typ::Named(
+            match self {
+                Self::I32 => "#integer-i32",
+                Self::U32 => "#integer-u32",
+            }
+            .into(),
+        )
+    }
+    fn common(left: Option<Self>, right: Option<Self>) -> Option<Self> {
+        match (left?, right?) {
+            (Self::U32, _) | (_, Self::U32) => Some(Self::U32),
+            _ => Some(Self::I32),
+        }
+    }
+}
+
+fn c_expression_leaf_kind(expr: &Expr, typ: Option<&Typ>) -> Option<CIntegerKind> {
+    let name = match expr {
+        Expr::Unary { op, .. } if op == "!" => return Some(CIntegerKind::I32),
+        Expr::Unary { op, .. } if op == "c-integer-literal-i32" => return Some(CIntegerKind::I32),
+        Expr::Unary { op, .. } if op == "c-integer-literal-u32" => return Some(CIntegerKind::U32),
+        Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if name == "c-numeric-cast") =>
+        {
+            let [_, Expr::StringLit(target)] = args.as_slice() else {
+                return None;
+            };
+            if target == "Bool" {
+                return Some(CIntegerKind::I32);
+            }
+            target.as_str()
+        }
+        _ => match typ? {
+            Typ::Bool => return Some(CIntegerKind::I32),
+            Typ::Named(name) => crate::core_ir::integer_type_name(name)?,
+            _ => return None,
+        },
+    };
+    match name {
+        "u32" => Some(CIntegerKind::U32),
+        "i8" | "u8" | "i16" | "u16" | "i32" => Some(CIntegerKind::I32),
+        _ => None,
+    }
+}
+
+fn c_unsigned_value(value: Expr) -> Expr {
+    Expr::Binary {
+        op: "&".into(),
+        lhs: Box::new(value),
+        rhs: Box::new(Expr::IntLit(0xffff_ffff)),
+    }
+}
+
+fn resolve_c_unsigned_expression(
+    expr: &mut Expr,
+    kind: Option<CIntegerKind>,
+    operands: [Option<CIntegerKind>; 2],
+) {
+    let Expr::Binary { op, lhs, rhs } = expr else {
+        if kind == Some(CIntegerKind::U32)
+            && (matches!(expr, Expr::Unary { op, .. } if matches!(op.as_str(), "-" | "~"))
+                || matches!(expr, Expr::Conditional { .. }))
+        {
+            *expr = c_unsigned_value(expr.clone());
+        }
+        return;
+    };
+    let compare = matches!(op.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=");
+    let numeric = matches!(
+        op.as_str(),
+        "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"
+    ) || compare;
+    let common = CIntegerKind::common(operands[0], operands[1]);
+    // Source long widths and literal ranks beyond int/unsigned int are not inferred.
+    if numeric
+        && !matches!(op.as_str(), "<<" | ">>")
+        && operands.contains(&Some(CIntegerKind::U32))
+        && common.is_none()
+    {
+        *expr = Expr::Call {
+            callee: Box::new(Expr::Ident("unsupported-c-integer-rank".into())),
+            args: vec![expr.clone()],
+        };
+        return;
+    }
+    if compare && common == Some(CIntegerKind::U32) {
+        if matches!(op.as_str(), "==" | "!=") {
+            **lhs = c_unsigned_value((**lhs).clone());
+            **rhs = c_unsigned_value((**rhs).clone());
+        } else if let Some(value) =
+            crate::core_ir::unsigned_compare_expr(op, (**lhs).clone(), (**rhs).clone(), 32)
+        {
+            *expr = value;
+        }
+    } else if kind == Some(CIntegerKind::U32) && numeric {
+        match op.as_str() {
+            "/" | "%" => {
+                *op = if op == "/" { "udiv" } else { "urem" }.into();
+                **lhs = c_unsigned_value((**lhs).clone());
+                **rhs = c_unsigned_value((**rhs).clone());
+            }
+            ">>" => {
+                *op = "lshr".into();
+                **lhs = c_unsigned_value((**lhs).clone());
+            }
+            _ => {}
+        }
+        *expr = c_unsigned_value(expr.clone());
+    }
+}
+
 fn c_fixed_integer_name(name: &str) -> bool {
     matches!(name, "i8" | "u8" | "i16" | "u16" | "i32" | "u32")
 }
@@ -3070,6 +3286,42 @@ mod tests {
         )
         .unwrap();
         assert!(!crate::core_ir_verifier::verify_for_entry(&strict, "main").ok);
+    }
+
+    #[test]
+    fn c_conditional_converts_selected_signed_branch_to_common_unsigned_kind() {
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Conditional {
+                cond: Box::new(Expr::BoolLit(true)),
+                then_expr: Box::new(Expr::Unary {
+                    op: "c-integer-literal-i32".into(),
+                    expr: Box::new(Expr::IntLit(-1)),
+                }),
+                else_expr: Box::new(Expr::Unary {
+                    op: "c-integer-literal-u32".into(),
+                    expr: Box::new(Expr::IntLit(0)),
+                }),
+            }))],
+        }]);
+        let mut normalized = super::normalize_module(ParserId::C, &module);
+        assert_eq!(
+            normalized,
+            super::normalize_module(ParserId::C, &normalized)
+        );
+        crate::core_opt::map_decl_exprs_mut(&mut normalized.decls, &mut |expr| {
+            *expr = crate::core_opt::fold_expr(expr.clone());
+        });
+        let Decl::Function { body, .. } = &normalized.decls[0] else {
+            panic!("main")
+        };
+        assert!(
+            matches!(&body[0], Stmt::Return(Some(Expr::Binary { op, lhs, rhs }))
+            if op == "&" && matches!(lhs.as_ref(), Expr::Conditional { then_expr, .. } if **then_expr == Expr::IntLit(-1)) && **rhs == Expr::IntLit(4294967295))
+        );
     }
 
     #[test]

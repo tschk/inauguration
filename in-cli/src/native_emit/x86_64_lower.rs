@@ -2344,6 +2344,7 @@ fn lower_checked_div_or_mod(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
     modulo: bool,
+    unsigned: bool,
 ) -> Result<(), String> {
     emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
     emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
@@ -2353,6 +2354,15 @@ fn lower_checked_div_or_mod(
     emit_failure_return(emitter, ctx)?;
     let valid = emitter.len();
     emitter.patch_u32(nonzero + 2, (valid as i32 - nonzero as i32 - 6) as u32);
+
+    if unsigned {
+        emitter.emit_insns(&x86_64::zero_reg(RDX));
+        emitter.emit_insns(&x86_64::div_reg(RCX));
+        if modulo {
+            emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
+        }
+        return Ok(());
+    }
 
     // Match AArch64's wrapping MIN/-1 result without an x86 hardware fault.
     emitter.emit_insns(&x86_64::cmp_rmi8(RCX, 0xff));
@@ -2519,7 +2529,9 @@ fn scalar_expr_type_with_bindings(
                 scalar_expr_type_with_bindings(rhs, ctx, bindings),
             )
         }
-        Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "<<" | ">>" | "%") => {
+        Expr::Binary { op, lhs, rhs }
+            if matches!(op.as_str(), "<<" | ">>" | "%" | "lshr" | "udiv" | "urem") =>
+        {
             if scalar_expr_type_with_bindings(lhs, ctx, bindings) == Some(Typ::Int)
                 && scalar_expr_type_with_bindings(rhs, ctx, bindings) == Some(Typ::Int)
             {
@@ -2737,7 +2749,15 @@ fn lower_binary_expr(
             emitter.emit_insns(&x86_64::movzx_r8(RAX, RAX));
         }
         "/" | "/=" | "%" | "%=" => {
-            lower_checked_div_or_mod(emitter, ctx, matches!(op, "%" | "%="))?;
+            lower_checked_div_or_mod(emitter, ctx, matches!(op, "%" | "%="), false)?;
+        }
+        "udiv" | "urem" => {
+            lower_checked_div_or_mod(emitter, ctx, op == "urem", true)?;
+        }
+        "lshr" => {
+            emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
+            emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
+            emitter.emit_insns(&x86_64::shr_reg_cl(RAX));
         }
         "<" => {
             emitter.emit_insns(&x86_64::cmp_rr(RDX, RAX));
@@ -4726,6 +4746,54 @@ fn lower_expr_into(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unsigned_word_ops_use_unsigned_x86_encodings_in_both_modes() {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                x86_64::set_32bit(self.0);
+            }
+        }
+        let _restore = Restore(x86_64::is_32bit());
+        for word32 in [false, true] {
+            x86_64::set_32bit(word32);
+            for op in ["udiv", "urem", "lshr"] {
+                let mut module =
+                    crate::in_lang_parse::parse_in_source("fn main(a:Int,b:Int)->Int{return a/b;}")
+                        .unwrap();
+                let Decl::Function { body, .. } = &mut module.decls[0] else {
+                    panic!("function")
+                };
+                let Stmt::Return(Some(Expr::Binary { op: actual, .. })) = &mut body[0] else {
+                    panic!("binary")
+                };
+                *actual = op.into();
+                let result = lower_module(&module, "main").expect("unsigned lower");
+                let expected = if op == "lshr" {
+                    x86_64::shr_reg_cl(RAX)
+                } else {
+                    x86_64::div_reg(RCX)
+                };
+                assert!(
+                    result
+                        .code
+                        .windows(expected.len())
+                        .any(|bytes| bytes == expected),
+                    "{word32}/{op}"
+                );
+                if op != "lshr" {
+                    let signed = x86_64::idiv_reg(RCX);
+                    assert!(
+                        !result
+                            .code
+                            .windows(signed.len())
+                            .any(|bytes| bytes == signed)
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn absolute_references_preserve_code_and_data_targets_in_both_word_modes() {
         struct Restore(bool);

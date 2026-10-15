@@ -743,8 +743,11 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool
                     .is_none_or(|result| count_expr(result, depth + 1, nodes, lang))
         }
         Expr::Unary { expr, .. } => count_expr(expr, depth + 1, nodes, lang),
-        Expr::Binary { lhs, rhs, .. } => {
-            count_expr(lhs, depth + 1, nodes, lang) && count_expr(rhs, depth + 1, nodes, lang)
+        Expr::Binary { op, lhs, rhs } => {
+            // These sinks cannot yet preserve unsigned word/failure semantics.
+            !matches!(op.as_str(), "udiv" | "urem" | "lshr")
+                && count_expr(lhs, depth + 1, nodes, lang)
+                && count_expr(rhs, depth + 1, nodes, lang)
         }
         Expr::StructInit { fields, .. } => fields
             .iter()
@@ -901,5 +904,32 @@ mod tests {
         assert!(go.contains("Point{"), "{go}");
         assert!(rs.contains("struct Point"), "{rs}");
         assert!(rs.contains("Point {"), "{rs}");
+    }
+}
+
+#[cfg(test)]
+mod unsigned_projection_tests {
+    use super::*;
+
+    #[test]
+    fn unsigned_operations_abort_lossy_projection_instead_of_emitting_invalid_syntax() {
+        for op in ["udiv", "urem", "lshr"] {
+            let module = UnifiedModule::new(vec![Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![Stmt::Return(Some(Expr::Binary {
+                    op: op.into(),
+                    lhs: Box::new(Expr::IntLit(-1)),
+                    rhs: Box::new(Expr::IntLit(1)),
+                }))],
+            }]);
+            for lang in [SourceLang::Rust, SourceLang::Go] {
+                let source = emit_source_module(&module, lang);
+                assert!(source.starts_with("// emit aborted:"), "{lang:?}: {source}");
+                assert!(!source.contains("fn main") && !source.contains("func main"));
+            }
+        }
     }
 }
