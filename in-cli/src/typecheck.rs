@@ -2448,7 +2448,7 @@ fn is_builtin_fn(name: &str) -> bool {
             | "bool-to-int"
             | "int-to-bool"
             // x86 bare-metal intrinsics
-            | "outb" | "inb" | "outl" | "inl"
+            | "outb" | "inb" | "outw" | "inw" | "outl" | "inl"
             | "load8" | "load16" | "load32" | "load64"
             | "store8" | "store16" | "store32" | "store64"
             | "hlt" | "cli" | "sti" | "pause"
@@ -2463,8 +2463,8 @@ fn builtin_return_type(name: &str) -> Typ {
     }
     match name {
         "len" | "str-len" | "array-len" | "array_len" | "vector-capacity" | "bool-to-int"
-        | "to-int" | "str-to-int" | "str-index-of" | "str-table-get-int" | "inb" | "inl"
-        | "load8" | "load16" | "load32" | "load64" | "read-cr2" | "read-cr3" | "invoke"
+        | "to-int" | "str-to-int" | "str-index-of" | "str-table-get-int" | "inb" | "inw"
+        | "inl" | "load8" | "load16" | "load32" | "load64" | "read-cr2" | "read-cr3" | "invoke"
         | "invoke1" | "invoke2" | "invoke-native" | "invoke-native1" | "invoke-native2"
         | "invoke_native" | "invoke_native1" | "invoke_native2" => Typ::Int,
         "str-eq" | "str-contains" | "str-starts-with" | "str-is-int" | "str-table-has"

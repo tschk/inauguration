@@ -177,6 +177,8 @@ enum IntrinsicRet {
 const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("outb", IntrinsicRet::Void),
     ("inb", IntrinsicRet::Int),
+    ("outw", IntrinsicRet::Void),
+    ("inw", IntrinsicRet::Int),
     ("outl", IntrinsicRet::Void),
     ("inl", IntrinsicRet::Int),
     ("load8", IntrinsicRet::Int),
@@ -377,6 +379,8 @@ pub(crate) fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
         .unwrap_or(name)
         .replace('_', "-");
     Some(match name.as_str() {
+        "inb" | "inw" | "inl" => &[Typ::Int],
+        "outb" | "outw" | "outl" => &[Typ::Int, Typ::Int],
         "str-concat" | "str-eq" | "str-contains" | "str-starts-with" | "str-ends-with"
         | "str-index-of" | "path-join" | "write-file" | "env-set" | "str-table-has" => {
             &[Typ::String, Typ::String]

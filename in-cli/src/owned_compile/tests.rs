@@ -7152,3 +7152,81 @@ fn owned_raw_native_calls_emit_freestanding_objects_and_refuse_bad_contracts() {
     fs::remove_file(source).unwrap();
     fs::remove_file(artifact).unwrap();
 }
+
+#[test]
+fn owned_word_port_io_emits_real_x86_instructions_and_checks_contracts() {
+    let source = temp_path("word-port-io.in");
+    let artifact = temp_path("word-port-io.o");
+    fs::write(&source, "fn main()->Int{outw(0x3f8,42);return inw(0x3f8);}").unwrap();
+    let mut request = default_request(
+        source.clone(),
+        CompileTarget::Native,
+        Some("main"),
+        Some(artifact.clone()),
+    );
+    request.target_triple = Some("x86_64-unknown-none".into());
+    request.linkage = NativeLinkage::StaticLib;
+    let report = compile_owned(&request);
+    assert!(
+        report.success && report.degradations.is_empty(),
+        "{report:?}"
+    );
+    let bytes = fs::read(&artifact).unwrap();
+    assert_eq!(&bytes[..4], b"\x7fELF");
+    // Compile only: privileged port instructions must never execute on the host.
+    assert!(
+        bytes.windows(2).any(|pair| pair == [0x66, 0xef]),
+        "missing OUT DX,AX"
+    );
+    assert!(
+        bytes.windows(2).any(|pair| pair == [0x66, 0xed]),
+        "missing IN AX,DX"
+    );
+    for name in ["inb", "inw", "inl", "outb", "outw", "outl"] {
+        let output = name.starts_with("out");
+        let invalid = if output {
+            vec![
+                format!("{name}(1);"),
+                format!("{name}(1,2,3);"),
+                format!("{name}(true,2);"),
+                format!("{name}(1,2.0);"),
+            ]
+        } else {
+            vec![
+                format!("{name}();"),
+                format!("{name}(1,2);"),
+                format!("{name}(true);"),
+            ]
+        };
+        for call in invalid {
+            fs::write(&source, format!("fn main()->Int{{{call}return 42;}}")).unwrap();
+            fs::write(&artifact, b"preserve output").unwrap();
+            let report = compile_owned(&request);
+            assert!(!report.success, "{call}: {report:?}");
+            assert_eq!(fs::read(&artifact).unwrap(), b"preserve output");
+        }
+    }
+    fs::remove_file(source).unwrap();
+    fs::remove_file(artifact).unwrap();
+}
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+fn owned_declared_word_io_names_preserve_function_overrides() {
+    let source = temp_path("word-io-overrides.in");
+    fs::write(&source, "fn outw(value:Int)->Int{return value;}\nfn inw(value:Int)->Int{return value;}\nfn main()->Int{return outw(20)+inw(22);}").unwrap();
+    let request = default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+    let report = compile_owned(&request);
+    assert!(
+        report.success && report.degradations.is_empty(),
+        "{report:?}"
+    );
+    assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
+    fs::remove_file(source).unwrap();
+}
