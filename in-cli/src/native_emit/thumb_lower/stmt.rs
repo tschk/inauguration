@@ -262,7 +262,17 @@ pub(crate) fn lower_stmt(
             "thumb-lower: unsupported loop {:?} in `{}`",
             kind, ctx.fn_name
         )),
-        Stmt::Continue => Ok(()),
+        Stmt::Continue => {
+            let Some(&head) = ctx.loop_heads.last() else {
+                return Err(format!(
+                    "thumb-lower: continue outside loop in `{}`",
+                    ctx.fn_name
+                ));
+            };
+            let site = emitter.len();
+            emitter.emit_u32_thumb(thumb::b_wide(0));
+            patch_b(emitter, site, head)
+        }
         Stmt::Break => {
             let Some(sites) = ctx.break_sites.last_mut() else {
                 return Err(format!(
@@ -396,6 +406,7 @@ fn lower_while(
     emitter.emit_u32_thumb(thumb::b_cond_wide(COND_EQ, 0));
 
     ctx.break_sites.push(Vec::new());
+    ctx.loop_heads.push(loop_head);
     for stmt in body {
         lower_stmt(emitter, ctx, stmt, pending, frame)?;
         ctx.emitted_return = false; // returns inside loop don't end the function for us
@@ -409,6 +420,7 @@ fn lower_while(
     let end = emitter.len();
     patch_b_cond(emitter, beq_site, end)?;
 
+    ctx.loop_heads.pop();
     let breaks = ctx.break_sites.pop().expect("break site stack");
     for site in breaks {
         patch_b(emitter, site, end)?;

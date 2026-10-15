@@ -390,6 +390,97 @@ fn main() -> void { return }
         assert!(!or_fn.code.is_empty());
     }
 
+    fn wide_unconditional_targets(code: &[u8]) -> Vec<(u32, i64)> {
+        let words = code.as_chunks::<2>().0;
+        let mut branches = Vec::new();
+        for (index, pair) in words.windows(2).enumerate() {
+            let high = u32::from(u16::from_le_bytes(pair[0]));
+            let low = u32::from(u16::from_le_bytes(pair[1]));
+            if high & 0xf800 != 0xf000 || low & 0xd000 != 0x9000 {
+                continue;
+            }
+            let sign = (high >> 10) & 1;
+            let i1 = !((low >> 13) ^ sign) & 1;
+            let i2 = !((low >> 11) ^ sign) & 1;
+            let bits = (sign << 24)
+                | (i1 << 23)
+                | (i2 << 22)
+                | ((high & 0x3ff) << 12)
+                | ((low & 0x7ff) << 1);
+            let displacement = ((bits << 7) as i32) >> 7;
+            let site = u32::try_from(index * 2).unwrap();
+            branches.push((site, i64::from(site) + 4 + i64::from(displacement)));
+        }
+        branches
+    }
+
+    #[test]
+    fn continue_and_break_keep_innermost_loop_ownership() {
+        use crate::core_ir::{Expr, LoopKind, Stmt};
+        let functions = HashMap::new();
+        let structs = HashMap::new();
+        let mut ctx = ctx::LowerCtx::new("nested", &[], &functions, &structs);
+        let mut emitter = CodeEmitter::new();
+        let mut pending = Vec::new();
+        let inner = Stmt::Loop {
+            kind: LoopKind::While,
+            cond: Some(Expr::BoolLit(false)),
+            body: vec![Stmt::Continue, Stmt::Break],
+        };
+        let outer = Stmt::Loop {
+            kind: LoopKind::While,
+            cond: Some(Expr::BoolLit(true)),
+            body: vec![inner, Stmt::Continue, Stmt::Break],
+        };
+        stmt::lower_stmt(&mut emitter, &mut ctx, &outer, &mut pending, 0).unwrap();
+        assert_eq!(
+            wide_unconditional_targets(&emitter.bytes),
+            vec![(16, 8), (20, 28), (24, 8), (28, 0), (32, 40), (36, 0)]
+        );
+        assert!(ctx.loop_heads.is_empty());
+        assert!(ctx.break_sites.is_empty());
+    }
+
+    #[test]
+    fn continue_in_conditional_rechecks_condition_and_outside_loop_refuses() {
+        use crate::core_ir::{Expr, LoopKind, Stmt};
+        let functions = HashMap::new();
+        let structs = HashMap::new();
+        let mut ctx = ctx::LowerCtx::new("conditional", &[], &functions, &structs);
+        let mut emitter = CodeEmitter::new();
+        let mut pending = Vec::new();
+        assert!(
+            stmt::lower_stmt(&mut emitter, &mut ctx, &Stmt::Continue, &mut pending, 0)
+                .unwrap_err()
+                .contains("continue outside loop")
+        );
+        assert!(emitter.bytes.is_empty());
+        let statement = Stmt::Loop {
+            kind: LoopKind::While,
+            cond: Some(Expr::BoolLit(true)),
+            body: vec![
+                Stmt::If {
+                    cond: Expr::BoolLit(false),
+                    then_body: vec![Stmt::Continue],
+                    else_body: vec![],
+                },
+                Stmt::Break,
+            ],
+        };
+        stmt::lower_stmt(&mut emitter, &mut ctx, &statement, &mut pending, 0).unwrap();
+        let branches = wide_unconditional_targets(&emitter.bytes);
+        assert_eq!(
+            branches.iter().filter(|(_, target)| *target == 0).count(),
+            2
+        );
+        assert!(
+            branches
+                .iter()
+                .any(|(_, target)| *target == i64::from(emitter.len()))
+        );
+        assert!(ctx.loop_heads.is_empty());
+    }
+
     #[test]
     fn lower_break() {
         let module = parse(

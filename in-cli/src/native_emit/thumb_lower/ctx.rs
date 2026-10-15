@@ -32,6 +32,8 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) emitted_return: bool,
     /// stack of break-site lists, one per enclosing loop
     pub(crate) break_sites: Vec<Vec<u32>>,
+    /// Condition-entry offsets, one per enclosing while loop.
+    pub(crate) loop_heads: Vec<u32>,
     pub(crate) functions: &'a HashMap<String, FunctionInfo>,
     pub(crate) structs: &'a HashMap<String, Vec<(String, Typ)>>,
     pub(crate) fn_name: String,
@@ -98,6 +100,7 @@ impl<'a> LowerCtx<'a> {
             frame_size: 0,
             emitted_return: false,
             break_sites: Vec::new(),
+            loop_heads: Vec::new(),
             functions,
             structs,
             fn_name: fn_name.to_string(),

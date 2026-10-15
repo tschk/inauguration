@@ -1,0 +1,46 @@
+fn finite()->Int {
+  let i:Int=0;
+  let sum:Int=0;
+  while i<3 {
+    i=i+1;
+    if i<3 { continue; }
+    sum=sum+42;
+  }
+  return sum;
+}
+fn nested()->Int {
+  let outer:Int=0;
+  let sum:Int=0;
+  while outer<3 {
+    outer=outer+1;
+    if outer==3 { break; }
+    let inner:Int=0;
+    while inner<3 {
+      inner=inner+1;
+      if inner<3 { continue; }
+      sum=sum+21;
+    }
+  }
+  return sum;
+}
+fn condition()->Bool {
+  let count:Int=load32(0x38000000)+1;
+  store32(0x38000000,count);
+  return count<4;
+}
+fn condition_effects()->Int {
+  store32(0x38000000,0);
+  let sum:Int=0;
+  while condition() {
+    if load32(0x38000000)<3 { continue; }
+    sum=sum+42;
+  }
+  if load32(0x38000000)!=4 { return 0; }
+  return sum;
+}
+fn main()->Int {
+  if finite()!=42 { return 0; }
+  if nested()!=42 { return 0; }
+  if condition_effects()!=42 { return 0; }
+  return 42;
+}
