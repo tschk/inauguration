@@ -88,3 +88,4 @@ agree conformance/control-flow/receiver-replacement-effects.in
 agree conformance/control-flow/temporary-receiver-order.in
 agree conformance/control-flow/temporary-receiver-chain.in
 agree conformance/control-flow/receiver-identity-through-spills.in
+agree conformance/control-flow/short-circuit.in
