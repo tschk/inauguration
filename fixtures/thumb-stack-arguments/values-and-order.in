@@ -1,0 +1,78 @@
+extern asm fn stack_alignment() -> Int
+
+fn mark(value: Int) -> Int {
+  store32(0x38000000, load32(0x38000000) * 10 + value);
+  return value;
+}
+
+fn take5(p1: Int, p2: Int, p3: Int, p4: Int, p5: Int) -> Int {
+  if invoke-native(stack_alignment) != 0 {
+    return -1;
+  }
+  return 1 * p1 + 2 * p2 + 3 * p3 + 4 * p4 + 5 * p5;
+}
+
+fn take6(p1: Int, p2: Int, p3: Int, p4: Int, p5: Int, p6: Int) -> Int {
+  if invoke-native(stack_alignment) != 0 {
+    return -1;
+  }
+  return 1 * p1 + 2 * p2 + 3 * p3 + 4 * p4 + 5 * p5 + 6 * p6;
+}
+
+fn take7(p1: Int, p2: Int, p3: Int, p4: Int, p5: Int, p6: Int, p7: Int) -> Int {
+  if invoke-native(stack_alignment) != 0 {
+    return -1;
+  }
+  return 1 * p1 + 2 * p2 + 3 * p3 + 4 * p4 + 5 * p5 + 6 * p6 + 7 * p7;
+}
+
+fn nested(value: Int) -> Int {
+  return take5(value, 2, 3, 4, 5);
+}
+
+fn word_edge(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int) -> Int {
+  if e != 0xffffffff {
+    return 1;
+  }
+  if f != -2147483648 {
+    return 2;
+  }
+  if g != 0x7fffffff {
+    return 3;
+  }
+  return a + b + c + d;
+}
+
+fn main() -> Int {
+  store32(0x38000000, 0);
+  if take5(mark(1), mark(2), mark(3), mark(4), mark(5)) != 55 {
+    return 5;
+  }
+  if load32(0x38000000) != 12345 {
+    return 15;
+  }
+  store32(0x38000000, 0);
+  if take6(mark(1), mark(2), mark(3), mark(4), mark(5), mark(6)) != 91 {
+    return 6;
+  }
+  if load32(0x38000000) != 123456 {
+    return 16;
+  }
+  store32(0x38000000, 0);
+  if take7(mark(1), mark(2), mark(3), mark(4), mark(5), mark(6), mark(7)) != 140 {
+    return 7;
+  }
+  if load32(0x38000000) != 1234567 {
+    return 17;
+  }
+  if nested(1) != 55 {
+    return 18;
+  }
+  if take6(1, 2, 3, 4, 5, 6) != 91 {
+    return 19;
+  }
+  if word_edge(10, 10, 10, 12, 0xffffffff, -2147483648, 0x7fffffff) != 42 {
+    return 20;
+  }
+  return 42;
+}

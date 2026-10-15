@@ -175,11 +175,17 @@ pub(crate) fn lower_call_args(
         emitter.emit_u16(thumb::ldr_sp(arg_regs[i], ctx.call_arg_temps[base + i])?);
     }
 
-    // 3. Push extra args right-to-left using r4 so arg 4 ends up at [sp].
-    if n > 4 {
-        for i in (4..n).rev() {
-            emitter.emit_u16(thumb::ldr_sp(R4, ctx.call_arg_temps[base + i])?);
-            emitter.emit_u16(thumb::push(1 << 4, false));
+    // 3. Reserve one aligned outgoing block. Source temps were staged before
+    // moving SP, so their offsets include this block; arg 4 is at caller SP.
+    let stack_bytes = (((n.saturating_sub(4) * 4) + 7) & !7) as u32;
+    if stack_bytes != 0 {
+        emitter.emit_u16(thumb::sub_sp_imm(stack_bytes)?);
+        for i in 4..n {
+            emitter.emit_u16(thumb::ldr_sp(
+                R4,
+                ctx.call_arg_temps[base + i] + stack_bytes,
+            )?);
+            emitter.emit_u16(thumb::str_sp(R4, ((i - 4) * 4) as u32)?);
         }
     }
 
@@ -202,9 +208,8 @@ pub(crate) fn lower_call_args(
     });
 
     // 5. Caller cleans up stack arguments.
-    if n > 4 {
-        let extra = ((n - 4) * 4) as u32;
-        emitter.emit_u16(thumb::add_sp_imm(extra)?);
+    if stack_bytes != 0 {
+        emitter.emit_u16(thumb::add_sp_imm(stack_bytes)?);
     }
 
     ctx.release_call_arg_temps();
@@ -1018,5 +1023,53 @@ mod raw_native_tests {
                 .unwrap_err()
                 .contains("requires 3")
         );
+    }
+}
+
+#[cfg(test)]
+mod outgoing_stack_argument_tests {
+    use super::*;
+
+    #[test]
+    fn five_six_and_seven_argument_calls_keep_aligned_ordered_stack_slots() {
+        for count in [5usize, 6, 7] {
+            let functions = HashMap::new();
+            let structs = HashMap::new();
+            let mut ctx = LowerCtx::new("caller", &[], &functions, &structs);
+            ctx.call_arg_chunk = count;
+            ctx.call_arg_temps = (0..count).map(|_| ctx.alloc_slot()).collect();
+            let args = (1..=count)
+                .map(|n| Expr::IntLit(n as i64))
+                .collect::<Vec<_>>();
+            let mut emitter = CodeEmitter::new();
+            let mut pending = Vec::new();
+            lower_call_args(&mut emitter, &mut ctx, "take", &args, R0, &mut pending).unwrap();
+            let words = emitter
+                .bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|w| u16::from_le_bytes(*w))
+                .collect::<Vec<_>>();
+            let bytes = if count <= 6 { 8 } else { 16 };
+            assert_eq!(bytes % 8, 0);
+            let start = words
+                .iter()
+                .position(|word| *word == thumb::sub_sp_imm(bytes).unwrap())
+                .unwrap();
+            for index in 4..count {
+                assert_eq!(
+                    words[start + 1 + (index - 4) * 2],
+                    thumb::ldr_sp(R4, ctx.call_arg_temps[index] + bytes).unwrap()
+                );
+                assert_eq!(
+                    words[start + 2 + (index - 4) * 2],
+                    thumb::str_sp(R4, ((index - 4) * 4) as u32).unwrap()
+                );
+            }
+            assert_eq!(words.last(), Some(&thumb::add_sp_imm(bytes).unwrap()));
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].target, "take");
+        }
     }
 }
