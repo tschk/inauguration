@@ -202,7 +202,14 @@ fn format_expr(expr: &Expr) -> String {
     match expr {
         Expr::UnitLit => "()".into(),
         Expr::IntLit(n) => n.to_string(),
-        Expr::FloatLit(f) => f.0.to_string(),
+        // Overflow notation preserves infinities accepted by the Float parser.
+        Expr::FloatLit(f) if f.0.is_infinite() => if f.0.is_sign_negative() {
+            "-1e999"
+        } else {
+            "1e999"
+        }
+        .into(),
+        Expr::FloatLit(f) => format!("{:?}", f.0),
         Expr::StringLit(value) => format!(
             "\"{}\"",
             value
@@ -406,6 +413,43 @@ mod tests {
 
     use super::*;
     use crate::in_lang_parse::parse_in_source;
+
+    #[test]
+    fn canonical_float_literals_preserve_type_and_bits() {
+        for literal in [
+            "0.0",
+            "-0.0",
+            "1.0",
+            "-42.0",
+            "1.5",
+            "1e20",
+            "1e-20",
+            "1.7976931348623157e308",
+            "2.2250738585072014e-308",
+            "5e-324",
+            "1e999",
+            "-1e999",
+        ] {
+            let original = crate::in_lang_parse::parse_expr(literal);
+            assert!(matches!(original, Expr::FloatLit(_)), "{literal}");
+            let rendered = format_expr(&original);
+            assert_eq!(
+                crate::in_lang_parse::parse_expr(&rendered),
+                original,
+                "{rendered}"
+            );
+            let source = format!(
+                "var amount:Float={literal};\nfn main()->Float{{amount={literal};return amount;}}"
+            );
+            let canonical = canonicalize_in_source(&source).unwrap();
+            assert_eq!(
+                parse_in_source(&source).unwrap(),
+                parse_in_source(&canonical).unwrap(),
+                "{canonical}"
+            );
+            assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+        }
+    }
 
     #[test]
     fn canonical_globals_keep_mutability_types_and_initializers() {
