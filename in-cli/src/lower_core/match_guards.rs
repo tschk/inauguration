@@ -13,6 +13,15 @@ pub(crate) fn prepared_native_module_with_semantics(
     module: &UnifiedModule,
     semantics: crate::integer_semantics::IntegerSemantics,
 ) -> Cow<'_, UnifiedModule> {
+    let original = module;
+    let normalized = crate::typecheck::rust_integers::has_metadata(module).then(|| {
+        crate::typecheck::normalize_module_with_semantics(
+            crate::parser_registry::ParserId::Rust,
+            module,
+            semantics,
+        )
+    });
+    let module = normalized.as_ref().unwrap_or(original);
     let whole_bindings = module
         .decls
         .iter()
@@ -24,7 +33,10 @@ pub(crate) fn prepared_native_module_with_semantics(
         && !super::value_spills::has_value_spills(&module.decls)
         && !super::constant_values::has_named_constants(&module.decls)
     {
-        return Cow::Borrowed(module);
+        return match normalized {
+            Some(module) => Cow::Owned(module),
+            None => Cow::Borrowed(original),
+        };
     }
     let structs: HashMap<_, _> = module
         .decls

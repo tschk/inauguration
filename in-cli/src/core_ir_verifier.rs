@@ -368,6 +368,11 @@ pub(crate) fn invoke_signature_error(
 }
 
 pub(crate) fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
+    match name {
+        crate::inrt::INRT_VECTOR_CLONE => return Some(&[Typ::Int, Typ::Int, Typ::Int]),
+        crate::inrt::INRT_VECTOR_EXTEND => return Some(&[Typ::Int, Typ::Int, Typ::Int, Typ::Int]),
+        _ => {}
+    }
     if let Some(params) = invoke_param_types(name) {
         return Some(params);
     }
@@ -3024,6 +3029,19 @@ mod tests {
             let report = verify_for_entry(&module, "main");
             assert_eq!(report.ok, accepted, "{report:?}");
         }
+    }
+
+    #[test]
+    fn raw_vector_copy_intrinsics_preserve_word_abi_parameters() {
+        assert_eq!(
+            intrinsic_param_types(crate::inrt::INRT_VECTOR_CLONE),
+            Some([Typ::Int, Typ::Int, Typ::Int].as_slice())
+        );
+        assert_eq!(
+            intrinsic_param_types(crate::inrt::INRT_VECTOR_EXTEND),
+            Some([Typ::Int, Typ::Int, Typ::Int, Typ::Int].as_slice())
+        );
+        assert_eq!(intrinsic_param_types("vector-extend"), None);
     }
 
     #[test]

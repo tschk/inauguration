@@ -94,7 +94,7 @@ fn constrain(
     if !candidates.contains(name) || !resolved_closure_type(&typ) {
         return;
     }
-    let typ = typ.canonical();
+    let typ = typ.inference_type();
     constraints
         .entry(name.into())
         .and_modify(|existing| {

@@ -184,7 +184,7 @@ fn register_explicit_vector_constructors(module: &mut UnifiedModule) {
             return;
         }
         let typ = map_type(item);
-        if matches!(typ, Typ::Int | Typ::Float | Typ::Bool) {
+        if matches!(typ.canonical(), Typ::Int | Typ::Float | Typ::Bool) {
             constructors.insert(
                 name.clone(),
                 (
@@ -395,6 +395,154 @@ fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
 #[path = "rust_front/atomics.rs"]
 mod atomics;
 
+// Primitive-shadow resolution needs a type namespace. Refuse these ambiguous
+// declarations explicitly until the Rust front carries that namespace.
+fn reject_integer_primitive_shadowing(items: &[syn::Item]) -> Result<(), String> {
+    let check_name = |name: &syn::Ident| -> Result<(), String> {
+        let name = name.to_string();
+        if matches!(
+            name.as_str(),
+            "i8" | "u8"
+                | "i16"
+                | "u16"
+                | "i32"
+                | "u32"
+                | "i64"
+                | "u64"
+                | "isize"
+                | "usize"
+                | "i128"
+                | "u128"
+        ) {
+            return Err(format!(
+                "rust front: shadowed primitive integer type `{name}` requires type namespace resolution"
+            ));
+        }
+        Ok(())
+    };
+    let check_generics = |generics: &syn::Generics| -> Result<(), String> {
+        for parameter in &generics.params {
+            if let syn::GenericParam::Type(parameter) = parameter {
+                check_name(&parameter.ident)?;
+            }
+        }
+        Ok(())
+    };
+    fn nested_blocks(mut cursor: syn::buffer::Cursor<'_>) -> Result<(), String> {
+        while !cursor.eof() {
+            if let Some((inside, _, _, after)) = cursor.any_group() {
+                let tokens = inside.token_stream();
+                if let Ok(block) = syn::parse2::<syn::Block>(quote::quote!({ #tokens })) {
+                    for statement in &block.stmts {
+                        if let syn::Stmt::Item(item) = statement {
+                            reject_integer_primitive_shadowing(std::slice::from_ref(item))?;
+                        }
+                    }
+                }
+                nested_blocks(inside)?;
+                cursor = after;
+            } else if let Some((_, after)) = cursor.token_tree() {
+                cursor = after;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+    for item in items {
+        match item {
+            syn::Item::Use(value) => {
+                fn imported(tree: &syn::UseTree, prefix: &str) -> Vec<(String, String)> {
+                    match tree {
+                        syn::UseTree::Path(path) => {
+                            imported(&path.tree, &format!("{prefix}{}::", path.ident))
+                        }
+                        syn::UseTree::Name(name) => {
+                            vec![(name.ident.to_string(), format!("{prefix}{}", name.ident))]
+                        }
+                        syn::UseTree::Rename(name) => {
+                            vec![(name.rename.to_string(), format!("{prefix}{}", name.ident))]
+                        }
+                        syn::UseTree::Group(group) => group
+                            .items
+                            .iter()
+                            .flat_map(|tree| imported(tree, prefix))
+                            .collect(),
+                        // Glob namespaces require resolution outside this bounded guard.
+                        syn::UseTree::Glob(_) => vec![],
+                    }
+                }
+                for (binding, path) in imported(&value.tree, "") {
+                    if let Err(error) = check_name(&syn::Ident::new(&binding, value.use_token.span))
+                    {
+                        let primitive = path
+                            .strip_prefix("core::primitive::")
+                            .or_else(|| path.strip_prefix("std::primitive::"));
+                        if primitive != Some(binding.as_str()) {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+            syn::Item::Struct(value) => {
+                check_name(&value.ident)?;
+                check_generics(&value.generics)?;
+            }
+            syn::Item::Enum(value) => {
+                check_name(&value.ident)?;
+                check_generics(&value.generics)?;
+            }
+            syn::Item::Union(value) => {
+                check_name(&value.ident)?;
+                check_generics(&value.generics)?;
+            }
+            syn::Item::Type(value) => {
+                check_name(&value.ident)?;
+                check_generics(&value.generics)?;
+            }
+            syn::Item::Fn(value) => {
+                check_generics(&value.sig.generics)?;
+                for statement in &value.block.stmts {
+                    if let syn::Stmt::Item(item) = statement {
+                        reject_integer_primitive_shadowing(std::slice::from_ref(item))?;
+                    }
+                }
+            }
+            syn::Item::Mod(value) => {
+                if let Some((_, items)) = &value.content {
+                    reject_integer_primitive_shadowing(items)?;
+                }
+            }
+            syn::Item::Impl(value) => {
+                check_generics(&value.generics)?;
+                for item in &value.items {
+                    match item {
+                        syn::ImplItem::Fn(value) => check_generics(&value.sig.generics)?,
+                        syn::ImplItem::Type(value) => check_name(&value.ident)?,
+                        _ => {}
+                    }
+                }
+            }
+            syn::Item::Trait(value) => {
+                check_name(&value.ident)?;
+                check_generics(&value.generics)?;
+                for item in &value.items {
+                    match item {
+                        syn::TraitItem::Fn(value) => check_generics(&value.sig.generics)?,
+                        syn::TraitItem::Type(value) => check_name(&value.ident)?,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let tokens =
+        syn::buffer::TokenBuffer::new2(items.iter().map(ToTokens::to_token_stream).collect());
+    nested_blocks(tokens.begin())?;
+    Ok(())
+}
+
 fn lower_file_items_at_visited(
     file: &syn::File,
     base_dir: &Path,
@@ -404,6 +552,7 @@ fn lower_file_items_at_visited(
     if depth > 8 {
         return Err("rust front: module nest limit".into());
     }
+    reject_integer_primitive_shadowing(&file.items)?;
     let mut decls = Vec::new();
     let mut external_modules: Vec<String> = Vec::new();
     let mut uses: Vec<syn::ItemUse> = Vec::new();
@@ -1372,7 +1521,7 @@ fn type_to_string(ty: &Typ) -> String {
         Typ::String => "String".to_string(),
         Typ::Float => "f64".to_string(),
         Typ::Void => "()".to_string(),
-        Typ::Named(n) => n.clone(),
+        Typ::Named(n) => n.strip_prefix("#rust-integer-").unwrap_or(n).to_string(),
         Typ::Array(e) => format!("Vec<{}>", type_to_string(e)),
         Typ::Vector(_) => "Vec".to_string(),
         Typ::Generic(g) => g.clone(),
@@ -1470,6 +1619,56 @@ fn nominal_path_name(path: &syn::Path) -> String {
         .join("::")
 }
 
+fn rust_integer_path(path: &syn::Path) -> Option<&str> {
+    if path
+        .segments
+        .iter()
+        .any(|part| !matches!(part.arguments, syn::PathArguments::None))
+    {
+        return None;
+    }
+    let names: Vec<_> = path
+        .segments
+        .iter()
+        .map(|part| part.ident.to_string())
+        .collect();
+    let primitive = match names.as_slice() {
+        [name] => name,
+        [root, module, name]
+            if matches!(root.as_str(), "core" | "std") && module == "primitive" =>
+        {
+            name
+        }
+        _ => return None,
+    };
+    match primitive.as_str() {
+        "i8" => Some("i8"),
+        "u8" => Some("u8"),
+        "i16" => Some("i16"),
+        "u16" => Some("u16"),
+        "i32" => Some("i32"),
+        "u32" => Some("u32"),
+        "i64" => Some("i64"),
+        "u64" => Some("u64"),
+        "isize" => Some("isize"),
+        "usize" => Some("usize"),
+        "i128" => Some("i128"),
+        "u128" => Some("u128"),
+        _ => None,
+    }
+}
+
+fn rust_integer_literal(value: i64, suffix: &str) -> Expr {
+    Expr::Unary {
+        op: if suffix.is_empty() {
+            "rust-integer-literal".into()
+        } else {
+            format!("rust-integer-literal-{suffix}")
+        },
+        expr: Box::new(Expr::IntLit(value)),
+    }
+}
+
 fn map_type(ty: &syn::Type) -> Typ {
     match ty {
         syn::Type::Path(tp) if tp.qself.is_some() => Typ::Named(ty.to_token_stream().to_string()),
@@ -1477,8 +1676,18 @@ fn map_type(ty: &syn::Type) -> Typ {
             let last_segment = tp.path.segments.last();
             let last = last_segment.map(|s| s.ident.to_string());
             match last.as_deref() {
-                Some("i8" | "i16" | "i32" | "i64" | "i128" | "isize") => Typ::Int,
-                Some("u8" | "u16" | "u32" | "u64" | "u128" | "usize") => Typ::Int,
+                Some(
+                    "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize",
+                ) if rust_integer_path(&tp.path).is_some() => Typ::Named(format!(
+                    "#rust-integer-{}",
+                    last.as_deref().unwrap_or_default()
+                )),
+                Some("i128" | "u128") if rust_integer_path(&tp.path).is_some() => {
+                    Typ::Named(format!(
+                        "#unsupported-rust-integer-{}",
+                        last.as_deref().unwrap_or_default()
+                    ))
+                }
                 Some("String" | "str") => Typ::String,
                 Some("bool") => Typ::Bool,
                 Some("f64") => Typ::Float,
@@ -2327,10 +2536,37 @@ fn lower_expr_with_types_inner(
                     .map(|value| Expr::FloatLit(FloatVal(value)))
                     .unwrap_or(Expr::Ident(token))
             }
-            syn::Lit::Int(i) => i
-                .base10_parse::<i64>()
-                .map(Expr::IntLit)
-                .unwrap_or_else(|_| Expr::Ident(i.to_token_stream().to_string())),
+            syn::Lit::Int(i) => {
+                let suffix = i.suffix();
+                let value = if suffix == "u64" {
+                    i.base10_parse::<u64>().map(|value| value as i64).ok()
+                } else {
+                    i.base10_parse::<i64>().ok()
+                };
+                match value {
+                    Some(value)
+                        if suffix.is_empty()
+                            || matches!(
+                                suffix,
+                                "i8" | "u8"
+                                    | "i16"
+                                    | "u16"
+                                    | "i32"
+                                    | "u32"
+                                    | "i64"
+                                    | "u64"
+                                    | "isize"
+                                    | "usize"
+                            ) =>
+                    {
+                        rust_integer_literal(value, suffix)
+                    }
+                    _ => Expr::Ident(format!(
+                        "#unsupported-rust-integer-literal:{}",
+                        i.to_token_stream()
+                    )),
+                }
+            }
             syn::Lit::Float(value) => {
                 let parsed = match value.suffix() {
                     "f32" => value.base10_parse::<f32>().map(f64::from),
@@ -2533,6 +2769,41 @@ fn lower_expr_with_types_inner(
                 args,
             }
         }
+        syn::Expr::Unary(u)
+            if matches!(u.op, syn::UnOp::Neg(_))
+                && matches!(
+                    u.expr.as_ref(),
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Int(_),
+                        ..
+                    })
+                ) =>
+        {
+            let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(literal),
+                ..
+            }) = u.expr.as_ref()
+            else {
+                unreachable!()
+            };
+            let suffix = literal.suffix();
+            if suffix.is_empty() || matches!(suffix, "i8" | "i16" | "i32" | "i64" | "isize") {
+                literal
+                    .base10_parse::<i128>()
+                    .ok()
+                    .and_then(|value| value.checked_neg())
+                    .and_then(|value| i64::try_from(value).ok())
+                    .map(|value| rust_integer_literal(value, suffix))
+                    .unwrap_or_else(|| {
+                        Expr::Ident("#unsupported-rust-negative-integer-literal".into())
+                    })
+            } else {
+                Expr::Unary {
+                    op: "-".into(),
+                    expr: Box::new(lower_expr_with_types(&u.expr, local_types)),
+                }
+            }
+        }
         syn::Expr::Unary(u) => Expr::Unary {
             op: match u.op {
                 syn::UnOp::Not(_) => "complement".into(),
@@ -2567,8 +2838,13 @@ fn lower_expr_with_types_inner(
             let op = format!("int-cast-{target}");
             if crate::core_ir::integer_cast_spec(&op).is_some() {
                 Expr::Unary {
-                    op: format!("numeric-cast-{target}"),
-                    expr: Box::new(value),
+                    // Retain the source integer result kind even when generic
+                    // cast normalization erases its numeric-cast operation.
+                    op: format!("rust-integer-value-{target}"),
+                    expr: Box::new(Expr::Unary {
+                        op: format!("numeric-cast-{target}"),
+                        expr: Box::new(value),
+                    }),
                 }
             } else if matches!(target, "f32" | "f64") {
                 Expr::Unary {
@@ -2784,7 +3060,7 @@ mod tests {
         let Decl::Function { body, .. } = &module.decls[0] else {
             unreachable!()
         };
-        assert!(matches!(body.as_slice(), [Stmt::Throw(Expr::IntLit(1))]));
+        assert_eq!(body.as_slice(), &[Stmt::Throw(rust_integer_literal(1, ""))]);
     }
 
     #[test]
@@ -2894,7 +3170,7 @@ fn main() -> Result<i64, i64> {
         else {
             panic!("main must be a function");
         };
-        assert_eq!(*ret, Typ::Int);
+        assert_eq!(*ret, Typ::Named("#rust-integer-i64".into()));
         assert!(matches!(body.get(1), Some(Stmt::Propagate)));
         assert!(matches!(body.last(), Some(Stmt::Return(Some(_)))));
     }
@@ -2928,7 +3204,7 @@ fn main() -> Result<i64, i64> {
         assert!(matches!(
             body.first(),
             Some(Stmt::Let(_, Some(Typ::Vector(elem)), Expr::ArrayLit(items)))
-                if **elem == Typ::Int && items.len() == 2
+                if **elem == Typ::Named("#rust-integer-i64".into()) && items == &vec![rust_integer_literal(1, ""), rust_integer_literal(2, "")]
         ));
     }
 
@@ -2953,7 +3229,7 @@ fn main() -> Result<i64, i64> {
             panic!("main must be a function");
         };
         assert!(
-            matches!(body.first(), Some(Stmt::Let(_, _, Expr::Closure { params, body, .. })) if params == &vec![("value".to_string(), Typ::Int)] && matches!(body.last(), Some(Stmt::Return(Some(Expr::Binary { .. })))))
+            matches!(body.first(), Some(Stmt::Let(_, _, Expr::Closure { params, body, .. })) if params == &vec![("value".to_string(), Typ::Named("#rust-integer-i64".into()))] && matches!(body.last(), Some(Stmt::Return(Some(Expr::Binary { .. })))))
         );
     }
 
@@ -3194,7 +3470,7 @@ fn main() {
             assert!(matches!(args.as_slice(), [Expr::Block { .. }]));
             if source.contains("return") {
                 assert!(
-                    matches!(&args[0], Expr::Block { body, result: None } if matches!(body.as_slice(), [Stmt::Return(Some(Expr::IntLit(42)))]))
+                    matches!(&args[0], Expr::Block { body, result: None } if body.as_slice() == [Stmt::Return(Some(rust_integer_literal(42, "")))])
                 );
             }
             if source.contains("runtime") {
@@ -3219,7 +3495,7 @@ fn main() -> i64 { N }
             module
                 .decls
                 .iter()
-                .any(|d| matches!(d, Decl::Global { name, typ: Typ::Int, mutable: false, constant_value: true, init: Some(value) } if name == "N" && value.as_ref() == &Expr::IntLit(4)))
+                .any(|d| matches!(d, Decl::Global { name, typ: Typ::Named(typ), mutable: false, constant_value: true, init: Some(value) } if name == "N" && typ == "#rust-integer-i64" && value.as_ref() == &rust_integer_literal(4, "")))
         );
         assert!(
             module
@@ -3725,7 +4001,10 @@ fn main() {
         for (index, (name, init, constant)) in globals.iter().enumerate() {
             assert!(name.starts_with("$anonymous_const$"));
             assert!(**constant);
-            assert_eq!(init.as_deref(), Some(&Expr::IntLit(index as i64 + 1)));
+            assert_eq!(
+                init.as_deref(),
+                Some(&rust_integer_literal(index as i64 + 1, ""))
+            );
         }
     }
 
@@ -3834,6 +4113,8 @@ fn main() {
                 .any(|decl| matches!(decl, Decl::Struct{name,fields,..}
             if name=="shapes::Slice" && fields[0].1 == map_type(&syn::parse_str::<syn::Type>("&[i64]").unwrap())))
         );
+        module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &module);
         crate::lower_core::desugar_module(&mut module);
         assert!(
             crate::native_emit::lower::lower_module(
@@ -3844,5 +4125,125 @@ fn main() {
             .is_ok()
         );
         assert!(crate::native_emit::x86_64_lower::lower_module(&module, "main").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod integer_metadata_tests {
+    #[test]
+    fn integer_casts_retain_source_kind_around_generic_conversion() {
+        for target in [
+            "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "isize", "usize",
+        ] {
+            let expression: syn::Expr = syn::parse_str(&format!("next() as {target}")).unwrap();
+            let actual = lower_expr_with_types(&expression, &mut HashMap::new());
+            let expected = Expr::Unary {
+                op: format!("rust-integer-value-{target}"),
+                expr: Box::new(Expr::Unary {
+                    op: format!("numeric-cast-{target}"),
+                    expr: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Ident("next".into())),
+                        args: vec![],
+                    }),
+                }),
+            };
+            assert_eq!(actual, expected);
+        }
+        let expression: syn::Expr = syn::parse_str("next() as f32").unwrap();
+        assert!(
+            matches!(lower_expr_with_types(&expression, &mut HashMap::new()), Expr::Unary {op, expr} if op == "numeric-cast-f32" && matches!(expr.as_ref(), Expr::Call {..}))
+        );
+    }
+
+    #[test]
+    fn typed_vector_constructors_keep_private_integer_element_metadata() {
+        for item in ["u8", "i64"] {
+            let source = format!("fn main(){{let values=Vec::<{item}>::with_capacity(2);}}");
+            let module = parse_rust_source(&source).unwrap();
+            assert!(module.decls.iter().any(|decl| matches!(decl,
+                Decl::Function {name, ret: Typ::Vector(element), ..}
+                if name.contains("with_capacity") && **element == Typ::Named(format!("#rust-integer-{item}"))
+            )), "{source}: {module:?}");
+        }
+    }
+
+    #[test]
+    fn ambiguous_primitive_type_shadows_refuse_explicitly() {
+        for source in [
+            "struct u32; fn main(){}",
+            "type u8 = bool; fn main(){}",
+            "mod names{pub struct Word;} use names::Word as u32; fn main(){}",
+            "use names::{u8, Other as u16}; fn main(){}",
+            "fn identity<u16>(value:u16)->u16{value}",
+            "struct Holder<i32>{value:i32}",
+            "mod inner { type usize = bool; } fn main(){}",
+            "fn main(){if true {type u32=bool;} let f=||{struct u8;};}",
+        ] {
+            let file = syn::parse_file(source).unwrap();
+            assert!(
+                reject_integer_primitive_shadowing(&file.items)
+                    .unwrap_err()
+                    .contains("shadowed primitive integer type")
+            );
+        }
+        let file =
+            syn::parse_file("fn main(value:core::primitive::u32)->std::primitive::u32{value}")
+                .unwrap();
+        assert!(reject_integer_primitive_shadowing(&file.items).is_ok());
+        let file =
+            syn::parse_file("use core::primitive::u32; use std::primitive::{u8,i16}; fn main(){}")
+                .unwrap();
+        assert!(reject_integer_primitive_shadowing(&file.items).is_ok());
+    }
+
+    use super::*;
+
+    #[test]
+    fn primitive_integer_paths_preserve_exact_rust_kind() {
+        for spelling in ["u32", "core::primitive::u32", "std::primitive::u32"] {
+            let typ: syn::Type = syn::parse_str(spelling).unwrap();
+            let mapped = map_type(&typ);
+            assert_eq!(mapped, Typ::Named("#rust-integer-u32".into()));
+            assert_eq!(type_to_string(&mapped), "u32");
+        }
+        let nominal: syn::Type = syn::parse_str("foo::u32").unwrap();
+        assert_eq!(map_type(&nominal), Typ::Named("foo::u32".into()));
+        for name in ["i128", "u128"] {
+            let typ: syn::Type = syn::parse_str(name).unwrap();
+            assert_eq!(
+                map_type(&typ),
+                Typ::Named(format!("#unsupported-rust-integer-{name}"))
+            );
+        }
+    }
+
+    #[test]
+    fn literal_metadata_preserves_suffix_bits_and_signed_minimum() {
+        for (source, marker, value) in [
+            ("42", "rust-integer-literal", 42),
+            ("42u32", "rust-integer-literal-u32", 42),
+            ("0xffffffffffffffffu64", "rust-integer-literal-u64", -1),
+            (
+                "-9223372036854775808i64",
+                "rust-integer-literal-i64",
+                i64::MIN,
+            ),
+            ("-128i8", "rust-integer-literal-i8", -128),
+        ] {
+            let expr: syn::Expr = syn::parse_str(source).unwrap();
+            assert_eq!(
+                lower_expr_with_types(&expr, &mut HashMap::new()),
+                Expr::Unary {
+                    op: marker.into(),
+                    expr: Box::new(Expr::IntLit(value))
+                }
+            );
+        }
+        for source in ["18446744073709551615", "1u128", "-9223372036854775809i64"] {
+            let expr: syn::Expr = syn::parse_str(source).unwrap();
+            assert!(
+                matches!(lower_expr_with_types(&expr, &mut HashMap::new()), Expr::Ident(name) if name.starts_with("#unsupported-rust-"))
+            );
+        }
     }
 }

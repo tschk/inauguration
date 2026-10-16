@@ -28,6 +28,13 @@ pub fn desugar_module_with_semantics(
     module: &mut UnifiedModule,
     semantics: crate::integer_semantics::IntegerSemantics,
 ) {
+    if crate::typecheck::rust_integers::has_metadata(module) {
+        *module = crate::typecheck::normalize_module_with_semantics(
+            crate::parser_registry::ParserId::Rust,
+            module,
+            semantics,
+        );
+    }
     crate::core_bindings::normalize_decls(&mut module.decls);
     lower_guarded_decls(&mut module.decls);
     let mut method_map: HashMap<String, String> = HashMap::new();

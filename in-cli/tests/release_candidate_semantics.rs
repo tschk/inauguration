@@ -79,3 +79,75 @@ fn logical_integer_truth_is_normalized_to_zero_or_one() {
         assert_eq!(inisa::eval_module(&module, "main").unwrap(), expected);
     }
 }
+
+#[test]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn rust_integer_widths_survive_normalization_and_optimization() {
+    use inauguration::{
+        compiler::rust_front::parse_rust_source, parser_registry::ParserId, typecheck,
+    };
+    fn run(module: &inauguration::core_ir::UnifiedModule) -> i64 {
+        #[cfg(target_arch = "aarch64")]
+        let (code, exports, relocations) = {
+            let lowered = inauguration::native_emit::lower::lower_module(
+                module,
+                "main",
+                inauguration::native_emit::NativeLinkage::Executable,
+            )
+            .unwrap();
+            assert!(
+                lowered.degradations.is_empty(),
+                "{:?}",
+                lowered.degradations
+            );
+            (
+                lowered.code,
+                lowered
+                    .exports
+                    .into_iter()
+                    .map(|export| (export.name, export.offset, 0))
+                    .collect::<Vec<_>>(),
+                lowered.relocations,
+            )
+        };
+        #[cfg(target_arch = "x86_64")]
+        let (code, exports, relocations) = {
+            let lowered =
+                inauguration::native_emit::x86_64_lower::lower_module(module, "main").unwrap();
+            (
+                lowered.code,
+                lowered
+                    .exports
+                    .into_iter()
+                    .map(|(name, offset)| (name, offset, 0))
+                    .collect::<Vec<_>>(),
+                lowered
+                    .relocations
+                    .into_iter()
+                    .map(|offset| (offset, lowered.codegen_base))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let mut runtime = inauguration::jit_runtime::JitRuntime::new();
+        runtime.load(&code, &exports, &relocations).unwrap();
+        unsafe { runtime.invoke("main", &[]).unwrap() }
+    }
+    for source in [
+        "fn main()->i32 { let x:u8=128; if (x << 1) == 0 { return 42; } return 7; }",
+        "fn main()->i32 { let x:u16=32768; if (x << 1) == 0 { return 42; } return 7; }",
+        "fn main()->i32 { let x:u32=2147483648; if (x << 1) == 0 { return 42; } return 7; }",
+        "fn main()->i32 { let x:u8=0; if !x == 255 { return 42; } return 7; }",
+        "fn main()->i32 { let x:u64=18446744073709551615u64; if (x >> 63) == 1 && x / 2 == 9223372036854775807u64 && x % 2 == 1 && x > 1 { return 42; } return 7; }",
+        "fn main()->i64 { let x=42; return x; }",
+        "fn byte()->u8{254} fn mask(x:bool,y:bool)->bool{!((x as u8)|(y as u8))==byte()} fn main()->i64{if mask(true,false){42}else{7}}",
+        "fn main()->i32 { let mut values=Vec::new(); values.push(213u8); if !values[0] == 42 { return 42; } return 7; }",
+        "fn next()->u8 { return 128; } fn main()->i32 { if (next() << 1) == 0 { return 42; } return 7; }",
+        "struct Value { bits:u8 } fn main()->i32 { let x=Value { bits:128 }; if (x.bits << 1) == 0 { return 42; } return 7; }",
+    ] {
+        let raw = parse_rust_source(source).unwrap();
+        let mut module = typecheck::normalize_module(ParserId::Rust, &raw);
+        assert_eq!(run(&module), 42, "{source}");
+        core_opt::optimize_with_entry(&mut module.decls, Some("main"));
+        assert_eq!(run(&module), 42, "optimized: {source}");
+    }
+}

@@ -122,7 +122,7 @@ pub(super) fn argument_type(
     }
     checker
         .expr_type(expr, facts, env)
-        .map(|typ| typ.canonical())
+        .map(|typ| typ.inference_type())
         .filter(resolved_closure_type)
 }
 

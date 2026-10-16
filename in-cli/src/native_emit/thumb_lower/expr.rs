@@ -86,6 +86,20 @@ pub(crate) fn lower_expr_into(
             }
         }
         Expr::Unary { op, expr } => {
+            if op.starts_with("int-cast-") {
+                let Some((width, _)) = crate::core_ir::integer_cast_spec(op) else {
+                    return Err(format!("thumb-lower: unsupported integer cast `{op}`"));
+                };
+                if width > 32 {
+                    return Err(format!(
+                        "thumb-lower: integer cast `{op}` exceeds the 32-bit word"
+                    ));
+                }
+                // The shared expansion contains the operand exactly once and
+                // uses ordinary word operators already lowered below.
+                let value = crate::core_ir::integer_cast_expr((**expr).clone(), op).unwrap();
+                return lower_expr_into(emitter, ctx, &value, dest, pending);
+            }
             lower_expr_into(emitter, ctx, expr, R0, pending)?;
             match op.as_str() {
                 "-" | "neg" => {
@@ -1629,6 +1643,87 @@ mod selected_mmio_contract_tests {
                 "fn {name}(value:Bool)->Int{{if value{{return 1;}}return 42;}}\nfn main()->Int{{return {name}(false);}}"
             );
             assert!(lower(&source).is_ok(), "defined override {name}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod integer_cast_tests {
+    use super::super::ctx::FunctionInfo;
+    use super::*;
+    use crate::core_ir::Stmt;
+
+    #[test]
+    fn scalar_integer_casts_reuse_shared_expansion_and_evaluate_call_once() {
+        let producer = FunctionInfo {
+            name: "producer".into(),
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::IntLit(298)))],
+        };
+        let functions = HashMap::from([("producer".into(), producer)]);
+        let structs = HashMap::new();
+        for op in [
+            "int-cast-i8",
+            "int-cast-u8",
+            "int-cast-i16",
+            "int-cast-u16",
+            "int-cast-i32",
+            "int-cast-u32",
+        ] {
+            let value = Expr::Call {
+                callee: Box::new(Expr::Ident("producer".into())),
+                args: vec![],
+            };
+            let mut emissions = Vec::new();
+            for expression in [
+                Expr::Unary {
+                    op: op.into(),
+                    expr: Box::new(value.clone()),
+                },
+                crate::core_ir::integer_cast_expr(value, op).unwrap(),
+            ] {
+                let mut ctx = LowerCtx::new("entry", &[], &functions, &structs);
+                for _ in 0..16 {
+                    let slot = ctx.alloc_slot();
+                    ctx.scratch_temps.push(slot);
+                }
+                let mut emitter = CodeEmitter::new();
+                let mut pending = Vec::new();
+                lower_expr_into(&mut emitter, &mut ctx, &expression, R0, &mut pending).unwrap();
+                assert_eq!(pending.len(), 1, "{op}");
+                assert_eq!(pending[0].target, "producer");
+                assert_eq!(ctx.scratch_depth, 0);
+                assert_eq!(ctx.call_arg_depth, 0);
+                emissions.push(emitter.bytes);
+            }
+            assert_eq!(emissions[0], emissions[1], "{op}");
+        }
+    }
+
+    #[test]
+    fn unknown_and_wide_casts_refuse_before_evaluating_operand() {
+        let functions = HashMap::new();
+        let structs = HashMap::new();
+        for op in [
+            "int-cast-u7",
+            "int-cast-i64",
+            "int-cast-u64",
+            "int-cast-isize",
+            "int-cast-usize",
+        ] {
+            let mut ctx = LowerCtx::new("entry", &[], &functions, &structs);
+            let mut emitter = CodeEmitter::new();
+            let mut pending = Vec::new();
+            let expression = Expr::Unary {
+                op: op.into(),
+                expr: Box::new(Expr::IntLit(42)),
+            };
+            assert!(
+                lower_expr_into(&mut emitter, &mut ctx, &expression, R0, &mut pending).is_err()
+            );
+            assert!(emitter.bytes.is_empty());
+            assert!(pending.is_empty());
         }
     }
 }

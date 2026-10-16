@@ -105,11 +105,21 @@ pub(crate) fn integer_type_name(name: &str) -> Option<&str> {
     matches!(width, "i8" | "u8" | "i16" | "u16" | "i32" | "u32").then_some(width)
 }
 
+/// Rust integer metadata includes pointer-sized kinds resolved by the target.
+pub(crate) fn rust_integer_type_name(name: &str) -> Option<&str> {
+    let kind = name.strip_prefix("#rust-integer-")?;
+    (integer_spec(kind).is_some() || matches!(kind, "isize" | "usize")).then_some(kind)
+}
+
 impl Typ {
     /// Normalize language-specific named types to canonical Core IR primitives.
     pub fn canonical(&self) -> Typ {
         match self {
-            Typ::Named(name) if integer_type_name(name).is_some() => Typ::Int,
+            Typ::Named(name)
+                if integer_type_name(name).is_some() || rust_integer_type_name(name).is_some() =>
+            {
+                Typ::Int
+            }
             Typ::Named(name) => match name.trim() {
                 "Int" | "int" | "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" => {
                     Typ::Int
@@ -123,6 +133,15 @@ impl Typ {
             Typ::Array(item) => Typ::Array(Box::new(item.canonical())),
             Typ::Vector(item) => Typ::Vector(Box::new(item.canonical())),
             _ => self.clone(),
+        }
+    }
+
+    pub(crate) fn inference_type(&self) -> Typ {
+        match self {
+            Typ::Named(name) if rust_integer_type_name(name).is_some() => self.clone(),
+            Typ::Array(item) => Typ::Array(Box::new(item.inference_type())),
+            Typ::Vector(item) => Typ::Vector(Box::new(item.inference_type())),
+            _ => self.canonical(),
         }
     }
 
@@ -411,17 +430,25 @@ pub(crate) fn saturating_float_cast(value: f64, bits: u8, signed: bool) -> i64 {
     }
 }
 
-pub(crate) fn integer_cast_spec(op: &str) -> Option<(u8, bool)> {
-    match op.strip_prefix("int-cast-")? {
+pub(crate) fn integer_spec(name: &str) -> Option<(u8, bool)> {
+    match name {
         "i8" => Some((8, true)),
         "u8" => Some((8, false)),
         "i16" => Some((16, true)),
         "u16" => Some((16, false)),
         "i32" => Some((32, true)),
         "u32" => Some((32, false)),
-        "i64" | "isize" => Some((64, true)),
-        "u64" | "usize" => Some((64, false)),
+        "i64" => Some((64, true)),
+        "u64" => Some((64, false)),
         _ => None,
+    }
+}
+
+pub(crate) fn integer_cast_spec(op: &str) -> Option<(u8, bool)> {
+    match op.strip_prefix("int-cast-")? {
+        "isize" => Some((64, true)),
+        "usize" => Some((64, false)),
+        name => integer_spec(name),
     }
 }
 
@@ -445,9 +472,15 @@ pub(crate) fn integer_cast_expr(value: Expr, op: &str) -> Option<Expr> {
 }
 
 /// Compare unsigned fixed-width values through the signed native Int carrier.
-/// Widths up to 32 work on both word sizes. Width 64 needs target-specific
-/// handling and is deliberately refused here. Each operand occurs once.
-pub(crate) fn unsigned_compare_expr(op: &str, lhs: Expr, rhs: Expr, width: u32) -> Option<Expr> {
+/// Widths up to 32 work on both word sizes; width 64 requires Word64.
+/// Each operand occurs once.
+pub(crate) fn unsigned_compare_expr(
+    op: &str,
+    lhs: Expr,
+    rhs: Expr,
+    width: u32,
+    semantics: crate::integer_semantics::IntegerSemantics,
+) -> Option<Expr> {
     if !matches!(op, "<" | "<=" | ">" | ">=") {
         return None;
     }
@@ -455,6 +488,7 @@ pub(crate) fn unsigned_compare_expr(op: &str, lhs: Expr, rhs: Expr, width: u32) 
         8 => "int-cast-i8",
         16 => "int-cast-i16",
         32 => "int-cast-i32",
+        64 if semantics == crate::integer_semantics::IntegerSemantics::Word64 => "int-cast-i64",
         _ => return None,
     };
     let biased = |value| {
@@ -1293,6 +1327,7 @@ mod tests {
                         super::Expr::IntLit(lhs),
                         super::Expr::IntLit(rhs),
                         width,
+                        crate::integer_semantics::IntegerSemantics::Word64,
                     )
                     .unwrap();
                     for semantics in [
@@ -1319,7 +1354,14 @@ mod tests {
             callee: Box::new(super::Expr::Ident(name.into())),
             args: vec![],
         };
-        let value = super::unsigned_compare_expr("<", call("left"), call("right"), 32).unwrap();
+        let value = super::unsigned_compare_expr(
+            "<",
+            call("left"),
+            call("right"),
+            32,
+            crate::integer_semantics::IntegerSemantics::Word64,
+        )
+        .unwrap();
         let calls = std::cell::RefCell::new(Vec::new());
         crate::core_opt::map_expr(value, &mut |expr| {
             if let super::Expr::Call { callee, .. } = &expr
@@ -1332,12 +1374,102 @@ mod tests {
         assert_eq!(calls.into_inner(), ["left", "right"]);
         for width in [0, 1, 7, 64, 128] {
             assert!(
-                super::unsigned_compare_expr("<", call("left"), call("right"), width).is_none()
+                super::unsigned_compare_expr(
+                    "<",
+                    call("left"),
+                    call("right"),
+                    width,
+                    crate::integer_semantics::IntegerSemantics::Word32
+                )
+                .is_none()
             );
         }
         for op in ["==", "!=", "+", "lt"] {
-            assert!(super::unsigned_compare_expr(op, call("left"), call("right"), 32).is_none());
+            assert!(
+                super::unsigned_compare_expr(
+                    op,
+                    call("left"),
+                    call("right"),
+                    32,
+                    crate::integer_semantics::IntegerSemantics::Word64
+                )
+                .is_none()
+            );
         }
+    }
+
+    #[test]
+    fn rust_integer_metadata_and_unsigned64_comparison_are_target_explicit() {
+        use crate::integer_semantics::IntegerSemantics::{Word32, Word64};
+        for kind in [
+            "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "isize", "usize",
+        ] {
+            let name = format!("#rust-integer-{kind}");
+            assert_eq!(super::rust_integer_type_name(&name), Some(kind));
+            assert_eq!(super::Typ::Named(name).canonical(), super::Typ::Int);
+            assert_eq!(super::rust_integer_type_name(kind), None);
+        }
+        for name in [
+            "#rust-integer-u7",
+            "#rust-integer-i128",
+            "#rust-integer-",
+            "#rust-integer-u64-extra",
+            "prefix#rust-integer-u64",
+            "#integer-u64",
+        ] {
+            assert_eq!(super::rust_integer_type_name(name), None);
+        }
+        for (left, right) in [
+            (0, i64::MIN),
+            (i64::MIN, 0),
+            (-1, 1),
+            (i64::MAX, i64::MIN),
+            (-1, -1),
+        ] {
+            let (a, b) = (left as u64, right as u64);
+            for (op, expected) in [("<", a < b), ("<=", a <= b), (">", a > b), (">=", a >= b)] {
+                let expression = super::unsigned_compare_expr(
+                    op,
+                    super::Expr::IntLit(left),
+                    super::Expr::IntLit(right),
+                    64,
+                    Word64,
+                )
+                .unwrap();
+                let folded = crate::core_opt::map_expr(expression, &mut |expr| {
+                    crate::core_opt::fold_expr_with_semantics(expr, Word64)
+                });
+                assert_eq!(folded, super::Expr::BoolLit(expected));
+                assert!(
+                    super::unsigned_compare_expr(
+                        op,
+                        super::Expr::IntLit(left),
+                        super::Expr::IntLit(right),
+                        64,
+                        Word32
+                    )
+                    .is_none()
+                );
+            }
+        }
+        let call = |name: &str| super::Expr::Call {
+            callee: Box::new(super::Expr::Ident(name.into())),
+            args: vec![],
+        };
+        let expression =
+            super::unsigned_compare_expr("<", call("left"), call("right"), 64, Word64).unwrap();
+        let calls = std::cell::RefCell::new(Vec::new());
+        crate::core_opt::map_expr(expression, &mut |expr| {
+            if let super::Expr::Call { callee, .. } = &expr
+                && let super::Expr::Ident(name) = callee.as_ref()
+            {
+                calls.borrow_mut().push(name.clone());
+            }
+            expr
+        });
+        assert_eq!(calls.into_inner(), ["left", "right"]);
+        assert_eq!(super::integer_spec("isize"), None);
+        assert_eq!(super::integer_cast_spec("int-cast-isize"), Some((64, true)));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+pub(crate) mod rust_integers;
 #[path = "typecheck/vector_inference.rs"]
 mod vector_inference;
 use crate::core_ir::{Decl, Expr, MatchPattern, MethodSig, Stmt, Typ, UnifiedModule};
@@ -1128,8 +1129,9 @@ impl TypeChecker {
                     // Empty and unresolved arrays still need contextual element types;
                     // leave other inferred bindings available to closure inference.
                     if typ.is_none()
-                        && let Some(inferred @ Typ::Array(_)) =
-                            self.expr_type(expr, facts, env).map(|typ| typ.canonical())
+                        && let Some(inferred @ Typ::Array(_)) = self
+                            .expr_type(expr, facts, env)
+                            .map(|typ| typ.inference_type())
                         && resolved_closure_type(&inferred)
                     {
                         *typ = Some(inferred);
@@ -2365,6 +2367,11 @@ impl TypeChecker {
                 .or_else(|| is_builtin_fn(name).then(|| builtin_return_type(name))),
             Expr::StructInit { name, .. } => Some(Typ::Named(name.clone())),
             Expr::Field { base, name, .. } => {
+                if matches!(name.as_str(), "ptr" | "len" | "cap")
+                    && matches!(self.expr_type(base, facts, env), Some(Typ::Vector(_)))
+                {
+                    return Some(Typ::Int);
+                }
                 if let Some(base_typ) = self.expr_type(base, facts, env)
                     && let Typ::Named(struct_name) = &base_typ
                     && let Some(schema) = facts.structs.get(struct_name)
@@ -2398,6 +2405,20 @@ impl TypeChecker {
                 }
             }
             Expr::Unary { op, expr, .. } => match op.as_str() {
+                op if op
+                    .strip_prefix("rust-integer-literal-")
+                    .or_else(|| op.strip_prefix("rust-integer-value-"))
+                    .is_some_and(|kind| {
+                        crate::core_ir::rust_integer_type_name(&format!("#rust-integer-{kind}"))
+                            .is_some()
+                    }) =>
+                {
+                    let kind = op
+                        .strip_prefix("rust-integer-literal-")
+                        .or_else(|| op.strip_prefix("rust-integer-value-"))
+                        .unwrap();
+                    Some(Typ::Named(format!("#rust-integer-{kind}")))
+                }
                 "c-integer-literal-i32" => Some(Typ::Named("#integer-i32".into())),
                 "c-integer-literal-u32" => Some(Typ::Named("#integer-u32".into())),
                 "!" => Some(Typ::Bool),
@@ -2422,6 +2443,18 @@ impl TypeChecker {
             Expr::Binary { op, lhs, rhs, .. } => {
                 let left = self.expr_type(lhs, facts, env);
                 let right = self.expr_type(rhs, facts, env);
+                if matches!(
+                    op.as_str(),
+                    "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"
+                ) {
+                    let rust_kind = |typ: &Option<Typ>| matches!(typ, Some(Typ::Named(name)) if crate::core_ir::rust_integer_type_name(name).is_some());
+                    if rust_kind(&left) {
+                        return left;
+                    }
+                    if rust_kind(&right) && !matches!(op.as_str(), "<<" | ">>") {
+                        return right;
+                    }
+                }
                 if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>")
                     && [left.as_ref(), right.as_ref()].iter().any(|typ| matches!(typ, Some(Typ::Named(name)) if crate::core_ir::integer_type_name(name).is_some()))
                 {
@@ -2865,8 +2898,9 @@ pub fn normalize_module_with_semantics(
         });
     }
     if parser_id == ParserId::Rust {
-        crate::lower_core::lower_inline_constants_with_semantics(&mut normalized.decls, semantics);
         TypeChecker::new().resolve_complements(&mut normalized);
+        rust_integers::normalize(&TypeChecker::new(), &mut normalized, semantics);
+        crate::lower_core::lower_inline_constants_with_semantics(&mut normalized.decls, semantics);
         refuse_rust_array_tuple_values(&mut normalized);
     }
     normalized
@@ -3175,9 +3209,13 @@ fn resolve_c_unsigned_expression(
         if matches!(op.as_str(), "==" | "!=") {
             **lhs = c_unsigned_value((**lhs).clone());
             **rhs = c_unsigned_value((**rhs).clone());
-        } else if let Some(value) =
-            crate::core_ir::unsigned_compare_expr(op, (**lhs).clone(), (**rhs).clone(), 32)
-        {
+        } else if let Some(value) = crate::core_ir::unsigned_compare_expr(
+            op,
+            (**lhs).clone(),
+            (**rhs).clone(),
+            32,
+            crate::integer_semantics::IntegerSemantics::Word64,
+        ) {
             *expr = value;
         }
     } else if kind == Some(CIntegerKind::U32) && numeric {

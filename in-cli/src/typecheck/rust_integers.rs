@@ -1,0 +1,1675 @@
+//! Resolve Rust integer widths before canonical native carriers erase them.
+use super::{Facts, TypeChecker};
+use crate::core_ir::{self, Decl, Expr, Stmt, Typ, UnifiedModule};
+use crate::integer_semantics::IntegerSemantics;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Kind {
+    bits: u8,
+    signed: bool,
+}
+impl Kind {
+    fn parse(name: &str, semantics: IntegerSemantics) -> Option<Self> {
+        let (bits, signed) = match name {
+            "isize" => (
+                if semantics == IntegerSemantics::Word32 {
+                    32
+                } else {
+                    64
+                },
+                true,
+            ),
+            "usize" => (
+                if semantics == IntegerSemantics::Word32 {
+                    32
+                } else {
+                    64
+                },
+                false,
+            ),
+            name => core_ir::integer_spec(name)?,
+        };
+        Some(Self { bits, signed })
+    }
+    fn typ(self) -> Typ {
+        Typ::Named(format!(
+            "#rust-integer-{}{}",
+            if self.signed { "i" } else { "u" },
+            self.bits
+        ))
+    }
+    fn cast(self, value: Expr) -> Expr {
+        core_ir::integer_cast_expr(
+            value,
+            &format!(
+                "int-cast-{}{}",
+                if self.signed { "i" } else { "u" },
+                self.bits
+            ),
+        )
+        .unwrap_or_else(invalid)
+    }
+    fn supported(self, semantics: IntegerSemantics) -> bool {
+        self.bits
+            <= if semantics == IntegerSemantics::Word32 {
+                32
+            } else {
+                64
+            }
+    }
+    fn contains(self, value: i64) -> bool {
+        if self.bits == 64 {
+            return self.signed || value >= 0;
+        }
+        if self.signed {
+            let bound = 1i64 << (self.bits - 1);
+            (-bound..bound).contains(&value)
+        } else {
+            (0..(1i64 << self.bits)).contains(&value)
+        }
+    }
+}
+fn invalid() -> Expr {
+    Expr::Ident("#unsupported-rust-integer-semantics".into())
+}
+fn typ_kind(typ: &Typ, semantics: IntegerSemantics) -> Option<Kind> {
+    let Typ::Named(name) = typ else { return None };
+    Kind::parse(core_ir::rust_integer_type_name(name)?, semantics)
+}
+
+fn unsupported_type(
+    typ: &Typ,
+    facts: &Facts,
+    semantics: IntegerSemantics,
+    seen: &mut HashSet<String>,
+) -> bool {
+    match typ {
+        Typ::Array(item) | Typ::Vector(item) => unsupported_type(item, facts, semantics, seen),
+        Typ::Named(name) if name.starts_with("#rust-integer-") => {
+            core_ir::rust_integer_type_name(name)
+                .and_then(|name| Kind::parse(name, semantics))
+                .is_none_or(|kind| !kind.supported(semantics))
+        }
+        Typ::Named(name) if seen.insert(name.clone()) => {
+            if let Some(fields) = facts.structs.get(name) {
+                fields
+                    .iter()
+                    .any(|(_, typ)| unsupported_type(typ, facts, semantics, seen))
+            } else if let Some(fields) = core_ir::tuples::fields(name) {
+                fields
+                    .iter()
+                    .any(|(_, typ)| unsupported_type(typ, facts, semantics, seen))
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn constant_integer(value: &Expr) -> Option<i64> {
+    let folded = crate::core_opt::map_expr(value.clone(), &mut crate::core_opt::fold_expr);
+    if let Expr::IntLit(value) = folded {
+        Some(value)
+    } else {
+        None
+    }
+}
+fn constant_overflow(kind: Kind, op: &str, left: &Expr, right: &Expr) -> bool {
+    let (Some(left), Some(right)) = (constant_integer(left), constant_integer(right)) else {
+        return false;
+    };
+    if kind.signed {
+        let (left, right) = (i128::from(left), i128::from(right));
+        let result = match op {
+            "+" => Some(left + right),
+            "-" => Some(left - right),
+            "*" => Some(left * right),
+            "/" if right != 0 => Some(left / right),
+            "%" if right == -1 && left == -(1i128 << (kind.bits - 1)) => return true,
+            _ => None,
+        };
+        let bound = 1i128 << (kind.bits - 1);
+        result.is_some_and(|value| !(-bound..bound).contains(&value))
+    } else {
+        let (left, right) = (u128::from(left as u64), u128::from(right as u64));
+        let result = match op {
+            "+" => left.checked_add(right),
+            "-" => left.checked_sub(right),
+            "*" => left.checked_mul(right),
+            _ => return false,
+        };
+        result.is_none_or(|value| value > ((1u128 << kind.bits) - 1))
+    }
+}
+
+/// Evaluate one exact-width Rust constexpr operation after its operands have
+/// been evaluated by the bounded static evaluator.
+pub(crate) fn fold_checked_integer(
+    name: &str,
+    op: &str,
+    lhs: i64,
+    rhs: Option<i64>,
+    semantics: IntegerSemantics,
+) -> Option<Expr> {
+    let kind = Kind::parse(name, semantics)?;
+    if !kind.supported(semantics) {
+        return None;
+    }
+    let mask = (1u128 << kind.bits) - 1;
+    let unsigned = |value: i64| u128::from(value as u64) & mask;
+    let signed = |value: i64| {
+        let value = unsigned(value) as i128;
+        let sign = 1i128 << (kind.bits - 1);
+        if value & sign != 0 {
+            value - (1i128 << kind.bits)
+        } else {
+            value
+        }
+    };
+    let carrier = |value: u128| {
+        let value = value & mask;
+        let sign = 1u128 << (kind.bits - 1);
+        let value = if kind.signed && value & sign != 0 {
+            (value as i128 - (1i128 << kind.bits)) as i64
+        } else {
+            value as u64 as i64
+        };
+        semantics.normalize_word(value).map(Expr::IntLit)
+    };
+    if matches!(op, "<<" | ">>" | "lshr") {
+        let count = rhs?;
+        if !(0..i64::from(kind.bits)).contains(&count) {
+            return None;
+        }
+        let value = if op == "<<" {
+            unsigned(lhs) << count
+        } else if kind.signed && op != "lshr" {
+            (signed(lhs) >> count) as u128
+        } else {
+            unsigned(lhs) >> count
+        };
+        return carrier(value);
+    }
+    if matches!(op, "~" | "bitnot" | "complement") {
+        return carrier(!unsigned(lhs));
+    }
+    if kind.signed {
+        let left = signed(lhs);
+        let value = if let Some(rhs) = rhs {
+            let right = signed(rhs);
+            match op {
+                "+" => left.checked_add(right)?,
+                "-" => left.checked_sub(right)?,
+                "*" => left.checked_mul(right)?,
+                "/" => left.checked_div(right)?,
+                "%" => {
+                    if left == -(1i128 << (kind.bits - 1)) && right == -1 {
+                        return None;
+                    }
+                    left.checked_rem(right)?
+                }
+                "&" => left & right,
+                "|" => left | right,
+                "^" => left ^ right,
+                _ => return None,
+            }
+        } else if op == "-" {
+            left.checked_neg()?
+        } else {
+            return None;
+        };
+        let bound = 1i128 << (kind.bits - 1);
+        if !(-bound..bound).contains(&value) {
+            return None;
+        }
+        // Sign-extend narrow signed results into the canonical carrier.
+        return semantics.normalize_word(value as i64).map(Expr::IntLit);
+    }
+    let left = unsigned(lhs);
+    let right = unsigned(rhs?);
+    let value = match op {
+        "+" => left.checked_add(right)?,
+        "-" => left.checked_sub(right)?,
+        "*" => left.checked_mul(right)?,
+        "/" | "udiv" => left.checked_div(right)?,
+        "%" | "urem" => left.checked_rem(right)?,
+        "&" => left & right,
+        "|" => left | right,
+        "^" => left ^ right,
+        _ => return None,
+    };
+    if value > mask {
+        return None;
+    }
+    carrier(value)
+}
+
+struct Pass<'a> {
+    checker: &'a TypeChecker,
+    facts: &'a Facts,
+    semantics: IntegerSemantics,
+    inferred: HashMap<String, Kind>,
+    flexible: HashSet<String>,
+    opaque: HashSet<String>,
+    rewrite: bool,
+    return_type: Option<Typ>,
+    const_env: Option<HashMap<String, i64>>,
+}
+impl Pass<'_> {
+    fn expected(&self, typ: Option<&Typ>) -> Option<Kind> {
+        typ.and_then(|typ| typ_kind(typ, self.semantics))
+    }
+    fn folded_constant(&self, expr: &Expr) -> Expr {
+        let values = self.const_env.as_ref();
+        crate::core_opt::map_expr(expr.clone(), &mut |expr| {
+            let expr = if let Expr::Ident(name) = &expr {
+                values
+                    .and_then(|values| values.get(name))
+                    .map(|value| Expr::IntLit(*value))
+                    .unwrap_or(expr)
+            } else {
+                expr
+            };
+            let expr = if values.is_some() {
+                if let Expr::Block {
+                    result: Some(result),
+                    ..
+                } = expr
+                {
+                    *result
+                } else {
+                    expr
+                }
+            } else {
+                expr
+            };
+            crate::core_opt::fold_expr(expr)
+        })
+    }
+    fn constant(&self, expr: &Expr) -> Option<i64> {
+        if let Expr::IntLit(value) = self.folded_constant(expr) {
+            Some(value)
+        } else {
+            None
+        }
+    }
+    fn pattern_hint(&self, pattern: &str) -> Option<Kind> {
+        if let Ok(core_ir::MatchPattern::IdentPat(name)) = core_ir::MatchPattern::parse(pattern) {
+            self.inferred.get(&name).copied()
+        } else {
+            None
+        }
+    }
+    fn flexible_pattern(
+        &mut self,
+        inner: &HashMap<String, Typ>,
+        outer: &HashMap<String, Typ>,
+        unknown: bool,
+    ) {
+        if unknown {
+            for name in inner.keys() {
+                if !outer.contains_key(name) {
+                    self.flexible.insert(name.clone());
+                }
+            }
+        }
+    }
+    fn opaque_int(&self, expr: &Expr, env: &HashMap<String, Typ>) -> bool {
+        let candidate = match expr {
+            Expr::Ident(name) => self.opaque.contains(name) || !self.flexible.contains(name),
+            Expr::Call { .. } | Expr::Field { .. } | Expr::Index { .. } => true,
+            _ => false,
+        };
+        candidate
+            && self.hint(expr, env).is_none()
+            && self.checker.expr_type(expr, self.facts, env) == Some(Typ::Int)
+    }
+    fn hint(&self, expr: &Expr, env: &HashMap<String, Typ>) -> Option<Kind> {
+        match expr {
+            Expr::Unary { op, expr } if op == "rust-integer-literal" => {
+                let _ = expr;
+                None
+            }
+            Expr::Unary { op, .. } if op.starts_with("rust-integer-value-") => {
+                Kind::parse(op.strip_prefix("rust-integer-value-")?, self.semantics)
+            }
+            Expr::Unary { op, .. } if op.starts_with("rust-integer-literal-") => {
+                Kind::parse(op.strip_prefix("rust-integer-literal-")?, self.semantics)
+            }
+            Expr::Unary { op, expr }
+                if matches!(op.as_str(), "-" | "~" | "complement" | "bitnot") =>
+            {
+                self.hint(expr, env)
+            }
+            Expr::Ident(name) => self
+                .inferred
+                .get(name)
+                .copied()
+                .or_else(|| env.get(name).and_then(|typ| typ_kind(typ, self.semantics))),
+            _ => self
+                .checker
+                .expr_type(expr, self.facts, env)
+                .and_then(|typ| typ_kind(&typ, self.semantics)),
+        }
+    }
+    fn value(
+        &mut self,
+        expr: &mut Expr,
+        expected: Option<&Typ>,
+        env: &mut HashMap<String, Typ>,
+        ret: Option<Kind>,
+    ) -> Option<Kind> {
+        if expected == Some(&Typ::Int) && self.hint(expr, env).is_none() {
+            return self.expression(
+                expr,
+                Some(Kind {
+                    bits: if self.semantics == IntegerSemantics::Word32 {
+                        32
+                    } else {
+                        64
+                    },
+                    signed: true,
+                }),
+                env,
+                ret,
+            );
+        }
+        if self.rewrite
+            && expected.is_some_and(|typ| {
+                unsupported_type(typ, self.facts, self.semantics, &mut HashSet::new())
+            })
+        {
+            *expr = invalid();
+            return None;
+        }
+        if let Some(typ @ (Typ::Array(item) | Typ::Vector(item))) = expected {
+            match expr {
+                Expr::Call { callee, args } if matches!(callee.as_ref(),Expr::Ident(name) if name == core_ir::INLINE_CONST) =>
+                {
+                    if let [value] = args.as_mut_slice() {
+                        let outer = self.const_env.replace(HashMap::new());
+                        self.value(value, Some(typ), env, ret);
+                        self.const_env = outer;
+                    }
+                    return None;
+                }
+                Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Closure { .. }) => {
+                    if let Expr::Closure {
+                        ret: closure_ret, ..
+                    } = callee.as_mut()
+                        && matches!(closure_ret,Typ::Generic(name) if name == "_")
+                    {
+                        *closure_ret = typ.clone();
+                    }
+                    return self.expression(expr, None, env, ret);
+                }
+                Expr::ArrayLit(items) => {
+                    for value in items {
+                        self.value(value, Some(item), env, ret);
+                    }
+                    return None;
+                }
+                Expr::Block { body, result } => {
+                    let mut inner = env.clone();
+                    self.body(body, &mut inner, ret);
+                    if let Some(result) = result {
+                        self.value(result, Some(typ), &mut inner, ret);
+                    }
+                    return None;
+                }
+                Expr::Conditional {
+                    cond,
+                    then_expr,
+                    else_expr,
+                } => {
+                    self.expression(cond, None, env, ret);
+                    self.value(then_expr, Some(typ), &mut env.clone(), ret);
+                    self.value(else_expr, Some(typ), &mut env.clone(), ret);
+                    return None;
+                }
+                Expr::MatchValue { scrutinee, arms } => {
+                    let hint = arms.iter().find_map(|arm| self.pattern_hint(&arm.pattern));
+                    let kind = self.expression(scrutinee, hint, env, ret);
+                    let scrutinee_type = kind
+                        .map(Kind::typ)
+                        .or_else(|| self.checker.expr_type(scrutinee, self.facts, env));
+                    for arm in arms {
+                        let mut inner = scrutinee_type
+                            .as_ref()
+                            .and_then(|typ| {
+                                self.checker
+                                    .pattern_environment(&arm.pattern, typ, self.facts, env)
+                            })
+                            .unwrap_or_else(|| env.clone());
+                        self.flexible_pattern(&inner, env, kind.is_none());
+                        if let Some(guard) = &mut arm.guard {
+                            self.expression(guard, None, &mut inner, ret);
+                        }
+                        self.value(&mut arm.value, Some(typ), &mut inner, ret);
+                    }
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        self.expression(expr, self.expected(expected), env, ret)
+    }
+    fn expression(
+        &mut self,
+        expr: &mut Expr,
+        expected: Option<Kind>,
+        env: &mut HashMap<String, Typ>,
+        ret: Option<Kind>,
+    ) -> Option<Kind> {
+        let mut bad = false;
+        let kind = match expr {
+            Expr::Ident(name) => {
+                let known = env
+                    .get(name)
+                    .and_then(|typ| typ_kind(typ, self.semantics))
+                    .or_else(|| self.inferred.get(name).copied());
+                if known.is_none()
+                    && self.flexible.contains(name)
+                    && let Some(expected) = expected
+                {
+                    self.inferred.insert(name.clone(), expected);
+                }
+                known.or_else(|| self.inferred.get(name).copied())
+            }
+            Expr::Unary { op, expr: value } if op.starts_with("rust-integer-value-") => {
+                let kind = op
+                    .strip_prefix("rust-integer-value-")
+                    .and_then(|name| Kind::parse(name, self.semantics));
+                bad |= kind.is_none();
+                self.expression(value, None, env, ret);
+                if self.rewrite {
+                    *expr = (**value).clone();
+                }
+                kind
+            }
+            Expr::Unary { op, expr: value }
+                if op == "rust-integer-literal" || op.starts_with("rust-integer-literal-") =>
+            {
+                let suffix = op.strip_prefix("rust-integer-literal-");
+                let explicit = suffix.and_then(|name| Kind::parse(name, self.semantics));
+                bad |= suffix.is_some() && explicit.is_none();
+                let kind = explicit.or(expected).or_else(|| {
+                    self.rewrite.then_some(Kind {
+                        bits: 32,
+                        signed: true,
+                    })
+                });
+                if self.rewrite
+                    && let Some(kind) = kind
+                {
+                    match value.as_ref() {
+                        Expr::IntLit(integer) => {
+                            // A u64 literal carries its full unsigned bit pattern.
+                            bad |= !(kind.contains(*integer)
+                                || (!kind.signed && kind.bits == 64 && suffix == Some("u64")));
+                            if !bad {
+                                let semantics = self.semantics;
+                                *expr = crate::core_opt::map_expr(
+                                    kind.cast(Expr::IntLit(*integer)),
+                                    &mut |expr| {
+                                        crate::core_opt::fold_expr_with_semantics(expr, semantics)
+                                    },
+                                );
+                            }
+                        }
+                        _ => bad = true,
+                    }
+                }
+                kind
+            }
+            Expr::Unary { op, expr: value } => {
+                let name = op.clone();
+                let cast = name
+                    .strip_prefix("numeric-cast-")
+                    .or_else(|| name.strip_prefix("int-cast-"))
+                    .or_else(|| name.strip_prefix("float-saturate-"));
+                let target = cast.and_then(|name| Kind::parse(name, self.semantics));
+                let inner = self.expression(
+                    value,
+                    if cast.is_some() { None } else { expected },
+                    env,
+                    ret,
+                );
+                if let Some(target) = target {
+                    if self.rewrite && inner.is_some() && !name.starts_with("float-saturate-") {
+                        *expr = target.cast((**value).clone());
+                    }
+                    Some(target)
+                } else if matches!(name.as_str(), "-" | "~" | "complement" | "bitnot") {
+                    if self.rewrite
+                        && let Some(kind) = inner
+                    {
+                        bad |= name == "-" && !kind.signed;
+                        if name == "-" && kind.signed {
+                            bad |= self.constant(value).is_some_and(|value| {
+                                i128::from(value) == -(1i128 << (kind.bits - 1))
+                            });
+                        }
+                        if self.const_env.is_some() && self.constant(value).is_none() {
+                            *expr = Expr::Unary {
+                                op: format!(
+                                    "rust-checked-integer-{}{}",
+                                    if kind.signed { "i" } else { "u" },
+                                    kind.bits
+                                ),
+                                expr: Box::new(expr.clone()),
+                            };
+                        } else {
+                            *expr = kind.cast(expr.clone());
+                        }
+                    }
+                    inner
+                } else {
+                    None
+                }
+            }
+            Expr::Binary { op, lhs, rhs } => {
+                let operator = op.clone();
+                let comparison = matches!(operator.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=");
+                let shift = matches!(operator.as_str(), "<<" | ">>" | "lshr");
+                let peer = self
+                    .hint(lhs, env)
+                    .or_else(|| if shift { None } else { self.hint(rhs, env) })
+                    .or(if comparison { None } else { expected })
+                    .or_else(|| {
+                        if self.opaque_int(lhs, env) || (!shift && self.opaque_int(rhs, env)) {
+                            Some(Kind {
+                                bits: if self.semantics == IntegerSemantics::Word32 {
+                                    32
+                                } else {
+                                    64
+                                },
+                                signed: true,
+                            })
+                        } else {
+                            None
+                        }
+                    });
+                let left = self.expression(lhs, peer, env, ret);
+                let right =
+                    self.expression(rhs, if shift { None } else { peer.or(left) }, env, ret);
+                // Legacy builtins and not-yet-inferred closure parameters use
+                // canonical Int. Preserve that existing operation rather than
+                // inventing a Rust width from its other operand.
+                let kind = if !shift && (left.is_none() || right.is_none()) {
+                    None
+                } else {
+                    left.or(if shift { None } else { right })
+                };
+                if shift
+                    && self.rewrite
+                    && let Some(kind) = left
+                {
+                    if let Some(count) = self.constant(rhs) {
+                        bad |= !(0..i64::from(kind.bits)).contains(&count);
+                    }
+                }
+                if !shift && left.is_some() && right.is_some() {
+                    bad |= left != right;
+                }
+                if self.rewrite
+                    && let Some(kind) = kind
+                {
+                    let constants = (self.constant(lhs), self.constant(rhs));
+                    if let (Some(left), Some(right)) = constants {
+                        bad |= constant_overflow(
+                            kind,
+                            &operator,
+                            &Expr::IntLit(left),
+                            &Expr::IntLit(right),
+                        );
+                    }
+                    let checked_unknown = self.const_env.is_some()
+                        && (constants.0.is_none() || constants.1.is_none())
+                        && matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%" | "<<" | ">>");
+                    if !kind.supported(self.semantics) {
+                        bad = true;
+                    } else if checked_unknown {
+                        *expr = Expr::Unary {
+                            op: format!(
+                                "rust-checked-integer-{}{}",
+                                if kind.signed { "i" } else { "u" },
+                                kind.bits
+                            ),
+                            expr: Box::new(expr.clone()),
+                        };
+                    } else if !kind.signed && matches!(operator.as_str(), "<" | "<=" | ">" | ">=") {
+                        *expr = core_ir::unsigned_compare_expr(
+                            &operator,
+                            (**lhs).clone(),
+                            (**rhs).clone(),
+                            u32::from(kind.bits),
+                            self.semantics,
+                        )
+                        .unwrap_or_else(invalid);
+                    } else {
+                        if !kind.signed {
+                            *op = match operator.as_str() {
+                                "/" => "udiv",
+                                "%" => "urem",
+                                ">>" => "lshr",
+                                _ => &operator,
+                            }
+                            .into();
+                        }
+                        if !comparison && !matches!(operator.as_str(), "&&" | "||") {
+                            *expr = kind.cast(expr.clone());
+                        }
+                    }
+                }
+                if comparison || matches!(operator.as_str(), "&&" | "||") {
+                    None
+                } else {
+                    kind
+                }
+            }
+            Expr::Call { callee, args } if matches!(callee.as_ref(),Expr::Ident(name) if name == core_ir::INLINE_CONST) => {
+                if let [value] = args.as_mut_slice() {
+                    let outer = self.const_env.replace(HashMap::new());
+                    let kind = self.expression(value, expected, env, ret);
+                    self.const_env = outer;
+                    kind
+                } else {
+                    None
+                }
+            }
+            Expr::Call { callee, args } => {
+                let signature = match callee.as_ref() {
+                    Expr::Ident(name) => self.facts.functions.get(name).cloned().or_else(|| {
+                        crate::core_atomic::signature(name)
+                            .map(|signature| {
+                                (
+                                    signature
+                                        .params
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(index, typ)| (format!("arg{index}"), typ.clone()))
+                                        .collect(),
+                                    signature.ret.clone(),
+                                )
+                            })
+                            .or_else(|| {
+                                let params = if name == core_ir::VECTOR_ALLOCATION
+                                    || name == "range-from"
+                                {
+                                    vec![Typ::Int]
+                                } else if matches!(
+                                    name.as_str(),
+                                    "range-exclusive" | "range-inclusive"
+                                ) {
+                                    vec![Typ::Int, Typ::Int]
+                                } else {
+                                    crate::core_ir_verifier::intrinsic_param_types(name)?.to_vec()
+                                };
+                                Some((
+                                    params
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(|(index, typ)| (format!("arg{index}"), typ))
+                                        .collect(),
+                                    Typ::Int,
+                                ))
+                            })
+                    }),
+                    Expr::Closure { params, ret, .. } => Some((params.clone(), ret.clone())),
+                    _ => None,
+                };
+                let vector_expected = if let Expr::Ident(name) = callee.as_ref()
+                    && !self.facts.functions.contains_key(name)
+                    && matches!(name.as_str(), "vector-push" | "vector-extend")
+                    && let Some(receiver) = args.first()
+                    && let Some(Typ::Vector(item)) =
+                        self.checker.expr_type(receiver, self.facts, env)
+                {
+                    Some(if name == "vector-push" {
+                        *item
+                    } else {
+                        Typ::Vector(item)
+                    })
+                } else {
+                    None
+                };
+                // The callee may itself contain executable blocks or closures.
+                // Traverse it once before arguments, matching source evaluation.
+                self.expression(callee, None, env, ret);
+                let atomic = if let Expr::Ident(name) = callee.as_ref() {
+                    crate::core_atomic::operation(name)
+                        .and_then(|(kind, _)| Kind::parse(kind.suffix(), self.semantics))
+                } else {
+                    None
+                };
+                for (index, arg) in args.iter_mut().enumerate() {
+                    if index == 1 && vector_expected.is_some() {
+                        self.value(arg, vector_expected.as_ref(), env, ret);
+                        continue;
+                    }
+                    if let Some(atomic_kind) = atomic
+                        && signature
+                            .as_ref()
+                            .and_then(|(params, _)| params.get(index))
+                            .is_some_and(|(_, typ)| *typ == Typ::Int)
+                    {
+                        self.expression(arg, Some(atomic_kind), env, ret);
+                        continue;
+                    }
+                    self.value(
+                        arg,
+                        signature
+                            .as_ref()
+                            .and_then(|(params, _)| params.get(index))
+                            .map(|(_, typ)| typ),
+                        env,
+                        ret,
+                    );
+                }
+                signature
+                    .as_ref()
+                    .and_then(|(_, typ)| typ_kind(typ, self.semantics))
+            }
+            Expr::Block { body, result } => {
+                let mut inner = env.clone();
+                self.body(body, &mut inner, ret);
+                result
+                    .as_mut()
+                    .and_then(|result| self.expression(result, expected, &mut inner, ret))
+            }
+            Expr::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                self.expression(cond, None, env, ret);
+                let left = self.expression(then_expr, expected, &mut env.clone(), ret);
+                let right = self.expression(else_expr, expected.or(left), &mut env.clone(), ret);
+                if left.is_some() && right.is_some() {
+                    bad |= left != right;
+                }
+                left.or(right)
+            }
+            Expr::Closure {
+                params,
+                ret: closure_ret,
+                body,
+                ..
+            } => {
+                let mut inner = env.clone();
+                inner.extend(params.iter().cloned());
+                let outer = self.return_type.replace(closure_ret.clone());
+                self.body(body, &mut inner, typ_kind(closure_ret, self.semantics));
+                self.return_type = outer;
+                if self.rewrite
+                    && (unsupported_type(
+                        closure_ret,
+                        self.facts,
+                        self.semantics,
+                        &mut HashSet::new(),
+                    ) || params.iter().any(|(_, typ)| {
+                        unsupported_type(typ, self.facts, self.semantics, &mut HashSet::new())
+                    }))
+                {
+                    body.insert(0, Stmt::Expr(invalid()));
+                }
+                None
+            }
+            Expr::StructInit { name, fields } => {
+                bad |= unsupported_type(
+                    &Typ::Named(name.clone()),
+                    self.facts,
+                    self.semantics,
+                    &mut HashSet::new(),
+                );
+                let schema = self.facts.structs.get(name).cloned().unwrap_or_default();
+                for (field, value) in fields {
+                    let expected = schema
+                        .iter()
+                        .find(|(name, _)| name == field)
+                        .map(|(_, typ)| typ);
+                    self.value(value, expected, env, ret);
+                }
+                None
+            }
+            Expr::Field { .. } | Expr::Index { .. } => {
+                let kind = self
+                    .checker
+                    .expr_type(expr, self.facts, env)
+                    .and_then(|typ| typ_kind(&typ, self.semantics));
+                core_ir::for_each_expr_child_mut(expr, &mut |child| {
+                    self.expression(child, None, env, ret);
+                });
+                kind
+            }
+            Expr::MatchValue { scrutinee, arms } => {
+                let hint = arms.iter().find_map(|arm| self.pattern_hint(&arm.pattern));
+                let scrutinee_kind = self.expression(scrutinee, hint, env, ret);
+                let typ = scrutinee_kind
+                    .map(Kind::typ)
+                    .or_else(|| self.checker.expr_type(scrutinee, self.facts, env));
+                let mut kind = expected;
+                for arm in arms {
+                    let mut inner = typ
+                        .as_ref()
+                        .and_then(|typ| {
+                            self.checker
+                                .pattern_environment(&arm.pattern, typ, self.facts, env)
+                        })
+                        .unwrap_or_else(|| env.clone());
+                    self.flexible_pattern(&inner, env, scrutinee_kind.is_none());
+                    if let Some(guard) = &mut arm.guard {
+                        self.expression(guard, None, &mut inner, ret);
+                    }
+                    let value = self.expression(&mut arm.value, kind, &mut inner, ret);
+                    if kind.is_some() && value.is_some() {
+                        bad |= kind != value;
+                    }
+                    kind = kind.or(value);
+                }
+                kind
+            }
+            _ => {
+                core_ir::for_each_expr_child_mut(expr, &mut |child| {
+                    self.expression(child, None, env, ret);
+                });
+                None
+            }
+        };
+        bad |= kind.is_some_and(|kind| !kind.supported(self.semantics));
+        if let (Some(actual), Some(expected)) = (kind, expected) {
+            bad |= actual != expected;
+        }
+        if bad && self.rewrite {
+            *expr = invalid();
+        }
+        kind
+    }
+    fn body(&mut self, body: &mut [Stmt], env: &mut HashMap<String, Typ>, ret: Option<Kind>) {
+        for stmt in body {
+            match stmt {
+                Stmt::Let(name, annotation, value) => {
+                    if annotation.is_none() {
+                        self.flexible.insert(name.clone());
+                    }
+                    let expected = self
+                        .expected(annotation.as_ref())
+                        .or_else(|| self.inferred.get(name).copied());
+                    let kind = if annotation.is_some() {
+                        self.value(value, annotation.as_ref(), env, ret)
+                    } else {
+                        self.expression(value, expected, env, ret)
+                    };
+                    if kind.is_none() && self.opaque_int(value, env) {
+                        self.opaque.insert(name.clone());
+                    }
+                    if self.rewrite && self.const_env.is_some() {
+                        let value = self.constant(value);
+                        if let Some(constants) = &mut self.const_env {
+                            if let Some(value) = value {
+                                constants.insert(name.clone(), value);
+                            } else {
+                                constants.remove(name);
+                            }
+                        }
+                    }
+                    if let Some(kind) = expected.or(kind) {
+                        if self.rewrite && annotation.is_none() {
+                            *annotation = Some(kind.typ());
+                        }
+                        self.inferred.insert(name.clone(), kind);
+                        env.insert(name.clone(), kind.typ());
+                    } else if let Some(typ) = annotation
+                        .clone()
+                        .or_else(|| self.checker.expr_type(value, self.facts, env))
+                    {
+                        env.insert(name.clone(), typ);
+                    }
+                }
+                Stmt::Assign(name, value) => {
+                    let typ = env
+                        .get(name)
+                        .cloned()
+                        .or_else(|| self.inferred.get(name).map(|kind| kind.typ()));
+                    self.value(value, typ.as_ref(), env, ret);
+                    if self.rewrite && self.const_env.is_some() {
+                        let value = self.constant(value);
+                        if let Some(constants) = &mut self.const_env {
+                            if let Some(value) = value {
+                                constants.insert(name.clone(), value);
+                            } else {
+                                constants.remove(name);
+                            }
+                        }
+                    }
+                }
+                Stmt::Return(Some(value)) => {
+                    let expected = self.return_type.clone();
+                    self.value(value, expected.as_ref(), env, ret);
+                }
+                Stmt::Expr(value) | Stmt::Throw(value) => {
+                    self.expression(value, None, env, ret);
+                }
+                Stmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                } => {
+                    self.expression(cond, None, env, ret);
+                    let condition = match self.folded_constant(cond) {
+                        Expr::BoolLit(value) => Some(value),
+                        _ => None,
+                    };
+                    let constants = self.const_env.clone();
+                    self.body(then_body, &mut env.clone(), ret);
+                    let then_constants = self.const_env.clone();
+                    self.const_env = constants;
+                    self.body(else_body, &mut env.clone(), ret);
+                    if condition == Some(true) {
+                        self.const_env = then_constants;
+                    } else if condition.is_none() {
+                        if let (Some(left), Some(right)) = (then_constants, self.const_env.as_mut())
+                        {
+                            right.retain(|name, value| left.get(name) == Some(value));
+                        }
+                    }
+                }
+                Stmt::Loop { cond, body, .. } => {
+                    if let Some(constants) = &mut self.const_env {
+                        constants.clear();
+                    }
+                    if let Some(cond) = cond {
+                        self.expression(cond, None, env, ret);
+                    }
+                    self.body(body, &mut env.clone(), ret);
+                    if let Some(constants) = &mut self.const_env {
+                        constants.clear();
+                    }
+                }
+                Stmt::FieldAssign { base, name, value } => {
+                    let typ = self.checker.expr_type(
+                        &Expr::Field {
+                            base: Box::new(base.clone()),
+                            name: name.clone(),
+                        },
+                        self.facts,
+                        env,
+                    );
+                    self.expression(base, None, env, ret);
+                    self.value(value, typ.as_ref(), env, ret);
+                }
+                Stmt::IndexAssign { base, index, value } => {
+                    let typ = self.checker.expr_type(
+                        &Expr::Index {
+                            base: Box::new(base.clone()),
+                            index: Box::new(index.clone()),
+                        },
+                        self.facts,
+                        env,
+                    );
+                    self.expression(base, None, env, ret);
+                    self.expression(index, None, env, ret);
+                    self.value(value, typ.as_ref(), env, ret);
+                }
+                Stmt::Match { scrutinee, arms } => {
+                    let hint = arms.iter().find_map(|arm| self.pattern_hint(&arm.pattern));
+                    let scrutinee_kind = self.expression(scrutinee, hint, env, ret);
+                    let typ = scrutinee_kind
+                        .map(Kind::typ)
+                        .or_else(|| self.checker.expr_type(scrutinee, self.facts, env));
+                    for arm in arms {
+                        let mut inner = typ
+                            .as_ref()
+                            .and_then(|typ| {
+                                self.checker
+                                    .pattern_environment(&arm.pattern, typ, self.facts, env)
+                            })
+                            .unwrap_or_else(|| env.clone());
+                        self.flexible_pattern(&inner, env, scrutinee_kind.is_none());
+                        if let Some(guard) = &mut arm.guard {
+                            self.expression(guard, None, &mut inner, ret);
+                        }
+                        self.body(&mut arm.body, &mut inner, ret);
+                    }
+                }
+                Stmt::Try { body, catches } => {
+                    self.body(body, &mut env.clone(), ret);
+                    for catch in catches {
+                        self.body(&mut catch.body, &mut env.clone(), ret);
+                    }
+                }
+                Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
+            }
+        }
+    }
+}
+
+fn decl_has_metadata(value: &Decl) -> bool {
+    fn typ(ty: &Typ) -> bool {
+        match ty {
+            Typ::Named(name) => name.starts_with("#rust-integer-"),
+            Typ::Array(item) | Typ::Vector(item) => typ(item),
+            _ => false,
+        }
+    }
+    fn expr(value: &Expr) -> bool {
+        if matches!(value,Expr::Unary{op,..} if (op.starts_with("rust-integer-literal") || op.starts_with("rust-integer-value-")))
+        {
+            return true;
+        }
+        if let Expr::Block { body, .. } = value
+            && stmts(body)
+        {
+            return true;
+        }
+        if let Expr::Closure {
+            params, ret, body, ..
+        } = value
+            && (typ(ret) || params.iter().any(|(_, ty)| typ(ty)) || stmts(body))
+        {
+            return true;
+        }
+        let mut found = false;
+        core_ir::for_each_expr_child(value, &mut |value| {
+            found |= expr(value);
+        });
+        found
+    }
+    fn stmts(body: &[Stmt]) -> bool {
+        body.iter().any(|stmt| match stmt {
+            Stmt::Let(_, annotation, value) => annotation.as_ref().is_some_and(typ) || expr(value),
+            Stmt::Assign(_, value)
+            | Stmt::Expr(value)
+            | Stmt::Throw(value)
+            | Stmt::Return(Some(value)) => expr(value),
+            Stmt::FieldAssign { base, value, .. } => expr(base) || expr(value),
+            Stmt::IndexAssign { base, index, value } => expr(base) || expr(index) || expr(value),
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => expr(cond) || stmts(then_body) || stmts(else_body),
+            Stmt::Loop { cond, body, .. } => cond.as_ref().is_some_and(expr) || stmts(body),
+            Stmt::Match { scrutinee, arms } => {
+                expr(scrutinee)
+                    || arms
+                        .iter()
+                        .any(|arm| arm.guard.as_ref().is_some_and(expr) || stmts(&arm.body))
+            }
+            Stmt::Try { body, catches } => {
+                stmts(body) || catches.iter().any(|catch| stmts(&catch.body))
+            }
+            _ => false,
+        })
+    }
+    fn decl(value: &Decl) -> bool {
+        match value {
+            Decl::Function {
+                params, ret, body, ..
+            } => typ(ret) || params.iter().any(|(_, ty)| typ(ty)) || stmts(body),
+            Decl::Global { typ: ty, init, .. } => typ(ty) || init.as_deref().is_some_and(expr),
+            Decl::Struct { fields, .. } => fields.iter().any(|(_, ty)| typ(ty)),
+            Decl::Class {
+                fields, methods, ..
+            } => fields.iter().any(|(_, ty)| typ(ty)) || methods.iter().any(decl),
+            _ => false,
+        }
+    }
+    decl(value)
+}
+
+pub(crate) fn has_metadata(module: &UnifiedModule) -> bool {
+    module.decls.iter().any(decl_has_metadata)
+}
+
+pub(crate) fn normalize(
+    checker: &TypeChecker,
+    module: &mut UnifiedModule,
+    semantics: IntegerSemantics,
+) {
+    if !has_metadata(module) {
+        return;
+    }
+    crate::core_bindings::normalize_decls(&mut module.decls);
+    let facts = checker.collect_facts(module);
+    let globals: HashMap<_, _> = module
+        .decls
+        .iter()
+        .filter_map(|decl| {
+            if let Decl::Global { name, typ, .. } = decl {
+                Some((name.clone(), typ.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    for decl in &mut module.decls {
+        if !decl_has_metadata(decl) {
+            // A nominal signature can still contain a Rust field wider than
+            // the target, even when its body comes from another frontend.
+            match decl {
+                Decl::Function {
+                    params, ret, body, ..
+                } if params.iter().any(|(_, typ)| {
+                    unsupported_type(typ, &facts, semantics, &mut HashSet::new())
+                }) || unsupported_type(ret, &facts, semantics, &mut HashSet::new()) =>
+                {
+                    body.insert(0, Stmt::Expr(invalid()));
+                }
+                Decl::Global { typ, init, .. }
+                    if unsupported_type(typ, &facts, semantics, &mut HashSet::new()) =>
+                {
+                    *init = Some(Box::new(invalid()));
+                }
+                _ => {}
+            }
+            continue;
+        }
+        let mut pass = Pass {
+            checker,
+            facts: &facts,
+            semantics,
+            inferred: HashMap::new(),
+            flexible: HashSet::new(),
+            opaque: HashSet::new(),
+            rewrite: false,
+            return_type: None,
+            const_env: None,
+        };
+        match decl {
+            Decl::Function {
+                params, ret, body, ..
+            } => {
+                pass.return_type = Some(ret.clone());
+                let mut initial = globals.clone();
+                initial.extend(params.iter().cloned());
+                loop {
+                    let before = pass.inferred.clone();
+                    pass.body(body, &mut initial.clone(), typ_kind(ret, semantics));
+                    if before == pass.inferred {
+                        break;
+                    }
+                }
+                pass.rewrite = true;
+                pass.body(body, &mut initial, typ_kind(ret, semantics));
+                if params
+                    .iter()
+                    .any(|(_, typ)| unsupported_type(typ, &facts, semantics, &mut HashSet::new()))
+                    || unsupported_type(ret, &facts, semantics, &mut HashSet::new())
+                {
+                    body.insert(0, Stmt::Expr(invalid()));
+                }
+            }
+            Decl::Global {
+                typ,
+                init: Some(value),
+                ..
+            } => {
+                loop {
+                    let before = pass.inferred.clone();
+                    pass.value(value, Some(typ), &mut globals.clone(), None);
+                    if before == pass.inferred {
+                        break;
+                    }
+                }
+                pass.rewrite = true;
+                pass.const_env = Some(HashMap::new());
+                pass.value(value, Some(typ), &mut globals.clone(), None);
+                if unsupported_type(typ, &facts, semantics, &mut HashSet::new()) {
+                    **value = invalid();
+                }
+            }
+            _ => {}
+        }
+    }
+    crate::core_bindings::rewrite_named_types(&mut module.decls, &|name| {
+        core_ir::rust_integer_type_name(name)
+            .and_then(|name| Kind::parse(name, semantics))
+            .filter(|kind| kind.supported(semantics))
+            .map(|_| Typ::Int)
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn resolved(source: &str, semantics: IntegerSemantics) -> UnifiedModule {
+        let mut module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        let checker = TypeChecker::new();
+        checker.resolve_complements(&mut module);
+        normalize(&checker, &mut module, semantics);
+        module
+    }
+    #[test]
+    fn backward_integer_inference_and_normalization_are_idempotent() {
+        for source in [
+            "fn main()->i64{let first=0;let second=first;second+42}",
+            "fn add(value:u64)->u64{value+1} fn main()->u64{let value=41;add(value)}",
+            "fn main()->u8{let value=254u8;value+1u8}",
+        ] {
+            let mut module = resolved(source, IntegerSemantics::Word64);
+            assert!(
+                crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}: {module:?}"
+            );
+            let once = module.clone();
+            normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+            assert_eq!(module, once);
+        }
+    }
+    #[test]
+    fn unsigned_operations_and_complement_keep_widths() {
+        let mut module = resolved(
+            "fn main()->u64{let value=0xffffffffffffffffu64;value/2u64}",
+            IntegerSemantics::Word64,
+        );
+        let mut operations = Vec::new();
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            if let Expr::Binary { op, .. } = expr {
+                operations.push(op.clone());
+            }
+        });
+        assert!(operations.iter().any(|op| op == "udiv"));
+        let module = resolved("fn main()->u8{!0u8}", IntegerSemantics::Word64);
+        let Decl::Function { body, .. } = &module.decls[0] else {
+            panic!("main")
+        };
+        let Stmt::Return(Some(value)) = &body[0] else {
+            panic!("return")
+        };
+        let value = crate::core_opt::map_expr(value.clone(), &mut crate::core_opt::fold_expr);
+        assert_eq!(value, Expr::IntLit(255));
+    }
+    #[test]
+    fn incompatible_kinds_and_unrepresentable_values_refuse() {
+        for (source, semantics) in [
+            ("fn main()->u8{256}", IntegerSemantics::Word64),
+            ("fn main()->u32{1u8+2u32}", IntegerSemantics::Word64),
+            ("fn main()->u64{42u64}", IntegerSemantics::Word32),
+            ("fn main()->i128{42i128}", IntegerSemantics::Word64),
+        ] {
+            let module = resolved(source, semantics);
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}: {module:?}"
+            );
+        }
+    }
+    #[test]
+    fn constant_shift_counts_are_checked_against_operand_width() {
+        for source in [
+            "fn main()->u8{1u8<<8}",
+            "fn main()->u16{1u16>>16}",
+            "fn main()->u32{1u32<<-1}",
+            "fn main()->u8{1u8<<(4+4)}",
+        ] {
+            let module = resolved(source, IntegerSemantics::Word64);
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}"
+            );
+        }
+        let module = resolved("fn main()->u8{128u8>>7}", IntegerSemantics::Word64);
+        assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+    }
+
+    #[test]
+    fn nested_wide_types_refuse_only_when_used_on_word32() {
+        let wide = Typ::Named("#rust-integer-u64".into());
+        let schema = Decl::Struct {
+            name: "Nested".into(),
+            fields: vec![(
+                "values".into(),
+                Typ::Vector(Box::new(Typ::Array(Box::new(wide.clone())))),
+            )],
+            type_params: vec![],
+        };
+        let checker = TypeChecker::new();
+        for typ in [Typ::Array(Box::new(wide)), Typ::Named("Nested".into())] {
+            let mut module = UnifiedModule::new(vec![
+                schema.clone(),
+                Decl::Function {
+                    name: "main".into(),
+                    params: vec![("value".into(), typ.clone())],
+                    ret: typ,
+                    body: vec![Stmt::Return(Some(Expr::Ident("value".into())))],
+                    type_params: vec![],
+                },
+            ]);
+            normalize(&checker, &mut module, IntegerSemantics::Word32);
+            let Decl::Function { body, .. } = &module.decls[1] else {
+                panic!("main")
+            };
+            assert!(
+                matches!(body.first(),Some(Stmt::Expr(Expr::Ident(name))) if name.starts_with("#unsupported-rust-integer"))
+            );
+        }
+        let mut module = UnifiedModule::new(vec![
+            schema,
+            Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Int,
+                body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                type_params: vec![],
+            },
+        ]);
+        normalize(&checker, &mut module, IntegerSemantics::Word32);
+        let Decl::Function { body, .. } = &module.decls[1] else {
+            panic!("main")
+        };
+        assert_eq!(body, &vec![Stmt::Return(Some(Expr::IntLit(42)))]);
+    }
+    #[test]
+    fn legacy_builtin_and_pending_closure_arithmetic_keeps_carrier_compatibility() {
+        for source in [
+            "fn accept(text:String)->i64{text.len()+40} fn main()->i64{accept(\"hi\")}",
+            "fn main()->i64{let f=|x|x+2;f(40)}",
+        ] {
+            let module = resolved(source, IntegerSemantics::Word64);
+            let mut invalid = false;
+            let mut declarations = module.decls.clone();
+            crate::core_opt::map_decl_exprs_mut(&mut declarations, &mut |expr| {
+                invalid |= matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+            });
+            assert!(!invalid, "{source}: {module:?}");
+        }
+    }
+
+    #[test]
+    fn known_constant_arithmetic_overflow_is_not_hidden_by_width_masks() {
+        for source in [
+            "fn main()->u8{255u8+1u8}",
+            "fn main()->u8{0u8-1u8}",
+            "fn main()->u16{65535u16*2u16}",
+            "fn main()->u64{0xffffffffffffffffu64+1u64}",
+            "fn main()->i8{127i8+1i8}",
+            "fn main()->i8{(-128i8)/(-1i8)}",
+            "fn main()->i8{-(-128i8)}",
+        ] {
+            let module = resolved(source, IntegerSemantics::Word64);
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}: {module:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_const_local_values_cannot_hide_overflow_behind_runtime_masks() {
+        for (source, overflow) in [
+            ("fn main()->u8{const{let x:u8=255;x+1}}", true),
+            ("fn main()->u8{const{let mut x:u8=254;x=255;x+1}}", true),
+            ("fn main()->u8{const{let x:u8=254;x+1}}", false),
+        ] {
+            let mut module = resolved(source, IntegerSemantics::Word64);
+            let mut rejected = false;
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                rejected |= matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+            });
+            assert_eq!(rejected, overflow, "{source}: {module:?}");
+        }
+    }
+    #[test]
+    fn aggregate_result_containers_keep_contextual_element_widths() {
+        for source in [
+            "fn main()->[u8;1]{{[256]}}",
+            "fn main()->[u8;1]{if true{[256]}else{[0]}}",
+            "fn main()->[u8;1]{match true{true=>[256],false=>[0]}}",
+            "static VALUES:[u8;1]={[256]};fn main()->i64{42}",
+        ] {
+            let mut module = resolved(source, IntegerSemantics::Word64);
+            let mut rejected = false;
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                rejected |= matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+            });
+            assert!(rejected, "{source}: {module:?}");
+        }
+        let module = resolved(
+            "fn main()->[u8;1]{if true{[255]}else{[0]}}",
+            IntegerSemantics::Word64,
+        );
+        assert!(
+            crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+            "{module:?}"
+        );
+    }
+    #[test]
+    fn direct_closure_callees_normalize_aggregate_returns() {
+        let mut module = UnifiedModule::new(vec![Decl::Global {
+            name: "VALUES".into(),
+            typ: Typ::Array(Box::new(Typ::Named("#rust-integer-u8".into()))),
+            mutable: false,
+            constant_value: true,
+            init: Some(Box::new(Expr::Call {
+                callee: Box::new(Expr::Closure {
+                    params: vec![],
+                    ret: Typ::Array(Box::new(Typ::Named("#rust-integer-u8".into()))),
+                    captures: vec![],
+                    body: vec![Stmt::Return(Some(Expr::ArrayLit(vec![Expr::Unary {
+                        op: "rust-integer-literal".into(),
+                        expr: Box::new(Expr::IntLit(256)),
+                    }])))],
+                }),
+                args: vec![],
+            })),
+        }]);
+        normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+        let mut rejected = false;
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            rejected |=
+                matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+        });
+        assert!(rejected, "{module:?}");
+    }
+
+    #[test]
+    fn signed_word_static_loop_keeps_existing_strict_evaluation_path() {
+        let mut module = resolved(
+            "static VALUE:i64={let mut i:i64=0;while i<2{i=i+1;}i+40};fn main()->i64{42}",
+            IntegerSemantics::Word64,
+        );
+        let mut rejected = false;
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            rejected |=
+                matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+        });
+        assert!(!rejected, "{module:?}");
+    }
+    #[test]
+    fn checked_integer_evaluation_enforces_width_on_each_const_iteration() {
+        let semantics = IntegerSemantics::Word64;
+        assert_eq!(
+            fold_checked_integer("u8", "+", 254, Some(1), semantics),
+            Some(Expr::IntLit(255))
+        );
+        assert_eq!(
+            fold_checked_integer("u8", "+", 255, Some(1), semantics),
+            None
+        );
+        assert_eq!(
+            fold_checked_integer("u64", "+", -1, Some(1), semantics),
+            None
+        );
+        assert_eq!(
+            fold_checked_integer("i8", "/", -128, Some(-1), semantics),
+            None
+        );
+        assert_eq!(fold_checked_integer("i8", "-", -128, None, semantics), None);
+        assert_eq!(
+            fold_checked_integer("u8", "~", 213, None, semantics),
+            Some(Expr::IntLit(42))
+        );
+        assert_eq!(
+            fold_checked_integer("u8", "<<", 1, Some(8), semantics),
+            None
+        );
+        assert_eq!(
+            fold_checked_integer("i8", ">>", -128, Some(1), semantics),
+            Some(Expr::IntLit(-64))
+        );
+        assert_eq!(
+            fold_checked_integer("u64", "/", -1, Some(2), semantics),
+            Some(Expr::IntLit(i64::MAX))
+        );
+        assert_eq!(
+            fold_checked_integer("u64", "+", 1, Some(1), IntegerSemantics::Word32),
+            None
+        );
+    }
+
+    #[test]
+    fn vector_mutation_uses_receiver_integer_element_metadata() {
+        let mut module = resolved(
+            "fn main()->i64{let mut values:Vec<u8>=vec![];values.push(256);42}",
+            IntegerSemantics::Word64,
+        );
+        let mut rejected = false;
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            rejected |=
+                matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+        });
+        assert!(rejected, "{module:?}");
+        let module = resolved(
+            "fn main()->u8{let mut values:Vec<u8>=vec![];values.push(213);!values[0]}",
+            IntegerSemantics::Word64,
+        );
+        assert!(
+            crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+            "{module:?}"
+        );
+    }
+    #[test]
+    fn const_local_shift_count_is_checked_and_mixed_language_decls_stay_unchanged() {
+        let mut module = resolved(
+            "fn main()->i64{let value=const{let x:u8=1;let amount:u32=8;x<<amount};value as i64}",
+            IntegerSemantics::Word64,
+        );
+        let mut rejected = false;
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            rejected |=
+                matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+        });
+        assert!(rejected, "{module:?}");
+        // Use the same structured cast produced by the other frontend.
+        let legacy = Decl::Function {
+            name: "legacy".into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(Expr::Unary {
+                    op: "int-cast-u8".into(),
+                    expr: Box::new(Expr::IntLit(511)),
+                }),
+                rhs: Box::new(Expr::IntLit(1)),
+            }))],
+        };
+        let mut module = UnifiedModule::new(vec![legacy.clone()]);
+        module.decls.extend(
+            crate::compiler::rust_front::parse_rust_source("fn rust_value()->u8{42u8}")
+                .unwrap()
+                .decls,
+        );
+        normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+        assert_eq!(module.decls[0], legacy);
+    }
+
+    #[test]
+    fn atomic_constructor_data_uses_its_unsigned_width() {
+        for literal in ["1u32", "4294967295u32", "4294967295"] {
+            let source = format!(
+                "use std::sync::atomic::AtomicU32;static VALUE:AtomicU32=AtomicU32::new({literal});fn main()->i64{{42}}"
+            );
+            let mut module = resolved(&source, IntegerSemantics::Word64);
+            let mut rejected = false;
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                rejected |= matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+            });
+            assert!(!rejected, "{source}: {module:?}");
+        }
+    }
+    #[test]
+    fn canonical_word_abi_accepts_large_literals_without_executing_invalid_inputs() {
+        for source in [
+            "fn main()->i64{__inrt_vector_clone(8,0,1152921504606846976);0}",
+            "fn main()->i64{let items=Vec::<i64>::with_capacity(576460752303423488);items.len()}",
+            "fn main()->i64{let mut items:Vec<i64>=Vec::new();items.ptr=8;items.cap=576460752303423488;items.push(42);0}",
+        ] {
+            let mut module = resolved(source, IntegerSemantics::Word64);
+            let mut rejected = false;
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                rejected |= matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+            });
+            assert!(!rejected, "{source}: {module:?}");
+            crate::lower_core::desugar_module(&mut module);
+            let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(verified.ok, "{source}: {verified:?}");
+        }
+    }
+    #[test]
+    fn internal_range_bounds_keep_existing_word_context() {
+        for source in [
+            "fn main()->i64{for value in 9223372036854775807..=9223372036854775807{return 42;}0}",
+            "fn main()->i64{for value in 9223372036854775807..{return 42;}0}",
+            "fn main()->i64{for value in 9223372036854775806..9223372036854775807{return 42;}0}",
+        ] {
+            let mut module = resolved(source, IntegerSemantics::Word64);
+            let mut rejected = false;
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                rejected |= matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+            });
+            assert!(!rejected, "{source}: {module:?}");
+            crate::lower_core::desugar_module(&mut module);
+            assert!(
+                crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{module:?}"
+            );
+        }
+    }
+    #[test]
+    fn cast_origin_metadata_keeps_boolean_only_rust_declarations_in_scope() {
+        let legacy = Decl::Function {
+            name: "legacy".into(),
+            params: vec![],
+            ret: Typ::Bool,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::BoolLit(true)))],
+        };
+        let mut module = UnifiedModule::new(vec![
+            legacy.clone(),
+            Decl::Function {
+                name: "check".into(),
+                params: vec![],
+                ret: Typ::Bool,
+                type_params: vec![],
+                body: vec![Stmt::Return(Some(Expr::Binary {
+                    op: "==".into(),
+                    lhs: Box::new(Expr::Unary {
+                        op: "rust-integer-value-u8".into(),
+                        expr: Box::new(Expr::Unary {
+                            op: "int-cast-u8".into(),
+                            expr: Box::new(Expr::IntLit(256)),
+                        }),
+                    }),
+                    rhs: Box::new(Expr::Unary {
+                        op: "rust-integer-literal".into(),
+                        expr: Box::new(Expr::IntLit(0)),
+                    }),
+                }))],
+            },
+        ]);
+        assert!(has_metadata(&module));
+        normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+        assert_eq!(module.decls[0], legacy);
+        assert!(!has_metadata(&module));
+        assert!(
+            crate::core_ir_verifier::verify_for_entry(&module, "check").ok,
+            "{module:?}"
+        );
+    }
+}

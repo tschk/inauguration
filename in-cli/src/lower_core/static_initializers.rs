@@ -419,6 +419,33 @@ impl Eval<'_> {
                 }
             }
             Expr::Unary { op, expr } => {
+                if let Some(kind) = op.strip_prefix("rust-checked-integer-") {
+                    let (operator, lhs, rhs) = match expr.as_ref() {
+                        Expr::Binary { op, lhs, rhs } => {
+                            let Expr::IntLit(left) = self.expr(lhs, env)? else {
+                                return None;
+                            };
+                            let Expr::IntLit(right) = self.expr(rhs, env)? else {
+                                return None;
+                            };
+                            (op.as_str(), left, Some(right))
+                        }
+                        Expr::Unary { op, expr } => {
+                            let Expr::IntLit(value) = self.expr(expr, env)? else {
+                                return None;
+                            };
+                            (op.as_str(), value, None)
+                        }
+                        _ => return None,
+                    };
+                    return crate::typecheck::rust_integers::fold_checked_integer(
+                        kind,
+                        operator,
+                        lhs,
+                        rhs,
+                        self.semantics,
+                    );
+                }
                 let value = self.expr(expr, env)?;
                 if self.strict && matches!(op.as_str(), "-" | "neg") {
                     if let Expr::IntLit(value) = value {
