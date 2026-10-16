@@ -3239,3 +3239,65 @@ fn reserved_array_length_preserves_raw_pointer_contract() {
         .unwrap();
     assert!(error.contains("incompatible length declaration"), "{error}");
 }
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn array_binding_replacement_preserves_earlier_aliases() {
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        let _guard = crate::native_emit::antidecomp::ProfileGuard::new(profile);
+        for source in [
+            "fn main()->Int{let rows:[Int]=[20];let alias=rows;rows=[22];return alias[0]+rows[0];}",
+            "fn main()->Int{let rows:[Int]=[20];let value:Int=match rows{whole{rows[0]=22;let before=whole[0];whole=[20];before+whole[0]}};return value;}",
+            "fn main()->Int{let value:Int=match [20]{whole if ({whole[0]=22;whole=[0];false}){0}other{other[0]+20}};return value;}",
+            "var flag:Bool=true;\nfn main()->Int{let rows:[Int]=[20];let other:[Int]=[99];let value:Int=match (if flag{rows}else{other}){whole{rows[0]=22;let before=whole[0];whole=[20];before+whole[0]}};return value;}",
+            "fn main()->Int{let rows:[Int]=[20];let value:Int=match ({rows}){whole{rows[0]=22;let before=whole[0];whole=[20];before+whole[0]}};return value;}",
+            "fn main()->Int{let rows:[Int]=[20];let alias=rows;rows[0]=22;let observed=alias[0];alias=[20];return observed+alias[0];}",
+            "fn main()->Int{let rows:[Int]=[20];let alias=rows;alias[0]=22;alias=[20];return rows[0]+alias[0];}",
+            "fn main()->Int{let rows:[Int]=[20];let target:[Int]=[0];target=rows;rows[0]=22;target=[20];return rows[0]+target[0];}",
+            "fn main()->Int{let rows:[Int]=[20];let alias=rows;let i=0;while i<2{rows=[22];i+=1;}return alias[0]+rows[0];}",
+            "fn main()->Int{let rows:[Int]=[20];let alias=rows;let marker:Int={if true{rows=[22];}0};return alias[0]+rows[0]+marker;}",
+            "fn main()->Int{let rows:[Int]=[20];let alias=rows;rows=[22,0];return alias[0]+rows[0]+rows[1];}",
+            "var flag:Bool=true;\nfn main()->Int{let rows:[Int]=[20];let alias=rows;if flag{rows=[22];}else{rows=[99];}return alias[0]+rows[0];}",
+            "var flag:Bool=false;\nfn main()->Int{let rows:[Int]=[20];let alias=rows;if flag{rows=[99];}else{rows=[22];}return alias[0]+rows[0];}",
+            "fn main()->Int{let rows:[Int]=[20];let alias=rows;let ignored:Int={let rows:[Int]=[0];rows=[1];0};rows=[22];return alias[0]+rows[0]+ignored;}",
+            "fn make()->[Int]{return [20];}\nfn main()->Int{let rows=make();let alias=rows;rows=[22];return alias[0]+rows[0];}",
+            "fn make()->[Int]{let rows:[Int]=[20];let alias=rows;rows=[22];return alias;}\nfn main()->Int{return make()[0]+22;}",
+            "struct Holder{[Int] items}\nfn main()->Int{let h=Holder{items:if true{[20,22]}else{[0]}};let alias=h.items;h.items={let x=40;[x,2]};alias[0]=0;return h.items[0]+h.items[1];}",
+            "fn main()->Int{let rows:[Bool]=[false];let alias=rows;rows=[true];if !alias[0] && rows[0]{return 42;}return 7;}",
+            "fn main()->Int{let rows:[Float]=[20.5];let alias=rows;rows=[21.5];if alias[0]+rows[0]==42.0{return 42;}return 7;}",
+            "fn main()->Int{let rows:[String]=[\"old\"];let alias=rows;rows=[\"new\"];if alias[0]==\"old\" && rows[0]==\"new\"{return 42;}return 7;}",
+            "fn main()->Int{let rows:[Int]=[];let alias=rows;rows=[42];return array-len(alias)+rows[0];}",
+            "fn main()->Int{let rows:[Int]=[42];let alias=rows;rows=[];return alias[0]+array-len(rows);}",
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            crate::lower_core::desugar_module(&mut module);
+            crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            let result = lower_module(&module, "main", NativeLinkage::Executable).unwrap();
+            let offsets = result
+                .function_offsets
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect::<Vec<_>>();
+            let mut runtime = crate::jit_runtime::JitRuntime::new();
+            runtime
+                .load_with_data_relocations(
+                    &result.code,
+                    &offsets,
+                    &result.relocations,
+                    &result.data,
+                    &result.global_relocs,
+                    &result.data_relocations,
+                )
+                .unwrap();
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]) },
+                Some(42),
+                "{profile:?}: {source}"
+            );
+        }
+    }
+}

@@ -5,7 +5,7 @@ use super::lower_util::{
 };
 use crate::core_ir::{Expr, LoopKind, Stmt, Typ};
 use crate::native_emit::aarch64::{self, CodeEmitter};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn expr_try_depth(expr: &Expr) -> usize {
     let mut depth = if let Expr::Block { body, .. } = expr {
@@ -124,6 +124,132 @@ pub(crate) fn append_string_table(
     Ok(())
 }
 
+// Function bodies are already alpha-normalized. Promote an entire alias component
+// if any binding is replaced, so pointer/length snapshots never copy inline storage.
+fn rebound_array_bindings(body: &[Stmt]) -> HashSet<String> {
+    fn link_value(target: &str, value: &Expr, links: &mut HashMap<String, Vec<String>>) {
+        match value {
+            Expr::Ident(source) => {
+                links.entry(target.into()).or_default().push(source.clone());
+                links.entry(source.clone()).or_default().push(target.into());
+            }
+            Expr::Block {
+                result: Some(value),
+                ..
+            } => link_value(target, value, links),
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                link_value(target, then_expr, links);
+                link_value(target, else_expr, links);
+            }
+            Expr::MatchValue { arms, .. } => {
+                for arm in arms {
+                    link_value(target, &arm.value, links);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn expression(
+        value: &Expr,
+        assigned: &mut HashSet<String>,
+        links: &mut HashMap<String, Vec<String>>,
+    ) {
+        if let Expr::Block { body, .. } = value {
+            statements(body, assigned, links);
+        }
+        if let Expr::MatchValue { scrutinee, arms } = value {
+            for arm in arms {
+                if let Ok(crate::core_ir::MatchPattern::IdentPat(name)) =
+                    crate::core_ir::MatchPattern::parse(&arm.pattern)
+                {
+                    link_value(&name, scrutinee, links);
+                }
+            }
+        }
+        crate::core_ir::for_each_expr_child(value, &mut |child| expression(child, assigned, links));
+    }
+    fn statements(
+        body: &[Stmt],
+        assigned: &mut HashSet<String>,
+        links: &mut HashMap<String, Vec<String>>,
+    ) {
+        for statement in body {
+            match statement {
+                Stmt::Let(name, _, value) | Stmt::Assign(name, value) => {
+                    if matches!(statement, Stmt::Assign(..)) {
+                        assigned.insert(name.clone());
+                    }
+                    link_value(name, value, links);
+                    expression(value, assigned, links);
+                }
+                Stmt::Expr(value) | Stmt::Throw(value) | Stmt::Return(Some(value)) => {
+                    expression(value, assigned, links)
+                }
+                Stmt::FieldAssign { base, value, .. } => {
+                    expression(base, assigned, links);
+                    expression(value, assigned, links);
+                }
+                Stmt::IndexAssign {
+                    base, index, value, ..
+                } => {
+                    for value in [base, index, value] {
+                        expression(value, assigned, links);
+                    }
+                }
+                Stmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                } => {
+                    expression(cond, assigned, links);
+                    statements(then_body, assigned, links);
+                    statements(else_body, assigned, links);
+                }
+                Stmt::Loop { cond, body, .. } => {
+                    if let Some(cond) = cond {
+                        expression(cond, assigned, links);
+                    }
+                    statements(body, assigned, links);
+                }
+                Stmt::Match { scrutinee, arms } => {
+                    expression(scrutinee, assigned, links);
+                    for arm in arms {
+                        if let Some(guard) = &arm.guard {
+                            expression(guard, assigned, links);
+                        }
+                        statements(&arm.body, assigned, links);
+                    }
+                }
+                Stmt::Try { body, catches } => {
+                    statements(body, assigned, links);
+                    for catch in catches {
+                        statements(&catch.body, assigned, links);
+                    }
+                }
+                Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
+            }
+        }
+    }
+    let mut assigned = HashSet::new();
+    let mut links = HashMap::new();
+    statements(body, &mut assigned, &mut links);
+    let mut pending: Vec<_> = assigned.iter().cloned().collect();
+    while let Some(name) = pending.pop() {
+        if let Some(aliases) = links.get(&name) {
+            for alias in aliases {
+                if assigned.insert(alias.clone()) {
+                    pending.push(alias.clone());
+                }
+            }
+        }
+    }
+    assigned
+}
+
 fn alloc_expr_locals(
     ctx: &mut LowerCtx<'_>,
     expr: &Expr,
@@ -145,6 +271,15 @@ fn alloc_expr_locals(
             }
             index += 1;
         };
+        if matches!(typ.canonical(), Typ::Array(_))
+            && arms.iter().any(|arm| {
+                matches!(crate::core_ir::MatchPattern::parse(&arm.pattern),
+                    Ok(crate::core_ir::MatchPattern::IdentPat(binding)) if ctx.rebound_arrays.contains(&binding))
+            })
+        {
+            // Guarded arms share the saved scrutinee even when it is a literal.
+            ctx.rebound_arrays.insert(name.clone());
+        }
         ctx.alloc_let_local(&name, Some(&typ), scrutinee, fn_name, functions)?;
         let mut planned = Vec::new();
         for arm in arms {
@@ -183,6 +318,10 @@ pub(crate) fn alloc_declared_locals(
     fn_name: &str,
     functions: &HashMap<String, super::FunctionInfo>,
 ) -> Result<(), String> {
+    if !ctx.rebindings_planned {
+        ctx.rebound_arrays = rebound_array_bindings(body);
+        ctx.rebindings_planned = true;
+    }
     for stmt in body {
         let mut expressions = Vec::new();
         match stmt {
@@ -369,6 +508,8 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) error_types: HashMap<String, u32>,
     pub(crate) ret_typ: Typ,
     arrays_in_aggregates: bool,
+    rebound_arrays: HashSet<String>,
+    rebindings_planned: bool,
     pub(crate) loop_branches: Vec<LoopBranches>,
     pub(crate) _params_src: &'a [(String, Typ)],
     pub(crate) try_flag_slots: Vec<u32>,
@@ -607,6 +748,8 @@ impl<'a> LowerCtx<'a> {
             error_branches: Vec::new(),
             error_types: HashMap::new(),
             ret_typ: Typ::Int,
+            rebound_arrays: HashSet::new(),
+            rebindings_planned: false,
             arrays_in_aggregates: structs
                 .values()
                 .flatten()
@@ -900,7 +1043,8 @@ impl<'a> LowerCtx<'a> {
             ensure_native_array_element(elem, fn_name, "local")?;
             // Local aliases share inline array metadata rather than pretending
             // an inline array is a returned pointer/length pair.
-            if let Expr::Ident(source) = expr
+            if !self.rebound_arrays.contains(name)
+                && let Expr::Ident(source) = expr
                 && let Some(slot @ LocalSlot::Array { elem: actual, .. }) = self.locals.get(source)
                 && actual == elem.as_ref()
             {
@@ -912,7 +1056,9 @@ impl<'a> LowerCtx<'a> {
             // shortcut: any array-bearing schema disables inline locals; refine with escape analysis.
             let inline_items = match expr {
                 Expr::ArrayLit(items)
-                    if !self.arrays_in_aggregates && !matches!(self.ret_typ, Typ::Array(_)) =>
+                    if !self.rebound_arrays.contains(name)
+                        && !self.arrays_in_aggregates
+                        && !matches!(self.ret_typ, Typ::Array(_)) =>
                 {
                     Some(items)
                 }
@@ -1104,5 +1250,51 @@ impl<'a> LowerCtx<'a> {
         self.strings.get(value).copied().ok_or_else(|| {
             format!("native-lower: string literal not found in constant pool: `{value}`")
         })
+    }
+}
+
+#[cfg(test)]
+mod array_rebinding_plan_tests {
+    use super::*;
+
+    #[test]
+    fn promotion_follows_alias_links_without_promoting_unrelated_arrays() {
+        let raw=crate::in_lang_parse::parse_in_source("fn main()->Int{let rows:[Int]=[20];let alias=rows;let untouched:[Int]=[42];alias=[22];return rows[0]+alias[0]+untouched[0];}").unwrap();
+        let crate::core_ir::Decl::Function { body, .. } = &raw.decls[0] else {
+            panic!("main function");
+        };
+        let promoted = rebound_array_bindings(body);
+        assert!(promoted.contains("rows") && promoted.contains("alias"));
+        assert!(!promoted.contains("untouched"));
+        let structs = HashMap::new();
+        let strings = HashMap::new();
+        let globals = HashMap::new();
+        let global_types = HashMap::new();
+        let mut pending_inrt = Vec::new();
+        let mut pending_strings = Vec::new();
+        let mut ctx = LowerCtx::new(
+            &[],
+            &structs,
+            &strings,
+            &globals,
+            &global_types,
+            &mut pending_inrt,
+            &mut pending_strings,
+            "main",
+        )
+        .unwrap();
+        alloc_declared_locals(&mut ctx, body, "main", &HashMap::new()).unwrap();
+        assert!(matches!(
+            ctx.locals.get("rows"),
+            Some(LocalSlot::ArrayParam { .. })
+        ));
+        assert!(matches!(
+            ctx.locals.get("alias"),
+            Some(LocalSlot::ArrayParam { .. })
+        ));
+        assert!(matches!(
+            ctx.locals.get("untouched"),
+            Some(LocalSlot::Array { .. })
+        ));
     }
 }
