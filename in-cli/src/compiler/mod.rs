@@ -21,6 +21,7 @@ pub mod mir;
 pub mod mir_emit;
 pub mod mir_emit_x86;
 pub mod mir_lower;
+pub mod mir_scalar_lower;
 pub mod passes;
 pub mod pipeline;
 pub mod rust_front;

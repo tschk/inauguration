@@ -1,226 +1,670 @@
-//! Direct UnifiedModule → MIR lowering.
-//!
-//! Converts a [`UnifiedModule`] into a [`MirModule`] with typed MirOp::Typed
-//! operations that carry source-level type information. The typed MIR can then
-//! be verified, optimized, and lowered to machine-level MirOps for emission.
-//!
-//! ponytail: minimal direct lowering. Function bodies are represented as
-//! TypedOps carrying variable names and expression structure. Machine lowering
-//! (TypedOp → Mov/Add/Ret etc.) happens in a separate pass.
-
+//! Fallible scalar Core IR → typed MIR. This is not a machine lowering pass.
 use crate::compiler::mir::*;
-use crate::core_ir::{Decl, Expr, LoopKind, Stmt, UnifiedModule};
+use crate::core_ir::{Decl, Expr, LoopKind, Stmt, Typ, UnifiedModule};
+use std::collections::HashMap;
+macro_rules! need {
+    ($builder:ident, $expr:expr, $abrupt:expr) => {
+        match $builder.required($expr)? {
+            Some(value) => value,
+            None => return Ok($abrupt),
+        }
+    };
+}
 
-/// Lower a UnifiedModule directly to MIR, preserving type information.
-///
-/// Each Decl::Function becomes a MirFunction with Typed(TypedOp) instructions.
-/// Struct/Global/Class/Component declarations are stored as MIR metadata.
-pub fn lower_to_mir(module: &UnifiedModule) -> MirModule {
-    let mut mir = MirModule::new();
+/// Lower the admitted scalar subset, refusing every unrepresented source operation.
+/// The boot path retains native_emit for globals, data and ABI features that
+/// are not represented by the scalar typed-to-machine pass.
+pub fn lower_to_mir(module: &UnifiedModule) -> Result<MirModule, String> {
+    let verified = crate::core_ir_verifier::verify_module(
+        module,
+        &crate::core_ir_verifier::VerifyOptions {
+            entry: None,
+            require_entry: false,
+        },
+    );
+    if !verified.ok {
+        return Err(format!(
+            "typed-mir: {}: {}",
+            verified.reason_code.unwrap_or_default(),
+            verified.reason.unwrap_or_default()
+        ));
+    }
+    let mut signatures = HashMap::new();
     for decl in &module.decls {
-        if let Decl::Function {
+        let Decl::Function {
             name,
             params,
             ret,
-            body,
+            type_params,
             ..
         } = decl
-        {
-            let mut func = MirFunction {
+        else {
+            return Err("typed-mir: non-function declarations are not represented yet".into());
+        };
+        if !type_params.is_empty() {
+            return Err("typed-mir: generic functions require specialization".into());
+        }
+        let params = params
+            .iter()
+            .map(|(_, typ)| scalar_type(typ))
+            .collect::<Result<Vec<_>, _>>()?;
+        if params.contains(&Typ::Void) {
+            return Err("typed-mir: Void parameter".into());
+        }
+        let ret = scalar_type(ret)?;
+        if signatures.insert(name.clone(), (params, ret)).is_some() {
+            return Err(format!("typed-mir: duplicate function {name}"));
+        }
+    }
+    let mut result = MirModule::new();
+    for decl in &module.decls {
+        let Decl::Function {
+            name, params, body, ..
+        } = decl
+        else {
+            unreachable!()
+        };
+        let (param_types, ret) = &signatures[name];
+        let mut builder = ScalarBuilder {
+            function: MirFunction {
                 name: name.clone(),
-                instructions: Vec::new(),
+                instructions: vec![],
                 vreg_count: 0,
                 frame_size: 0,
                 return_type: Some(ret.clone()),
-                param_types: params.iter().map(|(_, t)| t.clone()).collect(),
-                var_map: Vec::new(),
-            };
-            for (param_name, _) in params {
-                let vreg = func.vreg_count;
-                func.vreg_count += 1;
-                func.var_map.push((param_name.clone(), vreg));
+                param_types: param_types.clone(),
+                var_map: vec![],
+                value_types: vec![],
+                local_types: vec![],
+                is_external: body.is_empty(),
+            },
+            signatures: &signatures,
+            scopes: vec![HashMap::new()],
+            loops: vec![],
+            labels: 0,
+            open: true,
+        };
+        for ((name, _), typ) in params.iter().zip(param_types) {
+            let reg = builder.value(typ.clone())?;
+            let local = builder.local(name, typ.clone())?;
+            if !body.is_empty() {
+                builder.emit(TypedOp::LocalStore { local, src: reg });
             }
-            for stmt in body {
-                lower_stmt(stmt, &mut func);
-            }
-            mir.functions.push(func);
         }
+        if !body.is_empty() {
+            builder.body(body, false)?;
+            if builder.open {
+                if *ret == Typ::Void {
+                    builder.emit(TypedOp::ReturnValue(None));
+                }
+            }
+        }
+        result.functions.push(builder.function);
     }
-    mir
+    result.verify(None).map_err(|errors| errors.join("; "))?;
+    Ok(result)
 }
 
-fn lower_stmt(stmt: &Stmt, func: &mut MirFunction) {
-    match stmt {
-        Stmt::Let(name, _typ_ann, value) => {
-            let vreg = func.vreg_count;
-            func.vreg_count += 1;
-            func.var_map.push((name.clone(), vreg));
-            lower_expr_into(value, name, func);
+struct ScalarBuilder<'a> {
+    function: MirFunction,
+    signatures: &'a HashMap<String, (Vec<Typ>, Typ)>,
+    scopes: Vec<HashMap<String, u32>>,
+    loops: Vec<(String, String)>,
+    labels: u32,
+    open: bool,
+}
+impl ScalarBuilder<'_> {
+    fn emit(&mut self, op: TypedOp) {
+        self.function
+            .instructions
+            .push(mir(MirOp::Typed(op), vec![]));
+    }
+    fn value(&mut self, typ: Typ) -> Result<VReg, String> {
+        let reg = u32::try_from(self.function.value_types.len())
+            .map_err(|_| "typed-mir: too many values")?;
+        self.function.value_types.push(typ);
+        self.function.vreg_count = reg + 1;
+        Ok(reg)
+    }
+    fn temp_local(&mut self, typ: Typ) -> Result<u32, String> {
+        let id = u32::try_from(self.function.local_types.len())
+            .map_err(|_| "typed-mir: too many locals")?;
+        self.function.local_types.push(typ);
+        Ok(id)
+    }
+    fn local(&mut self, name: &str, typ: Typ) -> Result<u32, String> {
+        let id = self.temp_local(typ)?;
+        self.scopes
+            .last_mut()
+            .ok_or("typed-mir: missing scope")?
+            .insert(name.into(), id);
+        self.function.var_map.push((name.into(), id));
+        Ok(id)
+    }
+    fn lookup(&self, name: &str) -> Result<u32, String> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
+            .ok_or_else(|| format!("typed-mir: unknown local {name}"))
+    }
+    fn label(&mut self) -> Result<String, String> {
+        let id = self.labels;
+        self.labels = id.checked_add(1).ok_or("typed-mir: too many labels")?;
+        Ok(format!("block{id}"))
+    }
+    fn start(&mut self, label: String) {
+        self.function
+            .instructions
+            .push(mir(MirOp::Label(label), vec![]));
+        self.open = true;
+    }
+    fn jump(&mut self, label: String) {
+        self.emit(TypedOp::Jump(label));
+        self.open = false;
+    }
+    fn branch(&mut self, cond: VReg, yes: String, no: String) {
+        self.emit(TypedOp::BranchIf {
+            cond,
+            then_label: yes,
+            else_label: no,
+        });
+        self.open = false;
+    }
+    fn require(&self, reg: VReg, typ: &Typ) -> Result<(), String> {
+        if self.function.value_types.get(reg as usize) == Some(typ) {
+            Ok(())
+        } else {
+            Err(format!("typed-mir: expected {typ:?} value"))
         }
-        Stmt::Expr(expr) => {
-            lower_expr(expr, func);
+    }
+    fn required(&mut self, expr: &Expr) -> Result<Option<VReg>, String> {
+        let value = self.expr(expr)?;
+        if value.is_none() && self.open {
+            return Err("typed-mir: Void expression used as a value".into());
         }
+        Ok(value)
+    }
+    fn body(&mut self, body: &[Stmt], scoped: bool) -> Result<(), String> {
+        if scoped {
+            self.scopes.push(HashMap::new());
+        }
+        for statement in body {
+            // Validate even unreachable source shapes, never silently drop them.
+            validate_statement(statement)?;
+            if self.open {
+                self.stmt(statement)?;
+            }
+        }
+        if scoped {
+            self.scopes.pop();
+        }
+        Ok(())
+    }
+    fn stmt(&mut self, statement: &Stmt) -> Result<(), String> {
+        match statement {
+            Stmt::Let(name, annotation, value) => {
+                let reg = need!(self, value, ());
+                if !self.open {
+                    return Ok(());
+                }
+                let actual = self.function.value_types[reg as usize].clone();
+                let typ = annotation
+                    .as_ref()
+                    .map(scalar_type)
+                    .transpose()?
+                    .unwrap_or(actual.clone());
+                if actual != typ || typ == Typ::Void {
+                    return Err("typed-mir: local type mismatch".into());
+                }
+                let local = self.local(name, typ)?;
+                self.emit(TypedOp::LocalStore { local, src: reg });
+            }
+            Stmt::Assign(name, value) => {
+                let local = self.lookup(name)?;
+                let reg = need!(self, value, ());
+                if self.open {
+                    self.require(reg, &self.function.local_types[local as usize])?;
+                    self.emit(TypedOp::LocalStore { local, src: reg });
+                }
+            }
+            Stmt::Expr(expr) => {
+                self.expr(expr)?;
+            }
+            Stmt::Return(value) => {
+                let value = if let Some(expr) = value {
+                    self.expr(expr)?
+                } else {
+                    None
+                };
+                if self.open {
+                    let ret = self.function.return_type.clone().unwrap_or(Typ::Void);
+                    match value {
+                        Some(reg) => self.require(reg, &ret)?,
+                        None if ret == Typ::Void => {}
+                        None => return Err("typed-mir: return value required".into()),
+                    }
+                    self.emit(TypedOp::ReturnValue(value));
+                    self.open = false;
+                }
+            }
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                let reg = need!(self, cond, ());
+                if !self.open {
+                    return Ok(());
+                }
+                self.require(reg, &Typ::Bool)?;
+                let yes = self.label()?;
+                let no = self.label()?;
+                let join = self.label()?;
+                self.branch(reg, yes.clone(), no.clone());
+                self.start(yes);
+                self.body(then_body, true)?;
+                let yes_open = self.open;
+                if yes_open {
+                    self.jump(join.clone());
+                }
+                self.start(no);
+                self.body(else_body, true)?;
+                let no_open = self.open;
+                if no_open {
+                    self.jump(join.clone());
+                }
+                if yes_open || no_open {
+                    self.start(join);
+                } else {
+                    self.open = false;
+                }
+            }
+            Stmt::Loop { kind, cond, body } => {
+                if matches!(kind, LoopKind::For { .. }) {
+                    return Err("typed-mir: For requires iterator lowering".into());
+                }
+                let header = self.label()?;
+                let run = self.label()?;
+                let end = self.label()?;
+                self.jump(header.clone());
+                self.start(header.clone());
+                match cond {
+                    Some(cond) => {
+                        let reg = need!(self, cond, ());
+                        if self.open {
+                            self.require(reg, &Typ::Bool)?;
+                            self.branch(reg, run.clone(), end.clone());
+                        }
+                    }
+                    None => self.jump(run.clone()),
+                }
+                self.loops.push((header.clone(), end.clone()));
+                self.start(run);
+                self.body(body, true)?;
+                if self.open {
+                    self.jump(header);
+                }
+                self.loops.pop();
+                self.start(end);
+            }
+            Stmt::Break | Stmt::Continue => {
+                let (header, end) = self
+                    .loops
+                    .last()
+                    .ok_or("typed-mir: jump outside loop")?
+                    .clone();
+                self.jump(if matches!(statement, Stmt::Break) {
+                    end
+                } else {
+                    header
+                });
+            }
+            _ => return Err("typed-mir: unsupported statement".into()),
+        }
+        Ok(())
+    }
+    fn expr(&mut self, expression: &Expr) -> Result<Option<VReg>, String> {
+        match expression {
+            Expr::IntLit(value) => {
+                let dst = self.value(Typ::Int)?;
+                self.emit(TypedOp::ScalarInt { dst, value: *value });
+                Ok(Some(dst))
+            }
+            Expr::BoolLit(value) => {
+                let dst = self.value(Typ::Bool)?;
+                self.emit(TypedOp::ScalarBool { dst, value: *value });
+                Ok(Some(dst))
+            }
+            Expr::UnitLit => Ok(None),
+            Expr::Ident(name) => {
+                let local = self.lookup(name)?;
+                let dst = self.value(self.function.local_types[local as usize].clone())?;
+                self.emit(TypedOp::LocalLoad { dst, local });
+                Ok(Some(dst))
+            }
+            Expr::Unary { op, expr } => {
+                let src = need!(self, expr, None);
+                if !self.open {
+                    return Ok(Some(src));
+                }
+                let typ = scalar_unary_result(op, &self.function.value_types[src as usize])?;
+                let dst = self.value(typ)?;
+                self.emit(TypedOp::Unary {
+                    dst,
+                    op: op.clone(),
+                    src,
+                });
+                Ok(Some(dst))
+            }
+            Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&&" | "and" | "||" | "or") => {
+                let left = need!(self, lhs, None);
+                if !self.open {
+                    return Ok(Some(left));
+                }
+                self.require(left, &Typ::Bool)?;
+                let result = self.temp_local(Typ::Bool)?;
+                self.emit(TypedOp::LocalStore {
+                    local: result,
+                    src: left,
+                });
+                let evaluate = self.label()?;
+                let join = self.label()?;
+                if matches!(op.as_str(), "&&" | "and") {
+                    self.branch(left, evaluate.clone(), join.clone());
+                } else {
+                    self.branch(left, join.clone(), evaluate.clone());
+                }
+                self.start(evaluate);
+                let right = self.expr(rhs)?;
+                if self.open {
+                    let right = right.ok_or("typed-mir: lazy RHS must produce Bool")?;
+                    self.require(right, &Typ::Bool)?;
+                    self.emit(TypedOp::LocalStore {
+                        local: result,
+                        src: right,
+                    });
+                    self.jump(join.clone());
+                }
+                self.start(join);
+                let dst = self.value(Typ::Bool)?;
+                self.emit(TypedOp::LocalLoad { dst, local: result });
+                Ok(Some(dst))
+            }
+            Expr::Binary { op, lhs, rhs } => {
+                let left = need!(self, lhs, None);
+                if !self.open {
+                    return Ok(Some(left));
+                }
+                let right = need!(self, rhs, None);
+                if !self.open {
+                    return Ok(Some(right));
+                }
+                let lt = self.function.value_types[left as usize].clone();
+                self.require(right, &lt)?;
+                let typ = scalar_binary_type(op, &lt)?;
+                let dst = self.value(typ)?;
+                self.emit(TypedOp::Binary {
+                    dst,
+                    op: op.clone(),
+                    lhs: left,
+                    rhs: right,
+                });
+                Ok(Some(dst))
+            }
+            Expr::Call { callee, args } => {
+                let Expr::Ident(target) = callee.as_ref() else {
+                    return Err("typed-mir: indirect calls unsupported".into());
+                };
+                if target == crate::core_ir::COMPILER_UNREACHABLE {
+                    if !args.is_empty() {
+                        return Err("typed-mir: unreachable marker takes no arguments".into());
+                    }
+                    self.emit(TypedOp::Trap);
+                    self.open = false;
+                    return Ok(None);
+                }
+                if self.scopes.iter().any(|scope| scope.contains_key(target)) {
+                    return Err("typed-mir: lexical callee is indirect".into());
+                }
+                let (params, ret) = self
+                    .signatures
+                    .get(target)
+                    .cloned()
+                    .ok_or_else(|| format!("typed-mir: unknown call {target}"))?;
+                if params.len() != args.len() {
+                    return Err("typed-mir: call arity mismatch".into());
+                }
+                let mut values = vec![];
+                for (arg, typ) in args.iter().zip(params) {
+                    let reg = need!(self, arg, None);
+                    if !self.open {
+                        return Ok(Some(reg));
+                    }
+                    self.require(reg, &typ)?;
+                    values.push(reg);
+                }
+                let dst = if ret == Typ::Void {
+                    None
+                } else {
+                    Some(self.value(ret)?)
+                };
+                self.emit(TypedOp::DirectCall {
+                    dst,
+                    target: target.clone(),
+                    args: values,
+                });
+                Ok(dst)
+            }
+            Expr::Block { body, result } => {
+                self.scopes.push(HashMap::new());
+                self.body(body, false)?;
+                let value = if self.open {
+                    result
+                        .as_ref()
+                        .map(|expr| self.expr(expr))
+                        .transpose()?
+                        .flatten()
+                } else {
+                    None
+                };
+                self.scopes.pop();
+                Ok(value)
+            }
+            Expr::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                let cond = need!(self, cond, None);
+                if !self.open {
+                    return Ok(Some(cond));
+                }
+                self.require(cond, &Typ::Bool)?;
+                let yes = self.label()?;
+                let no = self.label()?;
+                let join = self.label()?;
+                self.branch(cond, yes.clone(), no.clone());
+                self.start(yes);
+                self.scopes.push(HashMap::new());
+                let left = self.expr(then_expr)?;
+                self.scopes.pop();
+                let left_open = self.open;
+                let result = if left_open {
+                    left.map(|reg| self.temp_local(self.function.value_types[reg as usize].clone()))
+                        .transpose()?
+                } else {
+                    None
+                };
+                if left_open {
+                    if let (Some(local), Some(src)) = (result, left) {
+                        self.emit(TypedOp::LocalStore { local, src });
+                    }
+                    self.jump(join.clone());
+                }
+                self.start(no);
+                self.scopes.push(HashMap::new());
+                let right = self.expr(else_expr)?;
+                self.scopes.pop();
+                let right_open = self.open;
+                let mut result = result;
+                if right_open {
+                    match (result, left_open, right) {
+                        (Some(local), _, Some(src)) => {
+                            self.require(src, &self.function.local_types[local as usize])?;
+                            self.emit(TypedOp::LocalStore { local, src });
+                        }
+                        (None, false, Some(src)) => {
+                            let local =
+                                self.temp_local(self.function.value_types[src as usize].clone())?;
+                            self.emit(TypedOp::LocalStore { local, src });
+                            result = Some(local);
+                        }
+                        (None, _, None) => {}
+                        _ => return Err("typed-mir: conditional value mismatch".into()),
+                    }
+                    self.jump(join.clone());
+                }
+                if left_open || right_open {
+                    self.start(join);
+                    if let Some(local) = result {
+                        let dst = self.value(self.function.local_types[local as usize].clone())?;
+                        self.emit(TypedOp::LocalLoad { dst, local });
+                        Ok(Some(dst))
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    self.open = false;
+                    Ok(None)
+                }
+            }
+            _ => Err("typed-mir: unsupported expression".into()),
+        }
+    }
+}
+fn validate_statement(statement: &Stmt) -> Result<(), String> {
+    match statement {
+        Stmt::Let(_, annotation, value) => {
+            if let Some(typ) = annotation {
+                scalar_type(typ)?;
+            }
+            validate_expression(value)
+        }
+        Stmt::Assign(_, value) | Stmt::Expr(value) => validate_expression(value),
+        Stmt::Return(value) => value.as_ref().map_or(Ok(()), validate_expression),
         Stmt::If {
             cond,
             then_body,
             else_body,
         } => {
-            lower_expr(cond, func);
-            for s in then_body {
-                lower_stmt(s, func);
+            validate_expression(cond)?;
+            for stmt in then_body.iter().chain(else_body) {
+                validate_statement(stmt)?;
             }
-            for s in else_body {
-                lower_stmt(s, func);
+            Ok(())
+        }
+        Stmt::Loop { kind, cond, body } => {
+            if matches!(kind, LoopKind::For { .. }) {
+                return Err("typed-mir: For requires iterator lowering".into());
             }
-        }
-        Stmt::Loop {
-            kind: LoopKind::While,
-            cond: Some(cond),
-            body,
-        } => {
-            lower_expr(cond, func);
-            for s in body {
-                lower_stmt(s, func);
+            if let Some(cond) = cond {
+                validate_expression(cond)?;
             }
-        }
-        Stmt::Loop {
-            kind: _,
-            cond: _,
-            body,
-        } => {
-            for s in body {
-                lower_stmt(s, func);
+            for stmt in body {
+                validate_statement(stmt)?;
             }
+            Ok(())
         }
-        Stmt::Return(expr) => match expr {
-            Some(e) => {
-                let temp = format!("__ret_{}", func.instructions.len());
-                let vreg = func.vreg_count;
-                func.vreg_count += 1;
-                func.var_map.push((temp.clone(), vreg));
-                lower_expr_into(e, &temp, func);
-                func.instructions
-                    .push(mir(MirOp::Typed(TypedOp::Return(Some(temp))), vec![]));
-            }
-            None => {
-                func.instructions
-                    .push(mir(MirOp::Typed(TypedOp::Return(None)), vec![]));
-            }
-        },
-        Stmt::Assign(name, value) => {
-            lower_expr_into(value, name, func);
-        }
-        Stmt::FieldAssign { value, .. } => {
-            // ponytail: MIR field assign = just lower the value, skip store
-            let _ = value;
-        }
-        _ => {
-            func.instructions
-                .push(mir(MirOp::Typed(TypedOp::Nop), vec![]));
-        }
+        Stmt::Break | Stmt::Continue => Ok(()),
+        _ => Err("typed-mir: unsupported statement shape".into()),
     }
 }
-
-fn lower_expr_into(expr: &Expr, target: &str, func: &mut MirFunction) {
-    match expr {
-        Expr::IntLit(v) => {
-            func.instructions
-                .push(mir(MirOp::Typed(TypedOp::IntLit(*v)), vec![]));
-            func.instructions.push(mir(
-                MirOp::Typed(TypedOp::Store(target.to_string())),
-                vec![],
-            ));
-        }
-        Expr::BoolLit(v) => {
-            func.instructions
-                .push(mir(MirOp::Typed(TypedOp::BoolLit(*v)), vec![]));
-            func.instructions.push(mir(
-                MirOp::Typed(TypedOp::Store(target.to_string())),
-                vec![],
-            ));
-        }
-        Expr::StringLit(v) => {
-            func.instructions
-                .push(mir(MirOp::Typed(TypedOp::StringLit(v.clone())), vec![]));
-            func.instructions.push(mir(
-                MirOp::Typed(TypedOp::Store(target.to_string())),
-                vec![],
-            ));
-        }
-        Expr::Ident(name) => {
-            func.instructions
-                .push(mir(MirOp::Typed(TypedOp::Load(name.clone())), vec![]));
-            func.instructions.push(mir(
-                MirOp::Typed(TypedOp::Store(target.to_string())),
-                vec![],
-            ));
+fn validate_expression(expression: &Expr) -> Result<(), String> {
+    match expression {
+        Expr::IntLit(_) | Expr::BoolLit(_) | Expr::UnitLit | Expr::Ident(_) => Ok(()),
+        Expr::Unary { op, expr } => {
+            if !matches!(op.as_str(), "-" | "neg" | "~" | "bitnot" | "!" | "not") {
+                return Err("typed-mir: unsupported unary operator".into());
+            }
+            validate_expression(expr)
         }
         Expr::Binary { op, lhs, rhs } => {
-            let ln = format!("__bin_{}_lhs", func.instructions.len());
-            let rn = format!("__bin_{}_rhs", func.instructions.len());
-            let lv = func.vreg_count;
-            func.vreg_count += 1;
-            let rv = func.vreg_count;
-            func.vreg_count += 1;
-            func.var_map.push((ln.clone(), lv));
-            func.var_map.push((rn.clone(), rv));
-            lower_expr_into(lhs, &ln, func);
-            lower_expr_into(rhs, &rn, func);
-            func.instructions
-                .push(mir(MirOp::Typed(TypedOp::BinOp { op: op.clone() }), vec![]));
-            func.instructions.push(mir(
-                MirOp::Typed(TypedOp::Store(target.to_string())),
-                vec![],
-            ));
-        }
-        Expr::Unary { op, expr: inner } => {
-            let n = format!("__un_{}", func.instructions.len());
-            let v = func.vreg_count;
-            func.vreg_count += 1;
-            func.var_map.push((n.clone(), v));
-            lower_expr_into(inner, &n, func);
-            func.instructions.push(mir(
-                MirOp::Typed(TypedOp::UnaryOp { op: op.clone() }),
-                vec![],
-            ));
-            func.instructions.push(mir(
-                MirOp::Typed(TypedOp::Store(target.to_string())),
-                vec![],
-            ));
+            if !matches!(
+                op.as_str(),
+                "+" | "add"
+                    | "-"
+                    | "sub"
+                    | "*"
+                    | "mul"
+                    | "/"
+                    | "div"
+                    | "%"
+                    | "rem"
+                    | "udiv"
+                    | "urem"
+                    | "&"
+                    | "bitand"
+                    | "|"
+                    | "bitor"
+                    | "^"
+                    | "bitxor"
+                    | "<<"
+                    | "shl"
+                    | ">>"
+                    | "shr"
+                    | "lshr"
+                    | "<"
+                    | "<="
+                    | ">"
+                    | ">="
+                    | "=="
+                    | "eq"
+                    | "!="
+                    | "neq"
+                    | "&&"
+                    | "and"
+                    | "||"
+                    | "or"
+            ) {
+                return Err("typed-mir: unsupported binary operator".into());
+            }
+            validate_expression(lhs)?;
+            validate_expression(rhs)
         }
         Expr::Call { callee, args } => {
-            for (i, arg) in args.iter().enumerate() {
-                let an = format!("__call_arg_{}_{}", func.instructions.len(), i);
-                let av = func.vreg_count;
-                func.vreg_count += 1;
-                func.var_map.push((an.clone(), av));
-                lower_expr_into(arg, &an, func);
+            if !matches!(callee.as_ref(), Expr::Ident(_)) {
+                return Err("typed-mir: indirect call".into());
             }
-            let fn_name = match callee.as_ref() {
-                Expr::Ident(n) => n.clone(),
-                _ => "__unknown_call".to_string(),
-            };
-            func.instructions
-                .push(mir(MirOp::Typed(TypedOp::Call(fn_name)), vec![]));
-            func.instructions.push(mir(
-                MirOp::Typed(TypedOp::Store(target.to_string())),
-                vec![],
-            ));
+            for arg in args {
+                validate_expression(arg)?;
+            }
+            Ok(())
         }
-        _ => {
-            func.instructions
-                .push(mir(MirOp::Typed(TypedOp::Nop), vec![]));
+        Expr::Block { body, result } => {
+            for stmt in body {
+                validate_statement(stmt)?;
+            }
+            result
+                .as_ref()
+                .map_or(Ok(()), |expr| validate_expression(expr))
         }
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            validate_expression(cond)?;
+            validate_expression(then_expr)?;
+            validate_expression(else_expr)
+        }
+        _ => Err("typed-mir: unsupported expression shape".into()),
     }
 }
 
-fn lower_expr(expr: &Expr, func: &mut MirFunction) {
-    let temp = format!("__expr_{}", func.instructions.len());
-    let v = func.vreg_count;
-    func.vreg_count += 1;
-    func.var_map.push((temp.clone(), v));
-    lower_expr_into(expr, &temp, func);
-}
+#[cfg(test)]
+#[path = "mir_typed_tests.rs"]
+mod scalar_typed_tests;
 
 /// Lower a Core IR module for the boot image: MIR plus freestanding x86_64
 /// (or AArch64) machine code with C-string literals, and the module's
@@ -279,7 +723,6 @@ pub fn lower_boot_image(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core_ir::{CoreModuleIdentity, Typ};
 
     #[test]
     fn x86_boot_rejects_unresolved_imports() {
@@ -344,208 +787,5 @@ mod tests {
             error.contains("do not yet relocate writable globals"),
             "{error}"
         );
-    }
-
-    #[test]
-    fn lower_empty_module() {
-        let module = UnifiedModule::new(vec![]);
-        let mir = lower_to_mir(&module);
-        assert!(mir.functions.is_empty());
-    }
-
-    #[test]
-    fn lower_simple_function() {
-        let decls = vec![Decl::Function {
-            name: "main".into(),
-            params: vec![],
-            ret: Typ::Int,
-            body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
-            type_params: vec![],
-        }];
-        let module = UnifiedModule::with_identity(decls, CoreModuleIdentity::default());
-        let mir = lower_to_mir(&module);
-        assert_eq!(mir.functions.len(), 1);
-        assert_eq!(mir.functions[0].name, "main");
-        assert_eq!(mir.functions[0].return_type, Some(Typ::Int));
-    }
-
-    #[test]
-    fn verify_passes_clean_module() {
-        let decls = vec![Decl::Function {
-            name: "main".into(),
-            params: vec![],
-            ret: Typ::Int,
-            body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
-            type_params: vec![],
-        }];
-        let module = UnifiedModule::with_identity(decls, CoreModuleIdentity::default());
-        let mir = lower_to_mir(&module);
-        assert!(mir.verify(Some("main")).is_ok());
-    }
-
-    #[test]
-    fn verify_fails_missing_entry() {
-        let decls = vec![Decl::Function {
-            name: "other".into(),
-            params: vec![],
-            ret: Typ::Void,
-            body: vec![],
-            type_params: vec![],
-        }];
-        let module = UnifiedModule::with_identity(decls, CoreModuleIdentity::default());
-        let mir = lower_to_mir(&module);
-        assert!(mir.verify(Some("main")).is_err());
-    }
-
-    #[test]
-    fn test_lower_let_and_assign() {
-        let decls = vec![Decl::Function {
-            name: "main".into(),
-            params: vec![],
-            ret: Typ::Void,
-            body: vec![
-                Stmt::Let("x".into(), None, Expr::IntLit(1)),
-                Stmt::Assign("x".into(), Expr::IntLit(2)),
-            ],
-            type_params: vec![],
-        }];
-        let module = UnifiedModule::with_identity(decls, CoreModuleIdentity::default());
-        let mir = lower_to_mir(&module);
-
-        let func = &mir.functions[0];
-        let has_lit_1 = func
-            .instructions
-            .iter()
-            .any(|i| i.op == MirOp::Typed(TypedOp::IntLit(1)));
-        let has_store_x1 = func
-            .instructions
-            .iter()
-            .any(|i| i.op == MirOp::Typed(TypedOp::Store("x".to_string())));
-        let has_lit_2 = func
-            .instructions
-            .iter()
-            .any(|i| i.op == MirOp::Typed(TypedOp::IntLit(2)));
-        let has_store_x2 = func
-            .instructions
-            .iter()
-            .any(|i| i.op == MirOp::Typed(TypedOp::Store("x".to_string())));
-
-        assert!(has_lit_1);
-        assert!(has_store_x1);
-        assert!(has_lit_2);
-        assert!(has_store_x2);
-    }
-
-    #[test]
-    fn test_lower_if_statement() {
-        let decls = vec![Decl::Function {
-            name: "main".into(),
-            params: vec![],
-            ret: Typ::Void,
-            body: vec![Stmt::If {
-                cond: Expr::BoolLit(true),
-                then_body: vec![Stmt::Return(None)],
-                else_body: vec![],
-            }],
-            type_params: vec![],
-        }];
-        let module = UnifiedModule::with_identity(decls, CoreModuleIdentity::default());
-        let mir = lower_to_mir(&module);
-
-        let func = &mir.functions[0];
-        let has_bool_true = func
-            .instructions
-            .iter()
-            .any(|i| i.op == MirOp::Typed(TypedOp::BoolLit(true)));
-        let has_ret_none = func
-            .instructions
-            .iter()
-            .any(|i| i.op == MirOp::Typed(TypedOp::Return(None)));
-
-        assert!(has_bool_true);
-        assert!(has_ret_none);
-    }
-
-    #[test]
-    fn test_lower_loop_while() {
-        let decls = vec![Decl::Function {
-            name: "main".into(),
-            params: vec![],
-            ret: Typ::Void,
-            body: vec![Stmt::Loop {
-                kind: LoopKind::While,
-                cond: Some(Expr::BoolLit(false)),
-                body: vec![],
-            }],
-            type_params: vec![],
-        }];
-        let module = UnifiedModule::with_identity(decls, CoreModuleIdentity::default());
-        let mir = lower_to_mir(&module);
-
-        let func = &mir.functions[0];
-        let has_bool_false = func
-            .instructions
-            .iter()
-            .any(|i| i.op == MirOp::Typed(TypedOp::BoolLit(false)));
-
-        assert!(has_bool_false);
-    }
-
-    #[test]
-    fn test_lower_complex_expr() {
-        let decls = vec![Decl::Function {
-            name: "main".into(),
-            params: vec![],
-            ret: Typ::Int,
-            body: vec![Stmt::Return(Some(Expr::Binary {
-                op: "+".into(),
-                lhs: Box::new(Expr::IntLit(1)),
-                rhs: Box::new(Expr::IntLit(2)),
-            }))],
-            type_params: vec![],
-        }];
-        let module = UnifiedModule::with_identity(decls, CoreModuleIdentity::default());
-        let mir = lower_to_mir(&module);
-
-        let func = &mir.functions[0];
-        let has_binop = func
-            .instructions
-            .iter()
-            .any(|i| i.op == MirOp::Typed(TypedOp::BinOp { op: "+".into() }));
-
-        assert!(has_binop);
-    }
-
-    #[test]
-    fn test_lower_field_assign() {
-        let decls = vec![Decl::Function {
-            name: "main".into(),
-            params: vec![],
-            ret: Typ::Void,
-            body: vec![Stmt::FieldAssign {
-                base: Expr::Ident("obj".into()),
-                name: "f".into(),
-                value: Expr::IntLit(1),
-            }],
-            type_params: vec![],
-        }];
-        let module = UnifiedModule::with_identity(decls, CoreModuleIdentity::default());
-        let mir = lower_to_mir(&module);
-
-        let func = &mir.functions[0];
-        let has_store_f = func
-            .instructions
-            .iter()
-            .any(|i| i.op == MirOp::Typed(TypedOp::Store("f".to_string())));
-
-        // Since the current implementation of FieldAssign skips lowering the value and just ignores it:
-        assert!(
-            func.instructions.is_empty()
-                || func
-                    .instructions
-                    .iter()
-                    .all(|i| i.op != MirOp::Typed(TypedOp::IntLit(1)))
-        );
-        assert!(!has_store_f);
     }
 }

@@ -1,19 +1,18 @@
-//! MIR (Machine IR) — unified IR with both semantic and machine levels.
+//! Typed scalar and machine IR data structures.
 //!
-//! The single IR from source to machine code:
-//! 1. Frontends produce MIR with Typed ops (preserving source-level types)
-//! 2. MIR verification checks entry function, call targets, type consistency
-//! 3. Lowering pass converts Typed → machine MirOps (allocation, schedule)
-//! 4. Emit pass produces raw machine bytes (AArch64, x86_64)
-//!
-//! Inspired by Zig's codegen architecture: MIR is 1:1 with machine instructions
-//! but all offsets are deferred, making it relocatable for JIT mmap.
-//!
-//! ponytail: minimal — virtual registers only, no register allocation yet.
+//! Fallible Core IR lowering produces explicit typed values and control flow.
+//! Scalar typed values lower to validated machine instructions before emission.
+//! Existing CLI boot compilation continues through native_emit because its
+//! globals, data and ABI features exceed this scalar subset.
 
 use serde::{Deserialize, Serialize};
 
 use crate::core_ir::Typ;
+#[path = "mir_controlflow.rs"]
+mod controlflow;
+#[path = "mir_typed.rs"]
+mod typed;
+pub(crate) use typed::{scalar_binary_type, scalar_type, scalar_unary_result};
 
 /// A virtual register identifier.
 pub type VReg = u32;
@@ -31,6 +30,8 @@ pub enum MirOperand {
     ImmFloat(u64),
     /// Memory at [base + offset]
     Mem { base: VReg, offset: i32 },
+    /// Scalar eight-byte local-frame slot, bounded by MirFunction.frame_size.
+    FrameSlot(u32),
     /// A label (for branches/control flow)
     Label(String),
     /// Global symbol reference (relocation)
@@ -43,6 +44,51 @@ pub enum MirOperand {
 /// These carry type information and are lowered to machine MirOps.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypedOp {
+    // Explicit scalar operations. All use/def identities are carried here;
+    // MirInst.operands is empty for these variants.
+    ScalarInt {
+        dst: VReg,
+        value: i64,
+    },
+    ScalarBool {
+        dst: VReg,
+        value: bool,
+    },
+    LocalLoad {
+        dst: VReg,
+        local: u32,
+    },
+    LocalStore {
+        local: u32,
+        src: VReg,
+    },
+    Binary {
+        dst: VReg,
+        op: String,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    Unary {
+        dst: VReg,
+        op: String,
+        src: VReg,
+    },
+    DirectCall {
+        dst: Option<VReg>,
+        target: String,
+        args: Vec<VReg>,
+    },
+    /// Compiler-proven unreachable control flow; no operands and no successors.
+    Trap,
+    ReturnValue(Option<VReg>),
+    Jump(String),
+    BranchIf {
+        cond: VReg,
+        then_label: String,
+        else_label: String,
+    },
+    // Legacy serialized forms are retained but typed verification rejects them:
+    // they do not identify their inputs/results unambiguously.
     /// Allocate a local variable of given type with given name
     Alloca(Typ, String),
     /// Load variable into register
@@ -60,9 +106,13 @@ pub enum TypedOp {
     /// Boolean literal
     BoolLit(bool),
     /// Binary operation: op, lhs_var, rhs_var
-    BinOp { op: String },
+    BinOp {
+        op: String,
+    },
     /// Unary operation: op, var
-    UnaryOp { op: String },
+    UnaryOp {
+        op: String,
+    },
     /// Return value (variable name)
     Return(Option<String>),
     /// Branch to a function entry
@@ -125,6 +175,10 @@ pub enum MirOp {
     Jg,
     Jge,
     Cmp, // left, right (sets flags)
+    /// Canonical comparison after Cmp; == != < <= > >=, one destination Reg.
+    SetCond(String),
+    /// Unconditional hardware trap; no successor and no operands.
+    Trap,
 
     // ── Stack ──────────────────────────────────────────────────
     Push,
@@ -139,6 +193,7 @@ pub enum MirOp {
     Typed(TypedOp),
 
     // ── Pseudo (resolved during emit) ──────────────────────────
+    Label(String),
     Nop,
     Comment(String),
 }
@@ -154,8 +209,17 @@ pub struct MirFunction {
     pub return_type: Option<Typ>,
     /// Parameter types
     pub param_types: Vec<Typ>,
-    /// Variable name → vreg mapping for typed ops
+    /// Source local spelling → local slot ID, for diagnostics only. Shadowed
+    /// bindings have different IDs; typed operations never resolve by spelling.
     pub var_map: Vec<(String, VReg)>,
+    /// First param_types.len() values and local slots correspond to parameters.
+    #[serde(default)]
+    pub value_types: Vec<Typ>,
+    #[serde(default)]
+    pub local_types: Vec<Typ>,
+    /// Established Core IR bodyless-declaration convention; no emitted body.
+    #[serde(default)]
+    pub is_external: bool,
 }
 
 /// A complete MIR module (one compilation unit).
@@ -170,6 +234,8 @@ pub struct MirModule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MirRelocation {
     pub symbol: String,
+    /// First byte of the relocation operand field in the final byte image.
+    /// Rel32 is relative to the end of its four-byte field.
     pub offset: u32,
     pub kind: RelocKind,
 }
@@ -196,6 +262,18 @@ impl MirModule {
         }
     }
 
+    /// Validate executable machine MIR before any bytes can be loaded.
+    pub(crate) fn verify_machine(&self) -> Result<(), String> {
+        self.verify(None).map_err(|errors| errors.join("; "))?;
+        let mut errors = Vec::new();
+        controlflow::validate(self, true, &mut errors);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
     /// Estimate total code size (for JIT page allocation).
     pub fn estimated_code_size(&self) -> usize {
         self.functions
@@ -212,9 +290,27 @@ impl MirModule {
         if let Some(entry_name) = entry {
             if !func_names.contains(&entry_name) {
                 errors.push(format!("missing entry function `{entry_name}`"));
+            } else if self
+                .functions
+                .iter()
+                .any(|function| function.name == entry_name && function.is_external)
+            {
+                errors.push(format!(
+                    "entry function `{entry_name}` is an external declaration"
+                ));
             }
         }
+        let mut names = std::collections::HashSet::new();
         for func in &self.functions {
+            if !names.insert(func.name.as_str()) {
+                errors.push(format!("duplicate MIR function `{}`", func.name));
+            }
+            if typed::is_typed(func) {
+                if let Err(error) = typed::verify(self, func) {
+                    errors.push(error);
+                }
+                continue;
+            }
             for inst in &func.instructions {
                 if let MirOp::Typed(ref typed_op) = inst.op {
                     match typed_op {
@@ -253,6 +349,7 @@ impl MirModule {
                 }
             }
         }
+        controlflow::validate(self, false, &mut errors);
         if errors.is_empty() {
             Ok(())
         } else {
@@ -283,3 +380,7 @@ pub fn label(name: &str) -> MirOperand {
 pub fn global(name: &str) -> MirOperand {
     MirOperand::Global(name.to_string())
 }
+
+#[cfg(test)]
+#[path = "mir_controlflow_tests.rs"]
+mod controlflow_tests;
