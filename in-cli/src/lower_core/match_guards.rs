@@ -58,6 +58,7 @@ pub(crate) fn prepared_native_module_with_semantics(
     super::lower_value_spills(&mut lowered.decls);
     crate::core_bindings::normalize_decls(&mut lowered.decls);
     crate::typecheck::TypeChecker::new().resolve_complements(&mut lowered);
+    crate::core_ir_verifier::preserve_nonvoid_completion_after(&module.decls, &mut lowered.decls);
     Cow::Owned(lowered)
 }
 
@@ -65,9 +66,11 @@ pub(crate) fn lower_guarded_decls(decls: &mut [Decl]) {
     if !decls.iter().any(|decl| decl_has_guard(decl, false)) {
         return;
     }
+    let original = decls.to_vec();
     let mut names = crate::core_bindings::module_names(decls);
     reserve_members(decls, &mut names);
     lower_members(decls, &names, &mut 0, false);
+    crate::core_ir_verifier::preserve_nonvoid_completion_after(&original, decls);
 }
 
 fn reserve_members(decls: &[Decl], names: &mut HashSet<String>) {
@@ -1077,6 +1080,50 @@ mod whole_struct_binding_tests {
             Stmt::Loop { body, .. } => has_typed_binding(body),
             _ => false,
         })
+    }
+
+    #[test]
+    fn linear_match_lowering_preserves_completion_without_sealing_fallthrough() {
+        let unchanged =
+            crate::in_lang_parse::parse_in_source("fn main()->Int{return 42;}").unwrap();
+        let mut same = unchanged.clone();
+        crate::core_ir_verifier::preserve_nonvoid_completion_after(
+            &unchanged.decls,
+            &mut same.decls,
+        );
+        assert_eq!(same, unchanged);
+        for source in [
+            "struct Pair{Int x;Int y} fn main()->Int{let p:Pair=Pair{x:20,y:22};match p{whole{return whole.x+whole.y;}}}",
+            "fn main()->Int{match 20{20 if false{return 0;}20 if true{return 42;}_ {return 0;}}}",
+        ] {
+            let original = crate::in_lang_parse::parse_in_source(source).unwrap();
+            assert!(crate::core_ir_verifier::check_nonvoid_completion(&original).is_ok());
+            let prepared = prepared_native_module(&original).into_owned();
+            assert!(
+                crate::core_ir_verifier::check_nonvoid_completion(&prepared).is_ok(),
+                "{prepared:?}"
+            );
+            let again = prepared_native_module(&prepared).into_owned();
+            assert_eq!(again, prepared);
+        }
+        for source in [
+            "struct Row{x:i64} fn Row()->i64{0} fn main()->i64{let row=Row{x:42};match row{Row{x:value}=>value}}",
+            "fn main()->i64 { let f=|| {let pair=(20,22.0);match pair {(a,b)=>a+b as i64}};f() }",
+            "struct Point { x:i64,y:i64 } fn main()->i64 { let f=|| { let p=Point{x:20,y:22}; match p { Point{x:a,y:b}=>a+b } }; f() }",
+        ] {
+            let original = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let prepared = prepared_native_module(&original).into_owned();
+            assert!(
+                crate::core_ir_verifier::check_nonvoid_completion(&prepared).is_ok(),
+                "{prepared:?}"
+            );
+        }
+        let mut invalid = crate::in_lang_parse::parse_in_source(
+            "fn main()->Int{match 20{20 if false{return 42;}_ {let x:Int=0;}}}",
+        )
+        .unwrap();
+        lower_guarded_decls(&mut invalid.decls);
+        assert!(crate::core_ir_verifier::check_nonvoid_completion(&invalid).is_err());
     }
 
     #[test]

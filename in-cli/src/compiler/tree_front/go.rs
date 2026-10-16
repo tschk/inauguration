@@ -1,4 +1,4 @@
-use super::extract::{AstShape, ast_body, first_named, node_txt};
+use super::extract::{AstShape, ast_defined_body, first_named, node_txt};
 use crate::core_ir::{Stmt, Typ};
 use tree_sitter::Node;
 
@@ -67,7 +67,7 @@ pub(super) fn go_params(src: &[u8], func: Node<'_>) -> Vec<(String, Typ)> {
 }
 
 pub(super) fn go_body(src: &[u8], body: Node<'_>) -> Vec<Stmt> {
-    ast_body(src, body, GO_AST)
+    ast_defined_body(src, body, GO_AST)
 }
 
 pub(super) fn go_return_type(src: &[u8], func: Node<'_>) -> Option<Typ> {

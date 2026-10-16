@@ -9,6 +9,7 @@ pub(crate) const FIELD_MODIFY_VALUE_FIRST: &str = "#field-modify-value-first";
 pub(crate) const MODIFY_VALUE_FIRST: &str = "#modify-value-first";
 pub(crate) const ARRAY_REPEAT: &str = "#array-repeat";
 pub(crate) const FIELD_MODIFY_PLACE_FIRST: &str = "#field-modify-place-first";
+pub(crate) const UNSUPPORTED_DEFINED_BODY: &str = "#unsupported-defined-body";
 pub(crate) const RUST_EXPRESSION_DEPTH: &str = "#unsupported-rust-expression-depth";
 pub(crate) const RUST_ASSIGNMENT_TARGET: &str = "#unsupported-rust-assignment-target";
 pub(crate) const RUST_COMPOUND_ASSIGNMENT_TARGET: &str =
@@ -20,6 +21,8 @@ pub(crate) const RUST_DECL_ORIGIN: &str = "#rust-declaration-origin";
 /// Compiler-generated output never resolves through source-language bindings.
 pub(crate) const COMPILER_PRINT: &str = "#print";
 pub(crate) const COMPILER_PRINT_INT: &str = "#print_int";
+/// A compiler-proven unreachable path aborts instead of inventing a result.
+pub(crate) const COMPILER_UNREACHABLE: &str = "#unreachable";
 pub(crate) fn compiler_print_callee(name: &str) -> Option<&'static str> {
     match name {
         COMPILER_PRINT => Some("print"),
@@ -44,6 +47,7 @@ pub(crate) fn legacy_compiler_callee(name: &str) -> Option<&'static str> {
 
 pub(crate) fn is_compiler_callee(name: &str) -> bool {
     compiler_print_callee(name).is_some()
+        || name == COMPILER_UNREACHABLE
         || tuples::is_marker(name)
         || matches!(
             name,
@@ -57,6 +61,7 @@ pub(crate) fn is_compiler_callee(name: &str) -> bool {
         || name == RUST_ASSIGNMENT_TARGET
         || name == RUST_COMPOUND_ASSIGNMENT_TARGET
         || name == RUST_EXPRESSION_DEPTH
+        || name == UNSUPPORTED_DEFINED_BODY
         || name == FIELD_MODIFY_PLACE_FIRST
         || name == INLINE_CONST
         || name == BORROW

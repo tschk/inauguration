@@ -1,5 +1,6 @@
 use super::extract::{
-    AstShape, ast_body, extract_fn_nodes, first_named, named_descendant, node_txt, normalize_entry,
+    AstShape, ast_defined_body, extract_fn_nodes, first_named, named_descendant, node_txt,
+    normalize_entry,
 };
 use crate::core_ir::{Decl, Stmt, Typ};
 use tree_sitter::Node;
@@ -115,7 +116,7 @@ fn dart_params<'a>(src: &[u8], plist: Node<'a>) -> Vec<(String, Typ)> {
 }
 
 fn dart_body(src: &[u8], body: Node<'_>) -> Vec<Stmt> {
-    ast_body(src, body, DART_AST)
+    ast_defined_body(src, body, DART_AST)
 }
 
 // ─── Swift ────────────────────────────────────────────────────────────

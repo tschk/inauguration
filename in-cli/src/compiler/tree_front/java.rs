@@ -1,5 +1,6 @@
 use super::extract::{
-    AstShape, ast_body, collect_kinds, first_named, named_descendant, node_txt, normalize_entry,
+    AstShape, ast_body, ast_defined_body, collect_kinds, first_named, named_descendant, node_txt,
+    normalize_entry,
 };
 use crate::core_ir::{Decl, MethodSig, Stmt, Typ, Visibility};
 use tree_sitter::Node;
@@ -301,7 +302,7 @@ fn java_method<'a>(src: &[u8], m: Node<'a>) -> Option<Decl> {
     let params = java_formals(src, fp);
     let body = m
         .child_by_field_name("body")
-        .map(|b| java_body(src, b))
+        .map(|b| ast_defined_body(src, b, JAVA_AST))
         .unwrap_or_default();
     Some(Decl::Function {
         name,

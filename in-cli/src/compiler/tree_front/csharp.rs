@@ -1,4 +1,6 @@
-use super::extract::{AstShape, ast_body, collect_kinds, first_named, node_txt, normalize_entry};
+use super::extract::{
+    AstShape, ast_defined_body, collect_kinds, first_named, node_txt, normalize_entry,
+};
 use crate::core_ir::{Decl, MethodSig, Stmt, Typ, Visibility};
 use tree_sitter::Node;
 
@@ -208,5 +210,5 @@ fn csharp_params<'a>(src: &[u8], plist: Node<'a>) -> Vec<(String, Typ)> {
 }
 
 fn csharp_body(src: &[u8], body: Node<'_>) -> Vec<Stmt> {
-    ast_body(src, body, CSHARP_AST)
+    ast_defined_body(src, body, CSHARP_AST)
 }

@@ -2413,6 +2413,44 @@ fn main()->Int{#print(argument());#print_int(7);#print("\n");return print("ignor
     }
 
     #[test]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    fn native_c_main_preserves_implicit_zero_and_explicit_returns() {
+        use crate::{core_opt, emit_profile::EmitProfile, parser_registry::ParserId};
+        let directory =
+            std::env::temp_dir().join(format!("in-c-main-return-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        for parser in [ParserId::C, ParserId::Cpp] {
+            let path = directory.join(format!("main.{}", parser.default_extension()));
+            for (source, expected) in [
+                ("int main(void) {}", 0),
+                ("int main(void) { int value = 7; }", 0),
+                ("int flag=0; int main(void) { if(flag) { return 42; } }", 0),
+                ("int flag=1; int main(void) { if(flag) { return 42; } }", 42),
+            ] {
+                std::fs::write(&path, source).unwrap();
+                let parsed =
+                    crate::compiler::tree_front::parse_polyglot_file(parser, &path).unwrap();
+                for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                    let mut module = crate::typecheck::normalize_module(parser, &parsed);
+                    crate::lower_core::desugar_module(&mut module);
+                    assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+                    core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                    crate::core_ir_verifier::check_nonvoid_completion(&module).unwrap_or_else(
+                        |error| panic!("{parser:?} {profile:?}: {source}: {error}: {module:?}"),
+                    );
+                    let runtime = runtime_for_module(&module, profile);
+                    assert_eq!(
+                        unsafe { runtime.invoke("main", &[]) },
+                        Some(expected),
+                        "{parser:?} {profile:?}: {source}"
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn nim_result_storage_and_numeric_tails_execute_across_profiles() {
         use crate::emit_profile::EmitProfile;

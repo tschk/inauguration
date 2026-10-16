@@ -3301,3 +3301,37 @@ fn array_binding_replacement_preserves_earlier_aliases() {
         }
     }
 }
+
+// Append to native_emit/lower/lower_tests.rs; no execution of trap bodies needed.
+#[test]
+fn unsupported_exhaustive_rust_helper_keeps_explicit_degradation_not_missing_return() {
+    let parsed = crate::compiler::rust_front::parse_rust_source(
+        "fn helper(left:Option<i64>,right:Option<i64>)->i64{match(left,right){(Some(_),Some(_))=>1,(Some(value),None)|(None,Some(value))=>value,(None,None)=>0}} fn main()->i64{42}"
+    ).unwrap();
+    let mut module =
+        crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+    crate::lower_core::desugar_module(&mut module);
+    for jobs in [1, 2] {
+        let lowered =
+            lower_module_with_jobs(&module, "main", NativeLinkage::Executable, jobs).unwrap();
+        assert!(
+            lowered
+                .degradations
+                .iter()
+                .any(|degradation| degradation.function == "helper" && !degradation.reachable)
+        );
+    }
+}
+#[test]
+fn supported_partial_return_helper_is_not_hidden_as_a_degradation() {
+    let module = crate::in_lang_parse::parse_in_source(
+        "fn helper(value:Bool)->Int{if value{return 42;}}fn main()->Int{return 42;}",
+    )
+    .unwrap();
+    for jobs in [1, 2] {
+        let error =
+            lower_module_with_jobs(&module, "main", NativeLinkage::Executable, jobs).unwrap_err();
+        assert!(error.starts_with("missing-return:"), "{error}");
+        assert!(error.contains("helper"), "{error}");
+    }
+}

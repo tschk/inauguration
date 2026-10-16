@@ -55,6 +55,8 @@ pub fn verify_module(module: &UnifiedModule, options: &VerifyOptions) -> VerifyR
         }
     }
 
+    let completion = CompletionContext::new(module, &facts);
+
     for decl in &module.decls {
         if let Decl::Global {
             name,
@@ -99,16 +101,14 @@ pub fn verify_module(module: &UnifiedModule, options: &VerifyOptions) -> VerifyR
                 return fail_report(parsed_function_count, call_edges, &code, reason);
             }
 
-            if canonical_type(ret) != Typ::Void && body.is_empty() {
-                // ponytail: package externs and polyfills have empty bodies with non-void returns;
-                // they're satisfied at link time by adapter invoke specs. Skip the empty-body check.
-            }
-
             let mut env: HashMap<String, Typ> = params.iter().cloned().collect();
             if let Err((code, reason)) =
                 check_stmts(name, body, &facts, ret, &mut env, &mut call_edges, 0)
             {
                 return fail_report(parsed_function_count, call_edges, &code, reason);
+            }
+            if let Some(reason) = completion.missing_return(decl) {
+                return fail_report(parsed_function_count, call_edges, "missing-return", reason);
             }
         }
     }
@@ -207,6 +207,7 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("invoke_native2", IntrinsicRet::Int),
     (crate::core_ir::COMPILER_PRINT, IntrinsicRet::Void),
     (crate::core_ir::COMPILER_PRINT_INT, IntrinsicRet::Void),
+    (crate::core_ir::COMPILER_UNREACHABLE, IntrinsicRet::Void),
     ("print", IntrinsicRet::Void),
     ("print-int", IntrinsicRet::Void),
     ("display", IntrinsicRet::String),
@@ -377,6 +378,7 @@ pub(crate) fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
         return intrinsic_param_types(public);
     }
     match name {
+        crate::core_ir::COMPILER_UNREACHABLE => return Some(&[]),
         "__inrt_array_len" => return Some(&[Typ::Int]),
         crate::inrt::INRT_VECTOR_CLONE => return Some(&[Typ::Int, Typ::Int, Typ::Int]),
         crate::inrt::INRT_VECTOR_EXTEND => return Some(&[Typ::Int, Typ::Int, Typ::Int, Typ::Int]),
@@ -454,6 +456,21 @@ fn check_and_insert_top_level<'a>(
 
 fn collect_module_facts(module: &UnifiedModule) -> Result<ModuleFacts<'_>, (String, String)> {
     let mut top_level = HashSet::new();
+    for declaration in &module.decls {
+        match declaration {
+            Decl::Struct { name, .. }
+            | Decl::Class { name, .. }
+            | Decl::Function { name, .. }
+            | Decl::Global { name, .. } => check_and_insert_top_level(&mut top_level, name)?,
+            _ => {}
+        }
+    }
+    Ok(module_type_facts(module))
+}
+
+// Completion consumes type facts, not full namespace validation. Raw backend
+// compile-only paths deliberately retain Rust's separate type/value namespaces.
+fn module_type_facts(module: &UnifiedModule) -> ModuleFacts<'_> {
     let mut functions = HashMap::new();
     let mut declared_functions = HashSet::new();
     let mut structs = HashMap::new();
@@ -464,18 +481,15 @@ fn collect_module_facts(module: &UnifiedModule) -> Result<ModuleFacts<'_>, (Stri
     for decl in &module.decls {
         match decl {
             Decl::Struct { name, fields, .. } => {
-                check_and_insert_top_level(&mut top_level, name.as_str())?;
                 structs.insert(name.as_str(), fields.as_slice());
             }
             Decl::Class { name, fields, .. } => {
                 // Register class fields as struct schema for verification
-                check_and_insert_top_level(&mut top_level, name.as_str())?;
                 structs.insert(name.as_str(), fields.as_slice());
             }
             Decl::Function {
                 name, params, ret, ..
             } => {
-                check_and_insert_top_level(&mut top_level, name.as_str())?;
                 functions.insert(name.as_str(), FunctionSig { params, ret });
                 declared_functions.insert(name.as_str());
             }
@@ -484,7 +498,6 @@ fn collect_module_facts(module: &UnifiedModule) -> Result<ModuleFacts<'_>, (Stri
             Decl::Global {
                 name, typ, mutable, ..
             } => {
-                check_and_insert_top_level(&mut top_level, name.as_str())?;
                 globals.insert(
                     name.as_str(),
                     GlobalSig {
@@ -496,12 +509,629 @@ fn collect_module_facts(module: &UnifiedModule) -> Result<ModuleFacts<'_>, (Stri
         }
     }
 
-    Ok(ModuleFacts {
+    ModuleFacts {
         functions,
         declared_functions,
         structs,
         globals,
-    })
+    }
+}
+
+// Completion outcomes are compositional: a loop jump is not a function return,
+// and a return hidden in an unexecuted closure is not an enclosing return.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Completion(u8);
+impl Completion {
+    const NORMAL: Self = Self(1);
+    const RETURN: Self = Self(2);
+    const THROW: Self = Self(4);
+    const BREAK: Self = Self(8);
+    const CONTINUE: Self = Self(16);
+    const DIVERGE: Self = Self(0);
+    fn has(self, outcome: Self) -> bool {
+        self.0 & outcome.0 != 0
+    }
+    fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+    fn without(self, outcome: Self) -> Self {
+        Self(self.0 & !outcome.0)
+    }
+    fn then(self, next: Self) -> Self {
+        if self.has(Self::NORMAL) {
+            self.without(Self::NORMAL).union(next)
+        } else {
+            self
+        }
+    }
+}
+
+struct CompletionContext<'a, 'm> {
+    facts: &'a ModuleFacts<'m>,
+    fallible: HashSet<String>,
+    calls: HashMap<String, Completion>,
+}
+
+impl<'a, 'm> CompletionContext<'a, 'm> {
+    fn new(module: &UnifiedModule, facts: &'a ModuleFacts<'m>) -> Self {
+        let fallible = crate::core_effects::fallible_functions(module.decls.iter().filter_map(
+            |decl| match decl {
+                Decl::Function {
+                    name,
+                    body,
+                    ret,
+                    params,
+                    ..
+                } => Some((name.as_str(), body.as_slice(), ret, params.as_slice())),
+                _ => None,
+            },
+        ));
+        let mut context = Self {
+            facts,
+            fallible,
+            calls: HashMap::new(),
+        };
+        for declaration in &module.decls {
+            if let Decl::Function { name, body, .. } = declaration
+                && !body.is_empty()
+            {
+                context
+                    .calls
+                    .insert(name.clone(), Completion::NORMAL.union(Completion::THROW));
+            }
+        }
+        // Start with both possible exits. Refine only from actual defined
+        // bodies, leaving unknown recursion/extern calls conservative.
+        loop {
+            let before = context.calls.clone();
+            for declaration in &module.decls {
+                if let Decl::Function {
+                    name, params, body, ..
+                } = declaration
+                    && !body.is_empty()
+                {
+                    let flow =
+                        completion_body(body, &mut params.iter().cloned().collect(), &context);
+                    let mut call = flow
+                        .without(Completion::NORMAL)
+                        .without(Completion::RETURN)
+                        .without(Completion::BREAK)
+                        .without(Completion::CONTINUE);
+                    if flow.has(Completion::NORMAL)
+                        || flow.has(Completion::RETURN)
+                        || flow.has(Completion::BREAK)
+                        || flow.has(Completion::CONTINUE)
+                    {
+                        call = call.union(Completion::NORMAL);
+                    }
+                    // Prologue/ABI/payload checks can fail before a syntactically
+                    // returning body. Refine Normal only; retain known fallibility.
+                    if context.fallible.contains(name) {
+                        call = call.union(Completion::THROW);
+                    }
+                    context.calls.insert(name.clone(), call);
+                }
+            }
+            if context.calls == before {
+                break;
+            }
+        }
+        context
+    }
+
+    fn missing_return(&self, decl: &Decl) -> Option<String> {
+        let Decl::Function {
+            name,
+            params,
+            ret,
+            body,
+            ..
+        } = decl
+        else {
+            return None;
+        };
+        self.missing_return_parts(name, params, ret, body)
+    }
+
+    fn missing_return_parts(
+        &self,
+        name: &str,
+        params: &[(String, Typ)],
+        ret: &Typ,
+        body: &[Stmt],
+    ) -> Option<String> {
+        // [] is the established external-declaration representation.
+        if canonical_type(ret) != Typ::Void
+            && !body.is_empty()
+            && completion_body(body, &mut params.iter().cloned().collect(), self)
+                .has(Completion::NORMAL)
+        {
+            Some(format!(
+                "non-void function `{name}` can reach its end without a return value"
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+/// Preserve a proven non-fallthrough boundary before control-flow lowering
+/// replaces exhaustive matches with independent linear gates.
+pub(crate) fn preserve_nonvoid_completion(decls: &mut [Decl]) {
+    let module = UnifiedModule::new(decls.to_vec());
+    let facts = module_type_facts(&module);
+    let context = CompletionContext::new(&module, &facts);
+    fn preserve(decls: &mut [Decl], context: &CompletionContext<'_, '_>) {
+        for decl in decls {
+            match decl {
+                Decl::Function {
+                    params, ret, body, ..
+                } if canonical_type(ret) != Typ::Void && !body.is_empty() => {
+                    let mut env = params.iter().cloned().collect();
+                    if !completion_body(body, &mut env, context).has(Completion::NORMAL)
+                        && !matches!(body.last(), Some(Stmt::Expr(Expr::Call {callee, args}))
+                            if args.is_empty() && matches!(callee.as_ref(), Expr::Ident(name)
+                                if name == crate::core_ir::COMPILER_UNREACHABLE))
+                    {
+                        body.push(Stmt::Expr(Expr::Call {
+                            callee: Box::new(Expr::Ident(
+                                crate::core_ir::COMPILER_UNREACHABLE.into(),
+                            )),
+                            args: vec![],
+                        }));
+                    }
+                }
+                Decl::Class { methods, .. } => preserve(methods, context),
+                _ => {}
+            }
+        }
+    }
+    preserve(decls, &context);
+}
+
+/// Retain a source completion proof only where lowering actually loses it.
+/// Declaration order and signatures are unchanged by match preparation.
+pub(crate) fn preserve_nonvoid_completion_after(original: &[Decl], lowered: &mut [Decl]) {
+    // Unchanged declarations cannot lose a completion proof.
+    if original == lowered {
+        return;
+    }
+    let source = UnifiedModule::new(original.to_vec());
+    let target = UnifiedModule::new(lowered.to_vec());
+    let source_facts = module_type_facts(&source);
+    let target_facts = module_type_facts(&target);
+    let source_context = CompletionContext::new(&source, &source_facts);
+    let target_context = CompletionContext::new(&target, &target_facts);
+    fn preserve(
+        original: &[Decl],
+        lowered: &mut [Decl],
+        source: &CompletionContext<'_, '_>,
+        target: &CompletionContext<'_, '_>,
+    ) {
+        for (original, lowered) in original.iter().zip(lowered) {
+            match (original, lowered) {
+                (
+                    Decl::Function {
+                        name: old_name,
+                        params: old_params,
+                        ret: old_ret,
+                        body: old_body,
+                        ..
+                    },
+                    Decl::Function {
+                        name,
+                        params,
+                        ret,
+                        body,
+                        ..
+                    },
+                ) if old_name.as_str() == name.as_str()
+                    && old_params.as_slice() == params.as_slice()
+                    && old_ret == &*ret
+                    && canonical_type(ret) != Typ::Void
+                    && !old_body.is_empty()
+                    && old_body.as_slice() != body.as_slice() =>
+                {
+                    let mut source_env = old_params.iter().cloned().collect();
+                    let mut target_env = params.iter().cloned().collect();
+                    if !completion_body(old_body, &mut source_env, source).has(Completion::NORMAL)
+                        && completion_body(body, &mut target_env, target).has(Completion::NORMAL)
+                    {
+                        body.push(Stmt::Expr(Expr::Call {
+                            callee: Box::new(Expr::Ident(
+                                crate::core_ir::COMPILER_UNREACHABLE.into(),
+                            )),
+                            args: vec![],
+                        }));
+                    }
+                }
+                (
+                    Decl::Class {
+                        name: old_name,
+                        methods: old_methods,
+                        ..
+                    },
+                    Decl::Class { name, methods, .. },
+                ) if old_name.as_str() == name.as_str() => {
+                    preserve(old_methods, methods, source, target)
+                }
+                _ => {}
+            }
+        }
+    }
+    preserve(original, lowered, &source_context, &target_context);
+}
+
+/// Raw native APIs share the normal-completion invariant with verified callers.
+pub(crate) fn check_nonvoid_completion(module: &UnifiedModule) -> Result<(), String> {
+    check_nonvoid_completion_for(
+        module,
+        module.decls.iter().filter_map(|decl| match decl {
+            Decl::Function {
+                name,
+                params,
+                ret,
+                body,
+                ..
+            } => Some((name.as_str(), params.as_slice(), ret, body.as_slice())),
+            _ => None,
+        }),
+    )
+}
+
+/// Validate the exact definitions retained by a backend after unsupported-body
+/// refusal. Omitted definitions must use that backend's existing trap/refusal path.
+pub(crate) fn check_nonvoid_completion_for<'a>(
+    module: &UnifiedModule,
+    functions: impl IntoIterator<Item = (&'a str, &'a [(String, Typ)], &'a Typ, &'a [Stmt])>,
+) -> Result<(), String> {
+    let facts = module_type_facts(module);
+    let completion = CompletionContext::new(module, &facts);
+    for (name, params, ret, body) in functions {
+        if let Some(reason) = completion.missing_return_parts(name, params, ret, body) {
+            return Err(format!("missing-return: {reason}"));
+        }
+    }
+    Ok(())
+}
+
+fn completion_body(
+    body: &[Stmt],
+    env: &mut HashMap<String, Typ>,
+    context: &CompletionContext<'_, '_>,
+) -> Completion {
+    let mut flow = Completion::NORMAL;
+    for statement in body {
+        if !flow.has(Completion::NORMAL) {
+            break;
+        }
+        let next = completion_stmt(statement, env, context);
+        flow = flow.then(next);
+    }
+    flow
+}
+
+fn completion_branch(
+    cond: &Expr,
+    then_flow: impl FnOnce() -> Completion,
+    else_flow: impl FnOnce() -> Completion,
+) -> Completion {
+    match cond {
+        Expr::BoolLit(true) => then_flow(),
+        Expr::BoolLit(false) => else_flow(),
+        _ => then_flow().union(else_flow()),
+    }
+}
+
+fn completion_stmt(
+    statement: &Stmt,
+    env: &mut HashMap<String, Typ>,
+    context: &CompletionContext<'_, '_>,
+) -> Completion {
+    match statement {
+        Stmt::Let(name, annotation, value) => {
+            let flow = completion_expr(value, env, context);
+            if let Some(typ) = annotation
+                .clone()
+                .or_else(|| expr_type(value, context.facts, env))
+            {
+                env.insert(name.clone(), typ);
+            }
+            flow
+        }
+        Stmt::Assign(_, value) | Stmt::Expr(value) => completion_expr(value, env, context),
+        Stmt::FieldAssign { base, value, .. } => completion_place(base, env, context)
+            .then(completion_expr(value, env, context))
+            .then(Completion::NORMAL.union(Completion::THROW)),
+        Stmt::IndexAssign { base, index, value } => completion_expr(base, env, context)
+            .then(completion_expr(index, env, context))
+            .then(completion_expr(value, env, context))
+            .then(Completion::NORMAL.union(Completion::THROW)),
+        Stmt::Return(value) => value
+            .as_ref()
+            .map_or(Completion::NORMAL, |value| {
+                completion_expr(value, env, context)
+            })
+            .then(Completion::RETURN),
+        Stmt::Throw(value) => completion_expr(value, env, context).then(Completion::THROW),
+        Stmt::Propagate => Completion::NORMAL.union(Completion::THROW),
+        Stmt::Break => Completion::BREAK,
+        Stmt::Continue => Completion::CONTINUE,
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => completion_expr(cond, env, context).then(completion_branch(
+            cond,
+            || completion_body(then_body, &mut env.clone(), context),
+            || completion_body(else_body, &mut env.clone(), context),
+        )),
+        Stmt::Loop { kind, cond, body } => {
+            // For loops may run zero times. While/Infinite lowering uses the
+            // actual optional condition, not the LoopKind label, for its exit.
+            let condition = cond.as_ref().map_or(Completion::NORMAL, |value| {
+                completion_expr(value, env, context)
+            });
+            if matches!(cond, Some(Expr::BoolLit(false))) {
+                return condition;
+            }
+            let body = completion_body(body, &mut env.clone(), context);
+            let can_exit = matches!(kind, crate::core_ir::LoopKind::For { .. })
+                || !matches!(cond, None | Some(Expr::BoolLit(true)))
+                || body.has(Completion::BREAK);
+            let iterations = body
+                .without(Completion::NORMAL)
+                .without(Completion::BREAK)
+                .without(Completion::CONTINUE);
+            condition.then(if can_exit {
+                iterations.union(Completion::NORMAL)
+            } else {
+                iterations
+            })
+        }
+        Stmt::Match { scrutinee, arms } => {
+            completion_expr(scrutinee, env, context).then(completion_match(
+                scrutinee,
+                arms.iter().map(|arm| {
+                    (
+                        arm.pattern.as_str(),
+                        arm.guard.as_ref(),
+                        CompletionArm::Body(&arm.body),
+                    )
+                }),
+                env,
+                context,
+            ))
+        }
+        Stmt::Try { body, catches } => {
+            let body = completion_body(body, &mut env.clone(), context);
+            if !body.has(Completion::THROW) {
+                return body;
+            }
+            let mut flow = body.without(Completion::THROW);
+            let mut uncaught = true;
+            for catch in catches {
+                if !uncaught {
+                    break;
+                }
+                let mut catch_env = env.clone();
+                if let Ok(pattern) = crate::core_ir::MatchPattern::parse(&catch.pattern) {
+                    if let crate::core_ir::MatchPattern::IdentPat(name) = &pattern {
+                        catch_env.insert(name.clone(), Typ::Named("Any".into()));
+                    }
+                    uncaught = !matches!(
+                        pattern,
+                        crate::core_ir::MatchPattern::WildPat
+                            | crate::core_ir::MatchPattern::IdentPat(_)
+                    );
+                }
+                flow = flow.union(completion_body(&catch.body, &mut catch_env, context));
+            }
+            if uncaught {
+                flow = flow.union(Completion::THROW);
+            }
+            flow
+        }
+    }
+}
+
+// Field stores stage an addressable place, not a whole record read. In
+// particular an indexed receiver's bounds/payload check follows its RHS;
+// source RHS-first operations have already staged their value in prefixes.
+fn completion_place(
+    value: &Expr,
+    env: &HashMap<String, Typ>,
+    context: &CompletionContext<'_, '_>,
+) -> Completion {
+    match value {
+        Expr::Ident(_) => Completion::NORMAL,
+        Expr::Field { base, .. } => completion_place(base, env, context),
+        Expr::Index { base, index } => {
+            completion_expr(base, env, context).then(completion_expr(index, env, context))
+        }
+        _ => completion_expr(value, env, context),
+    }
+}
+
+enum CompletionArm<'a> {
+    Body(&'a [Stmt]),
+    Value(&'a Expr),
+}
+
+fn completion_match<'a>(
+    scrutinee: &Expr,
+    arms: impl IntoIterator<Item = (&'a str, Option<&'a Expr>, CompletionArm<'a>)>,
+    env: &HashMap<String, Typ>,
+    context: &CompletionContext<'_, '_>,
+) -> Completion {
+    let typ = expr_type(scrutinee, context.facts, env).unwrap_or(Typ::Named("Any".into()));
+    let schema = |name: &str| context.facts.structs.get(name).copied();
+    let mut flow = Completion::DIVERGE;
+    let mut pending = true;
+    let mut bools = [false; 2];
+    for (source_pattern, guard, body) in arms {
+        if !pending {
+            break;
+        }
+        // Shape/type validation already ran in check_stmt/check_expr. A failed
+        // lookup here only makes completion conservative, never exhaustive.
+        let pattern = crate::core_ir::MatchPattern::parse(source_pattern).ok();
+        let mut arm_env = env.clone();
+        if let Some(pattern) = &pattern
+            && let Ok(bindings) = pattern.typed_bindings(&typ, &schema)
+        {
+            arm_env.extend(bindings);
+        }
+        let guard_flow = guard.map_or(Completion::NORMAL, |guard| {
+            completion_expr(guard, &arm_env, context)
+        });
+        let selected = if matches!(guard, Some(Expr::BoolLit(false))) {
+            Completion::DIVERGE
+        } else {
+            match body {
+                CompletionArm::Body(body) => completion_body(body, &mut arm_env, context),
+                CompletionArm::Value(value) => completion_expr(value, &arm_env, context),
+            }
+        };
+        flow = flow.union(guard_flow.without(Completion::NORMAL));
+        if guard_flow.has(Completion::NORMAL) {
+            flow = flow.union(selected);
+        }
+        if guard.is_none()
+            || matches!(guard, Some(Expr::BoolLit(true)))
+            || !guard_flow.has(Completion::NORMAL)
+        {
+            if let Some(pattern) = &pattern {
+                if pattern.irrefutable(&typ, &schema)
+                    || matches!(pattern, crate::core_ir::MatchPattern::ArrayPat(items)
+                        if matches!(typ.canonical(), Typ::Array(_) | Typ::Vector(_))
+                            && matches!(items.as_slice(), [crate::core_ir::MatchPattern::RestPat]))
+                {
+                    pending = false;
+                }
+                if typ.canonical() == Typ::Bool
+                    && let crate::core_ir::MatchPattern::BoolPat(value) = pattern
+                {
+                    bools[usize::from(*value)] = true;
+                    if bools.into_iter().all(|covered| covered) {
+                        pending = false;
+                    }
+                }
+            }
+        }
+    }
+    if pending {
+        flow = flow.union(Completion::NORMAL);
+    }
+    flow
+}
+
+fn completion_expr(
+    value: &Expr,
+    env: &HashMap<String, Typ>,
+    context: &CompletionContext<'_, '_>,
+) -> Completion {
+    match value {
+        Expr::Closure { .. } => Completion::NORMAL,
+        Expr::Block { body, result } => {
+            let mut local = env.clone();
+            completion_body(body, &mut local, context).then(
+                result.as_ref().map_or(Completion::NORMAL, |value| {
+                    completion_expr(value, &local, context)
+                }),
+            )
+        }
+        Expr::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => completion_expr(cond, env, context).then(completion_branch(
+            cond,
+            || completion_expr(then_expr, env, context),
+            || completion_expr(else_expr, env, context),
+        )),
+        Expr::MatchValue { scrutinee, arms } => {
+            completion_expr(scrutinee, env, context).then(completion_match(
+                scrutinee,
+                arms.iter().map(|arm| {
+                    (
+                        arm.pattern.as_str(),
+                        arm.guard.as_ref(),
+                        CompletionArm::Value(&arm.value),
+                    )
+                }),
+                env,
+                context,
+            ))
+        }
+        Expr::Binary { op, lhs, rhs } if matches!(op.trim(), "&&" | "||" | "and" | "or") => {
+            let right = || completion_expr(rhs, env, context);
+            let skipped = || Completion::NORMAL;
+            completion_expr(lhs, env, context).then(if matches!(op.trim(), "&&" | "and") {
+                completion_branch(lhs, right, skipped)
+            } else {
+                completion_branch(lhs, skipped, right)
+            })
+        }
+        _ => {
+            let mut flow = Completion::NORMAL;
+            crate::core_ir::for_each_expr_child(value, &mut |child| {
+                flow = flow.then(completion_expr(child, env, context));
+            });
+            if matches!(value, Expr::Call { callee, .. }
+                if matches!(callee.as_ref(), Expr::Ident(name)
+                    if name == crate::core_ir::COMPILER_UNREACHABLE
+                        || name == crate::inrt::INRT_TRAP_BUILTIN
+                        && !env.contains_key(name)
+                        && !context.facts.globals.contains_key(name.as_str())
+                        && !context.facts.declared_functions.contains(name.as_str())))
+            {
+                return flow.then(Completion::DIVERGE);
+            }
+            if let Expr::Call { callee, .. } = value
+                && let Expr::Ident(name) = callee.as_ref()
+                && !env.contains_key(name)
+                && !context.facts.globals.contains_key(name.as_str())
+                && let Some(completion) = context.calls.get(name).or_else(|| {
+                    // An exact bodyless declaration still owns this spelling;
+                    // it must not inherit another function's no-return proof.
+                    (!context.facts.declared_functions.contains(name.as_str()))
+                        .then(|| context.calls.get(&name.replace('_', "-")))
+                        .flatten()
+                })
+            {
+                return flow.then(*completion);
+            }
+            let may_throw = match value {
+                Expr::Call { callee, .. } => match callee.as_ref() {
+                    Expr::Ident(name) => {
+                        env.contains_key(name)
+                            || context.fallible.contains(name)
+                            || context.fallible.contains(&name.replace('_', "-"))
+                            || (matches!(name.as_str(), "invoke" | "invoke1" | "invoke2")
+                                && !context.facts.declared_functions.contains(name.as_str()))
+                    }
+                    _ => true,
+                },
+                // Checked operations may exit through the language error path;
+                // retain catch fallthrough even when the success path returns.
+                Expr::Index { .. } | Expr::Field { .. } | Expr::StructInit { .. } => true,
+                Expr::Binary { op, lhs, rhs } => {
+                    crate::core_effects::checked_binary_operation(op)
+                        && ![lhs, rhs].into_iter().any(|operand| {
+                            expr_type(operand, context.facts, env).map(|typ| typ.canonical())
+                                == Some(Typ::Float)
+                        })
+                }
+                _ => false,
+            };
+            flow.then(if may_throw {
+                Completion::NORMAL.union(Completion::THROW)
+            } else {
+                Completion::NORMAL
+            })
+        }
+    }
 }
 
 fn check_duplicate_param_names(
@@ -1709,6 +2339,544 @@ fn canonical_type(typ: &Typ) -> Typ {
 mod tests {
     use super::*;
     #[test]
+    fn private_unreachable_is_a_reserved_zero_argument_terminator() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "fn __inrt_unsupported_trap()->Void{return;}fn main()->Int{#unreachable();}",
+        )
+        .unwrap();
+        assert!(verify_for_entry(&module, "main").ok);
+        for source in [
+            "fn main()->Int{#unreachable(42);}",
+            "fn #unreachable()->Void{return;}fn main()->Int{return 42;}",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            assert!(!verify_for_entry(&module, "main").ok, "{source}");
+        }
+    }
+
+    #[test]
+    fn nonvoid_definitions_require_no_normal_completion_but_externs_and_void_do_not() {
+        for ret in [
+            Typ::Int,
+            Typ::Float,
+            Typ::Bool,
+            Typ::String,
+            Typ::Array(Box::new(Typ::Int)),
+        ] {
+            let report = verify_for_entry(
+                &module(vec![function_with_ret(
+                    "main",
+                    ret.clone(),
+                    vec![Stmt::Expr(Expr::IntLit(42))],
+                )]),
+                "main",
+            );
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("missing-return"),
+                "{ret:?}"
+            );
+            assert!(
+                verify_for_entry(
+                    &module(vec![function_with_ret("main", ret, vec![])]),
+                    "main"
+                )
+                .ok
+            );
+        }
+        assert!(
+            verify_for_entry(
+                &module(vec![function("main", vec![Stmt::Expr(Expr::IntLit(42))])]),
+                "main"
+            )
+            .ok
+        );
+        let returned = Stmt::Return(Some(Expr::IntLit(42)));
+        let hidden = Expr::Closure {
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![returned],
+            captures: vec![],
+        };
+        let report = verify_for_entry(
+            &module(vec![function_with_ret(
+                "main",
+                Typ::Int,
+                vec![Stmt::Let("hidden".into(), None, hidden)],
+            )]),
+            "main",
+        );
+        assert_eq!(report.reason_code.as_deref(), Some("missing-return"));
+    }
+
+    #[test]
+    fn in_front_preserves_empty_definition_vs_bodyless_external_before_completion() {
+        let empty = crate::in_lang_parse::parse_in_source("fn main()->Int{}").unwrap();
+        let report = verify_for_entry(&empty, "main");
+        assert_eq!(report.reason_code.as_deref(), Some("return-type-mismatch"));
+        let external = crate::in_lang_parse::parse_in_source(
+            "extern c fn external()->Int;\nfn main()->Int{return external();}",
+        )
+        .unwrap();
+        assert!(verify_for_entry(&external, "main").ok);
+    }
+
+    #[test]
+    fn completion_tracks_branches_and_loop_scopes_instead_of_any_return() {
+        let returned = || Stmt::Return(Some(Expr::IntLit(42)));
+        let flag = || Expr::Ident("flag".into());
+        let looped = |cond, body| Stmt::Loop {
+            kind: crate::core_ir::LoopKind::While,
+            cond,
+            body,
+        };
+        let cases = [
+            (
+                vec![Stmt::If {
+                    cond: flag(),
+                    then_body: vec![returned()],
+                    else_body: vec![],
+                }],
+                false,
+            ),
+            (
+                vec![Stmt::If {
+                    cond: flag(),
+                    then_body: vec![returned()],
+                    else_body: vec![returned()],
+                }],
+                true,
+            ),
+            (
+                vec![Stmt::If {
+                    cond: Expr::BoolLit(true),
+                    then_body: vec![returned()],
+                    else_body: vec![],
+                }],
+                true,
+            ),
+            (vec![looped(Some(Expr::BoolLit(true)), vec![])], true),
+            (vec![looped(None, vec![Stmt::Continue])], true),
+            (
+                vec![looped(Some(Expr::BoolLit(true)), vec![Stmt::Break])],
+                false,
+            ),
+            (vec![looped(Some(flag()), vec![returned()])], false),
+            (
+                vec![looped(Some(Expr::BoolLit(false)), vec![returned()])],
+                false,
+            ),
+            (
+                vec![looped(
+                    None,
+                    vec![Stmt::If {
+                        cond: flag(),
+                        then_body: vec![returned()],
+                        else_body: vec![Stmt::Continue],
+                    }],
+                )],
+                true,
+            ),
+            // The inner break exits only its own loop; the outer one still diverges.
+            (
+                vec![looped(None, vec![looped(None, vec![Stmt::Break])])],
+                true,
+            ),
+            (
+                vec![looped(
+                    None,
+                    vec![Stmt::If {
+                        cond: Expr::BoolLit(false),
+                        then_body: vec![Stmt::Break],
+                        else_body: vec![],
+                    }],
+                )],
+                true,
+            ),
+            (
+                vec![looped(Some(flag()), vec![Stmt::Break]), returned()],
+                true,
+            ),
+        ];
+        for (body, expected) in cases {
+            let report = verify_for_entry(
+                &module(vec![function_with_params(
+                    "main",
+                    vec![("flag".into(), Typ::Bool)],
+                    Typ::Int,
+                    body.clone(),
+                )]),
+                "main",
+            );
+            assert_eq!(report.ok, expected, "{body:?}: {report:?}");
+            if !expected {
+                assert_eq!(report.reason_code.as_deref(), Some("missing-return"));
+            }
+        }
+    }
+
+    #[test]
+    fn completion_tracks_ordered_exhaustive_match_guards_and_expression_exits() {
+        use crate::core_ir::{MatchArm, MatchValueArm};
+        let arm = |pattern: &str, guard, body| MatchArm {
+            pattern: pattern.into(),
+            guard,
+            body,
+        };
+        let returned = || Stmt::Return(Some(Expr::IntLit(42)));
+        let matched = |arms| Stmt::Match {
+            scrutinee: Expr::Ident("flag".into()),
+            arms,
+        };
+        for (body, expected) in [
+            (
+                vec![matched(vec![
+                    arm("true", None, vec![returned()]),
+                    arm("false", None, vec![returned()]),
+                ])],
+                true,
+            ),
+            (
+                vec![matched(vec![arm("true", None, vec![returned()])])],
+                false,
+            ),
+            (
+                vec![matched(vec![arm(
+                    "_",
+                    Some(Expr::Block {
+                        body: vec![returned()],
+                        result: Some(Box::new(Expr::BoolLit(false))),
+                    }),
+                    vec![],
+                )])],
+                true,
+            ),
+            (
+                vec![matched(vec![arm(
+                    "_",
+                    Some(Expr::Ident("flag".into())),
+                    vec![returned()],
+                )])],
+                false,
+            ),
+            (
+                vec![matched(vec![
+                    arm("_", None, vec![returned()]),
+                    arm("_", None, vec![]),
+                ])],
+                true,
+            ),
+            (
+                vec![Stmt::Expr(Expr::Block {
+                    body: vec![returned()],
+                    result: None,
+                })],
+                true,
+            ),
+            (
+                vec![Stmt::Expr(Expr::Conditional {
+                    cond: Box::new(Expr::Ident("flag".into())),
+                    then_expr: Box::new(Expr::Block {
+                        body: vec![returned()],
+                        result: None,
+                    }),
+                    else_expr: Box::new(Expr::Block {
+                        body: vec![returned()],
+                        result: None,
+                    }),
+                })],
+                true,
+            ),
+        ] {
+            let report = verify_for_entry(
+                &module(vec![function_with_params(
+                    "main",
+                    vec![("flag".into(), Typ::Bool)],
+                    Typ::Int,
+                    body.clone(),
+                )]),
+                "main",
+            );
+            assert_eq!(report.ok, expected, "{body:?}: {report:?}");
+        }
+        let value = Expr::MatchValue {
+            scrutinee: Box::new(Expr::BoolLit(true)),
+            arms: vec![MatchValueArm {
+                pattern: "_".into(),
+                guard: None,
+                value: Expr::Block {
+                    body: vec![returned()],
+                    result: None,
+                },
+            }],
+        };
+        let report = verify_for_entry(
+            &module(vec![function_with_ret(
+                "main",
+                Typ::Int,
+                vec![Stmt::Expr(value)],
+            )]),
+            "main",
+        );
+        assert!(report.ok, "{report:?}");
+    }
+
+    #[test]
+    fn completion_respects_short_circuit_reachability_and_still_checks_dead_code() {
+        for (op, lhs, expected) in [
+            ("&&", true, true),
+            ("&&", false, false),
+            ("and", true, true),
+            ("and", false, false),
+            (" && ", false, false),
+            (" and ", false, false),
+            ("||", true, false),
+            ("||", false, true),
+            ("or", true, false),
+            ("or", false, true),
+            (" || ", true, false),
+            (" or ", true, false),
+        ] {
+            let expression = Expr::Binary {
+                op: op.into(),
+                lhs: Box::new(Expr::BoolLit(lhs)),
+                rhs: Box::new(Expr::Block {
+                    body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                    result: Some(Box::new(Expr::BoolLit(true))),
+                }),
+            };
+            let report = verify_for_entry(
+                &module(vec![function_with_ret(
+                    "main",
+                    Typ::Int,
+                    vec![Stmt::Expr(expression)],
+                )]),
+                "main",
+            );
+            assert_eq!(report.ok, expected, "{report:?}");
+        }
+        let report = verify_for_entry(
+            &module(vec![function_with_ret(
+                "main",
+                Typ::Int,
+                vec![Stmt::Return(Some(Expr::IntLit(42))), Stmt::Return(None)],
+            )]),
+            "main",
+        );
+        assert_eq!(report.reason_code.as_deref(), Some("return-type-mismatch"));
+    }
+
+    #[test]
+    fn completion_evaluates_loop_header_before_body_and_store_checks_after_rhs() {
+        use crate::core_ir::{CatchArm, LoopKind};
+        for kind in [
+            LoopKind::While,
+            LoopKind::Infinite,
+            LoopKind::For {
+                binding: "item".into(),
+            },
+        ] {
+            let statement = Stmt::Try {
+                body: vec![Stmt::Loop {
+                    kind,
+                    cond: Some(Expr::Block {
+                        body: vec![Stmt::Throw(Expr::IntLit(7))],
+                        result: Some(Box::new(Expr::BoolLit(true))),
+                    }),
+                    body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                }],
+                catches: vec![CatchArm {
+                    pattern: "_".into(),
+                    body: vec![],
+                }],
+            };
+            let report = verify_for_entry(
+                &module(vec![function_with_ret("main", Typ::Int, vec![statement])]),
+                "main",
+            );
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("missing-return"),
+                "{report:?}"
+            );
+        }
+        // Raw indexed stores evaluate their base/index, then RHS, and only then
+        // check the destination. An enclosing return in RHS skips that check.
+        let rows = Expr::Ident("rows".into());
+        let index = Expr::Index {
+            base: Box::new(rows),
+            index: Box::new(Expr::IntLit(0)),
+        };
+        let statement = Stmt::Try {
+            body: vec![Stmt::FieldAssign {
+                base: index,
+                name: "x".into(),
+                value: Expr::Block {
+                    body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                    result: Some(Box::new(Expr::IntLit(0))),
+                },
+            }],
+            catches: vec![CatchArm {
+                pattern: "_".into(),
+                body: vec![],
+            }],
+        };
+        let report = verify_for_entry(
+            &module(vec![
+                point_struct(),
+                function_with_params(
+                    "main",
+                    vec![(
+                        "rows".into(),
+                        Typ::Array(Box::new(Typ::Named("Point".into()))),
+                    )],
+                    Typ::Int,
+                    vec![statement],
+                ),
+            ]),
+            "main",
+        );
+        assert!(report.ok, "{report:?}");
+    }
+
+    #[test]
+    fn completion_never_proves_builtin_trap_through_value_shadowing() {
+        let name = crate::inrt::INRT_TRAP_BUILTIN;
+        let call = || {
+            Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident(name.into())),
+                args: vec![Expr::IntLit(0), Expr::IntLit(0)],
+            })
+        };
+        let report = verify_for_entry(
+            &module(vec![function_with_ret("main", Typ::Int, vec![call()])]),
+            "main",
+        );
+        assert!(report.ok, "{report:?}");
+        let report = verify_for_entry(
+            &module(vec![function_with_ret(
+                "main",
+                Typ::Int,
+                vec![
+                    Stmt::Let(name.into(), Some(Typ::Int), Expr::IntLit(0)),
+                    call(),
+                ],
+            )]),
+            "main",
+        );
+        assert_eq!(report.reason_code.as_deref(), Some("missing-return"));
+        let global = Decl::Global {
+            name: name.into(),
+            typ: Typ::Int,
+            init: Some(Box::new(Expr::IntLit(0))),
+            mutable: true,
+            constant_value: false,
+        };
+        let report = verify_for_entry(
+            &module(vec![
+                global,
+                function_with_ret("main", Typ::Int, vec![call()]),
+            ]),
+            "main",
+        );
+        assert_eq!(report.reason_code.as_deref(), Some("missing-return"));
+    }
+
+    #[test]
+    fn completion_checked_division_aliases_cannot_hide_catch_fallthrough() {
+        use crate::core_ir::CatchArm;
+        for op in [
+            "/", "%", "/=", "%=", "udiv", "urem", " / ", " /= ", " %= ", " udiv ",
+        ] {
+            let statement = Stmt::Try {
+                body: vec![Stmt::Return(Some(Expr::Binary {
+                    op: op.into(),
+                    lhs: Box::new(Expr::IntLit(1)),
+                    rhs: Box::new(Expr::IntLit(0)),
+                }))],
+                catches: vec![CatchArm {
+                    pattern: "_".into(),
+                    body: vec![],
+                }],
+            };
+            let report = verify_for_entry(
+                &module(vec![function_with_ret("main", Typ::Int, vec![statement])]),
+                "main",
+            );
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("missing-return"),
+                "{op}: {report:?}"
+            );
+        }
+        let statement = Stmt::Try {
+            body: vec![Stmt::Return(Some(Expr::Binary {
+                op: "/".into(),
+                lhs: Box::new(Expr::FloatLit(crate::core_ir::FloatVal(1.0))),
+                rhs: Box::new(Expr::FloatLit(crate::core_ir::FloatVal(0.0))),
+            }))],
+            catches: vec![CatchArm {
+                pattern: "_".into(),
+                body: vec![],
+            }],
+        };
+        let report = verify_for_entry(
+            &module(vec![function_with_ret("main", Typ::Float, vec![statement])]),
+            "main",
+        );
+        assert!(report.ok, "{report:?}");
+    }
+
+    #[test]
+    fn completion_distinguishes_caught_failure_from_return_and_nothrow_calls() {
+        use crate::core_ir::CatchArm;
+        let returned = || Stmt::Return(Some(Expr::IntLit(42)));
+        let caught = |body, catch_body| Stmt::Try {
+            body,
+            catches: vec![CatchArm {
+                pattern: "_".into(),
+                body: catch_body,
+            }],
+        };
+        let call = |name: &str| Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args: vec![],
+        };
+        let helpers = || {
+            vec![
+                function_with_ret("safe", Typ::Int, vec![returned()]),
+                function_with_ret("fallible", Typ::Int, vec![Stmt::Throw(Expr::IntLit(7))]),
+            ]
+        };
+        for (body, expected) in [
+            (
+                vec![caught(vec![Stmt::Throw(Expr::IntLit(7))], vec![returned()])],
+                true,
+            ),
+            (
+                vec![caught(vec![Stmt::Throw(Expr::IntLit(7))], vec![])],
+                false,
+            ),
+            (vec![caught(vec![returned()], vec![])], true),
+            (
+                vec![caught(vec![Stmt::Return(Some(call("safe")))], vec![])],
+                true,
+            ),
+            (
+                vec![caught(vec![Stmt::Return(Some(call("fallible")))], vec![])],
+                false,
+            ),
+            (vec![Stmt::Throw(Expr::IntLit(7))], true),
+            (vec![Stmt::Propagate], false),
+        ] {
+            let mut decls = helpers();
+            decls.push(function_with_ret("main", Typ::Int, body.clone()));
+            let report = verify_for_entry(&module(decls), "main");
+            assert_eq!(report.ok, expected, "{body:?}: {report:?}");
+        }
+    }
+
+    #[test]
     fn private_print_identity_keeps_source_print_override_and_exact_signature() {
         use crate::core_ir::{COMPILER_PRINT, COMPILER_PRINT_INT};
         let source_print = function_with_params(
@@ -1756,6 +2924,231 @@ mod tests {
         }
     }
 
+    #[test]
+    fn completion_preflight_preserves_compile_only_type_value_namespaces() {
+        let complete = Decl::Function {
+            name: "Result".into(),
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+            type_params: vec![],
+        };
+        let schema = Decl::Struct {
+            name: "Result".into(),
+            fields: vec![],
+            type_params: vec![],
+        };
+        let mut value = UnifiedModule::new(vec![schema, complete]);
+        assert!(check_nonvoid_completion(&value).is_ok());
+        let report = verify_module(
+            &value,
+            &VerifyOptions {
+                entry: None,
+                require_entry: false,
+            },
+        );
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("duplicate-top-level-name")
+        );
+        let Decl::Function { body, .. } = &mut value.decls[1] else {
+            unreachable!()
+        };
+        *body = vec![Stmt::Expr(Expr::IntLit(7))];
+        assert!(
+            check_nonvoid_completion(&value)
+                .unwrap_err()
+                .starts_with("missing-return:")
+        );
+    }
+    #[test]
+    #[ignore = "manual timing for unchanged completion-proof preparation"]
+    fn unchanged_completion_proof_timing() {
+        let original = module(
+            (0..1000)
+                .map(|index| {
+                    function_with_ret(
+                        &format!("benchmark-{index}"),
+                        Typ::Int,
+                        vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                    )
+                })
+                .collect(),
+        );
+        let mut lowered = original.clone();
+        let start = std::time::Instant::now();
+        for _ in 0..30 {
+            preserve_nonvoid_completion_after(
+                std::hint::black_box(&original.decls),
+                std::hint::black_box(&mut lowered.decls),
+            );
+        }
+        eprintln!("unchanged-proof-1000x30-us={}", start.elapsed().as_micros());
+        assert_eq!(original, lowered);
+    }
+
+    #[test]
+    fn always_throwing_defined_calls_do_not_invent_successful_fallthrough() {
+        for source in [
+            "fn inner()->Void{throw \"nope\";}fn main()->String{try{inner();}catch(e){return \"caught: nope\";}}",
+            "fn relay()->Void{inner();}fn inner()->Void{throw 7;}fn main()->Int{try{relay();}catch(e){return 42;}}",
+            "fn main()->Int{try{relay();}catch(e){return 42;}}fn relay()->Void{inner();}fn inner()->Void{throw 7;}",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            let report = verify_for_entry(&module, "main");
+            assert!(report.ok, "{source}: {report:?}");
+            assert!(check_nonvoid_completion(&module).is_ok());
+        }
+    }
+    #[test]
+    fn possibly_returning_calls_and_fallthrough_catches_still_require_a_value() {
+        for source in [
+            "fn inner(flag:Bool)->Void{if flag{throw 7;}return;}fn main()->Int{try{inner(true);}catch(e){return 42;}}",
+            "fn inner()->Void{throw 7;}fn main()->Int{try{inner();}catch(e){let ignored=42;}}",
+            "fn recurse()->Void{recurse();}fn main()->Int{try{recurse();}catch(e){return 42;}}",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            let report = verify_for_entry(&module, "main");
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("missing-return"),
+                "{source}: {report:?}"
+            );
+        }
+    }
+    #[test]
+    fn call_completion_keeps_void_fallthrough_and_declared_trap_overrides_normal() {
+        let source = "fn noop()->Void{let value=7;}fn main()->Int{noop();return 42;}";
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        assert!(verify_for_entry(&module, "main").ok);
+        let source = format!(
+            "fn {}()->Void{{return;}}fn main()->Int{{try{{{}();}}catch(e){{return 42;}}}}",
+            crate::inrt::INRT_TRAP_BUILTIN,
+            crate::inrt::INRT_TRAP_BUILTIN
+        );
+        let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+        assert!(
+            check_nonvoid_completion(&module)
+                .unwrap_err()
+                .starts_with("missing-return:")
+        );
+    }
+    #[test]
+    fn syntactic_return_does_not_erase_fallible_aggregate_prologue() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "struct Row{Int value}fn copy(row:Row)->Row{return row;}fn main()->Void{return;}",
+        )
+        .unwrap();
+        let facts = module_type_facts(&module);
+        let context = CompletionContext::new(&module, &facts);
+        assert!(context.fallible.contains("copy"));
+        let completion = context.calls["copy"];
+        assert!(completion.has(Completion::NORMAL));
+        assert!(completion.has(Completion::THROW));
+    }
+    #[test]
+    fn local_callee_shadow_does_not_inherit_always_throw_summary() {
+        let source =
+            "fn fail()->Void{throw 7;}fn main(fail:Int)->Int{try{fail();}catch(e){return 42;}}";
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        assert!(
+            check_nonvoid_completion(&module)
+                .unwrap_err()
+                .starts_with("missing-return:")
+        );
+    }
+    #[test]
+    fn exact_bodyless_function_shadows_always_throwing_underscore_alias() {
+        let exact = function_with_params(
+            "print_int",
+            vec![("value".into(), Typ::Int)],
+            Typ::Void,
+            vec![],
+        );
+        let alias = function_with_params(
+            "print-int",
+            vec![("value".into(), Typ::Int)],
+            Typ::Void,
+            vec![Stmt::Throw(Expr::IntLit(7))],
+        );
+        let main = function_with_ret(
+            "main",
+            Typ::Int,
+            vec![Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident("print_int".into())),
+                args: vec![Expr::IntLit(42)],
+            })],
+        );
+        let module = UnifiedModule::new(vec![exact, alias, main]);
+        let report = verify_for_entry(&module, "main");
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("missing-return"),
+            "{report:?}"
+        );
+        assert!(
+            check_nonvoid_completion(&module)
+                .unwrap_err()
+                .starts_with("missing-return:")
+        );
+    }
+    #[test]
+    fn no_exact_declaration_keeps_defined_function_alias_completion() {
+        let alias = function_with_params(
+            "throw-value",
+            vec![],
+            Typ::Void,
+            vec![Stmt::Throw(Expr::IntLit(7))],
+        );
+        let main = function_with_ret(
+            "main",
+            Typ::Int,
+            vec![Stmt::Try {
+                body: vec![Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("throw_value".into())),
+                    args: vec![],
+                })],
+                catches: vec![crate::core_ir::CatchArm {
+                    pattern: "_".into(),
+                    body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                }],
+            }],
+        );
+        let module = UnifiedModule::new(vec![main, alias]);
+        assert!(verify_for_entry(&module, "main").ok);
+        assert!(check_nonvoid_completion(&module).is_ok());
+    }
+    #[test]
+    fn global_callee_shadow_cannot_inherit_function_alias_no_return_proof() {
+        let alias = function_with_params(
+            "throw-value",
+            vec![],
+            Typ::Void,
+            vec![Stmt::Throw(Expr::IntLit(7))],
+        );
+        let global = Decl::Global {
+            name: "throw_value".into(),
+            typ: Typ::Int,
+            mutable: true,
+            constant_value: false,
+            init: Some(Box::new(Expr::IntLit(0))),
+        };
+        let main = function_with_ret(
+            "main",
+            Typ::Int,
+            vec![Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident("throw_value".into())),
+                args: vec![],
+            })],
+        );
+        // Compile-only flow analysis: do not execute this unknown pointer.
+        let module = UnifiedModule::new(vec![global, alias, main]);
+        assert!(
+            check_nonvoid_completion(&module)
+                .unwrap_err()
+                .starts_with("missing-return:")
+        );
+    }
     use crate::core_ir::{Decl, UnifiedModule};
     use crate::core_ir::{Expr, Stmt};
 

@@ -759,7 +759,7 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool
         Expr::Index { base, index } => {
             count_expr(base, depth + 1, nodes, lang) && count_expr(index, depth + 1, nodes, lang)
         }
-        Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if crate::core_ir::compiler_print_callee(name).is_some()) => {
+        Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if (crate::core_ir::compiler_print_callee(name).is_some() || name == crate::core_ir::COMPILER_UNREACHABLE)) => {
             false
         }
         Expr::Call { callee, args } => {

@@ -2452,6 +2452,41 @@ fn aarch64_aggregate_returns_refuse_register_overflow() {
 }
 
 #[test]
+fn native_apis_refuse_nonvoid_fallthrough_across_profiles() {
+    for source in [
+        "fn main()->Int{42;}",
+        "fn helper(flag:Bool)->Int{if flag{return 42;}}fn main()->Int{return helper(false);}",
+    ] {
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let _profile = crate::native_emit::antidecomp::ProfileGuard::new(profile);
+            for result in [
+                crate::native_emit::lower::lower_module(&module, "main", NativeLinkage::Executable)
+                    .map(|_| ()),
+                crate::native_emit::x86_64_lower::lower_module(&module, "main").map(|_| ()),
+                crate::native_emit::thumb_lower::lower_module(&module, "main").map(|_| ()),
+                crate::native_emit::c_backend::emit_c_module(&module).map(|_| ()),
+            ] {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("missing-return"),
+                    "{source}: {profile:?}: {error}"
+                );
+            }
+        }
+    }
+    for source in [
+        "fn main()->Int{return 42;}",
+        "fn main()->Int{while true{continue;}}",
+    ] {
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        crate::native_emit::lower::lower_module(&module, "main", NativeLinkage::Executable)
+            .unwrap();
+        crate::native_emit::x86_64_lower::lower_module(&module, "main").unwrap();
+    }
+}
+
+#[test]
 fn native_backends_refuse_unresolved_private_compiler_operations() {
     for source in [
         "fn main()->i64 {let pair=(20,22);let borrowed=&pair;let(a,b)=borrowed;*a+*b}",

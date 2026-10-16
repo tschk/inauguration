@@ -276,6 +276,46 @@ fn c_like_fn_name<'a>(src: &[u8], func_def: Node<'a>) -> Option<String> {
     Some(normalize_entry(node_txt(src, id).trim()))
 }
 
+/// Only a source global `int main` has C/C++'s implicit success return.
+/// Entry-name normalization also maps Main/_main, which are ordinary functions;
+/// class/namespace/nested declarations must not inherit the global-main rule.
+fn c_global_main(src: &[u8], definition: Node<'_>, ret: &Typ) -> bool {
+    if !matches!(ret, Typ::Named(name)
+        if name == "int" || crate::core_ir::integer_type_name(name) == Some("i32"))
+    {
+        return false;
+    }
+    let Some(declarator) = definition.child_by_field_name("declarator") else {
+        return false;
+    };
+    let spine = c_declarator_spine(declarator);
+    if spine.iter().any(|node| {
+        matches!(
+            node.kind(),
+            "qualified_identifier" | "pointer_declarator" | "reference_declarator"
+        )
+    }) || !spine.iter().rev().any(|node| {
+        matches!(node.kind(), "identifier" | "field_identifier")
+            && node_txt(src, *node).trim() == "main"
+    }) {
+        return false;
+    }
+    let mut parent = definition.parent();
+    while let Some(node) = parent {
+        match node.kind() {
+            "translation_unit" => return true,
+            "class_specifier"
+            | "struct_specifier"
+            | "union_specifier"
+            | "namespace_definition"
+            | "function_definition"
+            | "lambda_expression" => return false,
+            _ => parent = node.parent(),
+        }
+    }
+    false
+}
+
 /// Lower a C / C++ / ObjC++ function definition with its source body.
 pub(super) fn c_like_function_decl<'a>(src: &[u8], func_def: Node<'a>) -> Option<Decl> {
     let name = c_like_fn_name(src, func_def)?;
@@ -283,10 +323,18 @@ pub(super) fn c_like_function_decl<'a>(src: &[u8], func_def: Node<'a>) -> Option
     let params = c_parameter_list(src, func_def);
     let body_node = func_def.child_by_field_name("body");
     let mut body = body_node.map(|b| c_body(src, b)).unwrap_or_default();
-    // Empty bodies denote extern declarations in Core IR. Preserve actual
-    // void definitions, including bodies containing only comments or `;`.
-    if body_node.is_some() && ret.canonical() == Typ::Void && body.is_empty() {
-        body.push(Stmt::Return(None));
+    if body_node.is_some() {
+        if c_global_main(src, func_def, &ret) {
+            // Append the language's fallback, including after partial branches.
+            // A terminal direct return already makes this fallback unreachable.
+            if !matches!(body.last(), Some(Stmt::Return(_))) {
+                body.push(Stmt::Return(Some(Expr::IntLit(0))));
+            }
+        } else if body.is_empty() {
+            // [] denotes an external declaration. A real empty definition must
+            // remain a definition; non-void Return(None) is rejected downstream.
+            body.push(Stmt::Return(None));
+        }
     }
     Some(Decl::Function {
         name,
@@ -1241,7 +1289,66 @@ mod empty_definition_tests {
     }
 
     #[test]
-    fn nonvoid_definitions_do_not_gain_void_returns_or_hide_unsupported_bodies() {
+    fn actual_global_main_has_implicit_zero_after_empty_and_partial_bodies() {
+        for cpp in [false, true] {
+            for source in [
+                "int main(void) {}",
+                "int main(void) { /* comment */ ; }",
+                "int main(void) { int value = 7; }",
+                "int main(int argc, char **argv) { if (argc > 1) { return 42; } }",
+            ] {
+                let module = extract(source, cpp);
+                assert!(
+                    matches!(&module.decls[0], Decl::Function { body, .. }
+                    if matches!(body.last(), Some(Stmt::Return(Some(Expr::IntLit(0)))))),
+                    "{source}: {module:?}"
+                );
+            }
+            let module = extract("int main(void) { return 42; }", cpp);
+            assert!(
+                matches!(&module.decls[0], Decl::Function { body, .. }
+                if matches!(body.as_slice(), [Stmt::Return(Some(value))]
+                    if Some(value.clone()) == c_number_literal("42"))),
+                "{module:?}"
+            );
+            let module = extract(
+                "int external(void); int main(void) { return external(); }",
+                cpp,
+            );
+            // Prototypes are currently omitted, never materialized as definitions.
+            assert!(!module.decls.iter().any(|decl| matches!(decl,
+                Decl::Function { name, .. } if name == "external")));
+            for name in ["Main", "_main"] {
+                let module = extract(&format!("int {name}(void) {{}}"), cpp);
+                assert!(matches!(&module.decls[0], Decl::Function { body, .. }
+                    if matches!(body.as_slice(), [Stmt::Return(None)])));
+            }
+        }
+    }
+
+    #[test]
+    fn cpp_member_and_namespace_main_are_not_program_entry_fallthrough() {
+        let module = extract(
+            "class Worker { public: int main() {} }; int main() { return 42; }",
+            true,
+        );
+        let methods = module
+            .decls
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Class { methods, .. } => Some(methods),
+                _ => None,
+            })
+            .unwrap();
+        assert!(methods.iter().any(|method| matches!(method,
+            Decl::Function { name, body, .. } if name == "main" && matches!(body.as_slice(), [Stmt::Return(None)]))));
+        let module = extract("namespace Worker { int main() {} }", true);
+        assert!(module.decls.iter().any(|decl| matches!(decl,
+            Decl::Function { body, .. } if matches!(body.as_slice(), [Stmt::Return(None)]))));
+    }
+
+    #[test]
+    fn nonvoid_empty_definitions_remain_visible_without_hiding_unsupported_bodies() {
         for cpp in [false, true] {
             let module = extract(
                 "long long empty(void) {} void unsupported(void) { goto done; done: ; }",
@@ -1259,7 +1366,7 @@ mod empty_definition_tests {
                 if let Decl::Function { name, body, .. } = decl {
                     match name.as_str() {
                         "empty" => {
-                            assert!(!body.iter().any(|stmt| matches!(stmt, Stmt::Return(None))))
+                            assert!(matches!(body.as_slice(), [Stmt::Return(None)]))
                         }
                         "unsupported" => {
                             assert!(!body.is_empty());

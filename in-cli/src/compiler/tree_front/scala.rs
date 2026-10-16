@@ -1,5 +1,6 @@
 use super::extract::{
-    AstShape, ast_body, collect_kinds, first_named, named_descendant, node_txt, normalize_entry,
+    AstShape, ast_defined_body, collect_kinds, first_named, named_descendant, node_txt,
+    normalize_entry,
 };
 use crate::core_ir::{Decl, MethodSig, Stmt, Typ, Visibility};
 use tree_sitter::Node;
@@ -254,7 +255,7 @@ fn scala_params<'a>(src: &[u8], n: Node<'a>) -> Vec<(String, Typ)> {
 }
 
 fn scala_body(src: &[u8], body: Node<'_>) -> Vec<Stmt> {
-    ast_body(src, body, SCALAAST)
+    ast_defined_body(src, body, SCALAAST)
 }
 
 fn find_field_deep<'a>(n: Node<'a>, field: &str) -> Option<Node<'a>> {

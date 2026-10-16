@@ -139,6 +139,13 @@ pub(crate) fn lower_expr_into(
                     ctx.fn_name
                 ));
             };
+            if name == crate::core_ir::COMPILER_UNREACHABLE {
+                if !args.is_empty() || ctx.functions.contains_key(name) {
+                    return Err("thumb-lower: private unreachable requires zero args and cannot be declared".into());
+                }
+                emitter.emit_u16(0xDE00); // UDF #0, independent of a hosted runtime.
+                return Ok(());
+            }
             if crate::core_ir::compiler_print_callee(name).is_some() {
                 return Err("thumb-lower: private print requires a hosted runtime".into());
             }

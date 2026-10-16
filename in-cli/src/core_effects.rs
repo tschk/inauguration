@@ -2,6 +2,12 @@
 use crate::core_ir::{Expr, Stmt};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+/// Native integer division/remainder spellings that have a checked failure path.
+/// AArch64 trims operators before dispatch; use the same normalization here.
+pub(crate) fn checked_binary_operation(op: &str) -> bool {
+    matches!(op.trim(), "/" | "%" | "/=" | "%=" | "udiv" | "urem")
+}
+
 pub(crate) fn fallible_functions<'a>(
     functions: impl IntoIterator<
         Item = (
@@ -67,7 +73,7 @@ fn scan_expr<'a>(
     if matches!(
         expr,
         Expr::Index { .. } | Expr::Field { .. } | Expr::StructInit { .. }
-    ) || matches!(expr, Expr::Binary { op, .. } if matches!(op.as_str(), "/" | "%" | "/=" | "%=" | "udiv" | "urem"))
+    ) || matches!(expr, Expr::Binary { op, .. } if checked_binary_operation(op))
     {
         *checked = true;
     }

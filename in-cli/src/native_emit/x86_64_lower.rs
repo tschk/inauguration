@@ -439,6 +439,7 @@ fn lower_module_impl(
     };
     let prepared = crate::lower_core::prepared_native_module_with_semantics(module, semantics);
     let module = prepared.as_ref();
+    crate::core_ir_verifier::check_nonvoid_completion(module)?;
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
     for decl in &module.decls {
@@ -3738,6 +3739,17 @@ fn lower_call_expr(
         }
     };
 
+    if target_name == crate::core_ir::COMPILER_UNREACHABLE {
+        if !args.is_empty() || ctx.functions.contains_key(&target_name) {
+            return Err(
+                "x86_64-lower: private unreachable requires zero args and cannot be declared"
+                    .into(),
+            );
+        }
+        // UD2 is available in both native x86 modes, including freestanding.
+        emitter.emit_insns(&[0x0F, 0x0B]);
+        return Ok(());
+    }
     if let Some(public) = crate::core_ir::compiler_print_callee(&target_name) {
         if ctx.functions.contains_key(&target_name) {
             return Err("x86_64-lower: private print operation cannot be declared".into());
@@ -5883,13 +5895,16 @@ fn main() -> void { return }
                 name: "main".into(),
                 params: vec![("values".into(), Typ::Array(Box::new(Typ::Int)))],
                 ret: Typ::Int,
-                body: vec![Stmt::Loop {
-                    kind: LoopKind::For {
-                        binding: "value".into(),
+                body: vec![
+                    Stmt::Loop {
+                        kind: LoopKind::For {
+                            binding: "value".into(),
+                        },
+                        cond: Some(Expr::Ident("values".into())),
+                        body: vec![],
                     },
-                    cond: Some(Expr::Ident("values".into())),
-                    body: vec![],
-                }],
+                    Stmt::Return(Some(Expr::IntLit(0))),
+                ],
                 type_params: vec![],
             }],
         };

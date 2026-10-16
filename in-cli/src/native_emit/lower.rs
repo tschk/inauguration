@@ -768,6 +768,22 @@ pub fn lower_module_with_jobs(
             })?
         };
 
+    // A body already refused by the lowerer is replaced by the existing explicit
+    // degradation trap. Check completion only for actual retained definitions,
+    // using collector identities (including any disambiguated names).
+    crate::core_ir_verifier::check_nonvoid_completion_for(
+        module,
+        buffers.iter().map(|buffer| {
+            let function = &functions[&buffer.name];
+            (
+                function.name.as_str(),
+                function.params.as_slice(),
+                &function.ret,
+                function.body.as_slice(),
+            )
+        }),
+    )?;
+
     // Every skipped function and unresolved call target becomes a trap body
     // instead of a return-0 stub, and is recorded so callers can report it.
     // ponytail: graceful degradation for self-hosting — skip stdlib functions

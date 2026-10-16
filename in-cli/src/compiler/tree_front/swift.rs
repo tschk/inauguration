@@ -1,5 +1,5 @@
 use super::extract::{
-    AstShape, ast_body, extract_fn_nodes, first_named, node_txt, normalize_entry,
+    AstShape, ast_defined_body, extract_fn_nodes, first_named, node_txt, normalize_entry,
 };
 use crate::core_ir::{Decl, Stmt, Typ};
 use tree_sitter::Node;
@@ -113,7 +113,7 @@ fn swift_params(src: &[u8], func: Node<'_>) -> Vec<(String, Typ)> {
 }
 
 fn swift_body(src: &[u8], body: Node<'_>) -> Vec<Stmt> {
-    ast_body(src, body, SWIFT_AST)
+    ast_defined_body(src, body, SWIFT_AST)
 }
 
 // ─── Go ───────────────────────────────────────────────────────────────

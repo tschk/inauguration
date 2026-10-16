@@ -72,6 +72,7 @@ pub fn emit_c_module(module: &UnifiedModule) -> Result<String, String> {
     // Hoisted declarations require unique lexical names, even on the borrowed fast path.
     crate::core_bindings::normalize_decls(&mut prepared.to_mut().decls);
     let module = prepared.as_ref();
+    crate::core_ir_verifier::check_nonvoid_completion(module)?;
 
     let mut names = HashSet::new();
     for decl in &module.decls {
@@ -875,6 +876,16 @@ impl Ctx {
     }
 
     fn intrinsic_or_call(&mut self, name: &str, args: &[Expr]) -> String {
+        if name == crate::core_ir::COMPILER_UNREACHABLE {
+            if !args.is_empty() || self.is_func(name) {
+                self.fail(
+                    "c-backend: private unreachable requires zero args and cannot be declared"
+                        .into(),
+                );
+                return "0".into();
+            }
+            return "__builtin_trap()".into();
+        }
         if crate::core_ir::compiler_print_callee(name).is_some() {
             self.fail("c-backend: private print requires a hosted runtime".into());
             return "0".into();

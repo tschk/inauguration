@@ -28,6 +28,16 @@ pub(crate) fn lower_call(
             "native-lower: dynamic call target unsupported in `{fn_name}`"
         ));
     };
+    if target == crate::core_ir::COMPILER_UNREACHABLE {
+        if !args.is_empty() || functions.contains_key(target) {
+            return Err(
+                "native-lower: private unreachable requires zero args and cannot be declared"
+                    .into(),
+            );
+        }
+        emitter.emit_u32(aarch64::brk(0));
+        return Ok(());
+    }
     if let Some(public) = crate::core_ir::compiler_print_callee(target) {
         if functions.contains_key(target) {
             return Err("native-lower: private print operation cannot be declared".into());

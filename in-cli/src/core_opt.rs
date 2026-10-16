@@ -91,6 +91,8 @@ pub fn optimize_with_linkage_and_semantics(
             if !keep_all_functions {
                 remove_dead_functions(decls, entry);
             }
+            // Preserve completion before opaque predicates hide feasible paths.
+            crate::core_ir_verifier::preserve_nonvoid_completion(decls);
             // Anti-decomp transforms (must run after fold/dce).
             harden_mba_arithmetic(decls);
             harden_obscure_literals(decls, semantics);
@@ -2436,13 +2438,20 @@ fn stmts_forbid_cfg_dispatch(stmts: &[Stmt]) -> bool {
 }
 
 fn harden_cfg_dispatch_lite(decls: &mut [Decl]) {
-    for body in fn_bodies_mut(decls) {
+    crate::core_ir_verifier::preserve_nonvoid_completion(decls);
+    for decl in decls {
+        let Decl::Function { body, .. } = decl else {
+            continue;
+        };
         if body.len() < 2 {
             continue;
         }
         if stmts_forbid_cfg_dispatch(body) {
             continue;
         }
+        let proven_complete = matches!(body.last(), Some(Stmt::Expr(Expr::Call { callee, args }))
+            if args.is_empty() && matches!(callee.as_ref(), Expr::Ident(name)
+                if name == crate::core_ir::COMPILER_UNREACHABLE));
         let original: Vec<Stmt> = std::mem::take(body);
         // Prefer short states when binding lifetimes permit.
         let chunk = if original.len() > 8 { 2 } else { 1 };
@@ -2518,6 +2527,13 @@ fn harden_cfg_dispatch_lite(decls: &mut [Decl]) {
                 body: vec![dispatch],
             },
         ];
+        if proven_complete {
+            // Carry the original completion proof across synthetic loop exits.
+            body.push(Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident(crate::core_ir::COMPILER_UNREACHABLE.into())),
+                args: vec![],
+            }));
+        }
     }
 }
 
@@ -4812,6 +4828,26 @@ mod tests {
             assert_eq!(value.0.to_bits(), expected.to_bits());
         }
     }
+    #[test]
+    fn harden_preserves_completion_without_sealing_invalid_functions() {
+        for (source, complete) in [
+            ("fn main()->Int{if true{return 42;}}", true),
+            ("fn main()->Int{print(20);print(22);}", false),
+            (
+                "fn main(flag:Bool)->Int{if flag{return 42;}print(0);}",
+                false,
+            ),
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            optimize_with_linkage(&mut module.decls, Some("main"), EmitProfile::Harden, false);
+            assert_eq!(
+                crate::core_ir_verifier::check_nonvoid_completion(&module).is_ok(),
+                complete,
+                "{source}: {module:?}"
+            );
+        }
+    }
+
     #[test]
     fn cfg_dispatch_retains_binding_lifetimes_and_private_counter_names() {
         for source in [

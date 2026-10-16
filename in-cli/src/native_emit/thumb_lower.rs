@@ -41,6 +41,7 @@ pub fn lower_module(module: &UnifiedModule, entry: &str) -> Result<ThumbCompileR
         crate::integer_semantics::IntegerSemantics::Word32,
     );
     let module = prepared.as_ref();
+    crate::core_ir_verifier::check_nonvoid_completion(module)?;
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
     if !functions.contains_key(entry) {

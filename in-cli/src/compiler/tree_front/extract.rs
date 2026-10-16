@@ -885,6 +885,42 @@ fn kind_in(n: Node<'_>, kinds: &[&str]) -> bool {
     kinds.contains(&n.kind())
 }
 
+// Opt in only after the declaration extractor has found an actual definition body.
+// A dropped unsupported statement is not evidence of an empty definition.
+pub(super) fn ast_defined_body(src: &[u8], body: Node<'_>, shape: AstShape) -> Vec<Stmt> {
+    let mut lowered = ast_body(src, body, shape);
+    let block = ast_body_node(body, shape)
+        .or_else(|| first_body_child(body, shape))
+        .unwrap_or(body);
+    fn genuinely_empty(block: Node<'_>, shape: AstShape) -> bool {
+        if block.has_error() {
+            return false;
+        }
+        let mut tokens = block.walk();
+        let braced = block.children(&mut tokens).any(|child| child.kind() == "{");
+        if !kind_in(block, shape.block_kinds) && !braced {
+            return false;
+        }
+        let mut walk = block.walk();
+        block.named_children(&mut walk).all(|child| {
+            child.is_extra()
+                || child.kind() == "empty_statement"
+                || (kind_in(child, shape.block_kinds) && genuinely_empty(child, shape))
+        })
+    }
+    if lowered.is_empty() {
+        if genuinely_empty(block, shape) {
+            lowered.push(Stmt::Return(None));
+        } else {
+            lowered.push(Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident(crate::core_ir::UNSUPPORTED_DEFINED_BODY.into())),
+                args: vec![],
+            }));
+        }
+    }
+    lowered
+}
+
 pub(super) fn ast_body(src: &[u8], body: Node<'_>, shape: AstShape) -> Vec<Stmt> {
     let block = ast_body_node(body, shape)
         .or_else(|| first_body_child(body, shape))
@@ -1838,6 +1874,88 @@ mod tests {
     use crate::boundary_ir::{BoundaryRepr, BoundaryTransfer};
     use crate::core_ir::Visibility;
     use std::path::PathBuf;
+
+    #[test]
+    fn actual_empty_definition_bodies_are_not_external_declarations() {
+        for (id, source) in [
+            (ParserId::Go, "package main\nfunc main() {}"),
+            (ParserId::Swift, "func main() {}"),
+            (
+                ParserId::Java,
+                "class Main { static void main() { /* empty */ } }",
+            ),
+        ] {
+            let module = dispatch(id, Path::new("empty"), source).expect("definition");
+            assert_eq!(main_body(&module), &[Stmt::Return(None)], "{id:?}");
+        }
+        let nonempty = dispatch(
+            ParserId::Java,
+            Path::new("unsupported"),
+            "class Main { static void main() { assert true; } }",
+        )
+        .expect("nonempty body");
+        assert_ne!(main_body(&nonempty), &[Stmt::Return(None)]);
+        let dropped = dispatch(
+            ParserId::Java,
+            Path::new("unsupported-definition"),
+            "class Main { static void main() { synchronized(Main.class) {} } }",
+        )
+        .expect("unsupported definition");
+        assert!(
+            matches!(main_body(&dropped), [Stmt::Expr(Expr::Call {callee, args})]
+            if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::UNSUPPORTED_DEFINED_BODY)
+                && args.is_empty())
+        );
+        let constructor = dispatch(
+            ParserId::Java,
+            Path::new("constructor"),
+            "class Box { Box() {} static void main() { return; } }",
+        )
+        .expect("constructor");
+        assert!(constructor.decls.iter().any(|decl| matches!(decl,
+            Decl::Class {methods, ..} if methods.iter().any(|method| matches!(method,
+                Decl::Function {name, body, ..} if name == "Box" && body.is_empty())))));
+        let module = dispatch(
+            ParserId::Java,
+            Path::new("abstract"),
+            "abstract class Main { abstract int missing(); static int main() { return 42; } }",
+        )
+        .expect("abstract method");
+        assert!(module.decls.iter().any(|decl| matches!(decl,
+            Decl::Class {name, methods, ..} if name == "Main" && methods.iter().any(|method| matches!(method,
+                Decl::Function {name, body, ..} if name == "missing" && body.is_empty())))));
+    }
+
+    #[cfg(feature = "parse-extended")]
+    #[test]
+    fn extended_empty_definitions_preserve_abstract_and_expression_body_boundaries() {
+        for (id, source) in [
+            (ParserId::Kotlin, "fun main() {}"),
+            (ParserId::CSharp, "class Main { static void main() {} }"),
+            (ParserId::Dart, "void main() {}"),
+            (ParserId::Scala, "def main(): Unit = {}"),
+        ] {
+            let module = dispatch(id, Path::new("empty"), source).expect("definition");
+            assert_eq!(main_body(&module), &[Stmt::Return(None)], "{id:?}");
+        }
+        for (id, source) in [
+            (ParserId::Dart, "external int main();"),
+            (
+                ParserId::Kotlin,
+                "abstract class Main { abstract fun main(): Int }",
+            ),
+        ] {
+            let module = dispatch(id, Path::new("external"), source).expect("declaration");
+            assert!(main_body(&module).is_empty(), "{id:?}");
+        }
+        for (id, source) in [
+            (ParserId::Kotlin, "fun main() = 42"),
+            (ParserId::Scala, "def main(): Int = 42"),
+        ] {
+            let module = dispatch(id, Path::new("expression"), source).expect("expression body");
+            assert_ne!(main_body(&module), &[Stmt::Return(None)], "{id:?}");
+        }
+    }
 
     fn repo_sample(name: &str) -> String {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
