@@ -163,10 +163,13 @@ pub(crate) fn lower_call(
         }
         return Ok(());
     }
-    if target == "vector-clear" && args.len() != 1 {
+    let has_definition = functions
+        .get(target)
+        .is_some_and(|function| !function.body.is_empty());
+    if target == "vector-clear" && !has_definition && args.len() != 1 {
         return Err("native-lower: vector clear requires one argument".into());
     }
-    if target == "vector-push" && args.len() != 2 {
+    if target == "vector-push" && !has_definition && args.len() != 2 {
         return Err("native-lower: vector push requires two arguments".into());
     }
     if is_inrt_builtin(target) {

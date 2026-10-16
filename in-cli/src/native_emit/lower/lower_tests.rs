@@ -3335,3 +3335,67 @@ fn supported_partial_return_helper_is_not_hidden_as_a_degradation() {
         assert!(error.contains("helper"), "{error}");
     }
 }
+
+#[test]
+fn arm_vector_arity_checks_preserve_defined_scalar_overrides() {
+    for name in ["vector-clear", "vector-push"] {
+        let source = format!("fn {name}()->Int{{return 42;}}fn main()->Int{{return {name}();}}");
+        let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+        let lowered = lower_module(&module, "main", NativeLinkage::Executable).unwrap();
+        assert!(lowered.degradations.is_empty(), "{name}");
+        assert!(lowered.function_offsets.contains_key(name));
+        #[cfg(all(unix, target_arch = "aarch64"))]
+        {
+            let offsets: Vec<_> = lowered
+                .function_offsets
+                .iter()
+                .map(|(name, offset)| {
+                    let end = lowered
+                        .function_offsets
+                        .values()
+                        .filter(|next| **next > *offset)
+                        .min()
+                        .copied()
+                        .unwrap_or(lowered.code.len() as u32);
+                    (name.clone(), *offset, end - *offset)
+                })
+                .collect();
+            let mut runtime = crate::jit_runtime::JitRuntime::new();
+            runtime
+                .load_with_data_relocations(
+                    &lowered.code,
+                    &offsets,
+                    &lowered.relocations,
+                    &lowered.data,
+                    &lowered.global_relocs,
+                    &lowered.data_relocations,
+                )
+                .unwrap();
+            // This executes the declared override, with no vector storage ABI.
+            assert_eq!(unsafe { runtime.invoke("main", &[]) }, Some(42), "{name}");
+        }
+        for declared in [false, true] {
+            let malformed = format!("fn main()->Int{{return {name}();}}");
+            let mut module = crate::in_lang_parse::parse_in_source(&malformed).unwrap();
+            if declared {
+                module.decls.insert(
+                    0,
+                    Decl::Function {
+                        name: name.into(),
+                        params: vec![],
+                        ret: Typ::Int,
+                        body: vec![],
+                        type_params: vec![],
+                    },
+                );
+            }
+            let error = lower_module(&module, "main", NativeLinkage::Executable).unwrap_err();
+            let expected = if name == "vector-clear" {
+                "vector clear requires one argument"
+            } else {
+                "vector push requires two arguments"
+            };
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+}
