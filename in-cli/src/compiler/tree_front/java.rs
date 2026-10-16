@@ -43,6 +43,7 @@ const JAVA_AST: AstShape = AstShape {
     match_kinds: &[],
     first_assignment_is_let: false,
     strict_args: true,
+    string_decoder: None,
 };
 
 #[cfg_attr(not(feature = "parse-extended"), allow(dead_code))]

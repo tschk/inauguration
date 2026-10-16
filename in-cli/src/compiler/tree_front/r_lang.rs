@@ -30,6 +30,7 @@ const RAST: AstShape = AstShape {
     match_kinds: &[],
     first_assignment_is_let: false,
     strict_args: false,
+    string_decoder: None,
 };
 
 pub(super) fn extract_r_lang(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {

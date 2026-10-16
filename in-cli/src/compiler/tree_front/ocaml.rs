@@ -30,6 +30,7 @@ const OCAML_AST: AstShape = AstShape {
     match_kinds: &["match_expression"],
     first_assignment_is_let: true,
     strict_args: false,
+    string_decoder: None,
 };
 
 pub(super) fn extract_ocaml(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {

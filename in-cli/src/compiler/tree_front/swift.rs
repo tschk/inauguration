@@ -47,6 +47,7 @@ const SWIFT_AST: AstShape = AstShape {
     match_kinds: &["switch_statement"],
     first_assignment_is_let: true,
     strict_args: false,
+    string_decoder: None,
 };
 
 pub(super) fn extract_swift(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {

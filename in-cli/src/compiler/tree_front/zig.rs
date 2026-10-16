@@ -40,6 +40,7 @@ const ZIG_AST: AstShape = AstShape {
     match_kinds: &[],
     first_assignment_is_let: false,
     strict_args: false,
+    string_decoder: None,
 };
 
 #[derive(Clone)]

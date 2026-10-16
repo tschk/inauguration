@@ -27,6 +27,7 @@ const GO_AST: AstShape = AstShape {
     match_kinds: &["expression_switch_statement", "type_switch_statement"],
     first_assignment_is_let: false,
     strict_args: false,
+    string_decoder: None,
 };
 
 fn norm_go_type(raw: &str) -> Typ {

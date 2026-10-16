@@ -27,6 +27,7 @@ const V_AST: AstShape = AstShape {
     match_kinds: &["match_expression"],
     first_assignment_is_let: false,
     strict_args: false,
+    string_decoder: None,
 };
 
 pub(super) fn v_params(src: &[u8], func: Node<'_>) -> Vec<(String, Typ)> {

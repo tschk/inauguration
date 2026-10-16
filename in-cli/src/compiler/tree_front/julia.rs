@@ -30,6 +30,7 @@ const JULIAAST: AstShape = AstShape {
     match_kinds: &[],
     first_assignment_is_let: true,
     strict_args: false,
+    string_decoder: None,
 };
 
 pub(super) fn extract_julia(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {

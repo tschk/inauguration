@@ -596,6 +596,13 @@ pub fn parse_zig_artifact(path: &Path) -> Result<CompileArtifact, String> {
     parse_zig_artifact_source(&src, &module_id)
 }
 
+/// Preserve declared spelling; shared type normalization owns aliases.
+pub(super) fn declared_return_type(src: &[u8], function: Node<'_>) -> Option<Typ> {
+    function
+        .child_by_field_name("return_type")
+        .map(|node| Typ::Named(node_txt(src, node).trim().to_string()))
+}
+
 fn textual_fn(name: String, body_src: &str) -> Decl {
     let body = simple_bounded_body(body_src, "=")
         .or_else(|| simple_bounded_body(body_src, "<-"))
@@ -870,6 +877,7 @@ pub(super) struct AstShape {
     pub(super) match_kinds: &'static [&'static str],
     pub(super) first_assignment_is_let: bool,
     pub(super) strict_args: bool,
+    pub(super) string_decoder: Option<fn(&str) -> Option<String>>,
 }
 
 fn kind_in(n: Node<'_>, kinds: &[&str]) -> bool {
@@ -1319,6 +1327,14 @@ pub(super) fn ast_expr(src: &[u8], expr: Node<'_>, shape: AstShape) -> Option<Ex
         });
     }
     if kind_in(expr, shape.string_kinds) {
+        if let Some(decode) = shape.string_decoder {
+            // Invalid language-owned literals must survive as an explicit
+            // refusal, never disappear from the enclosing statement/body.
+            return Some(match decode(node_txt(src, expr).trim()) {
+                Some(value) => Expr::StringLit(value),
+                None => Expr::Ident("#unsupported-string-literal".into()),
+            });
+        }
         return Some(Expr::StringLit(
             node_txt(src, expr)
                 .trim()
@@ -5194,6 +5210,54 @@ KTHXBYE
             .unwrap();
             assert!(
                 matches!(&module.decls[0], Decl::Function{ret,..} if ret == &expected),
+                "{source}: {module:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nim_and_crystal_preserve_declared_return_types_without_body_guessing() {
+        for (id, source, expected) in [
+            (ParserId::Nim, "proc main(): int =\n  return 3", "int"),
+            (
+                ParserId::Nim,
+                "proc main(): string =\n  return \"hi\"",
+                "string",
+            ),
+            (ParserId::Nim, "proc main(): Custom =\n  return 3", "Custom"),
+            (ParserId::Nim, "proc main(): string =\n  return 3", "string"),
+            (ParserId::Nim, "proc main() =\n  return 3", "dynamic"),
+            (
+                ParserId::Crystal,
+                "def main : Int32\n  return 3\nend",
+                "Int32",
+            ),
+            (
+                ParserId::Crystal,
+                "def main : String\n  return \"hi\"\nend",
+                "String",
+            ),
+            (
+                ParserId::Crystal,
+                "def main : Custom\n  return 3\nend",
+                "Custom",
+            ),
+            (
+                ParserId::Crystal,
+                "def main : String\n  return 3\nend",
+                "String",
+            ),
+            (ParserId::Crystal, "def main\n  return 3\nend", "dynamic"),
+        ] {
+            let extractor: fn(&[u8], Node<'_>) -> Result<Vec<Decl>, String> = if id == ParserId::Nim
+            {
+                extract_nim
+            } else {
+                extract_crystal
+            };
+            let module = parse_lang(try_lang_for(id).unwrap(), source, extractor).unwrap();
+            assert!(
+                matches!(&module.decls[0], Decl::Function{ret:Typ::Named(name),..} if name == expected),
                 "{source}: {module:?}"
             );
         }

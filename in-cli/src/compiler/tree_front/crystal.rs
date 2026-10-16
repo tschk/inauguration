@@ -1,4 +1,6 @@
-use super::extract::{AstShape, ast_body, collect_kinds, first_named, node_txt, normalize_entry};
+use super::extract::{
+    AstShape, ast_body, collect_kinds, declared_return_type, first_named, node_txt, normalize_entry,
+};
 use crate::core_ir::{Decl, Typ};
 use tree_sitter::Node;
 
@@ -27,6 +29,7 @@ const CRYSTAL_AST: AstShape = AstShape {
     match_kinds: &[],
     first_assignment_is_let: false,
     strict_args: false,
+    string_decoder: Some(crystal_string_literal),
 };
 
 pub(super) fn extract_crystal(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {
@@ -51,7 +54,7 @@ fn crystal_method_decl<'a>(src: &[u8], n: Node<'a>) -> Option<Decl> {
     Some(Decl::Function {
         name,
         params,
-        ret: Typ::Named("dynamic".into()),
+        ret: declared_return_type(src, n).unwrap_or_else(|| Typ::Named("dynamic".into())),
         body,
         type_params: vec![],
     })
@@ -71,4 +74,139 @@ fn crystal_params<'a>(src: &[u8], n: Node<'a>) -> Vec<(String, Typ)> {
         }
     }
     params
+}
+
+fn crystal_string_literal(source: &str) -> Option<String> {
+    let mut chars = source
+        .strip_prefix('"')?
+        .strip_suffix('"')?
+        .chars()
+        .peekable();
+    let mut output = Vec::new();
+    fn push_char(output: &mut Vec<u8>, ch: char) {
+        output.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes());
+    }
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            if ch == '"' || (ch == '#' && chars.peek() == Some(&'{')) {
+                return None;
+            }
+            push_char(&mut output, ch);
+            continue;
+        }
+        match chars.next()? {
+            'a' => push_char(&mut output, '\u{7}'),
+            'b' => push_char(&mut output, '\u{8}'),
+            'e' => push_char(&mut output, '\u{1b}'),
+            'f' => push_char(&mut output, '\u{c}'),
+            'n' => push_char(&mut output, '\n'),
+            'r' => push_char(&mut output, '\r'),
+            't' => push_char(&mut output, '\t'),
+            'v' => push_char(&mut output, '\u{b}'),
+            'x' => {
+                let digits: String = chars.by_ref().take(2).collect();
+                if digits.len() != 2 || !digits.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                    return None;
+                }
+                let byte = u8::from_str_radix(&digits, 16).ok()?;
+                output.push(byte);
+            }
+            'u' => {
+                if chars.peek() == Some(&'{') {
+                    chars.next();
+                    let mut digits = String::new();
+                    loop {
+                        let ch = chars.next()?;
+                        if ch == '}' {
+                            break;
+                        }
+                        digits.push(ch);
+                    }
+                    let mut any = false;
+                    for point in digits.split_whitespace() {
+                        if point.len() > 6 || !point.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                            return None;
+                        }
+                        push_char(
+                            &mut output,
+                            char::from_u32(u32::from_str_radix(point, 16).ok()?)?,
+                        );
+                        any = true;
+                    }
+                    if !any {
+                        return None;
+                    }
+                } else {
+                    let digits: String = chars.by_ref().take(4).collect();
+                    if digits.len() != 4 || !digits.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                        return None;
+                    }
+                    push_char(
+                        &mut output,
+                        char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?,
+                    );
+                }
+            }
+            first @ '0'..='7' => {
+                let mut value = first.to_digit(8)?;
+                for _ in 0..2 {
+                    let Some(next) = chars.peek().and_then(|ch| ch.to_digit(8)) else {
+                        break;
+                    };
+                    value = value * 8 + next;
+                    chars.next();
+                }
+                output.push(u8::try_from(value).ok()?);
+            }
+            newline @ ('\r' | '\n') => {
+                if newline == '\r' && chars.next()? != '\n' {
+                    return None;
+                }
+                while chars
+                    .peek()
+                    .is_some_and(|ch| matches!(*ch, '\t'..='\r' | ' '))
+                {
+                    chars.next();
+                }
+            }
+            other => push_char(&mut output, other),
+        }
+    }
+    String::from_utf8(output).ok()
+}
+
+#[test]
+fn crystal_regular_strings_decode_without_double_unescaping() {
+    for (source, expected) in [
+        (r#""hello""#, "hello"),
+        ("\"hello \\\r\n  \tworld\"", "hello world"),
+        ("\"hello \\\n \t\n\r\n\x0b\x0cworld\"", "hello world"),
+        (r#""\xCE\xBB""#, "λ"),
+        (r#""\316\273""#, "λ"),
+        ("\"hello \\\n  world\"", "hello world"),
+        (r#""\n\r\t\a\b\e\f\v""#, "\n\r\t\u{7}\u{8}\u{1b}\u{c}\u{b}"),
+        (r#""\\n\"\\""#, "\\n\"\\"),
+        (r#""\u0041\u{1f52e 96ea}\x42\101""#, "A🔮雪BA"),
+        (r#""\#{value}\q""#, "#{value}q"),
+        (r#""\0end""#, "\0end"),
+    ] {
+        assert_eq!(
+            crystal_string_literal(source).as_deref(),
+            Some(expected),
+            "{source}"
+        );
+    }
+    for source in [
+        "\"hello \\\rworld\"",
+        r##""#{value}""##,
+        r#""\u{d800}""#,
+        r#""\xFF""#,
+        r#""\u{}""#,
+        r#""\u+041""#,
+        r#""\x+1""#,
+        r#""\u{+41}""#,
+        r#"'x'"#,
+    ] {
+        assert_eq!(crystal_string_literal(source), None, "{source}");
+    }
 }

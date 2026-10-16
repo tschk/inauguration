@@ -29,6 +29,7 @@ const PYTHON_AST: AstShape = AstShape {
     match_kinds: &[],
     first_assignment_is_let: true,
     strict_args: false,
+    string_decoder: None,
 };
 
 pub(super) fn extract_python_with_classes(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {

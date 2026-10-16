@@ -779,3 +779,110 @@ fn native_empty_definitions_have_callable_entry_points() {
     }
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn native_declared_polyglot_returns_execute_and_reject_mismatches() {
+    use inauguration::{emit_profile::EmitProfile, parser_registry::ParserId};
+    let directory = std::env::temp_dir().join(format!("in-declared-return-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    for (parser, valid, invalid) in [
+        (
+            ParserId::Nim,
+            "proc main(): int =\n  return 40 + 2",
+            "proc main(): string =\n  return 42",
+        ),
+        (
+            ParserId::Crystal,
+            "def main : Int32\n  return 40 + 2\nend",
+            "def main : String\n  return 42\nend",
+        ),
+    ] {
+        let path = directory.join(format!("main.{}", parser.default_extension()));
+        std::fs::write(&path, valid).unwrap();
+        let parsed =
+            inauguration::compiler::tree_front::parse_polyglot_file(parser, &path).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut module = inauguration::typecheck::normalize_module(parser, &parsed);
+            assert!(inauguration::core_ir_verifier::verify_for_entry(&module, "main").ok);
+            inauguration::lower_core::desugar_module(&mut module);
+            core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            let runtime = native_runtime(&module);
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]) },
+                Some(42),
+                "{parser:?} {profile:?}"
+            );
+        }
+        std::fs::write(&path, invalid).unwrap();
+        let parsed =
+            inauguration::compiler::tree_front::parse_polyglot_file(parser, &path).unwrap();
+        let module = inauguration::typecheck::normalize_module(parser, &parsed);
+        assert!(!inauguration::core_ir_verifier::verify_for_entry(&module, "main").ok);
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn native_declared_polyglot_strings_preserve_escape_bytes() {
+    use inauguration::{emit_profile::EmitProfile, parser_registry::ParserId};
+    let directory = std::env::temp_dir().join(format!("in-declared-string-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    for (parser, literal, expected) in [
+        (ParserId::Nim, r#""a\nb\t\"\\""#, "a\nb\t\"\\"),
+        (ParserId::Nim, r#""\\n""#, "\\n"),
+        (ParserId::Nim, r#""\xCE\xBB\0end""#, "λ\0end"),
+        (ParserId::Crystal, r#""a\nb\t\"\\""#, "a\nb\t\"\\"),
+        (ParserId::Crystal, r#""\\n""#, "\\n"),
+        (ParserId::Crystal, r#""\xCE\xBB""#, "λ"),
+        (ParserId::Crystal, r#""\316\273""#, "λ"),
+        (ParserId::Crystal, "\"hello \\\r\n  world\"", "hello world"),
+        (ParserId::Crystal, r#""\u{3bb}\0end""#, "λ\0end"),
+    ] {
+        let source = match parser {
+            ParserId::Nim => format!("proc main(): string =\n  return {literal}"),
+            _ => format!("def main : String\n  return {literal}\nend"),
+        };
+        let path = directory.join(format!("main.{}", parser.default_extension()));
+        std::fs::write(&path, &source).unwrap();
+        let parsed =
+            inauguration::compiler::tree_front::parse_polyglot_file(parser, &path).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut module = inauguration::typecheck::normalize_module(parser, &parsed);
+            assert!(
+                inauguration::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}"
+            );
+            inauguration::lower_core::desugar_module(&mut module);
+            core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            let runtime = native_runtime(&module);
+            let pointer = unsafe { runtime.invoke("main", &[]) }.unwrap() as *const u64;
+            assert!(!pointer.is_null());
+            assert_eq!((pointer as usize) % 8, 0);
+            // Native strings use a length header followed by their exact UTF-8 bytes.
+            let length = unsafe { pointer.read() } as usize;
+            assert_eq!(length, expected.len(), "{source} {profile:?}");
+            let bytes = unsafe { std::slice::from_raw_parts(pointer.add(1).cast::<u8>(), length) };
+            assert_eq!(bytes, expected.as_bytes(), "{source} {profile:?}");
+        }
+    }
+    for (parser, source) in [
+        (ParserId::Nim, "proc main(): string =\n  return \"\\q\""),
+        (
+            ParserId::Crystal,
+            "def main : String\n  return \"#{unknown}\"\nend",
+        ),
+    ] {
+        let path = directory.join(format!("main.{}", parser.default_extension()));
+        std::fs::write(&path, source).unwrap();
+        let parsed =
+            inauguration::compiler::tree_front::parse_polyglot_file(parser, &path).unwrap();
+        let module = inauguration::typecheck::normalize_module(parser, &parsed);
+        assert!(
+            !inauguration::core_ir_verifier::verify_for_entry(&module, "main").ok,
+            "{source}"
+        );
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}

@@ -29,6 +29,7 @@ const HASKELL_AST: AstShape = AstShape {
     match_kinds: &["case", "alternatives"],
     first_assignment_is_let: false,
     strict_args: false,
+    string_decoder: None,
 };
 
 pub(super) fn extract_haskell(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {
