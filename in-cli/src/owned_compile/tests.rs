@@ -8069,6 +8069,18 @@ fn lua_return_inference_refuses_unowned_operator_semantics_before_execution() {
     }
     let path = temp_path("lua-return-proof.lua");
     for (body, expected) in [
+        ("if true & true then return 42 else return 7 end", None),
+        ("if false | true then return 42 else return 7 end", None),
+        ("if 5 & 3 == 1 then return 42 else return 7 end", Some(42)),
+        ("if 5 | 2 == 7 then return 42 else return 7 end", Some(42)),
+        (
+            "local value=5; if value & 3 == 1 then return 42 else return 7 end",
+            Some(42),
+        ),
+        (
+            "local value=5; if value | 2 == 7 then return 42 else return 7 end",
+            Some(42),
+        ),
         (
             "if \"12\" + \"30\" == \"1230\" then return 42 else return 7 end",
             None,

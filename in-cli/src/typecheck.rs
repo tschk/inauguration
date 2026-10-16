@@ -695,6 +695,15 @@ impl TypeChecker {
         } else if let Expr::Binary { op, lhs, rhs } = expr {
             c_operands[0] = self.resolve_typed_expr(lhs, facts, env, promote_c_bool, return_type);
             c_operands[1] = self.resolve_typed_expr(rhs, facts, env, promote_c_bool, return_type);
+            if matches!(op.as_str(), "lua-bitand" | "lua-bitor") {
+                if self.expr_type(lhs, facts, env) != Some(Typ::Int)
+                    || self.expr_type(rhs, facts, env) != Some(Typ::Int)
+                {
+                    *expr = Expr::Ident("#unsupported-lua-bitwise-operands".into());
+                    return None;
+                }
+                *op = if op == "lua-bitand" { "&" } else { "|" }.into();
+            }
             if op == "lua-add" {
                 let left = self.expr_type(lhs, facts, env);
                 let right = self.expr_type(rhs, facts, env);
@@ -2982,6 +2991,8 @@ pub fn normalize_module_with_semantics(
                 {
                     *expr = Expr::Ident("#unsupported-lua-operator-semantics".into());
                 }
+                Expr::Binary { op, .. } if op == "&" => *op = "lua-bitand".into(),
+                Expr::Binary { op, .. } if op == "|" => *op = "lua-bitor".into(),
                 Expr::Binary { op, .. } if op == "+" => *op = "lua-add".into(),
                 Expr::Binary { op, .. } if op == "/" => *op = "lua-div".into(),
                 Expr::Binary { op, .. } if op == "and" => *op = "&&".into(),

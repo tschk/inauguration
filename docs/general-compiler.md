@@ -90,6 +90,8 @@ modulo, power and shifts refuse before execution until their Lua semantics are
 owned; division of proven Float operands retains the native floating path.
 Lua `+` likewise requires proven numeric operands; string concatenation is not
 a valid lowering of Lua addition. Numeric string coercion remains unsupported.
+Lua `&` and `|` require proven integer operands; Boolean bitwise operations
+refuse, and integral Float coercion remains unsupported.
 
 Python scalar-name augmented assignments support `+=`, `-=`, `*=`, `&=`,
 `|=` and `^=` through the existing typed native operations. They read the old
