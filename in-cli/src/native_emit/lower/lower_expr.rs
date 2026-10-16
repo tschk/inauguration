@@ -770,6 +770,22 @@ pub(crate) fn lower_unary(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if op == "!"
+        && native_expr_type(expr, ctx, functions).is_some_and(|typ| typ.canonical() == Typ::Float)
+    {
+        // Numeric zero includes both signed zeros; unordered (NaN) compares false.
+        return lower_float_binary(
+            emitter,
+            ctx,
+            "==",
+            expr,
+            &Expr::FloatLit(FloatVal(0.0)),
+            rd,
+            functions,
+            pending_calls,
+            fn_name,
+        );
+    }
     if op == "vector-clone" {
         let Some(Typ::Vector(elem)) = native_expr_type(expr, ctx, functions) else {
             return Err("native-lower: vector clone requires a vector".into());

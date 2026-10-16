@@ -7507,3 +7507,33 @@ fn main()->Int{return 42;}
         }
     }
 }
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn owned_float_logical_not_uses_numeric_zero_once() {
+    let original = "var calls:Int=0;\nfn next()->Float{calls+=1;return -0.0;}\nfn norm(value:Float)->Bool{return !value;}\nfn main()->Int{if !next()==false{return 7;}if calls!=1{return 7;}if norm(0.0)==false{return 7;}if norm(-0.0)==false{return 7;}if norm(2.5)==true{return 7;}if norm(1.0/0.0)==true{return 7;}if norm(0.0/0.0)==true{return 7;}return 42;}";
+    let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+    for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+        for text in [original, canonical.as_str()] {
+            let source = temp_path("float-not.in");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.degradations.is_empty(),
+                "{profile:?}: {report:?}"
+            );
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{profile:?}: {report:?}"
+            );
+            let _ = fs::remove_file(source);
+        }
+    }
+}

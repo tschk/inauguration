@@ -1345,6 +1345,11 @@ pub(crate) fn fold_expr_with_semantics(e: Expr, semantics: IntegerSemantics) -> 
                 return Expr::IntLit(i64::from(*value));
             }
             if matches!(op.as_str(), "!" | "not")
+                && let Expr::FloatLit(value) = expr.as_ref()
+            {
+                return Expr::BoolLit(value.0 == 0.0);
+            }
+            if matches!(op.as_str(), "!" | "not")
                 && let Expr::BoolLit(value) = expr.as_ref()
             {
                 return Expr::BoolLit(!*value);
@@ -4960,6 +4965,37 @@ mod logical_normalization_tests {
                 }),
             };
             assert_eq!(map_expr(expr, &mut fold_expr), Expr::BoolLit(value));
+        }
+    }
+}
+
+#[cfg(test)]
+mod float_literal_logical_not_tests {
+    use super::*;
+
+    #[test]
+    fn float_not_folds_numeric_zero_for_both_word_widths() {
+        for semantics in [IntegerSemantics::Word32, IntegerSemantics::Word64] {
+            for op in ["!", "not"] {
+                for (value, expected) in [
+                    (0.0, true),
+                    (-0.0, true),
+                    (2.5, false),
+                    (-2.5, false),
+                    (f64::INFINITY, false),
+                    (f64::NEG_INFINITY, false),
+                    (f64::NAN, false),
+                ] {
+                    let expr = Expr::Unary {
+                        op: op.into(),
+                        expr: Box::new(Expr::FloatLit(crate::core_ir::FloatVal(value))),
+                    };
+                    assert_eq!(
+                        fold_expr_with_semantics(expr, semantics),
+                        Expr::BoolLit(expected)
+                    );
+                }
+            }
         }
     }
 }

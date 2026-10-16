@@ -338,6 +338,10 @@ when it is nonzero. Both return `Bool` and evaluate the operand once. Boolean
 and integer literal negations fold in global initializers, so
 `var enabled: Bool = !!42;` is valid.
 
+Logical negation of a Float compares its numeric value with zero. Both signed
+zeros yield true; nonzero values and NaN yield false. Literal Float negations
+also fold in Boolean global initializers.
+
 Arithmetic, bitwise, and comparisons chain as in the table in [parser-surface.md](parser-surface.md); method calls desugar to mangled functions on classes.
 
 ## Ideology

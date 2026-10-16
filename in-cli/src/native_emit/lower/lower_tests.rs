@@ -3126,3 +3126,64 @@ fn void_conditional_returns_keep_fallthrough_cleanup() {
         }
     }
 }
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod float_logical_not_regressions {
+    use super::*;
+
+    #[test]
+    fn float_not_uses_numeric_zero_and_evaluates_once() {
+        for (value, expected) in [
+            (0.0, true),
+            (-0.0, true),
+            (2.5, false),
+            (f64::INFINITY, false),
+            (f64::NEG_INFINITY, false),
+            (f64::NAN, false),
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(
+                    "var calls:Int=0;\nfn next()->Float{calls+=1;return 0.0;}\nfn main()->Int{if !next()==true && calls==1{return 42;}return 7;}"
+                ).unwrap();
+            for decl in &mut module.decls {
+                if let Decl::Function { name, body, .. } = decl {
+                    if name == "next" {
+                        body[1] =
+                            Stmt::Return(Some(Expr::FloatLit(crate::core_ir::FloatVal(value))));
+                    }
+                    if name == "main" {
+                        for statement in body.iter_mut() {
+                            crate::core_opt::map_stmt_exprs_mut(statement, &mut |expr| {
+                                if let Expr::BoolLit(truth) = expr {
+                                    *truth = expected;
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+            let result = lower_module(&module, "main", NativeLinkage::Executable).unwrap();
+            let offsets = result
+                .function_offsets
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect::<Vec<_>>();
+            let relocations = result.relocations.clone();
+            let mut runtime = crate::jit_runtime::JitRuntime::new();
+            runtime
+                .load_with_data_relocations(
+                    &result.code,
+                    &offsets,
+                    &relocations,
+                    &result.data,
+                    &result.global_relocs,
+                    &result.data_relocations,
+                )
+                .unwrap();
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]) },
+                Some(42),
+                "! {value}"
+            );
+        }
+    }
+}

@@ -4156,6 +4156,18 @@ fn lower_unary_expr(
     expr: &Expr,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if op == "!" && scalar_expr_type(expr, ctx).is_some_and(|typ| typ.canonical() == Typ::Float) {
+        // Reuse the ordered Float equality path, including its NaN parity guard.
+        return lower_binary_expr(
+            emitter,
+            ctx,
+            target_reg,
+            "==",
+            expr,
+            &Expr::FloatLit(crate::core_ir::FloatVal(0.0)),
+            pending_calls,
+        );
+    }
     if crate::core_ir::integer_cast_spec(op).is_some() {
         let value = match scalar_expr_type(expr, ctx) {
             Some(Typ::Int) => expr.clone(),
@@ -5383,6 +5395,43 @@ fn main() -> void { return }
     }
 
     #[test]
+    fn rejects_32bit_float_logical_not_and_keeps_integer_not() {
+        struct WidthGuard(bool);
+        impl Drop for WidthGuard {
+            fn drop(&mut self) {
+                x86_64::set_32bit(self.0);
+            }
+        }
+        let _width = WidthGuard(x86_64::is_32bit());
+        x86_64::set_32bit(true);
+        for source in [
+            "fn main(value:Float)->Bool{return !value;}",
+            "extern asm fn read_float()->Float\nfn main()->Bool{return !read_float();}",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            assert!(
+                lower_native_module(&module, "main")
+                    .err()
+                    .unwrap()
+                    .contains("Float requires 64-bit mode"),
+                "{source}"
+            );
+        }
+        for source in [
+            "fn main(value:Int)->Bool{return !value;}",
+            "extern asm fn read_int()->Int\nfn main()->Bool{return !read_int();}",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            assert!(
+                !lower_native_module(&module, "main")
+                    .unwrap()
+                    .code
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn keeps_32bit_local_arrays_without_allocator_imports() {
         struct WidthGuard(bool);
         impl Drop for WidthGuard {
@@ -6012,6 +6061,71 @@ mod void_fallthrough_tests {
                     "{source}"
                 );
             }
+        }
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod float_logical_not_regressions {
+    use super::*;
+
+    #[test]
+    fn float_not_uses_numeric_zero_and_evaluates_once() {
+        for (value, expected) in [
+            (0.0, true),
+            (-0.0, true),
+            (2.5, false),
+            (f64::INFINITY, false),
+            (f64::NEG_INFINITY, false),
+            (f64::NAN, false),
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(
+                    "var calls:Int=0;\nfn next()->Float{calls+=1;return 0.0;}\nfn main()->Int{if !next()==true && calls==1{return 42;}return 7;}"
+                ).unwrap();
+            for decl in &mut module.decls {
+                if let Decl::Function { name, body, .. } = decl {
+                    if name == "next" {
+                        body[1] =
+                            Stmt::Return(Some(Expr::FloatLit(crate::core_ir::FloatVal(value))));
+                    }
+                    if name == "main" {
+                        for statement in body.iter_mut() {
+                            crate::core_opt::map_stmt_exprs_mut(statement, &mut |expr| {
+                                if let Expr::BoolLit(truth) = expr {
+                                    *truth = expected;
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+            let result = lower_module(&module, "main").unwrap();
+            let offsets = result
+                .exports
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect::<Vec<_>>();
+            let relocations = result
+                .relocations
+                .iter()
+                .map(|site| (*site, result.codegen_base))
+                .collect::<Vec<_>>();
+            let mut runtime = crate::jit_runtime::JitRuntime::new();
+            runtime
+                .load_with_data_relocations(
+                    &result.code,
+                    &offsets,
+                    &relocations,
+                    &result.data,
+                    &result.global_relocs,
+                    &result.data_relocations,
+                )
+                .unwrap();
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]) },
+                Some(42),
+                "! {value}"
+            );
         }
     }
 }
