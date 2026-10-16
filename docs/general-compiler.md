@@ -92,6 +92,8 @@ Lua `+` likewise requires proven numeric operands; string concatenation is not
 a valid lowering of Lua addition. Numeric string coercion remains unsupported.
 Lua `&` and `|` require proven integer operands; Boolean bitwise operations
 refuse, and integral Float coercion remains unsupported.
+Lua `~=` uses the existing typed inequality path for same-kind scalar operands;
+mixed-type comparisons retain their existing refusal boundary.
 
 Python scalar-name augmented assignments support `+=`, `-=`, `*=`, `&=`,
 `|=` and `^=` through the existing typed native operations. They read the old

@@ -8069,6 +8069,49 @@ fn lua_return_inference_refuses_unowned_operator_semantics_before_execution() {
     }
     let path = temp_path("lua-return-proof.lua");
     for (body, expected) in [
+        ("if 20 ~= 22 then return 42 else return 7 end", Some(42)),
+        (
+            "if flag() ~= false then return 42 else return 7 end",
+            Some(42),
+        ),
+        (
+            "if flag() ~= true then return 42 else return 7 end",
+            Some(7),
+        ),
+        ("if 42 ~= 42 then return 42 else return 7 end", Some(7)),
+        ("if 20.0 ~= 22.0 then return 42 else return 7 end", Some(42)),
+        ("if 42.0 ~= 42.0 then return 42 else return 7 end", Some(7)),
+        (
+            "if true ~= false then return 42 else return 7 end",
+            Some(42),
+        ),
+        ("if true ~= true then return 42 else return 7 end", Some(7)),
+        (
+            "if \"a\" ~= \"b\" then return 42 else return 7 end",
+            Some(42),
+        ),
+        (
+            "if \"a\" ~= \"a\" then return 42 else return 7 end",
+            Some(7),
+        ),
+        (
+            "local value=20;if value ~= 22 then return 42 else return 7 end",
+            Some(42),
+        ),
+        (
+            "local value=20.0;if value ~= 22.0 then return 42 else return 7 end",
+            Some(42),
+        ),
+        (
+            "local value=true;if value ~= false then return 42 else return 7 end",
+            Some(42),
+        ),
+        (
+            "local value=\"a\";if value ~= \"b\" then return 42 else return 7 end",
+            Some(42),
+        ),
+        ("if 1 ~= 1.0 then return 42 else return 7 end", None),
+        ("if 1 ~= true then return 42 else return 7 end", None),
         ("if true & true then return 42 else return 7 end", None),
         ("if false | true then return 42 else return 7 end", None),
         ("if 5 & 3 == 1 then return 42 else return 7 end", Some(42)),

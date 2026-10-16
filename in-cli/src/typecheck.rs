@@ -2995,6 +2995,7 @@ pub fn normalize_module_with_semantics(
                 Expr::Binary { op, .. } if op == "|" => *op = "lua-bitor".into(),
                 Expr::Binary { op, .. } if op == "+" => *op = "lua-add".into(),
                 Expr::Binary { op, .. } if op == "/" => *op = "lua-div".into(),
+                Expr::Binary { op, .. } if op == "~=" => *op = "!=".into(),
                 Expr::Binary { op, .. } if op == "and" => *op = "&&".into(),
                 Expr::Binary { op, .. } if op == "or" => *op = "||".into(),
                 Expr::Unary { op, expr: value } if op == "not" => {
