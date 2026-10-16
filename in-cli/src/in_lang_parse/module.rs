@@ -3,10 +3,10 @@ use super::decl::{
     parse_interface_block, parse_struct_block,
 };
 use super::expr::parse_expr;
-use super::lexer::{normalize_human_in_source, split_top_level_decl_blocks};
+use super::lexer::{is_core_decl_item, normalize_human_in_source, split_top_level_items};
 use super::surface::{
     binding_decl, in_standard_import_bindings, normalize_import_path, parse_in_surface_info,
-    parse_in_surface_info_with_blocks,
+    parse_in_surface_info_with_items,
 };
 use super::types::{parse_fn_header, parse_in_type};
 use super::util::*;
@@ -189,8 +189,12 @@ fn parse_in_module_without_validation(
     source: &str,
     source_path: Option<&std::path::Path>,
 ) -> Result<ParsedInModule, String> {
-    let blocks = split_top_level_decl_blocks(source);
-    let surface = parse_in_surface_info_with_blocks(source, &blocks)?;
+    let items = split_top_level_items(source)?;
+    let surface = parse_in_surface_info_with_items(&items)?;
+    let blocks: Vec<_> = items
+        .into_iter()
+        .filter(|(_, text)| is_core_decl_item(text))
+        .collect();
     let identity = CoreModuleIdentity {
         package: surface.package.clone(),
         module: surface.module.clone(),

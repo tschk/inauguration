@@ -236,7 +236,10 @@ pub(crate) fn parse_distributed_fn_name(line: &str) -> Result<String, String> {
     let rest = trim(line)
         .strip_prefix("distributed fn ")
         .ok_or_else(|| ".in: expected `distributed fn name(...)`".to_string())?;
-    let (name, _, _) = parse_fn_header(rest)?;
+    let header = find_fn_body_open_brace(rest)
+        .map(|open| &rest[..open])
+        .unwrap_or(rest);
+    let (name, _, _) = parse_fn_header(header)?;
     if name.is_empty() {
         return Err(".in: distributed function name missing".into());
     }
@@ -298,11 +301,14 @@ where
         if line.is_empty() || line.starts_with('@') {
             continue;
         }
-        if let Some(rest) = line.strip_prefix("fn ") {
-            return parse_fn_header(rest).ok().map(|(n, _, _)| n);
-        }
-        if let Some(rest) = line.strip_prefix("distributed fn ") {
-            return parse_fn_header(rest).ok().map(|(n, _, _)| n);
+        if let Some(rest) = line
+            .strip_prefix("fn ")
+            .or_else(|| line.strip_prefix("distributed fn "))
+        {
+            let header = find_fn_body_open_brace(rest)
+                .map(|open| &rest[..open])
+                .unwrap_or(rest);
+            return parse_fn_header(header).ok().map(|(n, _, _)| n);
         }
         return None;
     }
@@ -371,213 +377,116 @@ pub(crate) fn parallel_tasks_from_content(content: &str, region: usize) -> Vec<I
 }
 
 pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
-    let blocks = super::lexer::split_top_level_decl_blocks(source);
-    parse_in_surface_info_with_blocks(source, &blocks)
+    let items = super::lexer::split_top_level_items(source)?;
+    parse_in_surface_info_with_items(&items)
 }
 
-pub(crate) fn parse_in_surface_info_with_blocks(
-    source: &str,
-    blocks: &[(usize, String)],
+pub(crate) fn parse_in_surface_info_with_items(
+    items: &[(usize, String)],
 ) -> Result<InSurfaceInfo, String> {
     let mut info = InSurfaceInfo::default();
-    let mut extern_blocks = blocks
-        .iter()
-        .filter(|(_, block)| block.trim_start().starts_with("extern "))
-        .peekable();
-    let mut depth = 0i32;
-    let lines: Vec<&str> = source.lines().collect();
-    let mut source_state = SourceLineState::default();
-    for (idx, raw_line) in lines.iter().enumerate() {
-        let mut initializer_delta = 0;
-        let scanned = source_state.scan_line_with(raw_line, |_, ch| match ch {
-            '(' | '[' => initializer_delta += 1,
-            ')' | ']' => initializer_delta -= 1,
-            _ => {}
-        });
-        let delta = scanned.brace_delta + initializer_delta;
-        if scanned.starts_in_string {
-            depth = (depth + delta).max(0);
-            continue;
-        }
-        let line = trim(scanned.text);
-        if line.is_empty() || line.starts_with("//") {
-            depth += delta;
-            if depth < 0 {
-                depth = 0;
+    for (idx, (_, text)) in items.iter().enumerate() {
+        let line = trim(text);
+        if let Some(rest) = line.strip_prefix("package ") {
+            let package = parse_package_or_module_name("package", rest)?;
+            if info.package.replace(package).is_some() {
+                return Err(".in: duplicate package declaration".into());
             }
             continue;
         }
-        if depth == 0 {
-            while extern_blocks
-                .peek()
-                .is_some_and(|(line, _)| *line < idx + 1)
-            {
-                extern_blocks.next();
+        if let Some(rest) = line.strip_prefix("module ") {
+            let module = parse_package_or_module_name("module", rest)?;
+            if info.module.replace(module).is_some() {
+                return Err(".in: duplicate module declaration".into());
             }
-            let mut has_extern = false;
-            while extern_blocks
-                .peek()
-                .is_some_and(|(line, _)| *line == idx + 1)
-            {
-                let (_, block) = extern_blocks.next().expect("peeked extern block");
-                info.externs.push(parse_extern_fn_block(block)?);
-                has_extern = true;
-            }
-            if let Some(rest) = line.strip_prefix("package ") {
-                let package = parse_package_or_module_name("package", rest)?;
-                if info.package.replace(package).is_some() {
-                    return Err(".in: duplicate package declaration".into());
-                }
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("module ") {
-                let module = parse_package_or_module_name("module", rest)?;
-                if info.module.replace(module).is_some() {
-                    return Err(".in: duplicate module declaration".into());
-                }
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("import ") {
-                let import = trim(rest).trim_end_matches(';').trim();
-                if import.is_empty() {
-                    return Err(".in: import path missing".into());
-                }
-                info.imports.push(import.to_string());
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("use ") {
-                let import = parse_package_or_module_name("use", rest)?;
-                info.semantic_imports.push(import);
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("bind ") {
-                let binding = parse_semantic_binding(rest)?;
-                info.semantic_bindings.push(binding);
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("capability ") {
-                let capability = trim(rest).trim_end_matches(';').trim();
-                if capability.is_empty() {
-                    return Err(".in: capability name missing".into());
-                }
-                info.capabilities.push(capability.to_string());
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("enable ") {
-                let extension = trim(rest).trim_end_matches(';').trim();
-                if extension.is_empty() {
-                    return Err(".in: enable extension missing".into());
-                }
-                info.orchestration
-                    .enabled_extensions
-                    .push(extension.to_string());
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            if line.starts_with('@') {
-                let name = parse_annotation_name(line)?;
-                let target = next_function_name_after_annotation(lines[idx + 1..].iter().copied());
-                info.orchestration
-                    .annotations
-                    .push(InAnnotationFact { name, target });
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            if line.starts_with("distributed ") {
-                let name = parse_distributed_fn_name(line)?;
-                info.orchestration.distributed_functions.push(name);
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            if line.starts_with("parallel") {
-                if !(line == "parallel {" || line.starts_with("parallel {")) {
-                    return Err(
-                        ".in: `parallel` must be a top-level `parallel { ... }` region".into(),
-                    );
-                }
-                info.orchestration.parallel_regions += 1;
-                let region = info.orchestration.parallel_regions - 1;
-                info.orchestration
-                    .parallel_tasks
-                    .extend(collect_parallel_tasks(&lines, idx, region));
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            if line.starts_with("extern ") {
-                if !has_extern {
-                    parse_extern_fn_block(line)?;
-                    return Err(".in: incomplete extern declaration".into());
-                }
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            if is_closed_world_topology_block(line) {
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            if line.starts_with("fn ")
-                || line.starts_with("interrupt fn ")
-                || line.starts_with("struct ")
-                || line.starts_with("class ")
-                || line.starts_with("interface ")
-                || line.starts_with("component ")
-                || line.starts_with("var ")
-                || line.starts_with("const ")
-            {
-                depth += delta;
-                if depth < 0 {
-                    depth = 0;
-                }
-                continue;
-            }
-            return Err(format!(".in: unknown top-level syntax `{line}`"));
+            continue;
         }
-        depth += delta;
-        if depth < 0 {
-            depth = 0;
+        if let Some(rest) = line.strip_prefix("import ") {
+            let import = trim(rest).trim_end_matches(';').trim();
+            if import.is_empty() {
+                return Err(".in: import path missing".into());
+            }
+            info.imports.push(import.to_string());
+            continue;
         }
+        if let Some(rest) = line.strip_prefix("use ") {
+            let import = parse_package_or_module_name("use", rest)?;
+            info.semantic_imports.push(import);
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("bind ") {
+            let binding = parse_semantic_binding(rest)?;
+            info.semantic_bindings.push(binding);
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("capability ") {
+            let capability = trim(rest).trim_end_matches(';').trim();
+            if capability.is_empty() {
+                return Err(".in: capability name missing".into());
+            }
+            info.capabilities.push(capability.to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("enable ") {
+            let extension = trim(rest).trim_end_matches(';').trim();
+            if extension.is_empty() {
+                return Err(".in: enable extension missing".into());
+            }
+            info.orchestration
+                .enabled_extensions
+                .push(extension.to_string());
+            continue;
+        }
+        if line.starts_with('@') {
+            let name = parse_annotation_name(line)?;
+            let target = next_function_name_after_annotation(
+                items[idx + 1..].iter().map(|(_, text)| text.as_str()),
+            );
+            info.orchestration
+                .annotations
+                .push(InAnnotationFact { name, target });
+            continue;
+        }
+        if line.starts_with("distributed ") {
+            let name = parse_distributed_fn_name(line)?;
+            info.orchestration.distributed_functions.push(name);
+            continue;
+        }
+        if line.starts_with("parallel") {
+            if !(line == "parallel {" || line.starts_with("parallel {")) {
+                return Err(".in: `parallel` must be a top-level `parallel { ... }` region".into());
+            }
+            info.orchestration.parallel_regions += 1;
+            let region = info.orchestration.parallel_regions - 1;
+            info.orchestration
+                .parallel_tasks
+                .extend(collect_parallel_tasks(
+                    &line.lines().collect::<Vec<_>>(),
+                    0,
+                    region,
+                ));
+            continue;
+        }
+        if line.starts_with("extern ") {
+            let binding = parse_extern_fn_block(line)?;
+            info.externs.push(binding);
+            continue;
+        }
+        if is_closed_world_topology_block(line) {
+            continue;
+        }
+        if line.starts_with("fn ")
+            || line.starts_with("interrupt fn ")
+            || line.starts_with("struct ")
+            || line.starts_with("class ")
+            || line.starts_with("interface ")
+            || line.starts_with("component ")
+            || line.starts_with("var ")
+            || line.starts_with("const ")
+        {
+            continue;
+        }
+        return Err(format!(".in: unknown top-level syntax `{line}`"));
     }
     Ok(info)
 }

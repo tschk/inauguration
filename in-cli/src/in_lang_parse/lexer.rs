@@ -274,12 +274,37 @@ pub fn normalize_human_in_source(source: &str) -> String {
     out.join("\n")
 }
 
+pub(crate) fn is_core_decl_item(text: &str) -> bool {
+    [
+        "fn ",
+        "interrupt fn ",
+        "struct ",
+        "class ",
+        "interface ",
+        "component ",
+        "extern ",
+        "var ",
+        "const ",
+    ]
+    .iter()
+    .any(|prefix| text.trim_start().starts_with(prefix))
+}
+
 /// Split complete top-level declarations at closing braces, semicolons, or newlines.
 pub fn split_top_level_decl_blocks(source: &str) -> Vec<(usize, String)> {
+    split_top_level_items(source)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, text)| is_core_decl_item(text))
+        .collect()
+}
+
+pub(crate) fn split_top_level_items(source: &str) -> Result<Vec<(usize, String)>, String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut start_line = 1;
-    let mut depth = [0i32; 3];
+    let mut delimiters = Vec::new();
+    let mut ends_in_string = false;
     let mut brace_decl = false;
     let mut lexical = SourceLineState::default();
     for (line_no, raw_line) in source.lines().enumerate() {
@@ -289,6 +314,7 @@ pub fn split_top_level_decl_blocks(source: &str) -> Vec<(usize, String)> {
                 outside.push((index, ch));
             }
         });
+        ends_in_string = scanned.ends_in_string;
         let literal = scanned.starts_in_string || scanned.ends_in_string;
         let text = scanned.text;
         let mut events = outside.into_iter();
@@ -301,23 +327,23 @@ pub fn split_top_level_decl_blocks(source: &str) -> Vec<(usize, String)> {
                 if rest.is_empty() {
                     break;
                 }
-                brace_decl = [
-                    "fn ",
-                    "interrupt fn ",
-                    "struct ",
-                    "class ",
-                    "interface ",
-                    "component ",
+                // Initializer braces are expressions; other top-level blocks
+                // (including unknown/product-owned syntax) remain opaque items.
+                brace_decl = ![
+                    "var ",
+                    "const ",
+                    "extern ",
+                    "package ",
+                    "module ",
+                    "import ",
+                    "use ",
+                    "bind ",
+                    "capability ",
+                    "enable ",
                 ]
                 .iter()
-                .any(|prefix| rest.starts_with(prefix));
-                if !brace_decl
-                    && !["extern ", "var ", "const "]
-                        .iter()
-                        .any(|prefix| rest.starts_with(prefix))
-                {
-                    break;
-                }
+                .any(|prefix| rest.starts_with(prefix))
+                    && !rest.starts_with('@');
                 start_line = line_no + 1;
             }
             let mut end = text.len();
@@ -327,15 +353,23 @@ pub fn split_top_level_decl_blocks(source: &str) -> Vec<(usize, String)> {
                     continue;
                 }
                 match ch {
-                    '{' => depth[0] += 1,
-                    '}' => depth[0] -= 1,
-                    '(' => depth[1] += 1,
-                    ')' => depth[1] -= 1,
-                    '[' => depth[2] += 1,
-                    ']' => depth[2] -= 1,
+                    '{' | '(' | '[' => delimiters.push(ch),
+                    '}' | ')' | ']' => {
+                        let expected = match ch {
+                            '}' => '{',
+                            ')' => '(',
+                            _ => '[',
+                        };
+                        if delimiters.pop() != Some(expected) {
+                            return Err(format!(
+                                ".in: mismatched delimiter at line {}",
+                                line_no + 1
+                            ));
+                        }
+                    }
                     _ => {}
                 }
-                if depth == [0; 3] && (ch == ';' || (brace_decl && ch == '}')) {
+                if delimiters.is_empty() && (ch == ';' || (brace_decl && ch == '}')) {
                     end = index + ch.len_utf8();
                     complete = true;
                     break;
@@ -352,7 +386,6 @@ pub fn split_top_level_decl_blocks(source: &str) -> Vec<(usize, String)> {
             begin = end;
             if complete {
                 out.push((start_line, std::mem::take(&mut current)));
-                depth = [0; 3];
             } else {
                 break;
             }
@@ -361,11 +394,14 @@ pub fn split_top_level_decl_blocks(source: &str) -> Vec<(usize, String)> {
         if text.is_empty() && literal && !current.is_empty() {
             current.push('\n');
         }
-        if !current.is_empty() && depth == [0; 3] && !scanned.ends_in_string {
+        if !current.is_empty() && delimiters.is_empty() && !scanned.ends_in_string {
             out.push((start_line, std::mem::take(&mut current)));
         }
     }
-    out
+    if !delimiters.is_empty() || ends_in_string {
+        return Err(format!(".in: incomplete declaration at line {start_line}"));
+    }
+    Ok(out)
 }
 
 /// Legacy: line-oriented filter (single-line decls only). Prefer [`split_top_level_decl_blocks`].

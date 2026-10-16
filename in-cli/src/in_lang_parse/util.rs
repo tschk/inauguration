@@ -5,7 +5,6 @@ pub(crate) struct SourceLineState {
 
 pub(crate) struct ScannedLine<'a> {
     pub(crate) text: &'a str,
-    pub(crate) brace_delta: i32,
     pub(crate) starts_in_string: bool,
     pub(crate) ends_in_string: bool,
 }
@@ -23,7 +22,6 @@ impl SourceLineState {
     ) -> ScannedLine<'a> {
         let starts_in_string = self.in_string;
         let mut escaped = false;
-        let mut brace_delta = 0;
         let mut end = line.len();
         for (index, ch) in line.char_indices() {
             if self.in_string {
@@ -36,24 +34,18 @@ impl SourceLineState {
                 }
                 continue;
             }
-            if ch != '"' && !line[index..].starts_with("//") {
-                outside(index, ch);
-            }
             match ch {
                 '"' => self.in_string = true,
                 '/' if line[index..].starts_with("//") => {
                     end = index;
                     break;
                 }
-                '{' => brace_delta += 1,
-                '}' => brace_delta -= 1,
-                _ => {}
+                _ => outside(index, ch),
             }
         }
         // A source newline consumes an escape; it cannot escape the next line's first character.
         ScannedLine {
             text: &line[..end],
-            brace_delta,
             starts_in_string,
             ends_in_string: self.in_string,
         }
@@ -710,18 +702,28 @@ mod source_line_tests {
     #[test]
     fn quotes_and_comments_preserve_multiline_literal_contents() {
         let mut state = SourceLineState::default();
-        let first = state.scan_line("fn main() { let text=\"{");
-        assert_eq!(first.brace_delta, 1);
+        let mut braces = Vec::new();
+        let first = state.scan_line_with("fn main() { let text=\"{", |_, ch| {
+            if matches!(ch, '{' | '}') {
+                braces.push(ch);
+            }
+        });
+        assert_eq!(braces, ['{']);
         assert!(!first.starts_in_string);
         assert!(first.ends_in_string);
-        let middle = state.scan_line("  // literal }  ");
+        braces.clear();
+        let middle = state.scan_line_with("  // literal }  ", |_, ch| braces.push(ch));
         assert_eq!(middle.text, "  // literal }  ");
-        assert_eq!(middle.brace_delta, 0);
+        assert!(braces.is_empty());
         assert!(middle.starts_in_string && middle.ends_in_string);
         let blank = state.scan_line("");
         assert!(blank.starts_in_string && blank.ends_in_string);
-        let last = state.scan_line("}\"; } // } ignored");
-        assert_eq!(last.brace_delta, -1);
+        let last = state.scan_line_with("}\"; } // } ignored", |_, ch| {
+            if matches!(ch, '{' | '}') {
+                braces.push(ch);
+            }
+        });
+        assert_eq!(braces, ['}']);
         assert!(last.starts_in_string);
         assert!(!last.ends_in_string);
         assert_eq!(last.text, "}\"; } ");
@@ -730,9 +732,14 @@ mod source_line_tests {
     fn newline_consumes_escape_without_resetting_quote_state() {
         let mut state = SourceLineState::default();
         assert!(state.scan_line("\"text\\").ends_in_string);
-        let closing = state.scan_line("\"; }");
+        let mut braces = Vec::new();
+        let closing = state.scan_line_with("\"; }", |_, ch| {
+            if matches!(ch, '{' | '}') {
+                braces.push(ch);
+            }
+        });
         assert!(closing.starts_in_string);
         assert!(!closing.ends_in_string);
-        assert_eq!(closing.brace_delta, -1);
+        assert_eq!(braces, ['}']);
     }
 }

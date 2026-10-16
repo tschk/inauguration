@@ -3402,3 +3402,108 @@ fn surface_externs_exclude_nested_topology_and_reject_incomplete_headers() {
         assert!(parse_in_source(&source).is_err(), "{source}");
     }
 }
+
+#[test]
+fn same_line_surface_items_preserve_independent_facts() {
+    let source = "package demo;module demo.main;capability memory.map;fn main()->Int{return 42;}capability console.write;enable trace;enable audit;";
+    let info = parse_in_surface_info(source).unwrap();
+    assert_eq!(info.package.as_deref(), Some("demo"));
+    assert_eq!(info.module.as_deref(), Some("demo.main"));
+    assert_eq!(info.capabilities, ["memory.map", "console.write"]);
+    assert_eq!(info.orchestration.enabled_extensions, ["trace", "audit"]);
+    assert_eq!(parse_in_source(source).unwrap().decls.len(), 1);
+    let info = parse_in_surface_info(
+        "@pure;@gpu;fn work()->Int{return 42;}parallel {alpha(); beta();}parallel {gamma();}",
+    )
+    .unwrap();
+    assert!(
+        info.orchestration
+            .annotations
+            .iter()
+            .all(|fact| fact.target.as_deref() == Some("work"))
+    );
+    assert_eq!(info.orchestration.parallel_regions, 2);
+    assert_eq!(
+        info.orchestration
+            .parallel_tasks
+            .iter()
+            .map(|fact| (fact.region, fact.name.as_str()))
+            .collect::<Vec<_>>(),
+        [(0, "alpha"), (0, "beta"), (1, "gamma")]
+    );
+}
+
+#[test]
+fn item_annotations_read_headers_without_calls_in_function_bodies() {
+    for modifier in ["", "distributed "] {
+        let source = format!(
+            "@pure;{modifier}fn work(\nvalue:Int\n)->Int {{\n return helper(value);\n}}fn helper(value:Int)->Int{{return value;}}"
+        );
+        let info = parse_in_surface_info(&source).unwrap();
+        assert_eq!(info.orchestration.annotations.len(), 1);
+        assert_eq!(
+            info.orchestration.annotations[0].target.as_deref(),
+            Some("work")
+        );
+    }
+    let source = "@pure;distributed fn work()->Int{\nreturn helper();\n}fn helper()->Int{return 42;}fn main()->Int{return 42;}";
+    let info = parse_in_surface_info(source).unwrap();
+    assert_eq!(info.orchestration.distributed_functions, ["work"]);
+    assert_eq!(
+        info.orchestration.annotations[0].target.as_deref(),
+        Some("work")
+    );
+    assert!(parse_in_source(source).is_ok());
+    let info = parse_in_surface_info("system topology {extern c fn nested()->Int;capability hidden;}capability visible;fn main()->Int{return 42;}").unwrap();
+    assert!(info.externs.is_empty());
+    assert_eq!(info.capabilities, ["visible"]);
+}
+
+#[test]
+fn same_line_imports_discover_both_real_local_modules() {
+    let directory = std::env::temp_dir().join(format!(
+        "in-surface-imports-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("left.in"), "fn left()->Int{return 20;}").unwrap();
+    fs::write(directory.join("right.in"), "fn right()->Int{return 22;}").unwrap();
+    let path = directory.join("main.in");
+    fs::write(
+        &path,
+        "import \"./left.in\";import \"./right.in\";fn main()->Int{return left()+right();}",
+    )
+    .unwrap();
+    let module = parse_in_file(&path).unwrap();
+    for expected in ["left", "right", "main"] {
+        assert!(
+            module
+                .decls
+                .iter()
+                .any(|decl| matches!(decl,Decl::Function{name,..} if name==expected))
+        );
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn rejects_incomplete_and_mismatched_top_level_items() {
+    for source in [
+        "fn main( {",
+        "fn main() -> Int { return (42]; }",
+        "fn main() -> Int { return 42; } capability memory.map(
+",
+        "extern rust fn missing(value: Int",
+        "const TEXT: String = \"unfinished",
+    ] {
+        assert!(parse_in_source(source).is_err(), "accepted {source:?}");
+        assert!(
+            parse_in_surface_info(source).is_err(),
+            "accepted surface {source:?}"
+        );
+    }
+}
