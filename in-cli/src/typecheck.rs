@@ -2886,6 +2886,19 @@ pub fn normalize_module_with_semantics(
         .map(|decl| normalize_decl(parser_id, decl))
         .collect();
     let mut normalized = UnifiedModule::with_identity(decls, module.identity.clone());
+    if parser_id == ParserId::Lua && semantics == crate::integer_semantics::IntegerSemantics::Word32
+    {
+        // Lua integers are signed64 values, unlike generic unsigned MMIO word
+        // carriers. Reject before target-word folding can reinterpret the sign.
+        crate::core_opt::map_decl_exprs_mut(&mut normalized.decls, &mut |expr| {
+            if matches!(expr, Expr::IntLit(value) if i32::try_from(*value).is_err()) {
+                *expr = Expr::Call {
+                    callee: Box::new(Expr::Ident("#unsupported-lua-integer-word32".into())),
+                    args: Vec::new(),
+                };
+            }
+        });
+    }
     if matches!(
         parser_id,
         ParserId::C | ParserId::Cpp | ParserId::ObjC | ParserId::ObjCpp
@@ -3024,6 +3037,15 @@ fn normalize_decl(parser_id: ParserId, decl: &Decl) -> Decl {
 
 fn normalize_function_ret(parser_id: ParserId, ret: &Typ, body: &[Stmt]) -> Typ {
     let normalized = normalize_parser_type(parser_id, ret);
+    if parser_id == ParserId::Lua && normalized == Typ::Void {
+        let checker = TypeChecker::new();
+        if let Some(inferred) =
+            checker.infer_closure_return(body, &checker.collect_decl_facts(&[]), &HashMap::new())
+            && inferred != Typ::Void
+        {
+            return inferred;
+        }
+    }
     if matches!(
         parser_id,
         ParserId::Lua | ParserId::Perl | ParserId::Python | ParserId::Ruby | ParserId::JavaScript
@@ -5342,5 +5364,69 @@ mod rust_array_tuple_value_tests {
             .is_ok()
         );
         assert!(crate::native_emit::x86_64_lower::lower_module(&module, "main").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod lua_word32_integer_tests {
+    use super::*;
+    use crate::integer_semantics::IntegerSemantics;
+    #[test]
+    fn lua_returned_locals_use_shared_dataflow_inference() {
+        for (value, expected) in [
+            (Expr::IntLit(42), Typ::Int),
+            (Expr::FloatLit(crate::core_ir::FloatVal(42.0)), Typ::Float),
+            (Expr::BoolLit(true), Typ::Bool),
+            (Expr::StringLit("value".into()), Typ::String),
+        ] {
+            let module = UnifiedModule::new(vec![Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Void,
+                type_params: vec![],
+                body: vec![
+                    Stmt::Let("value".into(), None, value),
+                    Stmt::Return(Some(Expr::Ident("value".into()))),
+                ],
+            }]);
+            let normalized = normalize_module(ParserId::Lua, &module);
+            assert!(matches!(&normalized.decls[0], Decl::Function {ret, ..} if ret == &expected));
+            assert!(typecheck_for_parser(ParserId::Lua, &module).is_ok());
+        }
+    }
+    #[test]
+    fn lua_signed_literal_boundary_preserves_generic_unsigned_carriers() {
+        for (value, refused) in [
+            (42, false),
+            (i32::MIN as i64, false),
+            (i32::MAX as i64, false),
+            (2147483648, true),
+            (4294967295, true),
+            (i64::MIN, true),
+        ] {
+            let module = UnifiedModule::new(vec![Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![Stmt::Return(Some(Expr::IntLit(value)))],
+            }]);
+            for parser in [ParserId::Lua, ParserId::In] {
+                for semantics in [IntegerSemantics::Word32, IntegerSemantics::Word64] {
+                    let mut prepared = module.clone();
+                    crate::lower_core::desugar_module_with_semantics(&mut prepared, semantics);
+                    let normalized = normalize_module_with_semantics(parser, &prepared, semantics);
+                    let Decl::Function { body, .. } = &normalized.decls[0] else {
+                        panic!()
+                    };
+                    let expected_refusal =
+                        refused && parser == ParserId::Lua && semantics == IntegerSemantics::Word32;
+                    assert_eq!(
+                        matches!(&body[0], Stmt::Return(Some(Expr::Call {callee, args})) if matches!(callee.as_ref(), Expr::Ident(name) if name == "#unsupported-lua-integer-word32") && args.is_empty()),
+                        expected_refusal
+                    );
+                }
+            }
+        }
     }
 }

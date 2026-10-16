@@ -74,6 +74,15 @@ same physical line as its callee; newlines inside opened arguments remain valid.
 Procedure and function parameter openers likewise stay on their name line,
 separated by spaces rather than tabs; opened parameter lists may span lines.
 
+Lua local initializers admit closed integer literal/group trees using `+`, `-`
+and `*`. They fold with Lua's signed 64-bit wrapping arithmetic before target
+word lowering, so wide intermediates can still produce a representable result.
+Returned Lua locals use the shared dataflow return-type inference.
+Lua integer literals outside signed 32-bit range refuse on Word32 targets;
+generic unsigned hardware word literals retain their existing policy. This
+folding path excludes calls, identifiers, floats, unary operators, shifts and
+division; their existing admission and refusal rules remain unchanged.
+
 Python scalar-name augmented assignments support `+=`, `-=`, `*=`, `&=`,
 `|=` and `^=` through the existing typed native operations. They read the old
 binding before evaluating the RHS once; supported conditional branches stay lazy.

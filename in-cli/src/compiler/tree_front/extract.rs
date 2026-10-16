@@ -1100,6 +1100,13 @@ fn ast_local_decl(src: &[u8], decl: Node<'_>, shape: AstShape) -> Option<Stmt> {
         {
             return Some(unsupported_body_stmt());
         }
+        if let Some(value) = super::lua::lua_closed_integer_initializer(src, values_children[0]) {
+            return Some(Stmt::Let(
+                node_txt(src, names_children[0]).trim().to_string(),
+                None,
+                Expr::IntLit(value),
+            ));
+        }
         if !ast_scalar_rhs_is_supported(values_children[0], shape) {
             return Some(unsupported_body_stmt());
         }
@@ -5941,7 +5948,6 @@ end
             "function() return 42 end",
             "...",
             "helper(...)",
-            "1 + 2",
             "-42",
             "2 ^ 3",
             "1 / 2",
@@ -5965,6 +5971,7 @@ end
             assert!(matches!(body.last(), Some(Stmt::Return(None))), "{body:?}");
         }
         for rhs in [
+            "1 + 2",
             "42",
             "true",
             "\"value\"",

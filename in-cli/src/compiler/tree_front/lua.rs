@@ -34,6 +34,50 @@ const LUAAST: AstShape = AstShape {
     number_decoder: Some(lua_number_literal),
 };
 
+// Only closed integer initializer trees are admitted here: Lua arithmetic wraps
+// at 64 bits even when the eventual native target has a narrower word.
+pub(super) fn lua_closed_integer_initializer(src: &[u8], node: Node<'_>) -> Option<i64> {
+    fn fold(src: &[u8], node: Node<'_>, depth: usize) -> Option<i64> {
+        if depth > 64 || node.has_error() || node.is_missing() {
+            return None;
+        }
+        if node.kind() == "number" {
+            return match lua_number_literal(node_txt(src, node))? {
+                crate::core_ir::Expr::IntLit(value) => Some(value),
+                _ => None,
+            };
+        }
+        let mut cursor = node.walk();
+        let children: Vec<_> = node
+            .named_children(&mut cursor)
+            .filter(|child| !child.is_extra())
+            .collect();
+        if matches!(node.kind(), "parenthesized_expression" | "expression") {
+            return (children.len() == 1)
+                .then(|| fold(src, children[0], depth + 1))
+                .flatten();
+        }
+        if node.kind() != "binary_expression" || children.len() != 2 {
+            return None;
+        }
+        let left = node.child_by_field_name("left")?;
+        let right = node.child_by_field_name("right")?;
+        let operator = node.child_by_field_name("operator")?;
+        if children != [left, right] {
+            return None;
+        }
+        let left = fold(src, left, depth + 1)?;
+        let right = fold(src, right, depth + 1)?;
+        match node_txt(src, operator) {
+            "+" => Some(left.wrapping_add(right)),
+            "-" => Some(left.wrapping_sub(right)),
+            "*" => Some(left.wrapping_mul(right)),
+            _ => None,
+        }
+    }
+    fold(src, node, 0)
+}
+
 pub(super) fn extract_lua(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {
     let mut decls = Vec::new();
 
@@ -373,6 +417,38 @@ mod decoder_ast_tests {
                 _ => None,
             })
             .unwrap()
+    }
+
+    #[test]
+    fn closed_integer_initializers_wrap_at_lua_width_before_target_lowering() {
+        for (expression, expected) in [
+            ("20 + 22", 42),
+            ("(2147483647 + 1) - 2147483606", 42),
+            ("(0x7fffffffffffffff + 1) - 0x7fffffffffffffd6", 42),
+            ("0x100000000 * 0x100000000 + 42", 42),
+            ("2147483647 + 1", 2147483648),
+        ] {
+            let body = parsed_body(&format!(
+                "function main() local value = {expression} return value end"
+            ));
+            assert!(
+                matches!(&body[0], Stmt::Let(_, None, Expr::IntLit(value)) if *value == expected),
+                "{expression}: {body:?}"
+            );
+        }
+        for expression in [
+            "other + 1",
+            "effect() + 1",
+            "1.0 + 41",
+            "21 << 1",
+            "84 / 2",
+            "-1 + 43",
+        ] {
+            let body = parsed_body(&format!(
+                "function main() local value = {expression} return value end"
+            ));
+            assert!(!matches!(&body[0], Stmt::Let(..)), "{expression}: {body:?}");
+        }
     }
 
     #[test]
