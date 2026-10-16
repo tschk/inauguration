@@ -315,44 +315,23 @@ where
     None
 }
 
-pub(crate) fn collect_parallel_tasks(
-    lines: &[&str],
-    start_idx: usize,
-    region: usize,
-) -> Vec<InParallelTaskFact> {
-    let mut depth = 0i32;
-    let mut started = false;
-    let mut content = String::new();
-    for raw in lines.iter().skip(start_idx) {
-        let line = strip_line_comment_outside_strings(raw);
-        for ch in line.chars() {
-            match ch {
-                '{' => {
-                    depth += 1;
-                    started = true;
-                }
-                '}' => {
-                    depth -= 1;
-                    if depth <= 0 {
-                        return parallel_tasks_from_content(&content, region);
-                    }
-                }
-                _ if started && depth > 0 => content.push(ch),
-                _ => {}
-            }
-        }
-        if started && depth > 0 {
-            content.push('\n');
-        }
-    }
-    parallel_tasks_from_content(&content, region)
+pub(crate) fn collect_parallel_tasks(source: &str, region: usize) -> Vec<InParallelTaskFact> {
+    // The shared top-level item scanner already removed outside-string comments.
+    // Preserve literal braces and delimiters while selecting this region body.
+    let Some(open) = source.find('{') else {
+        return Vec::new();
+    };
+    let Some(content) = brace_content_after_open(source, open) else {
+        return Vec::new();
+    };
+    parallel_tasks_from_content(content, region)
 }
 
 pub(crate) fn parallel_tasks_from_content(content: &str, region: usize) -> Vec<InParallelTaskFact> {
-    content
-        .split([';', '\n'])
+    split_function_statements(content)
+        .into_iter()
         .filter_map(|token| {
-            let token = trim(token);
+            let token = trim(&token);
             let name = token.split_once('(')?.0.trim();
             if name.is_empty()
                 || !name.split('.').all(|part| {
@@ -460,11 +439,7 @@ pub(crate) fn parse_in_surface_info_with_items(
             let region = info.orchestration.parallel_regions - 1;
             info.orchestration
                 .parallel_tasks
-                .extend(collect_parallel_tasks(
-                    &line.lines().collect::<Vec<_>>(),
-                    0,
-                    region,
-                ));
+                .extend(collect_parallel_tasks(line, region));
             continue;
         }
         if line.starts_with("extern ") {

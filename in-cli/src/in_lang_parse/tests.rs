@@ -3507,3 +3507,63 @@ fn rejects_incomplete_and_mismatched_top_level_items() {
         );
     }
 }
+
+#[test]
+fn parallel_task_facts_ignore_literal_and_nested_delimiters() {
+    for argument in [
+        r#""}""#,
+        r#""{""#,
+        r#""x;fake();y""#,
+        "\"x\nfake()\ny\"",
+        r#""escaped\\\";fake();}""#,
+        r#"nested("};fake()", [1, 2])"#,
+        "[nested(1), nested(2)]",
+    ] {
+        let source = format!(
+            "parallel {{first({argument});\nsecond();}}parallel {{third();}}fn main()->Int{{return 42;}}"
+        );
+        let info = parse_in_surface_info(&source).unwrap();
+        assert_eq!(
+            info.orchestration.parallel_tasks,
+            vec![
+                InParallelTaskFact {
+                    region: 0,
+                    name: "first".into()
+                },
+                InParallelTaskFact {
+                    region: 0,
+                    name: "second".into()
+                },
+                InParallelTaskFact {
+                    region: 1,
+                    name: "third".into()
+                },
+            ],
+            "{source}"
+        );
+        let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+        assert_eq!(parse_in_surface_info(&canonical).unwrap(), info);
+    }
+}
+
+#[test]
+fn parallel_task_facts_keep_comments_opaque_and_malformed_regions_refused() {
+    let source =
+        "parallel {first(); // } fake();\nsecond(\"// };fake()\");\n}fn main()->Int{return 42;}";
+    let info = parse_in_surface_info(source).unwrap();
+    assert_eq!(
+        info.orchestration
+            .parallel_tasks
+            .iter()
+            .map(|task| task.name.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    for source in [
+        "parallel nope;fn main()->Int{return 42;}",
+        "parallel {first();",
+        "parallel {first(\"unterminated);}",
+    ] {
+        assert!(parse_in_surface_info(source).is_err(), "{source}");
+    }
+}
