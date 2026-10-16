@@ -913,10 +913,7 @@ pub(super) fn ast_defined_body(src: &[u8], body: Node<'_>, shape: AstShape) -> V
         if genuinely_empty(block, shape) {
             lowered.push(Stmt::Return(None));
         } else {
-            lowered.push(Stmt::Expr(Expr::Call {
-                callee: Box::new(Expr::Ident(crate::core_ir::UNSUPPORTED_DEFINED_BODY.into())),
-                args: vec![],
-            }));
+            lowered.push(unsupported_body_stmt());
         }
     }
     lowered
@@ -983,8 +980,11 @@ pub(super) fn ast_stmt(
         return ast_expr_statement(src, stmt, shape, locals);
     }
     if kind_in(stmt, shape.local_decl_kinds) {
-        return ast_local_decl(src, stmt, shape)
-            .or_else(|| ast_assignment(src, stmt, shape, locals));
+        return Some(
+            ast_local_decl(src, stmt, shape)
+                .or_else(|| ast_assignment(src, stmt, shape, locals))
+                .unwrap_or_else(unsupported_body_stmt),
+        );
     }
     if kind_in(stmt, shape.assignment_kinds) {
         return ast_assignment(src, stmt, shape, locals);
@@ -1016,10 +1016,7 @@ pub(super) fn ast_stmt(
     }
     // An unknown statement cannot be replaced by its first expression child.
     if stmt.kind() == "statement" || stmt.kind().ends_with("_statement") {
-        return Some(Stmt::Expr(Expr::Call {
-            callee: Box::new(Expr::Ident(crate::core_ir::UNSUPPORTED_DEFINED_BODY.into())),
-            args: vec![],
-        }));
+        return Some(unsupported_body_stmt());
     }
     ast_expr(src, stmt, shape).map(Stmt::Expr)
 }
@@ -1057,29 +1054,27 @@ fn ast_expr_statement(
     ast_expr(src, expr, shape).map(Stmt::Expr)
 }
 
+fn unsupported_body_stmt() -> Stmt {
+    Stmt::Expr(Expr::Call {
+        callee: Box::new(Expr::Ident(crate::core_ir::UNSUPPORTED_DEFINED_BODY.into())),
+        args: vec![],
+    })
+}
+
 fn ast_local_decl(src: &[u8], decl: Node<'_>, shape: AstShape) -> Option<Stmt> {
-    if !shape.local_decl_prefixes.is_empty() {
-        let text = node_txt(src, decl).trim_start();
-        if !shape
-            .local_decl_prefixes
-            .iter()
-            .any(|prefix| text.starts_with(prefix))
-        {
-            return None;
-        }
-    }
     // Read the owned RHS without discarding extra bindings or effects.
     let owned_assignment = first_named(decl, "assignment_statement")
         .filter(|assignment| kind_in(*assignment, shape.assignment_kinds));
     if owned_assignment.is_some()
         || (decl.kind() == "variable_declaration" && first_named(decl, "variable_list").is_some())
     {
-        let unsupported = || {
-            Stmt::Expr(Expr::Call {
-                callee: Box::new(Expr::Ident(crate::core_ir::UNSUPPORTED_DEFINED_BODY.into())),
-                args: vec![],
-            })
-        };
+        // Lua aliases local/global declaration nodes; only local owns a local slot.
+        if !decl
+            .child(0)
+            .is_some_and(|token| token.kind() == "local" && !token.is_missing())
+        {
+            return Some(unsupported_body_stmt());
+        }
         fn meaningful(node: Node<'_>) -> Vec<Node<'_>> {
             let mut cursor = node.walk();
             node.named_children(&mut cursor)
@@ -1087,12 +1082,12 @@ fn ast_local_decl(src: &[u8], decl: Node<'_>, shape: AstShape) -> Option<Stmt> {
                 .collect::<Vec<_>>()
         }
         let Some(assignment) = owned_assignment else {
-            return Some(unsupported());
+            return Some(unsupported_body_stmt());
         };
         let declaration_children = meaningful(decl);
         let assignment_children = meaningful(assignment);
         if declaration_children.len() != 1 || assignment_children.len() != 2 {
-            return Some(unsupported());
+            return Some(unsupported_body_stmt());
         }
         let (names, values) = (assignment_children[0], assignment_children[1]);
         let names_children = meaningful(names);
@@ -1103,10 +1098,10 @@ fn ast_local_decl(src: &[u8], decl: Node<'_>, shape: AstShape) -> Option<Stmt> {
             || values_children.len() != 1
             || names_children[0].kind() != "identifier"
         {
-            return Some(unsupported());
+            return Some(unsupported_body_stmt());
         }
         if !ast_scalar_rhs_is_supported(values_children[0], shape) {
-            return Some(unsupported());
+            return Some(unsupported_body_stmt());
         }
         return Some(match ast_expr(src, values_children[0], shape) {
             Some(value) => Stmt::Let(
@@ -1114,8 +1109,18 @@ fn ast_local_decl(src: &[u8], decl: Node<'_>, shape: AstShape) -> Option<Stmt> {
                 None,
                 value,
             ),
-            None => unsupported(),
+            None => unsupported_body_stmt(),
         });
+    }
+    if !shape.local_decl_prefixes.is_empty() {
+        let text = node_txt(src, decl).trim_start();
+        if !shape
+            .local_decl_prefixes
+            .iter()
+            .any(|prefix| text.starts_with(prefix))
+        {
+            return None;
+        }
     }
     let var = named_descendant(decl, "variable_declarator")
         .or_else(|| named_descendant(decl, "initialized_variable_definition"))
@@ -5850,6 +5855,25 @@ end
     fn lua_local_initializer_uses_owned_rhs_and_refuses_multiple_bindings_or_values() {
         for (declaration, expected) in [
             ("local value = 42", Some(Expr::IntLit(42))),
+            ("local-- comment\nvalue = 42", Some(Expr::IntLit(42))),
+            ("local\tvalue = 42", Some(Expr::IntLit(42))),
+            ("local\nvalue = 42", Some(Expr::IntLit(42))),
+            ("local\r\nvalue = 42", Some(Expr::IntLit(42))),
+            (
+                "local\tvalue = print(\"side\")",
+                Some(Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into())),
+                    args: vec![Expr::StringLit("side".into())],
+                }),
+            ),
+            (
+                "local\nvalue = print(\"side\")",
+                Some(Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into())),
+                    args: vec![Expr::StringLit("side".into())],
+                }),
+            ),
+            ("global value = print(\"side\")", None),
             (
                 "local value = \"outer\"",
                 Some(Expr::StringLit("outer".into())),
@@ -5970,6 +5994,18 @@ end
                 })
                 .unwrap();
             assert_eq!(body, &vec![Stmt::Return(Some(expected))], "{source}");
+        }
+    }
+    #[test]
+    fn lua_plain_assignment_does_not_become_a_local_declaration() {
+        for name in ["value", "localvalue", "local_value"] {
+            let source = format!("function main() {name} = 42; return end");
+            let module =
+                parse_lang(try_lang_for(ParserId::Lua).unwrap(), &source, extract_lua).unwrap();
+            assert_eq!(
+                main_body(&module)[0],
+                Stmt::Assign(name.into(), Expr::IntLit(42))
+            );
         }
     }
 }

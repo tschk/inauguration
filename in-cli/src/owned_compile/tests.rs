@@ -79,6 +79,11 @@ fn unknown_statements_refuse_before_execution_across_profiles() {
             "function main() print(0x2LL); return end",
             "#unsupported-number-literal",
         ),
+        (
+            "lua",
+            "function main() global value = print(\"side\"); return end",
+            statement,
+        ),
     ] {
         let source = temp_path(&format!("unknown-statement.{extension}"));
         fs::write(&source, text).unwrap();
