@@ -371,13 +371,30 @@ pub(crate) fn parallel_tasks_from_content(content: &str, region: usize) -> Vec<I
 }
 
 pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
+    let blocks = super::lexer::split_top_level_decl_blocks(source);
+    parse_in_surface_info_with_blocks(source, &blocks)
+}
+
+pub(crate) fn parse_in_surface_info_with_blocks(
+    source: &str,
+    blocks: &[(usize, String)],
+) -> Result<InSurfaceInfo, String> {
     let mut info = InSurfaceInfo::default();
+    let mut extern_blocks = blocks
+        .iter()
+        .filter(|(_, block)| block.trim_start().starts_with("extern "))
+        .peekable();
     let mut depth = 0i32;
     let lines: Vec<&str> = source.lines().collect();
     let mut source_state = SourceLineState::default();
     for (idx, raw_line) in lines.iter().enumerate() {
-        let scanned = source_state.scan_line(raw_line);
-        let delta = scanned.brace_delta;
+        let mut initializer_delta = 0;
+        let scanned = source_state.scan_line_with(raw_line, |_, ch| match ch {
+            '(' | '[' => initializer_delta += 1,
+            ')' | ']' => initializer_delta -= 1,
+            _ => {}
+        });
+        let delta = scanned.brace_delta + initializer_delta;
         if scanned.starts_in_string {
             depth = (depth + delta).max(0);
             continue;
@@ -391,6 +408,21 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
             continue;
         }
         if depth == 0 {
+            while extern_blocks
+                .peek()
+                .is_some_and(|(line, _)| *line < idx + 1)
+            {
+                extern_blocks.next();
+            }
+            let mut has_extern = false;
+            while extern_blocks
+                .peek()
+                .is_some_and(|(line, _)| *line == idx + 1)
+            {
+                let (_, block) = extern_blocks.next().expect("peeked extern block");
+                info.externs.push(parse_extern_fn_block(block)?);
+                has_extern = true;
+            }
             if let Some(rest) = line.strip_prefix("package ") {
                 let package = parse_package_or_module_name("package", rest)?;
                 if info.package.replace(package).is_some() {
@@ -508,7 +540,10 @@ pub fn parse_in_surface_info(source: &str) -> Result<InSurfaceInfo, String> {
                 continue;
             }
             if line.starts_with("extern ") {
-                info.externs.push(parse_extern_fn_block(line)?);
+                if !has_extern {
+                    parse_extern_fn_block(line)?;
+                    return Err(".in: incomplete extern declaration".into());
+                }
                 depth += delta;
                 if depth < 0 {
                     depth = 0;

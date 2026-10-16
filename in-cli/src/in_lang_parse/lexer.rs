@@ -274,73 +274,95 @@ pub fn normalize_human_in_source(source: &str) -> String {
     out.join("\n")
 }
 
-/// Split source into complete top-level `struct` / `fn` declaration blocks (brace-balanced at depth 0).
+/// Split complete top-level declarations at closing braces, semicolons, or newlines.
 pub fn split_top_level_decl_blocks(source: &str) -> Vec<(usize, String)> {
-    let mut depth = 0i32;
-    let mut current: Option<Vec<(usize, String)>> = None;
     let mut out = Vec::new();
+    let mut current = String::new();
+    let mut start_line = 1;
+    let mut depth = [0i32; 3];
+    let mut brace_decl = false;
     let mut lexical = SourceLineState::default();
     for (line_no, raw_line) in source.lines().enumerate() {
-        let scanned = lexical.scan_line(raw_line);
+        let mut outside = Vec::new();
+        let scanned = lexical.scan_line_with(raw_line, |index, ch| {
+            if matches!(ch, '{' | '}' | '(' | ')' | '[' | ']' | ';') {
+                outside.push((index, ch));
+            }
+        });
         let literal = scanned.starts_in_string || scanned.ends_in_string;
-        let t = if literal {
-            scanned.text
-        } else {
-            scanned.text.trim()
-        };
-        let delta = scanned.brace_delta;
-
-        if current.is_none() {
-            let header = t.trim_start();
-            if header.is_empty() || t.starts_with("//") {
-                continue;
-            }
-            if depth == 0
-                && (header.starts_with("fn ")
-                    || header.starts_with("interrupt fn ")
-                    || header.starts_with("struct ")
-                    || header.starts_with("extern ")
-                    || header.starts_with("class ")
-                    || header.starts_with("interface ")
-                    || header.starts_with("component ")
-                    || header.starts_with("var ")
-                    || header.starts_with("const "))
-            {
-                current = Some(vec![(line_no + 1, t.to_string())]);
-                depth += delta;
-                if depth == 0 && !scanned.ends_in_string {
-                    let buf = current.take().expect("just set");
-                    let text = buf
-                        .into_iter()
-                        .map(|(_, s)| s)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    out.push((line_no + 1, text));
+        let text = scanned.text;
+        let mut events = outside.into_iter();
+        let mut begin = 0;
+        while begin < text.len() {
+            if current.is_empty() {
+                let rest =
+                    text[begin..].trim_start_matches(|ch: char| ch.is_whitespace() || ch == ';');
+                begin = text.len() - rest.len();
+                if rest.is_empty() {
+                    break;
                 }
-                continue;
+                brace_decl = [
+                    "fn ",
+                    "interrupt fn ",
+                    "struct ",
+                    "class ",
+                    "interface ",
+                    "component ",
+                ]
+                .iter()
+                .any(|prefix| rest.starts_with(prefix));
+                if !brace_decl
+                    && !["extern ", "var ", "const "]
+                        .iter()
+                        .any(|prefix| rest.starts_with(prefix))
+                {
+                    break;
+                }
+                start_line = line_no + 1;
             }
-            continue;
+            let mut end = text.len();
+            let mut complete = false;
+            for (index, ch) in events.by_ref() {
+                if index < begin {
+                    continue;
+                }
+                match ch {
+                    '{' => depth[0] += 1,
+                    '}' => depth[0] -= 1,
+                    '(' => depth[1] += 1,
+                    ')' => depth[1] -= 1,
+                    '[' => depth[2] += 1,
+                    ']' => depth[2] -= 1,
+                    _ => {}
+                }
+                if depth == [0; 3] && (ch == ';' || (brace_decl && ch == '}')) {
+                    end = index + ch.len_utf8();
+                    complete = true;
+                    break;
+                }
+            }
+            let part = &text[begin..end];
+            let part = if literal { part } else { part.trim() };
+            if !part.is_empty() || literal {
+                if !current.is_empty() {
+                    current.push('\n');
+                }
+                current.push_str(part);
+            }
+            begin = end;
+            if complete {
+                out.push((start_line, std::mem::take(&mut current)));
+                depth = [0; 3];
+            } else {
+                break;
+            }
         }
-
-        if literal || !(t.is_empty() || t.starts_with("//")) {
-            current
-                .as_mut()
-                .expect("inside decl")
-                .push((line_no + 1, t.to_string()));
+        // Preserve blank physical lines inside multiline literals.
+        if text.is_empty() && literal && !current.is_empty() {
+            current.push('\n');
         }
-        depth += delta;
-        if depth < 0 {
-            depth = 0;
-        }
-        if depth == 0 && !scanned.ends_in_string {
-            let buf = current.take().expect("inside decl");
-            let start_line = buf.first().map(|(l, _)| *l).unwrap_or(1);
-            let text = buf
-                .into_iter()
-                .map(|(_, s)| s)
-                .collect::<Vec<_>>()
-                .join("\n");
-            out.push((start_line, text));
+        if !current.is_empty() && depth == [0; 3] && !scanned.ends_in_string {
+            out.push((start_line, std::mem::take(&mut current)));
         }
     }
     out

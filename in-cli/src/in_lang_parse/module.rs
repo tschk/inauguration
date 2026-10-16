@@ -6,6 +6,7 @@ use super::expr::parse_expr;
 use super::lexer::{normalize_human_in_source, split_top_level_decl_blocks};
 use super::surface::{
     binding_decl, in_standard_import_bindings, normalize_import_path, parse_in_surface_info,
+    parse_in_surface_info_with_blocks,
 };
 use super::types::{parse_fn_header, parse_in_type};
 use super::util::*;
@@ -188,12 +189,12 @@ fn parse_in_module_without_validation(
     source: &str,
     source_path: Option<&std::path::Path>,
 ) -> Result<ParsedInModule, String> {
-    let surface = parse_in_surface_info(source)?;
+    let blocks = split_top_level_decl_blocks(source);
+    let surface = parse_in_surface_info_with_blocks(source, &blocks)?;
     let identity = CoreModuleIdentity {
         package: surface.package.clone(),
         module: surface.module.clone(),
     };
-    let blocks = split_top_level_decl_blocks(source);
     let ParsedInModule {
         mut module,
         pending_globals,

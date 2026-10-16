@@ -12,6 +12,15 @@ pub(crate) struct ScannedLine<'a> {
 
 impl SourceLineState {
     pub(crate) fn scan_line<'a>(&mut self, line: &'a str) -> ScannedLine<'a> {
+        self.scan_line_with(line, |_, _| {})
+    }
+
+    /// Visit source characters outside strings and comments without a second lexer.
+    pub(crate) fn scan_line_with<'a>(
+        &mut self,
+        line: &'a str,
+        mut outside: impl FnMut(usize, char),
+    ) -> ScannedLine<'a> {
         let starts_in_string = self.in_string;
         let mut escaped = false;
         let mut brace_delta = 0;
@@ -26,6 +35,9 @@ impl SourceLineState {
                     self.in_string = false;
                 }
                 continue;
+            }
+            if ch != '"' && !line[index..].starts_with("//") {
+                outside(index, ch);
             }
             match ch {
                 '"' => self.in_string = true,

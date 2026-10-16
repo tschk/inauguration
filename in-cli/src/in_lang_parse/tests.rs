@@ -3318,3 +3318,87 @@ fn dynamic_thumb_bitnot_fixture_canonicalizes_to_identical_core_ir() {
     let canonical = crate::in_canonical::canonicalize_in_source(source).unwrap();
     assert_eq!(parse_in_source(&canonical).unwrap(), original);
 }
+
+#[test]
+fn adjacent_brace_declarations_preserve_all_symbols() {
+    for separator in ["", " ", ";", "\n"] {
+        let source = format!(
+            "struct Pair{{Int x}}{separator}var value:Int=0;fn helper()->Int{{return 42;}}{separator}fn main()->Int{{return helper();}}"
+        );
+        let module = parse_in_source(&source).unwrap();
+        assert_eq!(module.decls.len(), 4, "{source}");
+        assert!(
+            module
+                .decls
+                .iter()
+                .any(|decl| matches!(decl, Decl::Function{name,..} if name=="main"))
+        );
+        let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+        assert_eq!(module, parse_in_source(&canonical).unwrap());
+    }
+}
+
+#[test]
+fn declaration_boundaries_ignore_initializer_and_literal_delimiters() {
+    let source = "var text:String=\"};fn fake(){; // literal\";const items:[Int]=[20,22];fn main()->Int{return items[0]+items[1];}";
+    let module = parse_in_source(source).unwrap();
+    assert_eq!(module.decls.len(), 3);
+    let blocks = split_top_level_decl_blocks("fn first(){} fn second(){}\n\nfn third(){}");
+    assert_eq!(
+        blocks.iter().map(|(line, _)| *line).collect::<Vec<_>>(),
+        [1, 1, 3]
+    );
+}
+
+#[test]
+fn adjacent_declarations_preserve_multiline_initializers_and_externs() {
+    for prefix in [
+        "var text:String=\"first\n\n  // literal } ;\nlast\";",
+        "const items:[Int]=[\n20,\n22\n];",
+        "var value:Int=(20+\n22);",
+        "extern c fn answer()->Int;",
+    ] {
+        let tail = "fn main()->Int{return 42;}";
+        let source = format!("{prefix}{tail}");
+        let expected = parse_in_source(&format!("{prefix}\n{tail}")).unwrap();
+        let actual = parse_in_source(&source).unwrap();
+        assert_eq!(actual, expected, "{source}");
+        let canonical = crate::in_canonical::canonicalize_in_source(&source).unwrap();
+        assert_eq!(
+            parse_in_source(&canonical).unwrap(),
+            expected,
+            "{canonical}"
+        );
+    }
+}
+
+#[test]
+fn surface_externs_follow_the_same_declaration_boundaries() {
+    let first = "extern c fn first(value:Int)->Int;";
+    let second = "extern rust fn second()->Bool;";
+    let main = "fn main()->Int{return 42;}";
+    let expected = parse_in_surface_info(&format!("{first}\n{second}\n{main}")).unwrap();
+    assert_eq!(expected.externs.len(), 2);
+    for source in [
+        format!("{first}{second}{main}"),
+        format!("{first}{main}{second}"),
+    ] {
+        assert_eq!(
+            parse_in_surface_info(&source).unwrap(),
+            expected,
+            "{source}"
+        );
+        assert_eq!(parse_in_source(&source).unwrap().decls.len(), 3);
+    }
+}
+
+#[test]
+fn surface_externs_exclude_nested_topology_and_reject_incomplete_headers() {
+    let source = "system topology {\nextern c fn nested()->Int;\n}\nfn main()->Int{return 42;}";
+    assert!(parse_in_surface_info(source).unwrap().externs.is_empty());
+    for header in ["extern c wrong(", "extern c fn broken("] {
+        let source = format!("fn main()->Int{{return 42;}}\n{header}");
+        assert!(parse_in_surface_info(&source).is_err(), "{source}");
+        assert!(parse_in_source(&source).is_err(), "{source}");
+    }
+}
