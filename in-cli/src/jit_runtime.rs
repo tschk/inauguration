@@ -2467,14 +2467,18 @@ fn main()->Int{#print(argument());#print_int(7);#print("\n");return print("ignor
                 42,
                 "",
             ),
-            ("proc main(): int =\n  result = 42\n  return\n  7", 42, ""),
+            (
+                "proc main(): int =\n  result = 42\n  return\n  return 7",
+                42,
+                "",
+            ),
             (
                 "proc main(): int =\n  result = 3\n  echo \"side\"",
                 3,
                 "side\n",
             ),
             (
-                "proc helper(): int =\n  result = 5\n  return\nproc main(): int =\n  result = 3\n  helper() + result",
+                "proc helper(): int =\n  result = 5\n  return\nproc main(): int =\n  result = 3\n  return helper() + result",
                 8,
                 "",
             ),
