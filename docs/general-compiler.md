@@ -88,6 +88,8 @@ Lua expression normalization routes Boolean logical operations through typed
 checks, preserving Boolean locals and function results. Integer division,
 modulo, power and shifts refuse before execution until their Lua semantics are
 owned; division of proven Float operands retains the native floating path.
+Lua `+` likewise requires proven numeric operands; string concatenation is not
+a valid lowering of Lua addition. Numeric string coercion remains unsupported.
 
 Python scalar-name augmented assignments support `+=`, `-=`, `*=`, `&=`,
 `|=` and `^=` through the existing typed native operations. They read the old

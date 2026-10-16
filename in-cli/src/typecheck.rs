@@ -695,6 +695,18 @@ impl TypeChecker {
         } else if let Expr::Binary { op, lhs, rhs } = expr {
             c_operands[0] = self.resolve_typed_expr(lhs, facts, env, promote_c_bool, return_type);
             c_operands[1] = self.resolve_typed_expr(rhs, facts, env, promote_c_bool, return_type);
+            if op == "lua-add" {
+                let left = self.expr_type(lhs, facts, env);
+                let right = self.expr_type(rhs, facts, env);
+                if !matches!(
+                    (&left, &right),
+                    (Some(Typ::Int), Some(Typ::Int)) | (Some(Typ::Float), Some(Typ::Float))
+                ) {
+                    *expr = Expr::Ident("#unsupported-lua-numeric-addition".into());
+                    return None;
+                }
+                *op = "+".into();
+            }
             if op == "lua-div" {
                 // Lua integer division produces Float; retain only proven Float operands.
                 if self.expr_type(lhs, facts, env) != Some(Typ::Float)
@@ -2970,6 +2982,7 @@ pub fn normalize_module_with_semantics(
                 {
                     *expr = Expr::Ident("#unsupported-lua-operator-semantics".into());
                 }
+                Expr::Binary { op, .. } if op == "+" => *op = "lua-add".into(),
                 Expr::Binary { op, .. } if op == "/" => *op = "lua-div".into(),
                 Expr::Binary { op, .. } if op == "and" => *op = "&&".into(),
                 Expr::Binary { op, .. } if op == "or" => *op = "||".into(),
