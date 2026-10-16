@@ -40,6 +40,7 @@ pub use lower::{
     compile_native_executable_for_host, host_supports_native_subset,
 };
 pub use macho::{ExportSymbol, MachOLinkage, write_relocatable_object};
+pub(crate) use object::try_emit_native_object;
 pub use object::{
     NATIVE_OBJECT_SUBSET as NATIVE_OBJECT_REASON, NativeObjectArtifact, NativeObjectRequest,
     emit_native_object,

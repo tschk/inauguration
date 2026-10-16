@@ -113,7 +113,13 @@ pub fn compile_native(
             module_id,
             base: request.base,
         };
-        if let Some(artifact) = native_emit::emit_native_object(&object_request) {
+        let artifact = native_emit::try_emit_native_object(&object_request).map_err(|error| {
+            format!(
+                "native-target-not-implemented: target `{target_triple}` with linkage `{}` could not be emitted by the owned backend; backend: {error}",
+                super::util::linkage_label(request.linkage)
+            )
+        })?;
+        if let Some(artifact) = artifact {
             fs::write(out_path, artifact.bytes)
                 .map_err(|err| format!("native object write `{}`: {err}", out_path.display()))?;
             set_native_artifact_permissions(out_path, request.linkage)?;

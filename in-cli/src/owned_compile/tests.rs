@@ -7537,3 +7537,44 @@ fn owned_float_logical_not_uses_numeric_zero_once() {
         }
     }
 }
+
+#[test]
+fn explicit_native_backend_failure_preserves_reason_code_and_detail() {
+    let source = temp_path("native-failure-detail.in");
+    fs::write(&source, "fn main(value:Float)->Int{return 42;}").unwrap();
+    for target in ["i386-unknown-none", "thumbv8m.main-none-eabi"] {
+        let out = temp_path("native-failure-detail.o");
+        let mut request = default_request(
+            source.clone(),
+            CompileTarget::Native,
+            Some("main"),
+            Some(out.clone()),
+        );
+        request.target_triple = Some(target.into());
+        request.linkage = NativeLinkage::StaticLib;
+        for existing in [false, true] {
+            if existing {
+                fs::write(&out, b"preserve artifact").unwrap();
+            }
+            let report = compile_owned(&request);
+            assert!(!report.success, "{report:?}");
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("native-target-not-implemented")
+            );
+            let error = report.error.as_deref().unwrap();
+            assert!(
+                error.contains("backend:") && error.contains("Float"),
+                "{error}"
+            );
+            assert_eq!(report.reason.as_deref(), Some(error));
+            if existing {
+                assert_eq!(fs::read(&out).unwrap(), b"preserve artifact");
+            } else {
+                assert!(!out.exists());
+            }
+        }
+        fs::remove_file(out).unwrap();
+    }
+    fs::remove_file(source).unwrap();
+}

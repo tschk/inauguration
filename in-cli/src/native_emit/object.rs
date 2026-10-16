@@ -42,6 +42,13 @@ pub struct NativeObjectArtifact {
 }
 
 pub fn emit_native_object(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
+    try_emit_native_object(request).ok().flatten()
+}
+
+/// Distinguish unsupported target selection from a selected backend's failure.
+pub(crate) fn try_emit_native_object(
+    request: &NativeObjectRequest<'_>,
+) -> Result<Option<NativeObjectArtifact>, String> {
     struct WidthGuard(bool);
     impl Drop for WidthGuard {
         fn drop(&mut self) {
@@ -51,34 +58,32 @@ pub fn emit_native_object(request: &NativeObjectRequest<'_>) -> Option<NativeObj
     let _width = WidthGuard(crate::native_emit::x86_64::is_32bit());
     match (request.target_triple, request.linkage) {
         (ELF_LINUX_TRIPLE, NativeLinkage::StaticLib) => emit_x86_64_elf_object(request),
-        (ELF_LINUX_TRIPLE, NativeLinkage::Executable) => Some(emit_x86_64_elf_executable(request)),
+        (ELF_LINUX_TRIPLE, NativeLinkage::Executable) => {
+            Ok(Some(emit_x86_64_elf_executable(request)))
+        }
         (COFF_WINDOWS_TRIPLE, NativeLinkage::Executable) => {
-            Some(emit_x86_64_pe_executable(request))
+            Ok(Some(emit_x86_64_pe_executable(request)))
         }
         (AARCH64_LINUX_TRIPLE, NativeLinkage::StaticLib) => emit_aarch64_elf_object(request),
         (AARCH64_LINUX_TRIPLE, NativeLinkage::Executable) => {
-            Some(emit_aarch64_elf_executable(request))
+            Ok(Some(emit_aarch64_elf_executable(request)))
         }
         ("aarch64-apple-darwin", NativeLinkage::StaticLib) => emit_aarch64_macho_archive(request),
-        (ARMV7_LINUX_GNUEABIHF_TRIPLE, NativeLinkage::StaticLib) => emit_arm32_elf_object(request),
-        (ARMV7_LINUX_GNUEABIHF_TRIPLE, NativeLinkage::Executable) => {
-            Some(emit_arm32_elf_executable(request))
+        (ARMV7_LINUX_GNUEABIHF_TRIPLE, NativeLinkage::StaticLib) => {
+            Ok(emit_arm32_elf_object(request))
         }
-        (WASM32_UNKNOWN_TRIPLE, NativeLinkage::StaticLib) => emit_wasm32_module(request),
+        (ARMV7_LINUX_GNUEABIHF_TRIPLE, NativeLinkage::Executable) => {
+            Ok(Some(emit_arm32_elf_executable(request)))
+        }
+        (WASM32_UNKNOWN_TRIPLE, NativeLinkage::StaticLib) => Ok(emit_wasm32_module(request)),
         ("i386-unknown-none", NativeLinkage::StaticLib)
         | ("i686-unknown-none", NativeLinkage::StaticLib)
         | (X86_64_TRIPLE, NativeLinkage::StaticLib) => emit_x86_64_freestanding_object(request),
         (AARCH64_NONE_TRIPLE, NativeLinkage::StaticLib) => emit_aarch64_elf_object(request),
         (THUMBV8M_MAIN_NONE_EABI_TRIPLE, NativeLinkage::StaticLib) => {
-            match emit_thumbv8m_freestanding_object(request) {
-                Ok(artifact) => Some(artifact),
-                Err(err) => {
-                    eprintln!("thumb-lower error: {err}");
-                    None
-                }
-            }
+            emit_thumbv8m_freestanding_object(request).map(Some)
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -165,19 +170,15 @@ fn x86_object_bytes(
     )
 }
 
-fn emit_x86_64_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
+fn emit_x86_64_elf_object(
+    request: &NativeObjectRequest<'_>,
+) -> Result<Option<NativeObjectArtifact>, String> {
     crate::native_emit::x86_64::set_32bit(false);
-    let result = lower_native_module(request.module, request.entry).ok()?;
+    let result = lower_native_module(request.module, request.entry)?;
     // Keep hosted sibling bodies local to avoid collisions with host symbols.
     let exports = vec![(request.entry.to_string(), result.entry_offset)];
-    let bytes = match x86_object_bytes(&result, &exports, true) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("x86 ELF object error: {error}");
-            return None;
-        }
-    };
-    Some(NativeObjectArtifact {
+    let bytes = x86_object_bytes(&result, &exports, true)?;
+    Ok(Some(NativeObjectArtifact {
         bytes,
         artifact_kind: "elf-relocatable-object",
         backend_level: "owned-object-subset",
@@ -185,25 +186,28 @@ fn emit_x86_64_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeObj
         reason_code: NATIVE_OBJECT_SUBSET,
         reason: "inauguration lowers x86_64 ELF objects with writable data, section-relative absolute references and external call relocations",
         abi_manifest: Some(object_abi_manifest(request)),
-    })
+    }))
 }
 
-fn emit_aarch64_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
+fn emit_aarch64_elf_object(
+    request: &NativeObjectRequest<'_>,
+) -> Result<Option<NativeObjectArtifact>, String> {
     let mut lowered = crate::native_emit::lower::lower_native_module(
         request.module,
         request.entry,
         NativeLinkage::StaticLib,
-    )
-    .ok()?;
+    )?;
     // ponytail: add data and CALL26 relocations before accepting globals or external calls.
     if !lowered.global_relocs.is_empty()
         || !lowered.data_relocations.is_empty()
         || !lowered.external_refs.is_empty()
         || !lowered.degradations.is_empty()
     {
-        return None;
+        return Ok(None);
     }
-    let first = lowered.exports.iter().min_by_key(|export| export.offset)?;
+    let Some(first) = lowered.exports.iter().min_by_key(|export| export.offset) else {
+        return Ok(None);
+    };
     let base = first.offset;
     let export_name = first.name.clone();
     // ELF's primary export starts at zero; remove the unused executable-entry prefix.
@@ -225,7 +229,7 @@ fn emit_aarch64_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeOb
     let mut bytes = Vec::new();
     write_aarch64_relocatable_object(&object, &mut bytes);
     let freestanding = request.target_triple == AARCH64_NONE_TRIPLE;
-    Some(NativeObjectArtifact {
+    Ok(Some(NativeObjectArtifact {
         bytes,
         artifact_kind: "elf-relocatable-object",
         backend_level: if freestanding {
@@ -245,7 +249,7 @@ fn emit_aarch64_elf_object(request: &NativeObjectRequest<'_>) -> Option<NativeOb
         },
         reason: "inauguration emits ELF64 AArch64 relocatable objects with real Core IR function bodies and every function exported",
         abi_manifest: Some(object_abi_manifest(request)),
-    })
+    }))
 }
 
 fn emit_aarch64_elf_executable(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
@@ -313,20 +317,21 @@ fn emit_arm32_elf_executable(request: &NativeObjectRequest<'_>) -> NativeObjectA
     }
 }
 
-fn emit_aarch64_macho_archive(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
+fn emit_aarch64_macho_archive(
+    request: &NativeObjectRequest<'_>,
+) -> Result<Option<NativeObjectArtifact>, String> {
     let lowered = crate::native_emit::lower::lower_native_module(
         request.module,
         request.entry,
         NativeLinkage::StaticLib,
-    )
-    .ok()?;
+    )?;
     // The object writer has no writable data section; every export must be fully lowered.
     if lowered.exports.is_empty()
         || !lowered.global_relocs.is_empty()
         || !lowered.data_relocations.is_empty()
         || !lowered.degradations.is_empty()
     {
-        return None;
+        return Ok(None);
     }
     let image = MachOImage {
         code: lowered.code,
@@ -336,7 +341,7 @@ fn emit_aarch64_macho_archive(request: &NativeObjectRequest<'_>) -> Option<Nativ
     };
     let mut bytes = Vec::new();
     write_image(&image, MachOLinkage::StaticLib, request.entry, &mut bytes);
-    Some(NativeObjectArtifact {
+    Ok(Some(NativeObjectArtifact {
         bytes,
         artifact_kind: "mach-o-static-archive",
         backend_level: "owned-native-subset-aarch64-static",
@@ -344,7 +349,7 @@ fn emit_aarch64_macho_archive(request: &NativeObjectRequest<'_>) -> Option<Nativ
         reason_code: NATIVE_OBJECT_SUBSET,
         reason: "inauguration emits Mach-O static archives containing real AArch64 Core IR function bodies and external call relocations",
         abi_manifest: Some(object_abi_manifest(request)),
-    })
+    }))
 }
 
 fn emit_x86_64_elf_executable(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
@@ -367,22 +372,15 @@ fn emit_x86_64_elf_executable(request: &NativeObjectRequest<'_>) -> NativeObject
 
 fn emit_x86_64_freestanding_object(
     request: &NativeObjectRequest<'_>,
-) -> Option<NativeObjectArtifact> {
+) -> Result<Option<NativeObjectArtifact>, String> {
     let is_i386 =
         request.target_triple.starts_with("i386-") || request.target_triple.starts_with("i686-");
     crate::native_emit::x86_64::set_32bit(is_i386);
     // ET_REL section relocations determine final placement, independently of --base.
     let result =
-        lower_module_with_bases(request.module, request.entry, request.base.unwrap_or(0), 0)
-            .ok()?;
-    let bytes = match x86_object_bytes(&result, &result.exports, !is_i386) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("x86 freestanding object error: {error}");
-            return None;
-        }
-    };
-    Some(NativeObjectArtifact {
+        lower_module_with_bases(request.module, request.entry, request.base.unwrap_or(0), 0)?;
+    let bytes = x86_object_bytes(&result, &result.exports, !is_i386)?;
+    Ok(Some(NativeObjectArtifact {
         bytes,
         artifact_kind: "elf-relocatable-object",
         backend_level: "owned-native-subset-freestanding",
@@ -398,7 +396,7 @@ fn emit_x86_64_freestanding_object(
             "inauguration owns ELF64 x86_64 relocatable function bodies, writable data and code/data relocations"
         },
         abi_manifest: Some(object_abi_manifest(request)),
-    })
+    }))
 }
 
 fn emit_wasm32_module(request: &NativeObjectRequest<'_>) -> Option<NativeObjectArtifact> {
@@ -1065,5 +1063,64 @@ fn main() -> void { return }
             base: None,
         };
         assert!(emit_native_object(&request).is_none());
+    }
+}
+
+#[cfg(test)]
+mod detailed_object_failure_tests {
+    use super::*;
+
+    #[test]
+    fn checked_dispatch_preserves_backend_errors_and_legacy_option_api() {
+        let module =
+            crate::in_lang_parse::parse_in_source("fn main(value:Float)->Int{return 42;}").unwrap();
+        for target in ["i386-unknown-none", THUMBV8M_MAIN_NONE_EABI_TRIPLE] {
+            let request = NativeObjectRequest {
+                target_triple: target,
+                linkage: NativeLinkage::StaticLib,
+                entry: "main",
+                exit_code: 0,
+                module: &module,
+                module_id: "diagnostics",
+                base: None,
+            };
+            let error = match try_emit_native_object(&request) {
+                Err(error) => error,
+                _ => panic!("selected backend must retain its Float ABI failure"),
+            };
+            assert!(error.contains("Float"), "{target}: {error}");
+            assert!(emit_native_object(&request).is_none());
+        }
+        let valid = crate::in_lang_parse::parse_in_source("fn main()->Int{return 42;}").unwrap();
+        for (target, linkage, supported) in [
+            (
+                "riscv64gc-unknown-none-elf",
+                NativeLinkage::StaticLib,
+                false,
+            ),
+            ("aarch64-apple-darwin", NativeLinkage::Executable, false),
+            ("i386-unknown-none", NativeLinkage::StaticLib, true),
+            (
+                THUMBV8M_MAIN_NONE_EABI_TRIPLE,
+                NativeLinkage::StaticLib,
+                true,
+            ),
+        ] {
+            let request = NativeObjectRequest {
+                target_triple: target,
+                linkage,
+                entry: "main",
+                exit_code: 42,
+                module: &valid,
+                module_id: "diagnostics",
+                base: None,
+            };
+            let artifact = try_emit_native_object(&request).unwrap();
+            assert_eq!(artifact.is_some(), supported, "{target}");
+            if let Some(artifact) = artifact {
+                assert_eq!(&artifact.bytes[..4], b"\x7fELF");
+            }
+            assert_eq!(emit_native_object(&request).is_some(), supported);
+        }
     }
 }
