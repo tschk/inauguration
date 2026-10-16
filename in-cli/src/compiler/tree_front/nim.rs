@@ -106,12 +106,9 @@ pub(super) fn extract_nim(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, Strin
     }
     // The bundled grammar ignores indentation and has no unary expression
     // nodes. Never reinterpret a next-line unary statement as a binary RHS
-    // or attach a later-line opening parenthesis to a preceding callee.
+    // or attach a separated parameter/call opener to its preceding name.
     for (declaration, node) in decls.iter_mut().zip(&func_nodes) {
-        if let Some(reason) = node
-            .child_by_field_name("body")
-            .and_then(|body| nim_statement_boundary(src, body))
-        {
+        if let Some(reason) = nim_statement_boundary(src, *node) {
             if let Decl::Function { body, .. } = declaration {
                 *body = vec![Stmt::Expr(Expr::Ident(reason.into()))];
             }
@@ -119,10 +116,7 @@ pub(super) fn extract_nim(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, Strin
     }
     let checker = crate::typecheck::TypeChecker::new();
     for (index, node) in func_nodes.iter().copied().enumerate() {
-        if node
-            .child_by_field_name("body")
-            .is_some_and(|body| nim_statement_boundary(src, body).is_some())
-        {
+        if nim_statement_boundary(src, node).is_some() {
             continue;
         }
         let facts = checker.collect_decl_facts(&decls[..=index]);
@@ -134,10 +128,7 @@ pub(super) fn extract_nim(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, Strin
         }
     }
     for (index, node) in func_nodes.into_iter().enumerate() {
-        if node
-            .child_by_field_name("body")
-            .is_some_and(|body| nim_statement_boundary(src, body).is_some())
-        {
+        if nim_statement_boundary(src, node).is_some() {
             continue;
         }
         let facts = checker.collect_decl_facts(&decls[..=index]);
@@ -166,6 +157,17 @@ pub(super) fn extract_nim(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, Strin
 /// A binary operator beginning a later line is an unsupported separate unary
 /// statement in the bundled Nim grammar, rather than a safe binary tree.
 fn nim_statement_boundary(src: &[u8], node: Node<'_>) -> Option<&'static str> {
+    if matches!(node.kind(), "proc_declaration" | "func_declaration")
+        && let (Some(name), Some(parameters)) = (
+            node.child_by_field_name("name"),
+            node.child_by_field_name("parameters"),
+        )
+        && src
+            .get(name.end_byte()..parameters.start_byte())
+            .is_some_and(|gap| gap.iter().any(|byte| matches!(byte, b'\n' | b'\r' | b'\t')))
+    {
+        return Some("#unsupported-nim-parameter-statement-boundary");
+    }
     if node.kind() == "call"
         && let (Some(name), Some(arguments)) = (
             node.child_by_field_name("name"),
@@ -1900,6 +1902,99 @@ mod call_boundary_tests {
                     crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
                     42,
                     "{source:?}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod parameter_boundary_tests {
+    use super::*;
+    fn parse(source: &str) -> crate::core_ir::UnifiedModule {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&crate::compiler::tree_front::nim_grammar::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{source:?}: {}",
+            tree.root_node().to_sexp()
+        );
+        crate::core_ir::UnifiedModule::new(
+            extract_nim(source.as_bytes(), tree.root_node()).unwrap(),
+        )
+    }
+    #[test]
+    fn later_line_and_tab_parameter_openers_keep_refusal_through_body_preparation() {
+        for keyword in ["proc", "func"] {
+            for ret in ["int", "auto"] {
+                for gap in [
+                    "\n  ",
+                    "\r\n  ",
+                    "\r  ",
+                    "\n\n  ",
+                    " # declaration\n  ",
+                    "\t",
+                ] {
+                    let source =
+                        format!("{keyword} rejected{gap}():{ret}=42\n{keyword} main():int=42\n");
+                    let module = parse(&source);
+                    assert!(
+                        matches!(&module.decls[0],Decl::Function{name,body,..} if name=="rejected" && matches!(body.as_slice(),[Stmt::Expr(Expr::Ident(reason))] if reason=="#unsupported-nim-parameter-statement-boundary")),
+                        "{source:?}: {module:?}"
+                    );
+                    assert!(
+                        matches!(&module.decls[1],Decl::Function{name,body,..} if name=="main" && !format!("{body:?}").contains("#unsupported")),
+                        "{source:?}: {module:?}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn same_line_openers_allow_spaces_and_multiline_parameter_contents() {
+        for keyword in ["proc", "func"] {
+            for header in [
+                "identity(value:int)",
+                "identity (value:int)",
+                "identity(\n  value:int\n)",
+            ] {
+                let source =
+                    format!("{keyword} {header}:int=value\n{keyword} main():int=identity(42)\n");
+                let module = parse(&source);
+                assert!(
+                    !format!("{module:?}").contains("#unsupported"),
+                    "{source:?}: {module:?}"
+                );
+                let module = crate::typecheck::normalize_module(
+                    crate::parser_registry::ParserId::Nim,
+                    &module,
+                );
+                for profile in [
+                    crate::emit_profile::EmitProfile::Default,
+                    crate::emit_profile::EmitProfile::Lean,
+                    crate::emit_profile::EmitProfile::Harden,
+                ] {
+                    let mut module = module.clone();
+                    crate::core_opt::optimize_with_profile(
+                        &mut module.decls,
+                        Some("main"),
+                        profile,
+                    );
+                    assert_eq!(
+                        crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
+                        42,
+                        "{source:?} {profile:?}"
+                    );
+                }
+            }
+            for header in ["main", "main()", "main ()"] {
+                let module = parse(&format!("{keyword} {header}:int=42\n"));
+                assert!(
+                    !format!("{module:?}").contains("#unsupported"),
+                    "{module:?}"
                 );
             }
         }

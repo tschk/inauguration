@@ -71,6 +71,8 @@ checked-in parser without a JavaScript runtime. This remains a bounded grammar,
 not full Nim syntax: tuples and indirect calls remain unsupported, and malformed
 grammar trees still refuse before execution. A call opener must remain on the
 same physical line as its callee; newlines inside opened arguments remain valid.
+Procedure and function parameter openers likewise stay on their name line,
+separated by spaces rather than tabs; opened parameter lists may span lines.
 
 Python scalar-name augmented assignments support `+=`, `-=`, `*=`, `&=`,
 `|=` and `^=` through the existing typed native operations. They read the old
