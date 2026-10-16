@@ -40,10 +40,10 @@ pub(crate) fn lower_function(
     ctx.ret_typ = func.ret.canonical();
     alloc_declared_locals(&mut ctx, &func.body)?;
 
-    // Scratch-slot pool for binary ops: 2 slots per nesting depth, 8 depths.
+    // Reserve exactly the pairs simultaneously live during binary evaluation.
     // Nested binary operands (e.g. the `b * c` in `a - b * c`) evaluate into
     // the next depth's pair so they cannot clobber the outer operand stash.
-    for _ in 0..16 {
+    for _ in 0..max_binary_depth(&func.body) * 2 {
         let off = ctx.alloc_slot();
         ctx.scratch_temps.push(off);
     }
@@ -152,6 +152,82 @@ pub(crate) fn alloc_declared_locals(ctx: &mut LowerCtx<'_>, body: &[Stmt]) -> Re
         }
     }
     Ok(())
+}
+
+// Match lower_binary's lifetime: ordinary binaries hold a pair while either
+// operand executes; lazy logical operands execute without an enclosing pair.
+fn max_binary_depth(body: &[Stmt]) -> usize {
+    body.iter().map(stmt_binary_depth).max().unwrap_or(0)
+}
+
+fn stmt_binary_depth(stmt: &Stmt) -> usize {
+    match stmt {
+        Stmt::Let(_, _, expr)
+        | Stmt::Assign(_, expr)
+        | Stmt::Expr(expr)
+        | Stmt::Return(Some(expr))
+        | Stmt::Throw(expr) => expr_binary_depth(expr),
+        Stmt::FieldAssign { base, value, .. } => {
+            expr_binary_depth(base).max(expr_binary_depth(value))
+        }
+        Stmt::IndexAssign { base, index, value } => expr_binary_depth(base)
+            .max(expr_binary_depth(index))
+            .max(expr_binary_depth(value)),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => expr_binary_depth(cond)
+            .max(max_binary_depth(then_body))
+            .max(max_binary_depth(else_body)),
+        Stmt::Loop { cond, body, .. } => cond
+            .as_ref()
+            .map(expr_binary_depth)
+            .unwrap_or(0)
+            .max(max_binary_depth(body)),
+        Stmt::Match { scrutinee, arms } => expr_binary_depth(scrutinee).max(
+            arms.iter()
+                .map(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .map(expr_binary_depth)
+                        .unwrap_or(0)
+                        .max(max_binary_depth(&arm.body))
+                })
+                .max()
+                .unwrap_or(0),
+        ),
+        Stmt::Try { body, catches } => max_binary_depth(body).max(
+            catches
+                .iter()
+                .map(|arm| max_binary_depth(&arm.body))
+                .max()
+                .unwrap_or(0),
+        ),
+        Stmt::Return(None) | Stmt::Propagate | Stmt::Break | Stmt::Continue => 0,
+    }
+}
+
+fn expr_binary_depth(expr: &Expr) -> usize {
+    // Casts are expanded inside lower_expr_into, after frame allocation.
+    if let Expr::Unary { op, expr: value } = expr
+        && op.starts_with("int-cast-")
+        && let Some(expanded) = crate::core_ir::integer_cast_expr((**value).clone(), op)
+    {
+        return expr_binary_depth(&expanded);
+    }
+    let mut depth = if let Expr::Block { body, .. } = expr {
+        max_binary_depth(body)
+    } else {
+        0
+    };
+    crate::core_ir::for_each_expr_child(expr, &mut |child| {
+        depth = depth.max(expr_binary_depth(child));
+    });
+    if matches!(expr, Expr::Binary { op, .. } if op != "&&" && op != "||") {
+        depth += 1;
+    }
+    depth
 }
 
 pub(crate) fn max_call_arity(body: &[Stmt]) -> usize {
@@ -426,4 +502,125 @@ fn lower_while(
         patch_b(emitter, site, end)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod scratch_depth_tests {
+    use super::*;
+
+    fn binary(op: &str, lhs: Expr, rhs: Expr) -> Expr {
+        Expr::Binary {
+            op: op.into(),
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
+    }
+
+    fn nested(mut expr: Expr, depth: usize) -> Expr {
+        for _ in 0..depth {
+            expr = binary("+", Expr::IntLit(0), expr);
+        }
+        expr
+    }
+
+    fn function(expr: Expr) -> FunctionInfo {
+        FunctionInfo {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(expr))],
+        }
+    }
+
+    fn lower(func: &FunctionInfo) -> Result<CodeEmitter, String> {
+        let functions = HashMap::from([(func.name.clone(), func.clone())]);
+        let mut emitter = CodeEmitter::new();
+        lower_function(&mut emitter, func, &functions, &HashMap::new(), &mut vec![])?;
+        Ok(emitter)
+    }
+
+    #[test]
+    fn scratch_depth_counts_lazy_cast_and_block_evaluation() {
+        let deep = nested(Expr::IntLit(42), 12);
+        assert_eq!(expr_binary_depth(&deep), 12);
+        assert_eq!(
+            expr_binary_depth(&binary("&&", deep.clone(), deep.clone())),
+            12
+        );
+        let cast = Expr::Unary {
+            op: "int-cast-i8".into(),
+            expr: Box::new(deep.clone()),
+        };
+        assert_eq!(expr_binary_depth(&cast), 15);
+        let block = Expr::Block {
+            body: vec![Stmt::Expr(cast)],
+            result: Some(Box::new(Expr::IntLit(42))),
+        };
+        assert_eq!(expr_binary_depth(&binary("+", deep, block)), 16);
+    }
+
+    #[test]
+    fn scratch_frames_fit_actual_depth_and_keep_instruction_bound() {
+        let small = lower(&function(Expr::IntLit(42))).unwrap();
+        assert_eq!(
+            &small.bytes[4..6],
+            &thumb::sub_sp_imm(4).unwrap().to_le_bytes()
+        );
+        let deep = lower(&function(nested(Expr::IntLit(42), 12))).unwrap();
+        // Twelve pairs = 96 bytes, plus four to align the saved 20-byte frame.
+        assert_eq!(
+            &deep.bytes[4..6],
+            &thumb::sub_sp_imm(100).unwrap().to_le_bytes()
+        );
+        let cast = lower(&function(Expr::Unary {
+            op: "int-cast-i8".into(),
+            expr: Box::new(nested(Expr::IntLit(42), 12)),
+        }))
+        .unwrap();
+        assert_eq!(
+            &cast.bytes[4..6],
+            &thumb::sub_sp_imm(124).unwrap().to_le_bytes()
+        );
+        let error = lower(&function(nested(Expr::IntLit(42), 70)))
+            .err()
+            .unwrap();
+        assert!(error.contains("frame 564 too large"), "{error}");
+    }
+
+    #[test]
+    fn deep_operand_calls_remain_in_source_order() {
+        let call = |name: &str| Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args: vec![],
+        };
+        let func = function(binary("+", call("left"), nested(call("right"), 12)));
+        let mut functions = HashMap::from([(func.name.clone(), func.clone())]);
+        for name in ["left", "right"] {
+            functions.insert(
+                name.into(),
+                FunctionInfo {
+                    name: name.into(),
+                    params: vec![],
+                    ret: Typ::Int,
+                    body: vec![],
+                },
+            );
+        }
+        let mut pending = vec![];
+        lower_function(
+            &mut CodeEmitter::new(),
+            &func,
+            &functions,
+            &HashMap::new(),
+            &mut pending,
+        )
+        .unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|call| call.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["left", "right"]
+        );
+    }
 }
