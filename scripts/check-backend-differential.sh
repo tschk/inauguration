@@ -60,6 +60,8 @@ classify() {
   local bin="$tmp_dir/bin"
   rm -f "$bin"
   if ! "${IN_CMD[@]}" build --path "$fixture" --out "$bin" >/dev/null 2>"$tmp_dir/build.err"; then
+    printf 'backend differential: native build failed for %s\n' "$fixture" >&2
+    cat "$tmp_dir/build.err" >&2
     echo "native-refused"
     return
   fi
