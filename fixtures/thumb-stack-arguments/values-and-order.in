@@ -30,6 +30,10 @@ fn nested(value: Int) -> Int {
   return take5(value, 2, 3, 4, 5);
 }
 
+fn step(value: Int) -> Int {
+  return value + 1;
+}
+
 fn word_edge(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int) -> Int {
   if e != 0xffffffff {
     return 1;
@@ -73,6 +77,16 @@ fn main() -> Int {
   }
   if word_edge(10, 10, 10, 12, 0xffffffff, -2147483648, 0x7fffffff) != 42 {
     return 20;
+  }
+  if step(step(step(step(step(step(step(step(step(step(step(step(30)))))))))))) != 42 {
+    return 21;
+  }
+  store32(0x38000000, 0);
+  if take7(mark(1), mark(2), mark(3), mark(4), mark(5), mark(6), step(step(step(step(step(step(step(step(step(step(step(step(mark(7)))))))))))))) != 224 {
+    return 22;
+  }
+  if load32(0x38000000) != 1234567 {
+    return 23;
   }
   return 42;
 }

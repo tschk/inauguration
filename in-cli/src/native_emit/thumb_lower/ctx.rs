@@ -38,10 +38,9 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) structs: &'a HashMap<String, Vec<(String, Typ)>>,
     pub(crate) fn_name: String,
     pub(crate) ret_typ: Typ,
-    /// SP offsets for call-argument temps. Indexed by [depth * chunk + i].
+    /// SP offsets for call arguments, reserved contiguously by live slot count.
     pub(crate) call_arg_temps: Vec<u32>,
-    pub(crate) call_arg_depth: usize,
-    pub(crate) call_arg_chunk: usize,
+    pub(crate) call_arg_used: usize,
     /// Scratch-slot pairs for binary-op operand evaluation. Indexed by
     /// [depth * 2] and [depth * 2 + 1]: each nested lower_binary acquires its
     /// own pair, so a binary operand of a binary (e.g. `a - b * c`) cannot
@@ -106,8 +105,7 @@ impl<'a> LowerCtx<'a> {
             fn_name: fn_name.to_string(),
             ret_typ: Typ::Int,
             call_arg_temps: Vec::new(),
-            call_arg_depth: 0,
-            call_arg_chunk: 4,
+            call_arg_used: 0,
             scratch_temps: Vec::new(),
             scratch_depth: 0,
         };
@@ -145,19 +143,26 @@ impl<'a> LowerCtx<'a> {
     }
 
     pub(crate) fn acquire_call_arg_temps(&mut self, n: usize) -> Result<usize, String> {
-        let base = self.call_arg_depth * self.call_arg_chunk;
-        if base + n > self.call_arg_temps.len() {
+        let base = self.call_arg_used;
+        let end = base
+            .checked_add(n)
+            .ok_or("thumb-lower: call argument reservation overflow")?;
+        if end > self.call_arg_temps.len() {
             return Err(format!(
                 "thumb-lower: call arg temp pool exhausted in `{}`",
                 self.fn_name
             ));
         }
-        self.call_arg_depth += 1;
+        self.call_arg_used = end;
         Ok(base)
     }
 
-    pub(crate) fn release_call_arg_temps(&mut self) {
-        self.call_arg_depth = self.call_arg_depth.saturating_sub(1);
+    pub(crate) fn release_call_arg_temps(&mut self, n: usize) -> Result<(), String> {
+        self.call_arg_used = self
+            .call_arg_used
+            .checked_sub(n)
+            .ok_or("thumb-lower: unbalanced call argument reservation")?;
+        Ok(())
     }
 
     /// Acquire the scratch-slot pair for one lower_binary evaluation. Nested

@@ -48,10 +48,14 @@ pub(crate) fn lower_function(
         ctx.scratch_temps.push(off);
     }
 
-    // Call-argument temp pool: chunk = max arity, depth = 8 nested calls.
-    let max_arity = max_call_arity(&func.body);
-    ctx.call_arg_chunk = max_arity;
-    let slots_needed = ctx.call_arg_chunk * 8;
+    // Reserve only argument slots simultaneously live while nested calls stage.
+    let slots_needed = body_expr_demand(&func.body, &|expr| call_arg_demand(expr, functions));
+    if slots_needed > (0x1FC / 4) as usize {
+        return Err(format!(
+            "thumb-lower: call argument frame too large in `{}`",
+            func.name
+        ));
+    }
     for _ in 0..slots_needed {
         let off = ctx.alloc_slot();
         ctx.call_arg_temps.push(off);
@@ -157,50 +161,55 @@ pub(crate) fn alloc_declared_locals(ctx: &mut LowerCtx<'_>, body: &[Stmt]) -> Re
 // Match lower_binary's lifetime: ordinary binaries hold a pair while either
 // operand executes; lazy logical operands execute without an enclosing pair.
 fn max_binary_depth(body: &[Stmt]) -> usize {
-    body.iter().map(stmt_binary_depth).max().unwrap_or(0)
+    body_expr_demand(body, &expr_binary_depth)
 }
 
-fn stmt_binary_depth(stmt: &Stmt) -> usize {
+fn body_expr_demand(body: &[Stmt], demand: &impl Fn(&Expr) -> usize) -> usize {
+    body.iter()
+        .map(|stmt| stmt_expr_demand(stmt, demand))
+        .max()
+        .unwrap_or(0)
+}
+
+fn stmt_expr_demand(stmt: &Stmt, demand: &impl Fn(&Expr) -> usize) -> usize {
     match stmt {
         Stmt::Let(_, _, expr)
         | Stmt::Assign(_, expr)
         | Stmt::Expr(expr)
         | Stmt::Return(Some(expr))
-        | Stmt::Throw(expr) => expr_binary_depth(expr),
-        Stmt::FieldAssign { base, value, .. } => {
-            expr_binary_depth(base).max(expr_binary_depth(value))
+        | Stmt::Throw(expr) => demand(expr),
+        Stmt::FieldAssign { base, value, .. } => demand(base).max(demand(value)),
+        Stmt::IndexAssign { base, index, value } => {
+            demand(base).max(demand(index)).max(demand(value))
         }
-        Stmt::IndexAssign { base, index, value } => expr_binary_depth(base)
-            .max(expr_binary_depth(index))
-            .max(expr_binary_depth(value)),
         Stmt::If {
             cond,
             then_body,
             else_body,
-        } => expr_binary_depth(cond)
-            .max(max_binary_depth(then_body))
-            .max(max_binary_depth(else_body)),
+        } => demand(cond)
+            .max(body_expr_demand(then_body, demand))
+            .max(body_expr_demand(else_body, demand)),
         Stmt::Loop { cond, body, .. } => cond
             .as_ref()
-            .map(expr_binary_depth)
+            .map(demand)
             .unwrap_or(0)
-            .max(max_binary_depth(body)),
-        Stmt::Match { scrutinee, arms } => expr_binary_depth(scrutinee).max(
+            .max(body_expr_demand(body, demand)),
+        Stmt::Match { scrutinee, arms } => demand(scrutinee).max(
             arms.iter()
                 .map(|arm| {
                     arm.guard
                         .as_ref()
-                        .map(expr_binary_depth)
+                        .map(demand)
                         .unwrap_or(0)
-                        .max(max_binary_depth(&arm.body))
+                        .max(body_expr_demand(&arm.body, demand))
                 })
                 .max()
                 .unwrap_or(0),
         ),
-        Stmt::Try { body, catches } => max_binary_depth(body).max(
+        Stmt::Try { body, catches } => body_expr_demand(body, demand).max(
             catches
                 .iter()
-                .map(|arm| max_binary_depth(&arm.body))
+                .map(|arm| body_expr_demand(&arm.body, demand))
                 .max()
                 .unwrap_or(0),
         ),
@@ -230,57 +239,41 @@ fn expr_binary_depth(expr: &Expr) -> usize {
     depth
 }
 
-pub(crate) fn max_call_arity(body: &[Stmt]) -> usize {
-    body.iter().map(max_call_arity_stmt).max().unwrap_or(0)
-}
-
-pub(crate) fn max_call_arity_stmt(s: &Stmt) -> usize {
-    match s {
-        Stmt::Let(_, _, e)
-        | Stmt::Assign(_, e)
-        | Stmt::Expr(e)
-        | Stmt::Return(Some(e))
-        | Stmt::FieldAssign { value: e, .. } => max_call_arity_expr(e),
-        Stmt::Return(None) => 0,
-        Stmt::If {
-            cond,
-            then_body,
-            else_body,
-            ..
-        } => max_call_arity_expr(cond)
-            .max(max_call_arity(then_body))
-            .max(max_call_arity(else_body)),
-        Stmt::Loop { cond, body, .. } => cond
-            .as_ref()
-            .map(max_call_arity_expr)
-            .unwrap_or(0)
-            .max(max_call_arity(body)),
-        _ => 0,
-    }
-}
-
-pub(crate) fn max_call_arity_expr(e: &Expr) -> usize {
-    match e {
-        Expr::Call { args, .. } => {
-            let here = args.len();
-            args.iter()
-                .map(max_call_arity_expr)
-                .max()
-                .unwrap_or(0)
-                .max(here)
+fn call_arg_demand(expr: &Expr, functions: &HashMap<String, FunctionInfo>) -> usize {
+    let mut nested = if let Expr::Block { body, .. } = expr {
+        body_expr_demand(body, &|child| call_arg_demand(child, functions))
+    } else {
+        0
+    };
+    crate::core_ir::for_each_expr_child(expr, &mut |child| {
+        nested = nested.max(call_arg_demand(child, functions));
+    });
+    let reserved = if let Expr::Call { callee, args } = expr {
+        if let Expr::Ident(name) = callee.as_ref() {
+            let defined = functions
+                .get(name)
+                .is_some_and(|function| !function.body.is_empty());
+            let mmio = matches!(
+                name.as_str(),
+                "load8"
+                    | "load16"
+                    | "load32"
+                    | "load64"
+                    | "store8"
+                    | "store16"
+                    | "store32"
+                    | "store64"
+            );
+            if defined || !mmio { args.len() } else { 0 }
+        } else {
+            0
         }
-        Expr::Unary { expr, .. } => max_call_arity_expr(expr),
-        Expr::Binary { lhs, rhs, .. } => max_call_arity_expr(lhs).max(max_call_arity_expr(rhs)),
-        Expr::StructInit { fields, .. } => fields
-            .iter()
-            .map(|(_, e)| max_call_arity_expr(e))
-            .max()
-            .unwrap_or(0),
-        Expr::ArrayLit(items) => items.iter().map(max_call_arity_expr).max().unwrap_or(0),
-        Expr::Index { index, .. } => max_call_arity_expr(index),
-        Expr::Field { base, .. } => max_call_arity_expr(base),
-        _ => 0,
-    }
+    } else {
+        0
+    };
+    // AST nodes and argument vectors already consume at least this much memory.
+    // Saturation forces the existing frame-size refusal instead of wrapping.
+    reserved.saturating_add(nested)
 }
 
 pub(crate) fn lower_stmt(
@@ -622,5 +615,117 @@ mod scratch_depth_tests {
                 .collect::<Vec<_>>(),
             vec!["left", "right"]
         );
+    }
+}
+
+#[cfg(test)]
+mod call_temp_tests {
+    use super::*;
+
+    fn call(name: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args,
+        }
+    }
+    fn nested(depth: usize) -> Expr {
+        (0..depth).fold(Expr::IntLit(42), |value, _| call("step", vec![value]))
+    }
+    fn function(value: Expr) -> FunctionInfo {
+        FunctionInfo {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(value))],
+        }
+    }
+    fn lower(value: Expr) -> Result<CodeEmitter, String> {
+        let main = function(value);
+        let step = FunctionInfo {
+            name: "step".into(),
+            params: vec![("value".into(), Typ::Int)],
+            ret: Typ::Int,
+            body: vec![],
+        };
+        let functions = HashMap::from([("main".into(), main.clone()), ("step".into(), step)]);
+        let mut emitter = CodeEmitter::new();
+        lower_function(
+            &mut emitter,
+            &main,
+            &functions,
+            &HashMap::new(),
+            &mut vec![],
+        )?;
+        Ok(emitter)
+    }
+    #[test]
+    fn deep_calls_reserve_exact_live_slots_and_keep_frame_limit() {
+        let emitter = lower(nested(12)).unwrap();
+        // Twelve argument words plus the alignment word, no fixed nesting cap.
+        assert_eq!(
+            &emitter.bytes[4..6],
+            &thumb::sub_sp_imm(52).unwrap().to_le_bytes()
+        );
+        assert!(
+            lower(nested(128))
+                .err()
+                .unwrap()
+                .contains("call argument frame too large")
+        );
+    }
+    #[test]
+    fn demand_tracks_mixed_arities_blocks_casts_and_intrinsic_overrides() {
+        let mut functions = HashMap::new();
+        let mixed = call(
+            "many",
+            vec![
+                nested(12),
+                Expr::IntLit(1),
+                Expr::IntLit(2),
+                Expr::IntLit(3),
+                Expr::IntLit(4),
+            ],
+        );
+        assert_eq!(call_arg_demand(&mixed, &functions), 17);
+        let block = Expr::Block {
+            body: vec![Stmt::IndexAssign {
+                base: Expr::Ident("items".into()),
+                index: nested(9),
+                value: mixed,
+            }],
+            result: Some(Box::new(nested(10))),
+        };
+        let cast = Expr::Unary {
+            op: "int-cast-i8".into(),
+            expr: Box::new(block),
+        };
+        assert_eq!(call_arg_demand(&cast, &functions), 17);
+        let mmio = call("load32", vec![nested(12)]);
+        assert_eq!(call_arg_demand(&mmio, &functions), 12);
+        let mut defined = function(Expr::IntLit(42));
+        defined.name = "load32".into();
+        functions.insert("load32".into(), defined);
+        assert_eq!(call_arg_demand(&mmio, &functions), 13);
+        assert_eq!(
+            call_arg_demand(
+                &call("invoke-native1", vec![Expr::IntLit(1), nested(12)]),
+                &functions
+            ),
+            14
+        );
+    }
+    #[test]
+    fn reservations_restore_cursor_and_reject_imbalance() {
+        let functions = HashMap::new();
+        let structs = HashMap::new();
+        let mut ctx = LowerCtx::new("test", &[], &functions, &structs);
+        ctx.call_arg_temps = vec![0, 4, 8];
+        assert_eq!(ctx.acquire_call_arg_temps(2).unwrap(), 0);
+        assert_eq!(ctx.acquire_call_arg_temps(1).unwrap(), 2);
+        assert!(ctx.acquire_call_arg_temps(1).is_err());
+        ctx.release_call_arg_temps(1).unwrap();
+        ctx.release_call_arg_temps(2).unwrap();
+        assert_eq!(ctx.call_arg_used, 0);
+        assert!(ctx.release_call_arg_temps(1).is_err());
     }
 }

@@ -242,7 +242,7 @@ pub(crate) fn lower_call_args(
         emitter.emit_u16(thumb::add_sp_imm(stack_bytes)?);
     }
 
-    ctx.release_call_arg_temps();
+    ctx.release_call_arg_temps(n)?;
 
     if dest != REG_RET {
         emitter.emit_u16(thumb::mov_low(dest, REG_RET));
@@ -319,7 +319,7 @@ fn lower_native_invoke(
         )?);
     }
     emitter.emit_u16(thumb::blx_reg(R3));
-    ctx.release_call_arg_temps();
+    ctx.release_call_arg_temps(args.len())?;
     if dest != REG_RET {
         emitter.emit_u16(thumb::mov_low(dest, REG_RET));
     }
@@ -368,7 +368,7 @@ fn lower_invoke(
             emitter.emit_u16(thumb::blx_reg(R2));
         }
     }
-    ctx.release_call_arg_temps();
+    ctx.release_call_arg_temps(n)?;
     if dest != REG_RET {
         emitter.emit_u16(thumb::mov_low(dest, REG_RET));
     }
@@ -1133,7 +1133,6 @@ mod outgoing_stack_argument_tests {
             let functions = HashMap::new();
             let structs = HashMap::new();
             let mut ctx = LowerCtx::new("caller", &[], &functions, &structs);
-            ctx.call_arg_chunk = count;
             ctx.call_arg_temps = (0..count).map(|_| ctx.alloc_slot()).collect();
             let args = (1..=count)
                 .map(|n| Expr::IntLit(n as i64))
@@ -1442,7 +1441,7 @@ mod checked_index_branch_tests {
         assert!(pending[0].site < pending[1].site);
         assert_bounds_return_paths(&emitter, ctx.frame_reserve());
         assert!(words(&emitter).contains(&thumb::str_imm(R4, R1, 0).unwrap()));
-        assert_eq!(ctx.call_arg_depth, 0);
+        assert_eq!(ctx.call_arg_used, 0);
     }
 }
 
@@ -1694,7 +1693,7 @@ mod integer_cast_tests {
                 assert_eq!(pending.len(), 1, "{op}");
                 assert_eq!(pending[0].target, "producer");
                 assert_eq!(ctx.scratch_depth, 0);
-                assert_eq!(ctx.call_arg_depth, 0);
+                assert_eq!(ctx.call_arg_used, 0);
                 emissions.push(emitter.bytes);
             }
             assert_eq!(emissions[0], emissions[1], "{op}");
