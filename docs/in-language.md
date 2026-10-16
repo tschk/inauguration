@@ -333,6 +333,11 @@ is false. Skipped operands perform no calls, side effects, or runtime checks.
 Their result is a Boolean (the native/Core IR representation is normalized to
 0 or 1). Bitwise `&` and `|` evaluate both operands.
 
+For integers, `!value` is true when the value is zero, and `!!value` is true
+when it is nonzero. Both return `Bool` and evaluate the operand once. Boolean
+and integer literal negations fold in global initializers, so
+`var enabled: Bool = !!42;` is valid.
+
 Arithmetic, bitwise, and comparisons chain as in the table in [parser-surface.md](parser-surface.md); method calls desugar to mangled functions on classes.
 
 ## Ideology

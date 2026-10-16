@@ -994,17 +994,7 @@ fn simplify_unary_expr(original: Expr, op: &str, expr: &Expr) -> Expr {
                 }
             }
         }
-        "not" | "!" => {
-            if let Expr::Unary {
-                op: ref inner_op,
-                expr: ref inner_expr2,
-            } = *expr
-            {
-                if inner_op == "not" || inner_op == "!" {
-                    return *inner_expr2.clone();
-                }
-            }
-        }
+        // !!x normalizes numeric truth values to Bool; untyped x is not equivalent.
         _ => {}
     }
     original
@@ -1353,6 +1343,11 @@ pub(crate) fn fold_expr_with_semantics(e: Expr, semantics: IntegerSemantics) -> 
                 && let Expr::BoolLit(value) = expr.as_ref()
             {
                 return Expr::IntLit(i64::from(*value));
+            }
+            if matches!(op.as_str(), "!" | "not")
+                && let Expr::BoolLit(value) = expr.as_ref()
+            {
+                return Expr::BoolLit(!*value);
             }
             if let Expr::IntLit(n) = expr.as_ref() {
                 if let Some(value) = semantics.fold_unary(op, *n) {
@@ -3409,7 +3404,7 @@ mod tests {
     #[test]
     fn simplify_double_not() {
         let e = unary("not", unary("not", ident("x")));
-        assert_eq!(simplify_expr(e), ident("x"));
+        assert_eq!(simplify_expr(e.clone()), e);
     }
 
     // ─── Dead Code Elimination ──────────────────────────────────────────
@@ -4258,14 +4253,15 @@ mod tests {
 
     #[test]
     fn algebraic_simplify_double_negation_and_self_identities() {
-        let double_neg = simplify_expr(Expr::Unary {
+        let double_neg = Expr::Unary {
             op: "!".into(),
             expr: Box::new(Expr::Unary {
                 op: "!".into(),
                 expr: Box::new(ident("x")),
             }),
-        });
-        assert_eq!(double_neg, ident("x"));
+        };
+        // Numeric operands require both logical operations to produce canonical Bool.
+        assert_eq!(simplify_expr(double_neg.clone()), double_neg);
 
         let double_minus = simplify_expr(Expr::Unary {
             op: "-".into(),
@@ -4911,6 +4907,59 @@ mod self_subtraction_tests {
                 found |= matches!(expr, Expr::Binary{op,lhs,rhs} if op=="-" && lhs==rhs && matches!(lhs.as_ref(),Expr::Ident(_)));
             });
             assert!(found, "{profile:?}: {declarations:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod logical_normalization_tests {
+    use super::*;
+    #[test]
+    fn double_logical_not_preserves_dynamic_values_and_one_effectful_operand() {
+        for outer in ["!", "not"] {
+            for inner in ["!", "not"] {
+                for value in [
+                    Expr::Ident("value".into()),
+                    Expr::Call {
+                        callee: Box::new(Expr::Ident("next".into())),
+                        args: vec![],
+                    },
+                ] {
+                    let expr = Expr::Unary {
+                        op: outer.into(),
+                        expr: Box::new(Expr::Unary {
+                            op: inner.into(),
+                            expr: Box::new(value),
+                        }),
+                    };
+                    for semantics in [IntegerSemantics::Word32, IntegerSemantics::Word64] {
+                        assert_eq!(simplify_expr_with_semantics(expr.clone(), semantics), expr);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn literal_double_not_keeps_boolean_result_type_and_truth_normalization() {
+        for value in [0, 1, 42, -1, i64::MIN] {
+            let expr = Expr::Unary {
+                op: "!".into(),
+                expr: Box::new(Expr::Unary {
+                    op: "!".into(),
+                    expr: Box::new(Expr::IntLit(value)),
+                }),
+            };
+            assert_eq!(map_expr(expr, &mut fold_expr), Expr::BoolLit(value != 0));
+        }
+        for value in [true, false] {
+            let expr = Expr::Unary {
+                op: "!".into(),
+                expr: Box::new(Expr::Unary {
+                    op: "!".into(),
+                    expr: Box::new(Expr::BoolLit(value)),
+                }),
+            };
+            assert_eq!(map_expr(expr, &mut fold_expr), Expr::BoolLit(value));
         }
     }
 }
