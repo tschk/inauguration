@@ -145,6 +145,12 @@ pub(crate) fn lower_expr_into(
                     "thumb-lower: local indirect callee requires a function signature".into(),
                 );
             }
+            if let Some(function) = ctx.functions.get(name) {
+                crate::native_emit::validate_word32_scalar_signature(
+                    &function.params,
+                    &function.ret,
+                )?;
+            }
             // Defined functions override intrinsic spellings; extern MMIO wrappers do not.
             if ctx
                 .functions
@@ -1723,6 +1729,36 @@ mod integer_cast_tests {
             );
             assert!(emitter.bytes.is_empty());
             assert!(pending.is_empty());
+        }
+    }
+    #[test]
+    fn word32_float_external_calls_refuse_before_argument_staging() {
+        for source in [
+            "extern asm fn read_float()->Float\nfn main()->Int{read_float();return 42;}",
+            "extern asm fn read_float()->Float\nextern asm fn consume_float(value:Float)->Int\nfn main()->Int{return consume_float(read_float());}",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            let error = super::super::lower_module(&module, "main").err().unwrap();
+            assert!(
+                error.contains("Float requires 64-bit mode"),
+                "{source}: {error}"
+            );
+        }
+        for source in [
+            "fn main(value:Int)->Int{return value;}",
+            "fn main(value:Bool)->Bool{return value;}",
+            "extern asm fn read_int()->Int\nfn main()->Int{return read_int();}",
+            "extern asm fn read_float()->Float\nfn main()->Int{return 42;}",
+            "extern asm fn read_float()->Float\nfn main()->Int{return read_float;}",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            assert!(
+                !super::super::lower_module(&module, "main")
+                    .unwrap()
+                    .code
+                    .is_empty(),
+                "{source}"
+            );
         }
     }
 }

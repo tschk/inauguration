@@ -71,3 +71,47 @@ pub struct AbsoluteReference {
 }
 
 pub(crate) mod struct_layout;
+
+/// Scalar Float parameters/results need a 64-bit owned carrier. This checks an
+/// emitted definition or selected call, never an unused declaration/address.
+pub(crate) fn validate_word32_scalar_signature(
+    params: &[(String, crate::core_ir::Typ)],
+    ret: &crate::core_ir::Typ,
+) -> Result<(), String> {
+    use crate::core_ir::Typ;
+    if ret.canonical() == Typ::Float || params.iter().any(|(_, typ)| typ.canonical() == Typ::Float)
+    {
+        return Err("Float requires 64-bit mode (scalar function ABI)".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod word32_signature_tests {
+    use super::validate_word32_scalar_signature;
+    use crate::core_ir::Typ;
+
+    #[test]
+    fn rejects_only_canonical_scalar_float_abi() {
+        assert!(validate_word32_scalar_signature(&[], &Typ::Float).is_err());
+        assert!(validate_word32_scalar_signature(&[], &Typ::Named("f64".into())).is_err());
+        assert!(
+            validate_word32_scalar_signature(
+                &[("items".into(), Typ::Array(Box::new(Typ::Float)))],
+                &Typ::Int
+            )
+            .is_ok()
+        );
+        assert!(validate_word32_scalar_signature(&[("x".into(), Typ::Float)], &Typ::Int).is_err());
+        for typ in [
+            Typ::Int,
+            Typ::Bool,
+            Typ::Void,
+            Typ::Named("Row".into()),
+            Typ::Array(Box::new(Typ::Float)),
+            Typ::Vector(Box::new(Typ::Float)),
+        ] {
+            assert!(validate_word32_scalar_signature(&[], &typ).is_ok());
+        }
+    }
+}

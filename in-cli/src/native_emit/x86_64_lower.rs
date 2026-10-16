@@ -477,6 +477,9 @@ fn lower_module_impl(
         if func.body.is_empty() {
             continue;
         }
+        if x86_64::is_32bit() {
+            super::validate_word32_scalar_signature(&func.params, &func.ret)?;
+        }
         let offset = emitter.len();
         function_offsets.insert(name.clone(), offset);
         let is_interrupt = crate::core_ir::is_interrupt_fn(&func.name);
@@ -3640,6 +3643,16 @@ fn lower_call_expr(
         ));
     }
 
+    // Check the selected declared ABI before an inline builtin can bypass
+    // argument staging. Lexical values retain their existing indirect policy.
+    if x86_64::is_32bit()
+        && !ctx.locals.contains_key(&target_name)
+        && !ctx.globals.contains_key(&target_name)
+        && let Some(function) = ctx.functions.get(&target_name)
+    {
+        super::validate_word32_scalar_signature(&function.params, &function.ret)?;
+    }
+
     if matches!(
         target_name.as_str(),
         "vector-push" | "vector-extend" | "vector-clear"
@@ -5394,6 +5407,57 @@ fn main() -> void { return }
         }
     }
 
+    #[test]
+    fn word32_scalar_float_abi_rejects_definitions_and_selected_calls() {
+        struct WidthGuard(bool);
+        impl Drop for WidthGuard {
+            fn drop(&mut self) {
+                x86_64::set_32bit(self.0);
+            }
+        }
+        let _width = WidthGuard(x86_64::is_32bit());
+        x86_64::set_32bit(true);
+        for source in [
+            "fn main(value:Float)->Int{return 42;}",
+            "fn main(value:Float)->Float{return value;}",
+            "extern asm fn read_float()->Float\nfn main()->Int{read_float();return 42;}",
+            "extern asm fn read_float()->Float\nextern asm fn consume_float(value:Float)->Int\nfn main()->Int{return consume_float(read_float());}",
+            "extern asm fn consume_float(value:Float)->Int\nfn main(value:Float)->Int{return consume_float(value);}",
+            "extern asm fn array-len(value:[Int])->Float\nfn main()->Int{array-len([1,2]);return 42;}",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            let error = lower_native_module(&module, "main").err().unwrap();
+            assert!(
+                error.contains("Float requires 64-bit mode"),
+                "{source}: {error}"
+            );
+        }
+        for source in [
+            "fn main(value:Int)->Int{return value;}",
+            "fn main(value:Bool)->Bool{return value;}",
+            "extern asm fn read_int()->Int\nfn main()->Int{return read_int();}",
+            "extern asm fn read_float()->Float\nfn main()->Int{return 42;}",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            assert!(
+                !lower_native_module(&module, "main")
+                    .unwrap()
+                    .code
+                    .is_empty(),
+                "{source}"
+            );
+        }
+        x86_64::set_32bit(false);
+        let module =
+            crate::in_lang_parse::parse_in_source("fn main(value:Float)->Float{return value;}")
+                .unwrap();
+        assert!(
+            !lower_native_module(&module, "main")
+                .unwrap()
+                .code
+                .is_empty()
+        );
+    }
     #[test]
     fn rejects_32bit_float_logical_not_and_keeps_integer_not() {
         struct WidthGuard(bool);
