@@ -8061,3 +8061,44 @@ fn python_augmented_rhs_preserves_lazy_branches_and_old_binding_order() {
     }
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn lua_return_inference_refuses_unowned_operator_semantics_before_execution() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("lua-return-proof.lua");
+    for (body, expected) in [
+        ("return not 0", None),
+        ("return -5 % 2", None),
+        ("return 2 ^ 3", None),
+        ("local value = 5; value = value % 2; return value", None),
+        ("local value = 20 + 22; return value", Some(42)),
+        ("local value = 20; value = 42; return value", Some(42)),
+    ] {
+        fs::write(&path, format!("function main()\n{body}\nend\n")).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            if let Some(value) = expected {
+                assert!(report.success, "{body} {profile:?}: {report:?}");
+                assert!(report.execution_started, "{report:?}");
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(value)),
+                    "{body} {profile:?}"
+                );
+            } else {
+                assert!(!report.success, "{body} {profile:?}: {report:?}");
+                assert!(!report.execution_started, "{report:?}");
+                assert_eq!(report.eval_result, None, "{body} {profile:?}");
+            }
+        }
+    }
+    fs::remove_file(path).unwrap();
+}

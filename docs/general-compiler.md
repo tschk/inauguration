@@ -77,7 +77,9 @@ separated by spaces rather than tabs; opened parameter lists may span lines.
 Lua local initializers admit closed integer literal/group trees using `+`, `-`
 and `*`. They fold with Lua's signed 64-bit wrapping arithmetic before target
 word lowering, so wide intermediates can still produce a representable result.
-Returned Lua locals use the shared dataflow return-type inference.
+Returned Lua locals use shared dataflow inference with literal/local type
+proofs. Unowned operator expressions do not acquire a return ABI through generic
+operator typing; unknown assignments and shadows invalidate those proofs.
 Lua integer literals outside signed 32-bit range refuse on Word32 targets;
 generic unsigned hardware word literals retain their existing policy. This
 folding path excludes calls, identifiers, floats, unary operators, shifts and

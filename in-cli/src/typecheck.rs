@@ -307,31 +307,47 @@ impl TypeChecker {
         facts: &Facts,
         initial: &HashMap<String, Typ>,
     ) -> Option<Typ> {
+        self.infer_return_with(
+            body,
+            facts,
+            initial,
+            &|value, env| closure_inference::argument_type(self, value, facts, env),
+            &|_, _| Some(()),
+        )
+    }
+
+    fn infer_return_with(
+        &self,
+        body: &[Stmt],
+        facts: &Facts,
+        initial: &HashMap<String, Typ>,
+        resolve: &impl Fn(&Expr, &HashMap<String, Typ>) -> Option<Typ>,
+        update: &impl Fn(&Stmt, &mut HashMap<String, Typ>) -> Option<()>,
+    ) -> Option<Typ> {
         fn walk(
             checker: &TypeChecker,
             body: &[Stmt],
             facts: &Facts,
             env: &mut HashMap<String, Typ>,
             returns: &mut Vec<Typ>,
+            resolve: &impl Fn(&Expr, &HashMap<String, Typ>) -> Option<Typ>,
+            update: &impl Fn(&Stmt, &mut HashMap<String, Typ>) -> Option<()>,
         ) -> Option<bool> {
             let mut falls = true;
             for stmt in body {
                 if !falls {
                     break;
                 }
+                update(stmt, env)?;
                 match stmt {
                     Stmt::Let(name, typ, value) => {
-                        if let Some(typ) = typ.clone().or_else(|| {
-                            closure_inference::argument_type(checker, value, facts, env)
-                        }) {
+                        if let Some(typ) = typ.clone().or_else(|| resolve(value, env)) {
                             env.insert(name.clone(), typ);
                         }
                     }
                     Stmt::Return(value) => {
                         returns.push(match value {
-                            Some(value) => {
-                                closure_inference::argument_type(checker, value, facts, env)?
-                            }
+                            Some(value) => resolve(value, env)?,
                             None => Typ::Void,
                         });
                         falls = false;
@@ -341,8 +357,24 @@ impl TypeChecker {
                         then_body,
                         else_body,
                     } => {
-                        let left = walk(checker, then_body, facts, &mut env.clone(), returns)?;
-                        let right = walk(checker, else_body, facts, &mut env.clone(), returns)?;
+                        let left = walk(
+                            checker,
+                            then_body,
+                            facts,
+                            &mut env.clone(),
+                            returns,
+                            resolve,
+                            update,
+                        )?;
+                        let right = walk(
+                            checker,
+                            else_body,
+                            facts,
+                            &mut env.clone(),
+                            returns,
+                            resolve,
+                            update,
+                        )?;
                         falls = match cond {
                             Expr::BoolLit(true) => left,
                             Expr::BoolLit(false) => right,
@@ -350,10 +382,18 @@ impl TypeChecker {
                         };
                     }
                     Stmt::Loop { body, .. } => {
-                        walk(checker, body, facts, &mut env.clone(), returns)?;
+                        walk(
+                            checker,
+                            body,
+                            facts,
+                            &mut env.clone(),
+                            returns,
+                            resolve,
+                            update,
+                        )?;
                     }
                     Stmt::Match { scrutinee, arms } => {
-                        let typ = closure_inference::argument_type(checker, scrutinee, facts, env)?;
+                        let typ = resolve(scrutinee, env)?;
                         let schema = |name: &str| facts.structs.get(name).map(Vec::as_slice);
                         let mut exhaustive = false;
                         let mut arm_falls = false;
@@ -364,7 +404,9 @@ impl TypeChecker {
                             }
                             let mut inner =
                                 checker.pattern_environment(&arm.pattern, &typ, facts, env)?;
-                            arm_falls |= walk(checker, &arm.body, facts, &mut inner, returns)?;
+                            arm_falls |= walk(
+                                checker, &arm.body, facts, &mut inner, returns, resolve, update,
+                            )?;
                         }
                         if typ == Typ::Bool
                             && [true, false].iter().all(|value| {
@@ -380,7 +422,15 @@ impl TypeChecker {
                         falls = !exhaustive || arm_falls;
                     }
                     Stmt::Try { body, catches } => {
-                        falls = walk(checker, body, facts, &mut env.clone(), returns)?;
+                        falls = walk(
+                            checker,
+                            body,
+                            facts,
+                            &mut env.clone(),
+                            returns,
+                            resolve,
+                            update,
+                        )?;
                         for catch in catches {
                             let mut inner = checker.pattern_environment(
                                 &catch.pattern,
@@ -388,7 +438,15 @@ impl TypeChecker {
                                 facts,
                                 env,
                             )?;
-                            falls |= walk(checker, &catch.body, facts, &mut inner, returns)?;
+                            falls |= walk(
+                                checker,
+                                &catch.body,
+                                facts,
+                                &mut inner,
+                                returns,
+                                resolve,
+                                update,
+                            )?;
                         }
                     }
                     Stmt::Propagate => return None,
@@ -400,7 +458,15 @@ impl TypeChecker {
             Some(falls)
         }
         let mut returns = Vec::new();
-        if walk(self, body, facts, &mut initial.clone(), &mut returns)? {
+        if walk(
+            self,
+            body,
+            facts,
+            &mut initial.clone(),
+            &mut returns,
+            resolve,
+            update,
+        )? {
             returns.push(Typ::Void);
         }
         let typ = returns.first()?.canonical();
@@ -3039,12 +3105,54 @@ fn normalize_function_ret(parser_id: ParserId, ret: &Typ, body: &[Stmt]) -> Typ 
     let normalized = normalize_parser_type(parser_id, ret);
     if parser_id == ParserId::Lua && normalized == Typ::Void {
         let checker = TypeChecker::new();
-        if let Some(inferred) =
-            checker.infer_closure_return(body, &checker.collect_decl_facts(&[]), &HashMap::new())
-            && inferred != Typ::Void
-        {
-            return inferred;
-        }
+        // Only owned literal/local value kinds prove Lua return inference. Generic
+        // operator typing does not establish Lua truth, modulo, or power semantics.
+        let resolve = |value: &Expr, env: &HashMap<String, Typ>| {
+            let typ = match value {
+                Expr::Ident(name) => env.get(name).cloned(),
+                _ => expr_type_hint(value),
+            }?;
+            matches!(
+                typ.canonical(),
+                Typ::Int | Typ::Float | Typ::Bool | Typ::String
+            )
+            .then_some(typ)
+        };
+        let update = |stmt: &Stmt, env: &mut HashMap<String, Typ>| {
+            match stmt {
+                Stmt::Let(name, annotation, value) => {
+                    let inferred = resolve(value, env);
+                    if let Some(annotation) = annotation
+                        && inferred.as_ref().map(Typ::canonical) != Some(annotation.canonical())
+                    {
+                        return None;
+                    }
+                    if inferred.is_none() {
+                        env.remove(name);
+                    }
+                }
+                Stmt::Assign(name, value) => {
+                    let typ = resolve(value, env)?;
+                    // Branch/loop environments are scoped copies: require a stable
+                    // kind instead of incorrectly inferring a join from one path.
+                    if env.get(name).map(Typ::canonical) != Some(typ.canonical()) {
+                        return None;
+                    }
+                    env.insert(name.clone(), typ);
+                }
+                _ => {}
+            }
+            Some(())
+        };
+        return checker
+            .infer_return_with(
+                body,
+                &checker.collect_decl_facts(&[]),
+                &HashMap::new(),
+                &resolve,
+                &update,
+            )
+            .unwrap_or(normalized);
     }
     if matches!(
         parser_id,
@@ -5394,6 +5502,101 @@ mod lua_word32_integer_tests {
             assert!(typecheck_for_parser(ParserId::Lua, &module).is_ok());
         }
     }
+    fn lua_module(body: Vec<Stmt>) -> UnifiedModule {
+        UnifiedModule::new(vec![Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Void,
+            type_params: vec![],
+            body,
+        }])
+    }
+
+    #[test]
+    fn lua_unowned_return_operations_do_not_gain_integer_abi() {
+        let operations = [
+            Expr::Unary {
+                op: "!".into(),
+                expr: Box::new(Expr::IntLit(0)),
+            },
+            Expr::Binary {
+                op: "%".into(),
+                lhs: Box::new(Expr::IntLit(-5)),
+                rhs: Box::new(Expr::IntLit(2)),
+            },
+            Expr::Binary {
+                op: "^".into(),
+                lhs: Box::new(Expr::IntLit(2)),
+                rhs: Box::new(Expr::IntLit(3)),
+            },
+        ];
+        for value in operations {
+            for body in [
+                vec![Stmt::Return(Some(value.clone()))],
+                vec![
+                    Stmt::Let("value".into(), None, Expr::IntLit(42)),
+                    Stmt::Assign("value".into(), value.clone()),
+                    Stmt::Return(Some(Expr::Ident("value".into()))),
+                ],
+                vec![
+                    Stmt::Let("value".into(), None, Expr::IntLit(42)),
+                    Stmt::If {
+                        cond: Expr::BoolLit(true),
+                        then_body: vec![Stmt::Assign("value".into(), value.clone())],
+                        else_body: vec![],
+                    },
+                    Stmt::Return(Some(Expr::Ident("value".into()))),
+                ],
+            ] {
+                let module = lua_module(body);
+                let normalized = normalize_module(ParserId::Lua, &module);
+                assert!(
+                    matches!(&normalized.decls[0], Decl::Function {ret, ..} if ret == &Typ::Void)
+                );
+                assert!(typecheck_for_parser(ParserId::Lua, &module).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn lua_return_inference_invalidates_shadow_and_requires_consistent_returns() {
+        let unknown = Expr::Call {
+            callee: Box::new(Expr::Ident("unknown".into())),
+            args: vec![],
+        };
+        for body in [
+            vec![
+                Stmt::Let("value".into(), None, Expr::IntLit(42)),
+                Stmt::Let("value".into(), None, unknown.clone()),
+                Stmt::Return(Some(Expr::Ident("value".into()))),
+            ],
+            vec![Stmt::If {
+                cond: Expr::Ident("flag".into()),
+                then_body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                else_body: vec![Stmt::Return(Some(Expr::BoolLit(true)))],
+            }],
+        ] {
+            assert_eq!(
+                normalize_function_ret(ParserId::Lua, &Typ::Void, &body),
+                Typ::Void
+            );
+        }
+        // An unused unknown initializer must not erase a separately proven return.
+        assert_eq!(
+            normalize_function_ret(
+                ParserId::Lua,
+                &Typ::Void,
+                &[
+                    Stmt::Let("unused".into(), None, unknown),
+                    Stmt::Let("value".into(), None, Expr::IntLit(20)),
+                    Stmt::Assign("value".into(), Expr::IntLit(42)),
+                    Stmt::Return(Some(Expr::Ident("value".into()))),
+                ]
+            ),
+            Typ::Int
+        );
+    }
+
     #[test]
     fn lua_signed_literal_boundary_preserves_generic_unsigned_carriers() {
         for (value, refused) in [
