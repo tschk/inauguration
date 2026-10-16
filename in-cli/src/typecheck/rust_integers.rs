@@ -144,14 +144,40 @@ fn constant_overflow(kind: Kind, op: &str, left: &Expr, right: &Expr) -> bool {
     }
 }
 
-/// Evaluate one exact-width Rust constexpr operation after its operands have
-/// been evaluated by the bounded static evaluator.
+#[derive(Clone, Copy)]
+enum OverflowPolicy {
+    Checked,
+    Wrapping,
+}
+
+/// Evaluate an exact-width checked operation after bounded operand evaluation.
 pub(crate) fn fold_checked_integer(
     name: &str,
     op: &str,
     lhs: i64,
     rhs: Option<i64>,
     semantics: IntegerSemantics,
+) -> Option<Expr> {
+    fold_integer(name, op, lhs, rhs, semantics, OverflowPolicy::Checked)
+}
+
+pub(crate) fn fold_wrapping_integer(
+    name: &str,
+    op: &str,
+    lhs: i64,
+    rhs: Option<i64>,
+    semantics: IntegerSemantics,
+) -> Option<Expr> {
+    fold_integer(name, op, lhs, rhs, semantics, OverflowPolicy::Wrapping)
+}
+
+fn fold_integer(
+    name: &str,
+    op: &str,
+    lhs: i64,
+    rhs: Option<i64>,
+    semantics: IntegerSemantics,
+    overflow: OverflowPolicy,
 ) -> Option<Expr> {
     let kind = Kind::parse(name, semantics)?;
     if !kind.supported(semantics) {
@@ -178,6 +204,16 @@ pub(crate) fn fold_checked_integer(
         };
         semantics.normalize_word(value).map(Expr::IntLit)
     };
+    if matches!(overflow, OverflowPolicy::Wrapping) {
+        let (left, right) = (unsigned(lhs), unsigned(rhs?));
+        let value = match op {
+            "+" => left.wrapping_add(right),
+            "-" => left.wrapping_sub(right),
+            "*" => left.wrapping_mul(right),
+            _ => return None,
+        };
+        return carrier(value);
+    }
     if matches!(op, "<<" | ">>" | "lshr") {
         let count = rhs?;
         if !(0..i64::from(kind.bits)).contains(&count) {
@@ -677,6 +713,68 @@ impl Pass<'_> {
                     self.const_env = outer;
                     kind
                 } else {
+                    None
+                }
+            }
+            Expr::Call { callee, args } if matches!(callee.as_ref(),Expr::Ident(name) if matches!(name.strip_prefix(core_ir::METHOD_PREFIX),Some("wrapping_add"|"wrapping_sub"|"wrapping_mul"))) =>
+            {
+                let operator = match callee.as_ref() {
+                    Expr::Ident(name) => match name.strip_prefix(core_ir::METHOD_PREFIX) {
+                        Some("wrapping_add") => "+",
+                        Some("wrapping_sub") => "-",
+                        _ => "*",
+                    },
+                    _ => unreachable!(),
+                };
+                if let [receiver, argument] = args.as_mut_slice() {
+                    let contextual = matches!(receiver,Expr::Unary{op,..} if op=="rust-integer-literal")
+                        || matches!(receiver,Expr::Ident(name) if self.flexible.contains(name)&&!self.opaque.contains(name)&&env.get(name)==Some(&Typ::Int));
+                    let target = self.hint(receiver, env).or_else(|| {
+                        if contextual {
+                            expected.or_else(|| self.hint(argument, env))
+                        } else {
+                            None
+                        }
+                    });
+                    let receiver_kind = self.expression(receiver, target, env, ret);
+                    let argument_kind =
+                        self.expression(argument, receiver_kind.or(target), env, ret);
+                    let kind = receiver_kind.or(target);
+                    // Wrapping methods do not implicitly coerce an opaque
+                    // canonical-Int argument into a Rust primitive width.
+                    bad |= kind.is_none() || argument_kind != kind;
+                    if self.rewrite
+                        && let Some(kind) = kind
+                    {
+                        let name = format!("{}{}", if kind.signed { "i" } else { "u" }, kind.bits);
+                        let operation = Expr::Binary {
+                            op: operator.into(),
+                            lhs: Box::new(receiver.clone()),
+                            rhs: Box::new(argument.clone()),
+                        };
+                        if let (Some(left), Some(right)) =
+                            (constant_integer(receiver), constant_integer(argument))
+                        {
+                            *expr = fold_wrapping_integer(
+                                &name,
+                                operator,
+                                left,
+                                Some(right),
+                                self.semantics,
+                            )
+                            .unwrap_or_else(invalid);
+                        } else if self.const_env.is_some() {
+                            *expr = Expr::Unary {
+                                op: format!("rust-wrapping-integer-{name}"),
+                                expr: Box::new(operation),
+                            };
+                        } else {
+                            *expr = kind.cast(operation);
+                        }
+                    }
+                    kind
+                } else {
+                    bad = true;
                     None
                 }
             }
@@ -1671,5 +1769,115 @@ mod tests {
             crate::core_ir_verifier::verify_for_entry(&module, "check").ok,
             "{module:?}"
         );
+    }
+    #[test]
+    fn wrapping_integer_methods_use_fixed_width_bits_and_preserve_user_dispatch() {
+        for (source, expected) in [
+            ("fn main()->u8{255u8.wrapping_add(43)}", 42),
+            ("fn main()->u16{0u16.wrapping_sub(65494)}", 42),
+            ("fn main()->u32{4294967295u32.wrapping_mul(4294967254)}", 42),
+            ("fn main()->u64{0xffffffffffffffffu64.wrapping_add(43)}", 42),
+            ("fn main()->i8{127i8.wrapping_add(1)}", -128),
+            ("fn main()->i8{(-128i8).wrapping_sub(1)}", 127),
+        ] {
+            let module = resolved(source, IntegerSemantics::Word64);
+            let Decl::Function { body, .. } = &module.decls[0] else {
+                panic!("main")
+            };
+            assert!(
+                matches!(body.last(),Some(Stmt::Return(Some(Expr::IntLit(value)))) if *value==expected),
+                "{source}: {module:?}"
+            );
+        }
+        let mut module = resolved(
+            "struct Counter{value:u8}impl Counter{fn wrapping_add(&self,extra:u8)->u8{self.value+extra}}fn main()->i64{let value=Counter{value:20};value.wrapping_add(22) as i64}",
+            IntegerSemantics::Word64,
+        );
+        let mut dispatch = false;
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            dispatch |= matches!(expr,Expr::Call{callee,..} if matches!(callee.as_ref(),Expr::Ident(name) if name=="Counter::wrapping_add"));
+        });
+        assert!(dispatch, "{module:?}");
+    }
+
+    #[test]
+    fn wrapping_methods_keep_order_once_and_lazy_context() {
+        let mut module = resolved(
+            "fn left()->u8{255}fn right()->u8{43}fn main()->bool{false && left().wrapping_add(right())==42u8}",
+            IntegerSemantics::Word64,
+        );
+        let mut calls = Vec::new();
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            if let Expr::Call { callee, .. } = expr
+                && let Expr::Ident(name) = callee.as_ref()
+                && matches!(name.as_str(), "left" | "right")
+            {
+                calls.push(name.clone());
+            }
+        });
+        assert_eq!(calls, ["left", "right"]);
+        let Decl::Function { body, .. } = module.decls.last().unwrap() else {
+            panic!("main")
+        };
+        assert!(
+            matches!(body.last(),Some(Stmt::Return(Some(Expr::Binary{op,lhs,..}))) if op=="&&"&&matches!(lhs.as_ref(),Expr::BoolLit(false)))
+        );
+    }
+
+    #[test]
+    fn wrapping_methods_refuse_mismatched_and_unrepresentable_receivers() {
+        for (source, semantics) in [
+            (
+                "fn main()->u8{1u8.wrapping_add(1u16)}",
+                IntegerSemantics::Word64,
+            ),
+            (
+                "fn main()->u64{1u64.wrapping_mul(2u64)}",
+                IntegerSemantics::Word32,
+            ),
+            (
+                "fn main()->u8{1u8.wrapping_add()}",
+                IntegerSemantics::Word64,
+            ),
+        ] {
+            let module = resolved(source, semantics);
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}: {module:?}"
+            );
+        }
+        assert_eq!(
+            fold_wrapping_integer("u64", "*", -1, Some(-42), IntegerSemantics::Word64),
+            Some(Expr::IntLit(42))
+        );
+        assert_eq!(
+            fold_checked_integer("u8", "+", 255, Some(1), IntegerSemantics::Word64),
+            None
+        );
+    }
+
+    #[test]
+    fn wrapping_methods_do_not_invent_primitive_nominal_receivers() {
+        let module = resolved(
+            "struct Counter{value:u8}fn main()->u8{let value=Counter{value:42};value.wrapping_add(1u8)}",
+            IntegerSemantics::Word64,
+        );
+        assert!(
+            !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+            "{module:?}"
+        );
+    }
+    #[test]
+    fn wrapping_methods_require_exact_argument_and_receiver_kinds() {
+        for source in [
+            "fn main()->u8{let text:String=\"hi\";1u8.wrapping_add(text.len())}",
+            "fn main()->i64{let text:String=\"hi\";text.len().wrapping_add(1i64)}",
+        ] {
+            let module = resolved(source, IntegerSemantics::Word64);
+            assert!(
+                !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                "{source}: {module:?}"
+            );
+        }
     }
 }

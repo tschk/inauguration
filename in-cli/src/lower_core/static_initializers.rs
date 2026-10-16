@@ -419,7 +419,10 @@ impl Eval<'_> {
                 }
             }
             Expr::Unary { op, expr } => {
-                if let Some(kind) = op.strip_prefix("rust-checked-integer-") {
+                if let Some(kind) = op
+                    .strip_prefix("rust-checked-integer-")
+                    .or_else(|| op.strip_prefix("rust-wrapping-integer-"))
+                {
                     let (operator, lhs, rhs) = match expr.as_ref() {
                         Expr::Binary { op, lhs, rhs } => {
                             let Expr::IntLit(left) = self.expr(lhs, env)? else {
@@ -438,13 +441,12 @@ impl Eval<'_> {
                         }
                         _ => return None,
                     };
-                    return crate::typecheck::rust_integers::fold_checked_integer(
-                        kind,
-                        operator,
-                        lhs,
-                        rhs,
-                        self.semantics,
-                    );
+                    let evaluate = if op.starts_with("rust-wrapping-integer-") {
+                        crate::typecheck::rust_integers::fold_wrapping_integer
+                    } else {
+                        crate::typecheck::rust_integers::fold_checked_integer
+                    };
+                    return evaluate(kind, operator, lhs, rhs, self.semantics);
                 }
                 let value = self.expr(expr, env)?;
                 if self.strict && matches!(op.as_str(), "-" | "neg") {
@@ -1262,6 +1264,65 @@ mod tests {
             inline(vec![], Expr::Ident("outer".into())),
         );
         assert!(evaluate_inline(&captured, 65536).is_none());
+    }
+
+    #[test]
+    fn wrapping_integer_constants_share_bounded_operand_evaluation() {
+        let operation = |name: &str, op: &str, left: Expr, right: Expr| Expr::Unary {
+            op: format!("rust-wrapping-integer-{name}"),
+            expr: Box::new(Expr::Binary {
+                op: op.into(),
+                lhs: Box::new(left),
+                rhs: Box::new(right),
+            }),
+        };
+        for (name, op, left, right, expected) in [
+            ("u8", "+", 255, 43, 42),
+            ("u16", "-", 0, 65494, 42),
+            ("u64", "*", -1, -42, 42),
+            ("i64", "+", i64::MAX, 1, i64::MIN),
+        ] {
+            let value = inline(
+                vec![Stmt::Let("left".into(), Some(Typ::Int), Expr::IntLit(left))],
+                operation(name, op, Expr::Ident("left".into()), Expr::IntLit(right)),
+            );
+            assert_eq!(
+                evaluate_inline(&value, 65536),
+                Some(Expr::IntLit(expected)),
+                "{name}/{op}"
+            );
+        }
+        let value = inline(
+            vec![
+                Stmt::Let("value".into(), Some(Typ::Int), Expr::IntLit(254)),
+                Stmt::Let("count".into(), Some(Typ::Int), Expr::IntLit(0)),
+                Stmt::Loop {
+                    kind: crate::core_ir::LoopKind::While,
+                    cond: Some(Expr::Binary {
+                        op: "<".into(),
+                        lhs: Box::new(Expr::Ident("count".into())),
+                        rhs: Box::new(Expr::IntLit(44)),
+                    }),
+                    body: vec![
+                        Stmt::Assign(
+                            "value".into(),
+                            operation("u8", "+", Expr::Ident("value".into()), Expr::IntLit(1)),
+                        ),
+                        Stmt::Assign(
+                            "count".into(),
+                            Expr::Binary {
+                                op: "+".into(),
+                                lhs: Box::new(Expr::Ident("count".into())),
+                                rhs: Box::new(Expr::IntLit(1)),
+                            },
+                        ),
+                    ],
+                },
+            ],
+            Expr::Ident("value".into()),
+        );
+        assert_eq!(evaluate_inline(&value, 65536), Some(Expr::IntLit(42)));
+        assert!(evaluate_inline(&value, 1).is_none());
     }
 
     #[test]
