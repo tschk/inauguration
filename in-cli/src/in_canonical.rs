@@ -1,22 +1,51 @@
-use crate::core_ir::{Decl, Expr, LoopKind, MatchArm, Stmt, Typ, UnifiedModule};
-use crate::in_lang_parse::parse_in_source;
+use crate::core_ir::{Decl, Expr, LoopKind, MatchArm, Stmt, Typ};
 
 pub fn canonicalize_in_source(source: &str) -> Result<String, String> {
-    let module = parse_in_source(source)?;
-    Ok(format_module(&module))
-}
-
-fn format_module(module: &UnifiedModule) -> String {
+    let crate::in_lang_parse::module::CanonicalSource {
+        module,
+        items,
+        generated_count,
+        counts,
+    } = crate::in_lang_parse::module::parse_in_source_for_canonical(source)?;
+    let mut declarations = module.decls.into_iter().skip(generated_count);
+    let mut counts = counts.into_iter();
     let mut out = String::new();
-    for (idx, decl) in module.decls.iter().enumerate() {
-        if idx > 0 {
-            out.push('\n');
-            out.push('\n');
+    for (_, text) in items {
+        if !out.is_empty() {
+            out.push_str("\n\n");
         }
-        format_decl(decl, &mut out);
+        if crate::in_lang_parse::lexer::is_core_decl_item(&text) {
+            let count = counts.next().ok_or(".in: missing source item provenance")?;
+            if count == 0 {
+                return Err(".in: empty source declaration provenance".into());
+            }
+            let decl = declarations
+                .next()
+                .ok_or(".in: missing source declaration provenance")?;
+            for _ in 1..count {
+                declarations
+                    .next()
+                    .ok_or(".in: missing expanded declaration provenance")?;
+            }
+            if count > 1 || text.trim_start().starts_with("extern ") {
+                // Extern metadata and struct method grouping require original source syntax.
+                out.push_str(text.trim());
+            } else {
+                if text.trim_start().starts_with("interrupt fn ") {
+                    out.push_str("interrupt ");
+                }
+                format_decl(&decl, &mut out);
+            }
+        } else {
+            // Keep annotation association, task arguments and product-owned blocks.
+            out.push_str(text.trim());
+        }
+    }
+    if declarations.next().is_some() {
+        return Err(".in: extra source declaration provenance".into());
     }
     out.push('\n');
-    out
+    Ok(out)
 }
 
 fn format_decl(decl: &Decl, out: &mut String) {
@@ -844,5 +873,78 @@ fn main() { return; }
             parse_in_source(&canonical).unwrap(),
             parse_in_source(src).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod surface_preservation_tests {
+    use super::*;
+    use crate::in_lang_parse::{parse_in_source, parse_in_surface_info};
+
+    #[test]
+    fn canonical_preserves_surface_facts_and_generated_binding_provenance() {
+        let source = r#"package demo;module demo.main;import std.io;use database.postgres;bind database.postgres as postgres;capability console.write;enable trace;@pure;fn helper()->Int{
+return 42;
+}parallel {helper();}system graph {capability hidden;extern c fn hidden()->Int;}extern c fn external(value:Int)->Int requires console.write;fn main()->Int{return helper();}"#;
+        let before = parse_in_source(source).unwrap();
+        let facts = parse_in_surface_info(source).unwrap();
+        let canonical = canonicalize_in_source(source).unwrap();
+        assert_eq!(parse_in_source(&canonical).unwrap(), before);
+        assert_eq!(parse_in_surface_info(&canonical).unwrap(), facts);
+        assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+        assert!(canonical.contains("extern c fn external"));
+        assert!(!canonical.contains("fn print("));
+        assert!(canonical.contains("system graph {capability hidden;extern c fn hidden()->Int;}"));
+    }
+
+    #[test]
+    fn canonical_keeps_annotation_order_and_interrupt_modifier() {
+        let source = "@pure;@gpu;fn helper()->Int{return 42;}@parallel-safe;var value:Int=42;interrupt fn irq()->Void{return;}fn main()->Int{return value;}";
+        let canonical = canonicalize_in_source(source).unwrap();
+        assert_eq!(
+            parse_in_surface_info(&canonical).unwrap(),
+            parse_in_surface_info(source).unwrap()
+        );
+        assert!(canonical.contains("interrupt fn irq"));
+        assert_eq!(
+            parse_in_source(&canonical).unwrap(),
+            parse_in_source(source).unwrap()
+        );
+        assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+    }
+
+    #[test]
+    fn canonical_retains_local_imports_for_file_resolution() {
+        let directory = std::env::temp_dir().join(format!(
+            "in-canonical-imports-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("helper.in"), "fn helper()->Int{return 42;}").unwrap();
+        let path = directory.join("main.in");
+        let source =
+            r#"import "./helper.in";capability console.write;fn main()->Int{return helper();}"#;
+        std::fs::write(&path, source).unwrap();
+        let before = crate::in_lang_parse::parse_in_file(&path).unwrap();
+        let canonical = canonicalize_in_source(source).unwrap();
+        std::fs::write(&path, &canonical).unwrap();
+        assert_eq!(crate::in_lang_parse::parse_in_file(&path).unwrap(), before);
+        assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn canonical_preserves_struct_method_expansion_provenance() {
+        let source = "struct Pair {Int value; fn read()->Int{return self.value;} fn add(extra:Int)->Int{return self.value+extra;}}fn main()->Int{let pair=Pair{value:20};return pair.add(22);}";
+        let before = parse_in_source(source).unwrap();
+        let canonical = canonicalize_in_source(source).unwrap();
+        assert_eq!(parse_in_source(&canonical).unwrap(), before);
+        assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+        assert_eq!(canonical.matches("fn read(").count(), 1);
+        assert!(!canonical.contains("fn Pair_read("));
     }
 }

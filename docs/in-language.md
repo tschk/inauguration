@@ -368,6 +368,12 @@ Arithmetic, bitwise, and comparisons chain as in the table in [parser-surface.md
 | `in package --path <dir\|manifest\|source>` | Manifest + dependency graph facts |
 | `in agent` | Effects, capabilities, orchestration facts |
 
+Canonicalization preserves identity directives, imports, capabilities, foreign
+binding metadata, annotations, and topology/orchestration blocks in source order.
+Generated import
+bindings are omitted from source output. Extern declarations and grouped struct
+methods retain their source syntax.
+
 See [orchestration-compiler.md](orchestration-compiler.md).
 
 ## Types and bodies

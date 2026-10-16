@@ -25,10 +25,14 @@ struct ParsedInModule {
     pending_globals: HashSet<String>,
 }
 
-fn parse_module_from_blocks(blocks: &[(usize, String)]) -> Result<ParsedInModule, String> {
+fn parse_module_from_blocks<'a>(
+    blocks: impl IntoIterator<Item = &'a (usize, String)>,
+    mut counts: Option<&mut Vec<usize>>,
+) -> Result<ParsedInModule, String> {
     let mut decls = Vec::new();
     let mut pending_globals = HashSet::new();
     for (start_line, block) in blocks {
+        let before = decls.len();
         let line = trim(block);
         if line.is_empty() {
             continue;
@@ -167,6 +171,9 @@ fn parse_module_from_blocks(blocks: &[(usize, String)]) -> Result<ParsedInModule
                 ".in at line {start_line}: expected top-level `fn`, `interrupt fn`, `struct`, `class`, `interface`, `component`, `var`, or `const`"
             ));
         }
+        if let Some(counts) = counts.as_deref_mut() {
+            counts.push(decls.len() - before);
+        }
     }
     Ok(ParsedInModule {
         module: UnifiedModule::new(decls),
@@ -190,11 +197,15 @@ fn parse_in_module_without_validation(
     source_path: Option<&std::path::Path>,
 ) -> Result<ParsedInModule, String> {
     let items = split_top_level_items(source)?;
-    let surface = parse_in_surface_info_with_items(&items)?;
-    let blocks: Vec<_> = items
-        .into_iter()
-        .filter(|(_, text)| is_core_decl_item(text))
-        .collect();
+    parse_in_module_from_items(&items, source_path, None)
+}
+
+fn parse_in_module_from_items(
+    items: &[(usize, String)],
+    source_path: Option<&std::path::Path>,
+    counts: Option<&mut Vec<usize>>,
+) -> Result<ParsedInModule, String> {
+    let surface = parse_in_surface_info_with_items(items)?;
     let identity = CoreModuleIdentity {
         package: surface.package.clone(),
         module: surface.module.clone(),
@@ -202,7 +213,10 @@ fn parse_in_module_without_validation(
     let ParsedInModule {
         mut module,
         pending_globals,
-    } = parse_module_from_blocks(&blocks)?;
+    } = parse_module_from_blocks(
+        items.iter().filter(|(_, text)| is_core_decl_item(text)),
+        counts,
+    )?;
     module.identity = identity;
     let mut std_decls = Vec::new();
     for import in surface.imports {
@@ -408,6 +422,36 @@ pub(crate) fn validate_module(module: &UnifiedModule, require_main: bool) -> Res
 pub fn parse_in_source(source: &str) -> Result<UnifiedModule, String> {
     let parsed = parse_in_module_without_validation(&normalize_human_in_source(source), None)?;
     finalize_in_module(parsed, true)
+}
+
+/// Preserve source-item order and the generated-binding prefix for canonical output.
+/// Finalization changes expressions/types, but preserves user declaration order/count.
+pub(crate) struct CanonicalSource {
+    pub module: UnifiedModule,
+    pub items: Vec<(usize, String)>,
+    pub generated_count: usize,
+    pub counts: Vec<usize>,
+}
+
+pub(crate) fn parse_in_source_for_canonical(source: &str) -> Result<CanonicalSource, String> {
+    let normalized = normalize_human_in_source(source);
+    let items = split_top_level_items(&normalized)?;
+    let mut counts = Vec::new();
+    let parsed = parse_in_module_from_items(&items, None, Some(&mut counts))?;
+    let user_count: usize = counts.iter().sum();
+    let generated_count = parsed
+        .module
+        .decls
+        .len()
+        .checked_sub(user_count)
+        .ok_or(".in: inconsistent source declaration provenance")?;
+    let module = finalize_in_module(parsed, true)?;
+    Ok(CanonicalSource {
+        module,
+        items,
+        generated_count,
+        counts,
+    })
 }
 
 /// Parse library source without requiring a `main` entry point.
