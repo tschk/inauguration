@@ -83,7 +83,11 @@ operator typing; unknown assignments and shadows invalidate those proofs.
 Lua integer literals outside signed 32-bit range refuse on Word32 targets;
 generic unsigned hardware word literals retain their existing policy. This
 folding path excludes calls, identifiers, floats, other unary operators, shifts and
-division; their existing admission and refusal rules remain unchanged.
+division; their existing initializer admission and refusal rules remain unchanged.
+Lua expression normalization routes Boolean logical operations through typed
+checks, preserving Boolean locals and function results. Integer division,
+modulo, power and shifts refuse before execution until their Lua semantics are
+owned; division of proven Float operands retains the native floating path.
 
 Python scalar-name augmented assignments support `+=`, `-=`, `*=`, `&=`,
 `|=` and `^=` through the existing typed native operations. They read the old

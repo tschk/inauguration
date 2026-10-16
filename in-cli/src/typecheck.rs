@@ -695,6 +695,16 @@ impl TypeChecker {
         } else if let Expr::Binary { op, lhs, rhs } = expr {
             c_operands[0] = self.resolve_typed_expr(lhs, facts, env, promote_c_bool, return_type);
             c_operands[1] = self.resolve_typed_expr(rhs, facts, env, promote_c_bool, return_type);
+            if op == "lua-div" {
+                // Lua integer division produces Float; retain only proven Float operands.
+                if self.expr_type(lhs, facts, env) != Some(Typ::Float)
+                    || self.expr_type(rhs, facts, env) != Some(Typ::Float)
+                {
+                    *expr = Expr::Ident("#unsupported-lua-integer-division".into());
+                    return None;
+                }
+                *op = "/".into();
+            }
             if promote_c_bool {
                 c_kind = match op.as_str() {
                     "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => Some(CIntegerKind::I32),
@@ -2952,6 +2962,32 @@ pub fn normalize_module_with_semantics(
         .map(|decl| normalize_decl(parser_id, decl))
         .collect();
     let mut normalized = UnifiedModule::with_identity(decls, module.identity.clone());
+    if parser_id == ParserId::Lua {
+        crate::core_opt::map_decl_exprs_mut(&mut normalized.decls, &mut |expr| {
+            match expr {
+                Expr::Binary { op, .. }
+                    if matches!(op.as_str(), "//" | "%" | "^" | "<<" | ">>") =>
+                {
+                    *expr = Expr::Ident("#unsupported-lua-operator-semantics".into());
+                }
+                Expr::Binary { op, .. } if op == "/" => *op = "lua-div".into(),
+                Expr::Binary { op, .. } if op == "and" => *op = "&&".into(),
+                Expr::Binary { op, .. } if op == "or" => *op = "||".into(),
+                Expr::Unary { op, expr: value } if op == "not" => {
+                    // Existing typed comparisons retain Boolean local/call proofs.
+                    *expr = Expr::Binary {
+                        op: "==".into(),
+                        lhs: std::mem::replace(value, Box::new(Expr::UnitLit)),
+                        rhs: Box::new(Expr::BoolLit(false)),
+                    };
+                }
+                _ => {}
+            }
+        });
+    }
+    if parser_id == ParserId::Lua {
+        TypeChecker::new().resolve_complements(&mut normalized);
+    }
     if parser_id == ParserId::Lua && semantics == crate::integer_semantics::IntegerSemantics::Word32
     {
         // Lua integers are signed64 values, unlike generic unsigned MMIO word

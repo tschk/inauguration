@@ -8069,6 +8069,37 @@ fn lua_return_inference_refuses_unowned_operator_semantics_before_execution() {
     }
     let path = temp_path("lua-return-proof.lua");
     for (body, expected) in [
+        ("if 3 / 2 == 1 then return 42 else return 7 end", None),
+        (
+            "if 3.0 / 2.0 == 1.5 then return 42 else return 7 end",
+            Some(42),
+        ),
+        (
+            "local value=3.0; if value / 2.0 == 1.5 then return 42 else return 7 end",
+            Some(42),
+        ),
+        ("if -5 % 2 == -1 then return 42 else return 7 end", None),
+        ("if 2 ^ 3 == 1 then return 42 else return 7 end", None),
+        ("if 1 << 64 == 1 then return 42 else return 7 end", None),
+        ("if -8 >> 1 == -4 then return 42 else return 7 end", None),
+        ("if 0 and true then return 42 else return 7 end", None),
+        (
+            "local flag=true; if not flag then return 42 else return 7 end",
+            Some(7),
+        ),
+        (
+            "local flag=true; if flag and true then return 42 else return 7 end",
+            Some(42),
+        ),
+        (
+            "local flag=false; if flag or true then return 42 else return 7 end",
+            Some(42),
+        ),
+        (
+            "if flag() and true then return 42 else return 7 end",
+            Some(42),
+        ),
+        ("if not flag() then return 42 else return 7 end", Some(7)),
         ("return not 0", None),
         ("return -5 % 2", None),
         ("return 2 ^ 3", None),
@@ -8081,7 +8112,11 @@ fn lua_return_inference_refuses_unowned_operator_semantics_before_execution() {
         ),
         ("local value = 20; value = 42; return value", Some(42)),
     ] {
-        fs::write(&path, format!("function main()\n{body}\nend\n")).unwrap();
+        fs::write(
+            &path,
+            format!("function flag() return true end\nfunction main()\n{body}\nend\n"),
+        )
+        .unwrap();
         for profile in [
             crate::emit_profile::EmitProfile::Default,
             crate::emit_profile::EmitProfile::Lean,
