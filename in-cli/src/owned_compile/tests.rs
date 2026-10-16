@@ -7971,3 +7971,61 @@ fn owned_scalar_mir_preserves_native_intrinsic_contracts() {
         }
     }
 }
+
+#[test]
+fn executable_jit_keeps_resolved_fallback_before_dce() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("entry-dce.rs");
+    fs::write(&path, "fn answer()->i64{42}").unwrap();
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        // The fallback remains deliberately compile-only under the existing
+        // Rust entry policy; executable DCE must still preserve its definition.
+        let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+        request.profile = profile;
+        assert_eq!(request.linkage, NativeLinkage::Executable);
+        let report = compile_owned(&request);
+        assert!(report.success, "{report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-compiled-only"));
+        assert!(!report.execution_started);
+        assert_eq!(report.eval_result, None);
+        // Exact entry spelling remains actually invocable under the same linkage.
+        request.entry = Some("answer".into());
+        let report = compile_owned(&request);
+        assert!(report.success, "{report:?}");
+        assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
+        assert!(report.execution_started);
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn jit_without_optimizer_root_keeps_library_discovery_policy() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("entry-less-library.rs");
+    fs::write(&path, "fn first()->i64{20} fn second()->i64{22}").unwrap();
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        let mut request = default_request(path.clone(), CompileTarget::Jit, None, None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(report.success, "{report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-compiled-only"));
+        assert_eq!(
+            report.typed_function_count, 2,
+            "both discovery functions must remain: {report:?}"
+        );
+        assert!(!report.execution_started);
+    }
+    fs::remove_file(path).unwrap();
+}

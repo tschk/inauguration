@@ -558,6 +558,15 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         let entry = effective_entry
             .clone()
             .or_else(|| module_has_function(&module, "main").then(|| "main".to_string()));
+        // Resolve only an existing optimizer root. Entry-less libraries retain
+        // their keep-all discovery policy below.
+        let entry = entry.map(|entry| {
+            if request.target == CompileTarget::Jit {
+                jit::resolve_jit_entry(&module, &entry)
+            } else {
+                entry
+            }
+        });
         let keep_all = request.linkage == crate::native_emit::NativeLinkage::StaticLib
             || matches!(request.emit, Some(OwnedEmit::Sci { .. }))
             || (matches!(request.target, CompileTarget::Jit) && entry.is_none());
