@@ -3085,3 +3085,44 @@ fn unsigned_word_ops_use_unsigned_aarch64_encodings() {
         assert!(code_contains_insn(&lowered.code, expected), "{op}");
     }
 }
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn void_conditional_returns_keep_fallthrough_cleanup() {
+    for body in [
+        "if flag==0{return;}store64(0,42);",
+        "if flag==0{if flag==0{return;}}store64(0,42);",
+        "while flag==0{return;}store64(0,42);",
+        "if flag==0{return;}store64(0,42);return;",
+    ] {
+        for (flag, expected) in [(0, 0), (1, 42)] {
+            let source = format!(
+                "var value:Int=0;\nfn store64(p:Int,v:Int)->Void{{value=v;}}\nfn helper(flag:Int)->Void{{{body}}}\nfn main()->Int{{helper({flag});return value;}}"
+            );
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let result = lower_module(&module, "main", NativeLinkage::Executable).unwrap();
+            let offsets: Vec<_> = result
+                .function_offsets
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect();
+            let relocations = result.relocations.clone();
+            let mut runtime = crate::jit_runtime::JitRuntime::new();
+            runtime
+                .load_with_data_relocations(
+                    &result.code,
+                    &offsets,
+                    &relocations,
+                    &result.data,
+                    &result.global_relocs,
+                    &result.data_relocations,
+                )
+                .unwrap();
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]) },
+                Some(expected),
+                "{source}"
+            );
+        }
+    }
+}

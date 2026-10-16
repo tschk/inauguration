@@ -1216,12 +1216,12 @@ fn lower_function(
     }
     let pending_globals = ctx.pending_globals;
 
-    // If no explicit return, emit default epilogue
-    if !ctx.emitted_return {
+    // A return in one branch does not terminate every fallthrough path.
+    if func.ret.canonical() == Typ::Void || !ctx.emitted_return {
         if matches!(&func.ret, Typ::Named(_) | Typ::Array(_)) {
             // ponytail: missing aggregate returns require control-flow validation.
             emitter.emit_insns(&x86_64::load_i64(RAX, 0));
-        } else if func.ret == Typ::Void {
+        } else if func.ret.canonical() == Typ::Void {
             emitter.emit_insns(&x86_64::zero_reg(RAX));
         }
         emit_function_epilogue(emitter, is_interrupt);
@@ -5962,6 +5962,56 @@ mod selected_mmio_contract_tests {
                 "fn {name}(value:Bool)->Int{{if value{{return 1;}}return 42;}}\nfn main()->Int{{return {name}(false);}}"
             );
             assert!(lower(&source).is_ok(), "defined override {name}");
+        }
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod void_fallthrough_tests {
+    use super::*;
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn void_conditional_returns_keep_fallthrough_cleanup() {
+        for body in [
+            "if flag==0{return;}store64(0,42);",
+            "if flag==0{if flag==0{return;}}store64(0,42);",
+            "while flag==0{return;}store64(0,42);",
+            "if flag==0{return;}store64(0,42);return;",
+        ] {
+            for (flag, expected) in [(0, 0), (1, 42)] {
+                let source = format!(
+                    "var value:Int=0;\nfn store64(p:Int,v:Int)->Void{{value=v;}}\nfn helper(flag:Int)->Void{{{body}}}\nfn main()->Int{{helper({flag});return value;}}"
+                );
+                let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                let result = lower_module(&module, "main").unwrap();
+                let offsets: Vec<_> = result
+                    .exports
+                    .iter()
+                    .map(|(name, offset)| (name.clone(), *offset, 0))
+                    .collect();
+                let relocations: Vec<_> = result
+                    .relocations
+                    .iter()
+                    .map(|site| (*site, result.codegen_base))
+                    .collect();
+                let mut runtime = crate::jit_runtime::JitRuntime::new();
+                runtime
+                    .load_with_data_relocations(
+                        &result.code,
+                        &offsets,
+                        &relocations,
+                        &result.data,
+                        &result.global_relocs,
+                        &result.data_relocations,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    unsafe { runtime.invoke("main", &[]) },
+                    Some(expected),
+                    "{source}"
+                );
+            }
         }
     }
 }

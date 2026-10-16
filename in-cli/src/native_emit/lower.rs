@@ -1141,8 +1141,9 @@ fn lower_function(
     }
     ctx.assert_vec_for_slots_consumed(&func.name)?;
 
-    if !ctx.emitted_return {
-        if func.ret == Typ::Void {
+    // A return in one branch does not terminate every fallthrough path.
+    if func.ret.canonical() == Typ::Void || !ctx.emitted_return {
+        if func.ret.canonical() == Typ::Void {
             emitter.emit_insns(&aarch64::load_i64(0, 0));
         }
         emit_epilogue(emitter, ctx.prologue_stack_reserve);
