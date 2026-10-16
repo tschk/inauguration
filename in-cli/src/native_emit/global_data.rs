@@ -270,6 +270,14 @@ pub(crate) fn build_data_section(
     let mut data = Vec::new();
     let mut strings = Vec::new();
     let mut initial_values = HashMap::new();
+    let structs: HashMap<_, _> = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Struct { name, fields, .. } => Some((name.as_str(), fields.as_slice())),
+            _ => None,
+        })
+        .collect();
     for decl in &module.decls {
         if let Decl::Global {
             name,
@@ -308,6 +316,60 @@ pub(crate) fn build_data_section(
                     &mut strings,
                     &initial_values,
                 )?;
+                continue;
+            }
+            if let (
+                Typ::Named(schema_name),
+                Some(Expr::StructInit {
+                    name: constructor,
+                    fields: values,
+                }),
+            ) = (typ.canonical(), init.as_deref())
+                && let Some(fields) = structs.get(schema_name.as_str())
+            {
+                let schema_names: std::collections::HashSet<_> =
+                    fields.iter().map(|(name, _)| name.as_str()).collect();
+                if constructor != &schema_name
+                    || values.len() != fields.len()
+                    || schema_names.len() != fields.len()
+                {
+                    return Err(format!(
+                        "unsupported native initializer for global `{name}`; struct constructor or field count mismatch"
+                    ));
+                }
+                let supplied: HashMap<_, _> = values
+                    .iter()
+                    .map(|(field, value)| (field.as_str(), value))
+                    .collect();
+                if supplied.len() != values.len() {
+                    return Err(format!(
+                        "unsupported native initializer for global `{name}`; duplicate struct field"
+                    ));
+                }
+                data.resize(offset as usize, 0);
+                for (field, field_type) in *fields {
+                    if !matches!(
+                        field_type.canonical(),
+                        Typ::Int | Typ::Bool | Typ::Float | Typ::String
+                    ) {
+                        return Err(format!(
+                            "unsupported native initializer for global `{name}`; struct fields require a flat scalar layout"
+                        ));
+                    }
+                    let value = supplied.get(field.as_str()).ok_or_else(|| format!("unsupported native initializer for global `{name}`; missing struct field `{field}`"))?;
+                    let slot = data.len() as u64;
+                    match eval_initial_value(field_type, Some(value), name, &initial_values)? {
+                        InitialValue::Scalar(value) => data.extend_from_slice(&value.to_le_bytes()),
+                        InitialValue::String(value) => {
+                            data.resize(data.len() + 8, 0);
+                            strings.push((slot, value));
+                        }
+                    }
+                }
+                // collect_globals reserves one word even for an empty known schema.
+                if fields.is_empty() {
+                    data.resize(offset as usize + 8, 0);
+                }
                 continue;
             }
             if let Some(kind) = crate::core_atomic::Kind::from_type(typ)
@@ -1209,6 +1271,169 @@ mod initial_reference_tests {
                     "{module:?}"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod scalar_record_initializer_tests {
+    use super::*;
+
+    fn schema_map(module: &UnifiedModule) -> HashMap<String, Vec<(String, Typ)>> {
+        module
+            .decls
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::Struct { name, fields, .. } => Some((name.clone(), fields.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+    fn word(data: &[u8], offset: u64) -> u64 {
+        u64::from_le_bytes(
+            data[offset as usize..offset as usize + 8]
+                .try_into()
+                .unwrap(),
+        )
+    }
+    #[test]
+    fn typed_record_fields_follow_schema_order_and_preserve_string_fixups() {
+        let module = crate::in_lang_parse::parse_in_source(
+            r#"struct Record{Int count;Bool ready;Float fraction;String text}
+var seed:Int=42;
+var label:String="λ雪";
+var record:Record=Record{text:label,fraction:1.5,ready:true,count:seed};
+var sentinel:Int=77;
+fn main()->Int{return record.count;}"#,
+        )
+        .unwrap();
+        let offsets = collect_globals(&module, &schema_map(&module));
+        for layout in [StringLayout::Instring, StringLayout::Cstring] {
+            let mut section = build_data_section(&module, &offsets, layout).unwrap();
+            assert_eq!(word(&section.bytes, offsets["record.count"]), 42);
+            assert_eq!(word(&section.bytes, offsets["record.ready"]), 1);
+            assert_eq!(
+                word(&section.bytes, offsets["record.fraction"]),
+                1.5f64.to_bits()
+            );
+            assert_eq!(word(&section.bytes, offsets["sentinel"]), 77);
+            assert_eq!(section.pointer_fixups.len(), 2);
+            let label_target = section
+                .pointer_fixups
+                .iter()
+                .find(|(slot, _)| *slot == offsets["label"])
+                .unwrap()
+                .1;
+            let (slot, target) = *section
+                .pointer_fixups
+                .iter()
+                .find(|(slot, _)| *slot == offsets["record.text"])
+                .unwrap();
+            assert_ne!(target, label_target);
+            assert_eq!(slot, offsets["record.text"]);
+            let prefix = if layout == StringLayout::Instring {
+                8
+            } else {
+                0
+            };
+            assert_eq!(
+                &section.bytes[target as usize + prefix..target as usize + prefix + "λ雪".len()],
+                "λ雪".as_bytes()
+            );
+            apply_data_relocations(
+                &mut section.bytes,
+                &section.pointer_fixups,
+                0x100000,
+                u64::MAX,
+            )
+            .unwrap();
+            assert_eq!(word(&section.bytes, slot), 0x100000 + target);
+            // Distinct global slots and immutable payloads retain the initial snapshot.
+            let label_slot = offsets["label"] as usize;
+            section.bytes[label_slot..label_slot + 8].copy_from_slice(&0u64.to_le_bytes());
+            assert_eq!(word(&section.bytes, slot), 0x100000 + target);
+            assert_eq!(word(&section.bytes, offsets["sentinel"]), 77);
+        }
+    }
+    #[test]
+    fn thirteen_field_global_records_lower_without_aggregate_call_abi() {
+        let fields = (0..13)
+            .map(|i| format!("Int f{i}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        let values = (0..13)
+            .rev()
+            .map(|i| format!("f{i}:{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            "struct Record{{{fields}}}\nvar record:Record=Record{{{values}}};\nvar sentinel:Int=77;\nfn main()->Int{{let before=record.f12;record.f0=30;return record.f0+before;}}"
+        );
+        let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+        let offsets = collect_globals(&module, &schema_map(&module));
+        let section = build_data_section(&module, &offsets, StringLayout::Instring).unwrap();
+        for i in 0..13 {
+            assert_eq!(
+                word(&section.bytes, offsets[&format!("record.f{i}")]),
+                i as u64
+            );
+        }
+        assert_eq!(word(&section.bytes, offsets["sentinel"]), 77);
+        assert!(
+            crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .is_ok()
+        );
+        assert!(crate::native_emit::x86_64_lower::lower_module(&module, "main").is_ok());
+    }
+    #[test]
+    fn empty_record_initializer_reserves_its_existing_word() {
+        let module=crate::in_lang_parse::parse_in_source("struct Empty{}\nvar empty:Empty=Empty{};\nvar sentinel:Int=42;\nfn main()->Int{return sentinel;}").unwrap();
+        let offsets = collect_globals(&module, &schema_map(&module));
+        let section = build_data_section(&module, &offsets, StringLayout::Cstring).unwrap();
+        assert_eq!(offsets["sentinel"], offsets["empty"] + 8);
+        assert_eq!(word(&section.bytes, offsets["empty"]), 0);
+        assert_eq!(word(&section.bytes, offsets["sentinel"]), 42);
+    }
+    #[test]
+    fn malformed_and_nonconstant_record_initializers_remain_refused() {
+        for initializer in [
+            "Point{x:42}",
+            "Point{x:20,x:22}",
+            "Other{x:20,y:22}",
+            "Point{x:20,z:22}",
+            "Point{x:false,y:22}",
+            "Point{x:runtime(),y:22}",
+        ] {
+            let source = format!(
+                "struct Point{{Int x;Int y}}\nvar point:Point={initializer};\nfn runtime()->Int{{return 20;}}\nfn main()->Int{{return 42;}}"
+            );
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let offsets = collect_globals(&module, &schema_map(&module));
+            assert!(
+                build_data_section(&module, &offsets, StringLayout::Instring).is_err(),
+                "{source}"
+            );
+        }
+        for (field, value) in [
+            ("[Int] items", "items:[42]"),
+            ("Point point", "point:Point{x:42}"),
+        ] {
+            let source = format!(
+                "struct Point{{Int x}}\nstruct Outer{{{field}}}\nvar outer:Outer=Outer{{{value}}};\nfn main()->Int{{return 42;}}"
+            );
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            assert!(
+                build_data_section(
+                    &module,
+                    &collect_globals(&module, &schema_map(&module)),
+                    StringLayout::Instring
+                )
+                .is_err()
+            );
         }
     }
 }
