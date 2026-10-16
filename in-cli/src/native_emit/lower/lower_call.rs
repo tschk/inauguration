@@ -357,6 +357,24 @@ pub(crate) fn lower_inrt_call(
         ));
     }
 
+    if matches!(target, "__inrt_str_len" | "__inrt_array_len") {
+        crate::native_emit::stdlib_wrappers::validate_length_call(
+            target,
+            functions
+                .get(target)
+                .map(|function| (function.params.as_slice(), &function.ret)),
+            args,
+            args.iter()
+                .map(|argument| native_expr_type(argument, ctx, functions)),
+        )
+        .map_err(|error| {
+            format!(
+                "native-lower: incompatible length {} `{target}`",
+                error.category()
+            )
+        })?;
+    }
+
     let temp_base = ctx.acquire_call_arg_temps(fn_name)?;
     for (i, arg) in args.iter().enumerate() {
         let reg = 0;

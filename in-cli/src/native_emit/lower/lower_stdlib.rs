@@ -1041,6 +1041,23 @@ pub(crate) fn lower_stdlib_call(
     } else {
         cleaned.replace('_', "-")
     };
+    if matches!(cleaned_kebab.as_str(), "str-len" | "array-len") {
+        crate::native_emit::stdlib_wrappers::validate_length_call(
+            &cleaned_kebab,
+            functions
+                .get(target)
+                .map(|function| (function.params.as_slice(), &function.ret)),
+            args,
+            args.iter()
+                .map(|argument| super::lower_expr::native_expr_type(argument, ctx, functions)),
+        )
+        .map_err(|error| {
+            format!(
+                "native-lower: incompatible length {} `{target}`",
+                error.category()
+            )
+        })?;
+    }
     // Validate recognized scalar callees before argc dispatch guards can fall through.
     let selected = if cleaned_kebab == "print"
         && matches!(args.first(), Some(Expr::IntLit(_) | Expr::BoolLit(_)))
@@ -1049,7 +1066,7 @@ pub(crate) fn lower_stdlib_call(
     } else {
         crate::native_emit::stdlib_wrappers::wrapper(&cleaned_kebab)
     };
-    if let Some(wrapper) = selected {
+    if let Some(wrapper) = selected.filter(|_| cleaned_kebab != "array-len") {
         crate::native_emit::stdlib_wrappers::validate_scalar_call(
             wrapper,
             functions

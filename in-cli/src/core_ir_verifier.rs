@@ -369,6 +369,7 @@ pub(crate) fn invoke_signature_error(
 
 pub(crate) fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
     match name {
+        "__inrt_array_len" => return Some(&[Typ::Int]),
         crate::inrt::INRT_VECTOR_CLONE => return Some(&[Typ::Int, Typ::Int, Typ::Int]),
         crate::inrt::INRT_VECTOR_EXTEND => return Some(&[Typ::Int, Typ::Int, Typ::Int, Typ::Int]),
         _ => {}

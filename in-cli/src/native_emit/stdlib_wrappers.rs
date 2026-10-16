@@ -116,6 +116,43 @@ pub(crate) fn validate_intrinsic_call(
     )
 }
 
+/// Validate an actually selected inline length operation, including generic sequences.
+pub(crate) fn validate_length_call(
+    name: &str,
+    declared: Option<(&[(String, Typ)], &Typ)>,
+    args: &[crate::core_ir::Expr],
+    mut actual: impl ExactSizeIterator<Item = Option<Typ>>,
+) -> Result<(), AbiMismatch> {
+    if !matches!(name, "array-len" | "array_len") {
+        return validate_intrinsic_call(name, declared, actual);
+    }
+    if let Some((params, ret)) = declared {
+        if params.len() != 1
+            || !matches!(params[0].1.canonical(), Typ::Array(_) | Typ::Vector(_))
+            || Some(&ret.canonical()) != crate::core_ir_verifier::intrinsic_return_type("array-len")
+        {
+            return Err(AbiMismatch::Declaration);
+        }
+    }
+    if args.len() != 1 || actual.len() != 1 {
+        return Err(AbiMismatch::Arguments);
+    }
+    let Some(Some(typ)) = actual.next() else {
+        return Err(AbiMismatch::Arguments);
+    };
+    if !matches!(typ.canonical(), Typ::Array(_) | Typ::Vector(_)) {
+        return Err(AbiMismatch::Arguments);
+    }
+    if let Some((params, _)) = declared {
+        if !params[0].1.compatible_with(&typ)
+            && !params[0].1.accepts_sequence_literal(&args[0], &typ)
+        {
+            return Err(AbiMismatch::Arguments);
+        }
+    }
+    Ok(())
+}
+
 fn validate_catalog_call(
     params: Option<&[Typ]>,
     ret: Option<&Typ>,
@@ -299,5 +336,101 @@ mod tests {
             validate_scalar_call("in_vec_join", Some((&[], &Typ::Int)), [].into_iter()),
             Err(AbiMismatch::Declaration)
         );
+    }
+}
+
+#[cfg(test)]
+mod inline_length_tests {
+    use super::*;
+    use crate::core_ir::Expr;
+
+    #[test]
+    fn selected_length_contract_preserves_sequence_element_types() {
+        let array = Typ::Array(Box::new(Typ::Int));
+        let vector = Typ::Vector(Box::new(Typ::Bool));
+        for typ in [array.clone(), vector] {
+            let params = vec![("items".into(), typ.clone())];
+            assert_eq!(
+                validate_length_call(
+                    "array-len",
+                    Some((&params, &Typ::Int)),
+                    &[Expr::Ident("items".into())],
+                    [Some(typ)].into_iter()
+                ),
+                Ok(())
+            );
+        }
+        let params = vec![("items".into(), array.clone())];
+        assert_eq!(
+            validate_length_call(
+                "array_len",
+                Some((&params, &Typ::Int)),
+                &[Expr::ArrayLit(vec![])],
+                [Some(Typ::Array(Box::new(Typ::Void)))].into_iter()
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_length_call(
+                "array-len",
+                Some((&params, &Typ::Float)),
+                &[Expr::ArrayLit(vec![])],
+                [Some(array.clone())].into_iter()
+            ),
+            Err(AbiMismatch::Declaration)
+        );
+        for actual in [None, Some(Typ::Int), Some(Typ::Array(Box::new(Typ::Float)))] {
+            assert_eq!(
+                validate_length_call(
+                    "array-len",
+                    Some((&params, &Typ::Int)),
+                    &[Expr::Ident("items".into())],
+                    [actual].into_iter()
+                ),
+                Err(AbiMismatch::Arguments)
+            );
+        }
+        assert_eq!(
+            validate_length_call("array-len", None, &[], [].into_iter()),
+            Err(AbiMismatch::Arguments)
+        );
+        assert_eq!(
+            crate::core_ir_verifier::intrinsic_param_types("array-len"),
+            None
+        );
+        assert_eq!(
+            crate::core_ir_verifier::intrinsic_param_types("__inrt_array_len"),
+            Some([Typ::Int].as_slice())
+        );
+        assert_eq!(
+            validate_length_call(
+                "__inrt_array_len",
+                None,
+                &[Expr::IntLit(0x3000)],
+                [Some(Typ::Int)].into_iter()
+            ),
+            Ok(())
+        );
+        let params = vec![("text".into(), Typ::String)];
+        for name in ["str-len", "str_len", "__inrt_str_len"] {
+            assert_eq!(
+                validate_length_call(
+                    name,
+                    Some((&params, &Typ::Int)),
+                    &[Expr::StringLit("x".into())],
+                    [Some(Typ::String)].into_iter()
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                validate_length_call(
+                    name,
+                    Some((&params, &Typ::Bool)),
+                    &[Expr::StringLit("x".into())],
+                    [Some(Typ::String)].into_iter()
+                ),
+                Err(AbiMismatch::Declaration)
+            );
+        }
     }
 }

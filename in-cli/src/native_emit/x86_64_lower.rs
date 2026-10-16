@@ -2880,6 +2880,25 @@ fn lower_builtin_call(
     }
     if matches!(
         target_name,
+        "str-len" | "str_len" | "__inrt_str_len" | "array-len" | "array_len"
+    ) {
+        crate::native_emit::stdlib_wrappers::validate_length_call(
+            target_name,
+            ctx.functions
+                .get(target_name)
+                .map(|function| (function.params.as_slice(), &function.ret)),
+            args,
+            args.iter().map(|argument| scalar_expr_type(argument, ctx)),
+        )
+        .map_err(|error| {
+            format!(
+                "x86_64-lower: incompatible length {} `{target_name}`",
+                error.category()
+            )
+        })?;
+    }
+    if matches!(
+        target_name,
         "load8" | "load16" | "load32" | "load64" | "store8" | "store16" | "store32" | "store64"
     ) {
         crate::native_emit::stdlib_wrappers::validate_intrinsic_call(
@@ -6191,5 +6210,41 @@ mod float_logical_not_regressions {
                 "! {value}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod selected_inline_length_tests {
+    use super::*;
+
+    #[test]
+    fn selected_length_declarations_validate_before_emission() {
+        for name in ["str-len", "str_len", "array-len", "array_len"] {
+            let (typ, value) = if name.starts_with("str") {
+                ("String", "\"abc\"")
+            } else {
+                ("[Int]", "[1,2]")
+            };
+            for ret in ["Float", "Bool"] {
+                let source = format!(
+                    "extern asm fn {name}(value:{typ})->{ret};\nfn main()->Int{{let value:{ret}={name}({value});return 42;}}"
+                );
+                let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                let error = lower_module(&module, "main")
+                    .err()
+                    .expect("bad selected declaration must refuse");
+                assert!(
+                    error.contains("incompatible length declaration"),
+                    "{name}: {error}"
+                );
+            }
+            let source = format!(
+                "extern asm fn {name}(value:{typ})->Int;\nfn main()->Int{{return {name}({value});}}"
+            );
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            lower_module(&module, "main").unwrap();
+        }
+        let module = crate::in_lang_parse::parse_in_source("fn str-len(value:Float)->Float{return value;}\nfn main()->Int{let value:Float=str-len(2.5);return 42;}").unwrap();
+        lower_module(&module, "main").unwrap();
     }
 }

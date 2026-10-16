@@ -2183,7 +2183,13 @@ fn lowers_inrt_call_with_ident_arg() {
 fn all_inrt_builtins_can_be_called() {
     for b in INRT_BUILTINS {
         let s = inrt::inrt_builtin_param_slots(b).unwrap_or(0);
-        let a: Vec<Expr> = (0..s).map(|i| Expr::IntLit(i as i64)).collect();
+        let params = crate::core_ir_verifier::intrinsic_param_types(b);
+        let a: Vec<Expr> = (0..s)
+            .map(|i| match params.and_then(|params| params.get(i)) {
+                Some(Typ::String) => Expr::StringLit("test".into()),
+                _ => Expr::IntLit(i as i64),
+            })
+            .collect();
         let m = build_inrt_call_module(b, a, Typ::Int);
         assert!(
             lower_module(&m, "main", NativeLinkage::Executable).is_ok(),
@@ -3186,4 +3192,50 @@ mod float_logical_not_regressions {
             );
         }
     }
+}
+
+#[cfg(test)]
+mod selected_inline_length_tests {
+    use super::*;
+
+    #[test]
+    fn selected_length_declarations_validate_before_emission() {
+        for name in ["str-len", "str_len", "array-len", "array_len"] {
+            let (typ, value) = if name.starts_with("str") {
+                ("String", "\"abc\"")
+            } else {
+                ("[Int]", "[1,2]")
+            };
+            for ret in ["Float", "Bool"] {
+                let source = format!(
+                    "extern asm fn {name}(value:{typ})->{ret};\nfn main()->Int{{let value:{ret}={name}({value});return 42;}}"
+                );
+                let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                let error = lower_module(&module, "main", NativeLinkage::Executable)
+                    .expect_err("bad selected declaration must refuse");
+                assert!(
+                    error.contains("incompatible length declaration"),
+                    "{name}: {error}"
+                );
+            }
+            let source = format!(
+                "extern asm fn {name}(value:{typ})->Int;\nfn main()->Int{{return {name}({value});}}"
+            );
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            lower_module(&module, "main", NativeLinkage::Executable).unwrap();
+        }
+        let module = crate::in_lang_parse::parse_in_source("fn str-len(value:Float)->Float{return value;}\nfn main()->Int{let value:Float=str-len(2.5);return 42;}").unwrap();
+        lower_module(&module, "main", NativeLinkage::Executable).unwrap();
+    }
+}
+
+#[test]
+fn reserved_array_length_preserves_raw_pointer_contract() {
+    let module = build_inrt_call_module("__inrt_array_len", vec![Expr::IntLit(0x3000)], Typ::Int);
+    lower_module(&module, "main", NativeLinkage::Executable).unwrap();
+    let module = crate::in_lang_parse::parse_in_source("extern asm fn __inrt_array_len(pointer:Int)->Float;\nfn main()->Int{let value:Float=__inrt_array_len(0);return 42;}").unwrap();
+    let error = lower_module(&module, "main", NativeLinkage::Executable)
+        .err()
+        .unwrap();
+    assert!(error.contains("incompatible length declaration"), "{error}");
 }
