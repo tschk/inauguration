@@ -181,7 +181,7 @@ fn daemon_typed_and_legacy_results_render_without_replaying_requests() {
 fn daemon_missing_expression_value_is_an_error_without_statement_retry() {
     let (output, requests) = eval_with_fake_daemon(
         &["eval", "--parser", "in", "1 + 2"],
-        serde_json::json!({"success":true}),
+        serde_json::json!({"success":true,"execution_started":true}),
     );
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
@@ -292,4 +292,93 @@ fn daemon_replays_lossless_bytes_once_before_value_or_error() {
         assert_eq!(output.stdout, expected);
         assert_eq!(requests.len(), 1, "raw output was replayed: {requests:?}");
     }
+}
+
+#[test]
+fn eval_rejects_compile_only_aggregate_but_preserves_void_execution() {
+    let socket = std::env::temp_dir().join(format!(
+        "in-aggregate-eval-{}-absent.sock",
+        std::process::id()
+    ));
+    assert!(!socket.exists());
+    let aggregate = "struct Pair{x:i64}fn main()->Pair{println!(\"effect\");Pair{x:42}}";
+    let output = Command::new(env!("CARGO_BIN_EXE_in"))
+        .env("IN_DAEMON_SOCKET", &socket)
+        .args(["eval", "--parser", "rust", aggregate])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("compiled but was not executed"));
+    let output = Command::new(env!("CARGO_BIN_EXE_in"))
+        .env("IN_DAEMON_SOCKET", &socket)
+        .args([
+            "eval",
+            "--parser",
+            "rust",
+            "fn main(){println!(\"effect\");}",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"effect");
+}
+
+#[test]
+fn daemon_eval_requires_proven_execution_and_never_replays_legacy_unknown() {
+    for (response, success, stdout, error) in [
+        (
+            serde_json::json!({"success":true,"execution_started":true}),
+            true,
+            "",
+            "",
+        ),
+        (
+            serde_json::json!({"success":true,"execution_started":false}),
+            false,
+            "",
+            "compiled but was not executed",
+        ),
+        (
+            serde_json::json!({"success":true}),
+            false,
+            "",
+            "execution status unavailable",
+        ),
+        (serde_json::json!({"success":true,"result":0}), true, "", ""),
+        (
+            serde_json::json!({"success":true,"output":"before"}),
+            false,
+            "before",
+            "execution status unavailable",
+        ),
+        (
+            serde_json::json!({"success":false,"error":"legacy runtime failed"}),
+            false,
+            "",
+            "legacy runtime failed",
+        ),
+    ] {
+        let (output, requests) = eval_with_fake_daemon(
+            &["eval", "--parser", "in", "fn main()->Void{return;}"],
+            response,
+        );
+        assert_eq!(output.status.success(), success, "{output:?}");
+        assert_eq!(output.stdout, stdout.as_bytes());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{output:?}"
+        );
+        assert_eq!(requests.len(), 1, "{requests:?}");
+    }
+    let (output, requests) = eval_with_fake_daemon(
+        &["eval", "--parser", "in", "1+2"],
+        serde_json::json!({"success":false,"error":"legacy unknown failed"}),
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        requests.len(),
+        1,
+        "unknown execution state was replayed: {requests:?}"
+    );
 }

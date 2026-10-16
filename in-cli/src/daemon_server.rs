@@ -66,8 +66,8 @@ pub struct DaemonResponse {
         skip_serializing_if = "Option::is_none"
     )]
     pub eval_result: Option<crate::owned_compile::EvalValue>,
-    #[serde(default)]
-    pub execution_started: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_started: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_json: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -163,7 +163,7 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
                 success: false,
                 result: None,
                 eval_result: None,
-                execution_started: false,
+                execution_started: Some(false),
                 report_json: None,
                 output: None,
                 output_bytes: None,
@@ -182,7 +182,7 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
                     success: false,
                     result: None,
                     eval_result: None,
-                    execution_started: false,
+                    execution_started: Some(false),
                     report_json: None,
                     output: None,
                     output_bytes: None,
@@ -205,7 +205,7 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
             success: false,
             result: None,
             eval_result: None,
-            execution_started: false,
+            execution_started: Some(false),
             report_json: None,
             output: None,
             output_bytes: None,
@@ -244,7 +244,7 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
             success: true,
             result: report.eval_result.as_ref().and_then(|value| value.as_int()),
             eval_result: report.eval_result.clone(),
-            execution_started: report.execution_started,
+            execution_started: Some(report.execution_started),
             report_json: None,
             output,
             output_bytes,
@@ -256,7 +256,7 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
             success: false,
             result: None,
             eval_result: None,
-            execution_started: report.execution_started,
+            execution_started: Some(report.execution_started),
             report_json: None,
             output,
             output_bytes,
@@ -299,7 +299,7 @@ fn handle_compile(
         success: report.success,
         result: None,
         eval_result: None,
-        execution_started: report.execution_started,
+        execution_started: Some(report.execution_started),
         report_json,
         output: None,
         output_bytes: None,
@@ -315,7 +315,7 @@ fn handle_request(request: DaemonRequest) -> (DaemonResponse, bool) {
                 success: true,
                 result: None,
                 eval_result: None,
-                execution_started: false,
+                execution_started: Some(false),
                 report_json: None,
                 output: None,
                 output_bytes: None,
@@ -329,7 +329,7 @@ fn handle_request(request: DaemonRequest) -> (DaemonResponse, bool) {
                 success: true,
                 result: None,
                 eval_result: None,
-                execution_started: false,
+                execution_started: Some(false),
                 report_json: None,
                 output: None,
                 output_bytes: None,
@@ -393,7 +393,7 @@ fn handle_client(mut stream: UnixStream) -> std::io::Result<bool> {
                 success: false,
                 result: None,
                 eval_result: None,
-                execution_started: false,
+                execution_started: Some(false),
                 report_json: None,
                 output: None,
                 output_bytes: None,
@@ -686,7 +686,7 @@ mod typed_eval_response_tests {
             serde_json::from_str(r#"{"success":true,"result":0}"#).unwrap();
         assert_eq!(response.result, Some(0));
         assert_eq!(response.eval_result, None);
-        assert!(!response.execution_started);
+        assert_eq!(response.execution_started, None);
     }
     #[test]
     #[cfg(any(
@@ -733,7 +733,7 @@ mod typed_eval_response_tests {
                 success: true,
                 result: None,
                 eval_result: Some(EvalValue::Float(value)),
-                execution_started: false,
+                execution_started: Some(false),
                 report_json: None,
                 output: None,
                 output_bytes: None,
@@ -770,6 +770,18 @@ mod typed_eval_response_tests {
 mod eval_output_tests {
     use super::*;
     #[test]
+    fn daemon_execution_state_distinguishes_legacy_absence_from_false() {
+        for (json, expected) in [
+            (r#"{"success":true}"#, None),
+            (r#"{"success":true,"execution_started":false}"#, Some(false)),
+            (r#"{"success":true,"execution_started":true}"#, Some(true)),
+        ] {
+            let response: DaemonResponse = serde_json::from_str(json).unwrap();
+            assert_eq!(response.execution_started, expected);
+        }
+    }
+
+    #[test]
     fn hosted_print_output_is_carried_with_result_and_before_error() {
         let response = handle_eval(
             "fn main()->Int{print(\"hé\0\");print-int(-42);return 42;}",
@@ -779,29 +791,29 @@ mod eval_output_tests {
         assert!(response.success, "{:?}", response.error);
         assert_eq!(response.output.as_deref(), Some("hé\0-42"));
         assert_eq!(response.result, Some(42));
-        assert!(response.execution_started);
+        assert_eq!(response.execution_started, Some(true));
         let response = handle_eval(
             "fn main()->Int{print(\"before\");throw 7;}",
             Some("in"),
             false,
         );
         assert!(!response.success);
-        assert!(response.execution_started);
+        assert_eq!(response.execution_started, Some(true));
         assert_eq!(response.output.as_deref(), Some("before"));
         let response = handle_eval("fn main()->Int{throw 7;}", Some("in"), false);
         assert!(!response.success);
-        assert!(response.execution_started);
+        assert_eq!(response.execution_started, Some(true));
         assert_eq!(response.output, None);
         let response = handle_eval("fn main()->Int{return unknown();}", Some("in"), false);
         assert!(!response.success);
-        assert!(!response.execution_started);
+        assert_eq!(response.execution_started, Some(false));
         let response = handle_eval(
             "struct Pair{x:i64}fn main()->Pair{Pair{x:42}}",
             Some("rust"),
             false,
         );
         assert!(response.success, "{:?}", response.error);
-        assert!(!response.execution_started);
+        assert_eq!(response.execution_started, Some(false));
         assert_eq!(response.eval_result, None);
     }
     #[cfg(target_arch = "aarch64")]
@@ -851,7 +863,7 @@ mod eval_output_tests {
                 "{:?}",
                 response.error
             );
-            assert!(response.execution_started);
+            assert_eq!(response.execution_started, Some(true));
             assert_eq!(response.output, None);
             assert_eq!(response.output_bytes, Some(vec![0xbb]));
             let wire = serde_json::to_string(&response).unwrap();
@@ -875,10 +887,13 @@ mod eval_output_tests {
             1,
         );
         assert!(response.success, "{:?}", response.error);
-        assert!(response.execution_started);
+        assert_eq!(response.execution_started, Some(true));
         let report: serde_json::Value =
             serde_json::from_str(response.report_json.as_ref().unwrap()).unwrap();
-        assert_eq!(report["execution_started"], response.execution_started);
+        assert_eq!(
+            report["execution_started"].as_bool(),
+            response.execution_started
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

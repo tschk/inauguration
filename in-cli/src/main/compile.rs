@@ -635,6 +635,12 @@ pub(crate) fn cmd_execute(
         compile_and_run_jit_report(&source_path, module_id, ParserCli::Auto, debug)
             .map_err(|failure| failure.error)?;
 
+    if !report.execution_started {
+        return Err(InError::Message(
+            "entry compiled but was not executed (unsupported entry ABI)".into(),
+        ));
+    }
+
     if verbose {
         eprintln!("[jit] Execution completed with result: {:?}", result);
     }

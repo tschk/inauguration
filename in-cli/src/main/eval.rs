@@ -119,6 +119,12 @@ pub(crate) fn cmd_eval(
             .map_err(|e| InError::Message(format!("write eval temp: {e}")))?;
         match compile_and_run_jit_report(&source_path, &module_id, ParserCli::Auto, debug) {
             Ok((report, run)) => {
+                if !report.execution_started {
+                    last_err = Some(InError::Message(
+                        "eval entry compiled but was not executed (unsupported entry ABI)".into(),
+                    ));
+                    break;
+                }
                 if plan.print_result && report.eval_result.is_none() {
                     last_err = Some(InError::Message("eval expression produced no value".into()));
                     break;
@@ -195,6 +201,21 @@ fn cmd_eval_daemon(
                     .result
                     .map(inauguration::owned_compile::EvalValue::Int)
             });
+            match response.execution_started {
+                Some(true) => {}
+                Some(false) => {
+                    return Err(InError::Message(
+                        "eval entry compiled but was not executed (unsupported entry ABI)".into(),
+                    ));
+                }
+                None if value.is_some() => {}
+                None => {
+                    return Err(InError::Message(
+                        "daemon eval execution status unavailable; restart or upgrade the daemon"
+                            .into(),
+                    ));
+                }
+            }
             if plan.print_result && value.is_none() {
                 return Err(InError::Message("eval expression produced no value".into()));
             }
@@ -214,11 +235,11 @@ fn cmd_eval_daemon(
             return Ok(());
         }
         if let Some(err) = response.error {
-            if response.execution_started {
+            if response.execution_started != Some(false) {
                 return Err(InError::Message(err));
             }
             last_err = Some(err);
-        } else if response.execution_started {
+        } else if response.execution_started != Some(false) {
             return Err(InError::Message("daemon eval failed".into()));
         }
     }

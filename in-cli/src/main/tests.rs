@@ -188,6 +188,26 @@ fn execute_propagates_nonzero_jit_exit() {
 }
 
 #[test]
+fn execute_refuses_compile_only_aggregate_entry() {
+    let path = std::env::temp_dir().join(format!("in-cli-aggregate-{}.rs", std::process::id()));
+    std::fs::write(&path, "struct Pair{x:i64}fn main()->Pair{Pair{x:42}}").unwrap();
+    let result = crate::compile::cmd_execute(
+        std::path::Path::new("."),
+        &path.to_string_lossy(),
+        "Aggregate",
+        false,
+        false,
+    );
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("compiled but was not executed")
+    );
+}
+
+#[test]
 fn parse_graph_flags() {
     let cli = Cli::try_parse_from([
         "in",
