@@ -5667,7 +5667,7 @@ main()
                 _ => None,
             })
             .collect();
-        assert_eq!(names, vec!["newGreeter", "greet", "main"]);
+        assert_eq!(names, vec!["newgreeter", "greet", "main"]);
         let greet = m
             .decls
             .iter()

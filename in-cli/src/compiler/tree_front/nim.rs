@@ -1,6 +1,5 @@
 use super::extract::{
     AstShape, ast_expr, ast_stmt, collect_kinds, declared_return_type, first_named, node_txt,
-    normalize_entry,
 };
 use crate::core_ir::{Decl, Expr, Stmt, Typ};
 use tree_sitter::Node;
@@ -35,6 +34,44 @@ const NIM_AST: AstShape = AstShape {
     number_decoder: None,
 };
 
+/// Nim identifiers ignore underscores and ASCII case after the first
+/// character. Non-ASCII spelling is byte-exact; private compiler names are not
+/// source identifiers and must retain their reserved identity.
+fn nim_identifier(raw: &str) -> String {
+    if raw.starts_with('#') {
+        return raw.into();
+    }
+    let mut chars = raw.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut result = String::with_capacity(raw.len());
+    result.push(first);
+    result.extend(
+        chars
+            .filter(|ch| *ch != '_')
+            .map(|ch| ch.to_ascii_lowercase()),
+    );
+    result
+}
+fn nim_type(typ: Typ) -> Typ {
+    match typ {
+        Typ::Named(name) => Typ::Named(nim_identifier(&name)),
+        other => other,
+    }
+}
+fn nim_expression_identifiers(value: &mut Expr) {
+    if let Expr::Ident(name) = value {
+        *name = nim_identifier(name);
+    }
+    crate::core_ir::for_each_expr_child_mut(value, &mut nim_expression_identifiers);
+}
+fn nim_expr(src: &[u8], node: Node<'_>) -> Option<Expr> {
+    let mut value = ast_expr(src, node, NIM_AST)?;
+    nim_expression_identifiers(&mut value);
+    Some(value)
+}
+
 pub(super) fn extract_nim(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {
     let mut decls = Vec::new();
 
@@ -52,6 +89,20 @@ pub(super) fn extract_nim(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, Strin
 
     if decls.len() != func_nodes.len() {
         return Err("Nim function declaration is missing a name".into());
+    }
+    let mut functions = std::collections::HashSet::new();
+    for declaration in &decls {
+        if let Decl::Function { name, params, .. } = declaration {
+            if !functions.insert(name) {
+                return Err(format!("Nim function style collision `{name}`"));
+            }
+            let mut names = std::collections::HashSet::new();
+            for (name, _) in params {
+                if !names.insert(name) {
+                    return Err(format!("Nim parameter style collision `{name}`"));
+                }
+            }
+        }
     }
     // The installed grammar ignores indentation and has no unary expression
     // nodes. Never reinterpret a next-line unary statement as a binary RHS.
@@ -133,9 +184,11 @@ fn nim_binary_starts_new_statement(node: Node<'_>) -> bool {
 
 fn nim_proc_decl<'a>(src: &[u8], n: Node<'a>) -> Option<Decl> {
     let name_n = n.child_by_field_name("name")?;
-    let name = normalize_entry(node_txt(src, name_n).trim());
+    let name = nim_identifier(node_txt(src, name_n).trim());
     let params = nim_params(src, n);
-    let ret = declared_return_type(src, n).unwrap_or(Typ::Void);
+    let ret = declared_return_type(src, n)
+        .map(nim_type)
+        .unwrap_or(Typ::Void);
     Some(Decl::Function {
         name,
         params,
@@ -154,12 +207,12 @@ fn nim_params<'a>(src: &[u8], n: Node<'a>) -> Vec<(String, Typ)> {
             .child_by_field_name("name")
             .or_else(|| first_named(p, "identifier"));
         if let Some(name_n) = name_n {
-            let pname = normalize_entry(node_txt(src, name_n).trim());
+            let pname = nim_identifier(node_txt(src, name_n).trim());
             let mut walk = p.walk();
             let typ = p
                 .named_children(&mut walk)
                 .find(|node| *node != name_n)
-                .map(|node| Typ::Named(node_txt(src, node).trim().to_string()))
+                .map(|node| Typ::Named(nim_identifier(node_txt(src, node).trim())))
                 .unwrap_or_else(|| Typ::Named("dynamic".into()));
             params.push((pname, typ));
         }
@@ -182,11 +235,13 @@ fn nim_scalar_type(typ: &Typ) -> Option<Typ> {
     }
 }
 
-fn nim_result_expr(expr: &mut Expr) {
-    if matches!(expr, Expr::Ident(name) if name == "result") {
+fn nim_result_expr(expr: &mut Expr, shadowed: bool) {
+    if !shadowed && matches!(expr, Expr::Ident(name) if name == "result") {
         *expr = Expr::Ident("#nim-result".into());
     } else {
-        crate::core_ir::for_each_expr_child_mut(expr, &mut nim_result_expr);
+        crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
+            nim_result_expr(child, shadowed)
+        });
     }
 }
 
@@ -205,12 +260,26 @@ fn nim_stmt(
             .find(|child| child.kind() != "comment");
         return match value {
             Some(value) if value.start_position().row == node.start_position().row => {
-                ast_expr(src, value, NIM_AST).map(|value| Stmt::Return(Some(value)))
+                nim_expr(src, value).map(|value| Stmt::Return(Some(value)))
             }
             _ => Some(Stmt::Return(None)),
         };
     }
-    ast_stmt(src, node, NIM_AST, locals)
+    let mut statement = ast_stmt(src, node, NIM_AST, locals)?;
+    if let Stmt::Let(name, annotation, _) = &mut statement {
+        *name = nim_identifier(name);
+        if let Some(typ) = annotation {
+            *typ = nim_type(typ.clone());
+        }
+    } else if let Stmt::Assign(name, _) = &mut statement {
+        *name = nim_identifier(name);
+    }
+    crate::core_opt::map_stmt_exprs_mut(&mut statement, &mut |expr| {
+        if let Expr::Ident(name) = expr {
+            *name = nim_identifier(name);
+        }
+    });
+    Some(statement)
 }
 
 fn nim_proc_body(
@@ -233,6 +302,9 @@ fn nim_proc_body(
         return unsupported("result-shadow");
     }
     let mut env: std::collections::HashMap<String, Typ> = params.iter().cloned().collect();
+    let mut declared_locals = std::collections::HashSet::new();
+    let mut result_shadowed = false;
+    let mut implicit_result_assigned = false;
     let mut locals = params.iter().map(|(name, _)| name.clone()).collect();
     let mut immutable: std::collections::HashSet<String> =
         params.iter().map(|(name, _)| name.clone()).collect();
@@ -267,13 +339,13 @@ fn nim_proc_body(
         if child.kind() == "echo_statement" {
             let Some(value) = child
                 .child_by_field_name("value")
-                .and_then(|node| ast_expr(src, node, NIM_AST))
+                .and_then(|node| nim_expr(src, node))
             else {
                 return unsupported("echo-value");
             };
             let mut value = value;
             if value_result {
-                nim_result_expr(&mut value);
+                nim_result_expr(&mut value, result_shadowed);
             }
             let callee = match nim_prepare_expr(&mut value, facts, &env) {
                 Some(Typ::String) => crate::core_ir::COMPILER_PRINT,
@@ -304,20 +376,11 @@ fn nim_proc_body(
                 if let Some(declared) = nim_local_annotation(src, child) {
                     *annotation = Some(declared);
                 }
-                if value_result && name == "result" {
-                    return unsupported("result-shadow");
-                }
-                if env.contains_key(name) {
+                if !declared_locals.insert(name.clone()) {
                     return unsupported("local-redeclaration");
                 }
-                if child
-                    .child(0)
-                    .is_some_and(|token| matches!(token.kind(), "let" | "const"))
-                {
-                    immutable.insert(name.clone());
-                }
                 if value_result {
-                    nim_result_expr(value);
+                    nim_result_expr(value, result_shadowed);
                 }
                 let Some(actual) = nim_prepare_expr(value, facts, &env) else {
                     return unsupported("value-type");
@@ -335,17 +398,31 @@ fn nim_proc_body(
                 {
                     return unsupported("const-initializer");
                 }
+                // The initializer used the preceding scope; only now does
+                // this local hide a parameter or the implicit result spelling.
                 env.insert(name.clone(), typ);
+                if child
+                    .child(0)
+                    .is_some_and(|token| matches!(token.kind(), "let" | "const"))
+                {
+                    immutable.insert(name.clone());
+                } else {
+                    immutable.remove(name);
+                }
+                if name == "result" {
+                    result_shadowed = true;
+                }
             }
             Stmt::Assign(name, value) => {
                 if immutable.contains(name) {
                     return unsupported("immutable-assignment");
                 }
-                if value_result && name == "result" {
+                if value_result && !result_shadowed && name == "result" {
+                    implicit_result_assigned = true;
                     *name = "#nim-result".into();
                 }
                 if value_result {
-                    nim_result_expr(value);
+                    nim_result_expr(value, result_shadowed);
                 }
                 let Some(actual) = nim_prepare_expr(value, facts, &env) else {
                     return unsupported("value-type");
@@ -360,7 +437,7 @@ fn nim_proc_body(
             Stmt::Return(value) => {
                 if let Some(value) = value {
                     if value_result {
-                        nim_result_expr(value);
+                        nim_result_expr(value, result_shadowed);
                     }
                     if !matches!(value,Expr::Ident(name) if name=="#unsupported-string-literal") {
                         let Some(actual) = nim_prepare_expr(value, facts, &env) else {
@@ -376,10 +453,13 @@ fn nim_proc_body(
             }
             Stmt::Expr(value) => {
                 if value_result {
-                    nim_result_expr(value);
+                    nim_result_expr(value, result_shadowed);
                 }
                 let typ = nim_prepare_expr(value, facts, &env);
                 if index + 1 == children.len() && value_result && typ != Some(Typ::Void) {
+                    if implicit_result_assigned {
+                        return unsupported("discarded-value");
+                    }
                     let Some(actual) = typ else {
                         return unsupported("tail-type");
                     };
@@ -553,7 +633,7 @@ mod tests {
         for source in [
             "proc main() =\n  3\n",
             "proc main(): Custom =\n  3\n",
-            "proc main(): int =\n  let result = 3\n  result\n",
+            "proc main(result:int): int =\n  result\n",
         ] {
             let declarations = parse(source);
             assert!(
@@ -714,7 +794,7 @@ fn nim_local_annotation(src: &[u8], node: Node<'_>) -> Option<Typ> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor)
         .find(|child| *child != name && *child != value)
-        .map(|typ| Typ::Named(node_txt(src, typ).trim().into()))
+        .map(|typ| Typ::Named(nim_identifier(node_txt(src, typ).trim())))
 }
 
 /// Lower Nim numeric/string operations while operand types and source operator
@@ -954,6 +1034,8 @@ fn nim_auto_return(
         return None;
     }
     let mut env: std::collections::HashMap<_, _> = params.iter().cloned().collect();
+    let mut declared_locals = std::collections::HashSet::new();
+    let mut result_shadowed = false;
     let mut locals = params.iter().map(|(name, _)| name.clone()).collect();
     let mut result = None;
     let mut cursor = block.walk();
@@ -963,7 +1045,7 @@ fn nim_auto_return(
         .collect();
     for (index, node) in children.iter().copied().enumerate() {
         if node.kind() == "echo_statement" {
-            let value = ast_expr(src, node.child_by_field_name("value")?, NIM_AST)?;
+            let value = nim_expr(src, node.child_by_field_name("value")?)?;
             if !matches!(nim_known_type(&value, facts, &env)?, Typ::Int | Typ::String) {
                 return None;
             }
@@ -977,7 +1059,7 @@ fn nim_auto_return(
         }
         match nim_stmt(src, node, &mut locals)? {
             Stmt::Let(name, _, mut value) => {
-                if name == "result" || env.contains_key(&name) {
+                if !declared_locals.insert(name.clone()) {
                     return None;
                 }
                 let actual = nim_prepare_expr(&mut value, facts, &env)?;
@@ -991,11 +1073,14 @@ fn nim_auto_return(
                 {
                     return None;
                 }
+                if name == "result" {
+                    result_shadowed = true;
+                }
                 env.insert(name, typ);
             }
             Stmt::Assign(name, mut value) => {
                 let actual = nim_prepare_expr(&mut value, facts, &env)?;
-                if name == "result" {
+                if !result_shadowed && name == "result" {
                     merge(&mut result, actual.clone())?;
                     env.insert(name, actual);
                 } else {
@@ -1013,6 +1098,11 @@ fn nim_auto_return(
             Stmt::Expr(value) => {
                 let actual = nim_known_type(&value, facts, &env)?;
                 if index + 1 == children.len() && actual != Typ::Void {
+                    // Explicit implicit-result assignment disables expression
+                    // body inference, even after a local shadows its spelling.
+                    if result.is_some() {
+                        return None;
+                    }
                     merge(&mut result, actual)?;
                 } else if actual != Typ::Void {
                     return None;
@@ -1260,5 +1350,212 @@ mod binary_boundary_tests {
                 "{declarations:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod identifier_style_tests {
+    use super::*;
+    fn parse(source: &str) -> Result<Vec<Decl>, String> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_nim::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        extract_nim(source.as_bytes(), tree.root_node())
+    }
+    #[test]
+    fn identifier_style_is_ascii_only_after_first_character_and_preserves_private_names() {
+        for (source, expected) in [
+            ("foo_Bar", "foobar"),
+            ("Foo_bar", "Foobar"),
+            ("rEs_Ult", "result"),
+            ("i_Nt", "int"),
+            ("é_Foo", "éfoo"),
+            ("é_foo", "éfoo"),
+            ("É_foo", "Éfoo"),
+            ("a_É", "aÉ"),
+            ("#print_int", "#print_int"),
+            ("#nim-result", "#nim-result"),
+        ] {
+            assert_eq!(nim_identifier(source), expected);
+        }
+    }
+    #[test]
+    fn functions_parameters_locals_assignments_types_and_result_share_style_identity() {
+        for source in [
+            "proc fooBar(valueName: i_Nt): i_Nt =\n  var localCount = value_name\n  local_count = local_count + 22\n  localCount\nproc main(): int =\n  foo_bar(20)\n",
+            "proc addValue(inputValue: int): int =\n  rEs_Ult = input_value + 22\nproc main(): int =\n  add_value(20)\n",
+            "proc fooBar(): int =\n  20\nproc FooBar(): int =\n  22\nproc main(): int =\n  foo_bar() + Foo_bar()\n",
+            "proc fooBar(): int =\n  7\nproc main(): int =\n  let foo_bar = 42\n  fooBar\n",
+        ] {
+            let declarations = parse(source).unwrap();
+            assert!(
+                !format!("{declarations:?}").contains("#unsupported"),
+                "{source}: {declarations:?}"
+            );
+            assert!(
+                declarations
+                    .iter()
+                    .any(|decl| matches!(decl,Decl::Function{name,..}if name=="main"))
+            );
+        }
+        let declarations =
+            parse("proc main(): string =\n  let fooBar = \"foo_bar FooBar rEs_Ult\"\n  foo_bar\n")
+                .unwrap();
+        assert!(
+            matches!(&declarations[0],Decl::Function{body,..}if body.iter().any(|stmt|matches!(stmt,Stmt::Let(_,_,Expr::StringLit(value))if value=="foo_bar FooBar rEs_Ult")))
+        );
+    }
+    #[test]
+    fn style_collisions_refuse_without_folding_first_letter_case() {
+        for source in [
+            "proc fooBar(): int =\n  20\nproc foo_bar(): int =\n  22\n",
+            "proc take(fooBar:int,foo_bar:int):int =\n  fooBar\n",
+        ] {
+            assert!(parse(source).unwrap_err().contains("style collision"));
+        }
+        let declarations =
+            parse("proc main():int =\n  let fooBar=20\n  let foo_bar=22\n  fooBar+foo_bar\n")
+                .unwrap();
+        assert!(format!("{declarations:?}").contains("#unsupported-nim-local-redeclaration"));
+        let declarations = parse("proc Main():int =\n  20\nproc main():int =\n  22\n").unwrap();
+        assert!(matches!(&declarations[0],Decl::Function{name,..}if name=="Main"));
+        assert!(matches!(&declarations[1],Decl::Function{name,..}if name=="main"));
+    }
+}
+
+#[cfg(test)]
+mod lexical_shadow_tests {
+    use super::*;
+    fn parse(source: &str) -> Vec<Decl> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_nim::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        extract_nim(source.as_bytes(), tree.root_node()).unwrap()
+    }
+    #[test]
+    fn local_shadow_uses_previous_initializer_scope_and_new_binding_mutability() {
+        for ret in ["int", "auto"] {
+            for body in [
+                "let foo_bar=fooBar+22\n  fooBar",
+                "var foo_bar=fooBar+20\n  fooBar=foo_bar+2\n  fooBar",
+                "const foo_bar=42\n  fooBar",
+            ] {
+                let source = format!(
+                    "proc work(fooBar:int):{ret} =\n  {body}\nproc main():int =\n  work(20)\n"
+                );
+                let parsed = crate::core_ir::UnifiedModule::new(parse(&source));
+                assert!(
+                    !format!("{parsed:?}").contains("#unsupported"),
+                    "{source}: {parsed:?}"
+                );
+                let normalized = crate::typecheck::normalize_module(
+                    crate::parser_registry::ParserId::Nim,
+                    &parsed,
+                );
+                for profile in [
+                    crate::emit_profile::EmitProfile::Default,
+                    crate::emit_profile::EmitProfile::Lean,
+                    crate::emit_profile::EmitProfile::Harden,
+                ] {
+                    let mut module = normalized.clone();
+                    crate::core_opt::optimize_with_profile(
+                        &mut module.decls,
+                        Some("main"),
+                        profile,
+                    );
+                    assert_eq!(
+                        crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
+                        42,
+                        "{source} {profile:?}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn explicit_local_result_uses_shadow_but_bare_and_fallback_return_hidden_result() {
+        for (body, expected) in [
+            ("let rEs_Ult=42\n  result", 42),
+            ("var result=20\n  rEs_Ult=result+22\n  result", 42),
+            ("result=20\n  let rEs_Ult=result+22\n  return result", 42),
+            ("let result=42", 0),
+            ("let result=42\n  return", 0),
+            ("result=20\n  let result=result+22\n  return", 20),
+        ] {
+            let source = format!("proc main():int =\n  {body}\n");
+            let parsed = crate::core_ir::UnifiedModule::new(parse(&source));
+            assert!(
+                !format!("{parsed:?}").contains("#unsupported"),
+                "{source}: {parsed:?}"
+            );
+            let normalized =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Nim, &parsed);
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut module = normalized.clone();
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                assert_eq!(
+                    crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
+                    expected,
+                    "{source} {profile:?}"
+                );
+            }
+        }
+        for body in [
+            "let result=42\n  result",
+            "result=20\n  let result=result+22\n  return result",
+        ] {
+            let declarations = parse(&format!("proc main():auto =\n  {body}\n"));
+            assert!(
+                matches!(&declarations[0], Decl::Function { ret: Typ::Int, .. }),
+                "{declarations:?}"
+            );
+            assert!(!format!("{declarations:?}").contains("#unsupported"));
+        }
+    }
+    #[test]
+    fn shadowing_does_not_enable_duplicate_locals_or_immutable_assignment() {
+        for body in [
+            "let foo_bar=42\n  fooBar=0\n  foo_bar",
+            "const foo_bar=42\n  fooBar=0\n  foo_bar",
+            "let foo_bar=20\n  let fooBar=22\n  foo_bar",
+        ] {
+            let declarations = parse(&format!("proc work(fooBar:int):int =\n  {body}\n"));
+            assert!(
+                format!("{declarations:?}").contains("#unsupported-nim"),
+                "{declarations:?}"
+            );
+        }
+        for ret in ["int", "auto"] {
+            for body in [
+                "result=20\n  let result=result+22\n  result",
+                "result=20\n  42",
+            ] {
+                let declarations = parse(&format!("proc work():{ret} =\n  {body}\n"));
+                assert!(
+                    format!("{declarations:?}").contains("#unsupported-nim"),
+                    "{declarations:?}"
+                );
+            }
+        }
+        let declarations = parse("proc work(rEs_Ult:int):int =\n  42\n");
+        assert!(format!("{declarations:?}").contains("#unsupported-nim-result-shadow"));
     }
 }
