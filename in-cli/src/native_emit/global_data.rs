@@ -96,16 +96,87 @@ pub(crate) fn apply_data_relocations(
     Ok(())
 }
 
-fn array_storage_size(init: Option<&Expr>) -> usize {
-    let Some(Expr::ArrayLit(items)) = init else {
-        return 16;
+fn array_storage_size(
+    elem: &Typ,
+    init: Option<&Expr>,
+    structs: &HashMap<String, Vec<(String, Typ)>>,
+) -> Result<usize, String> {
+    let elem = elem.canonical();
+    let record_bytes = if let Typ::Named(name) = &elem {
+        super::struct_layout::flat_record_fields(structs, name)?
+            .len()
+            .checked_mul(8)
+            .ok_or("native record array size overflow")?
+    } else {
+        if let Typ::Array(child) = &elem {
+            array_storage_size(child, None, structs)?;
+        }
+        0
     };
-    (items.len() + 2) * 8
-        + items
-            .iter()
-            .filter(|item| matches!(item, Expr::ArrayLit(_)))
-            .map(|item| array_storage_size(Some(item)))
-            .sum::<usize>()
+    let Some(Expr::ArrayLit(items)) = init else {
+        return Ok(16);
+    };
+    let mut size = items
+        .len()
+        .checked_mul(8)
+        .and_then(|slots| slots.checked_add(16))
+        .ok_or("native array size overflow")?;
+    for item in items {
+        let extra = match (&elem, item) {
+            (Typ::Array(child), Expr::ArrayLit(_)) => {
+                array_storage_size(child, Some(item), structs)?
+            }
+            (Typ::Named(_), _) => record_bytes,
+            _ => 0,
+        };
+        size = size
+            .checked_add(extra)
+            .ok_or("native array size overflow")?;
+    }
+    Ok(size)
+}
+
+fn reserve_storage(data: &mut Vec<u8>, bytes: usize) -> Result<usize, String> {
+    let end = data
+        .len()
+        .checked_add(bytes)
+        .ok_or("native data size overflow")?;
+    data.try_reserve(bytes)
+        .map_err(|error| format!("native data allocation failed: {error}"))?;
+    Ok(end)
+}
+
+fn reserve_pointer_fixups(fixups: &mut Vec<(u64, u64)>, additional: usize) -> Result<(), String> {
+    fixups
+        .try_reserve(additional)
+        .map_err(|error| format!("native pointer fixup allocation failed: {error}"))
+}
+
+fn append_initial_values<'a>(
+    data: &mut Vec<u8>,
+    values: &[InitialValue<'a>],
+    strings: &mut Vec<(u64, &'a str)>,
+) -> Result<(), String> {
+    reserve_storage(
+        data,
+        values
+            .len()
+            .checked_mul(8)
+            .ok_or("native record size overflow")?,
+    )?;
+    strings
+        .try_reserve(values.len())
+        .map_err(|error| format!("native string fixup allocation failed: {error}"))?;
+    for value in values {
+        match value {
+            InitialValue::Scalar(value) => data.extend_from_slice(&value.to_le_bytes()),
+            InitialValue::String(value) => {
+                strings.push((data.len() as u64, *value));
+                data.extend_from_slice(&0u64.to_le_bytes());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn append_array<'a>(
@@ -115,6 +186,8 @@ fn append_array<'a>(
     name: &str,
     strings: &mut Vec<(u64, &'a str)>,
     earlier: &HashMap<&str, (Typ, InitialValue<'a>)>,
+    structs: &HashMap<String, Vec<(String, Typ)>>,
+    pointer_fixups: &mut Vec<(u64, u64)>,
 ) -> Result<(), String> {
     let items = match init {
         Some(Expr::ArrayLit(items)) => items.as_slice(),
@@ -126,43 +199,84 @@ fn append_array<'a>(
         }
     };
     let elem = elem.canonical();
+    let record_fields = if let Typ::Named(record) = &elem {
+        Some(super::struct_layout::flat_record_fields(structs, record)?)
+    } else {
+        None
+    };
     if !matches!(
         elem,
-        Typ::Int | Typ::Float | Typ::Bool | Typ::String | Typ::Array(_)
+        Typ::Int | Typ::Float | Typ::Bool | Typ::String | Typ::Array(_) | Typ::Named(_)
     ) {
         return Err(format!(
-            "unsupported native initializer for global `{name}`; expected scalar string, numeric, boolean, or nested array elements"
+            "unsupported native initializer for global `{name}`; unsupported array element layout"
         ));
     }
+    reserve_storage(data, array_storage_size(&elem, init, structs)?)?;
     let header = data.len();
-    data.extend_from_slice(&(items.len() as u64).to_le_bytes());
-    data.extend_from_slice(&(items.len() as u64).to_le_bytes());
-    data.resize(data.len() + items.len() * 8, 0);
+    let length = u64::try_from(items.len()).map_err(|_| "native array length overflow")?;
+    data.extend_from_slice(&length.to_le_bytes());
+    data.extend_from_slice(&length.to_le_bytes());
+    let slots_end = data
+        .len()
+        .checked_add(
+            items
+                .len()
+                .checked_mul(8)
+                .ok_or("native array size overflow")?,
+        )
+        .ok_or("native array size overflow")?;
+    data.resize(slots_end, 0);
     for (index, item) in items.iter().enumerate() {
+        let slot = header + 16 + index * 8; // checked by the complete storage reservation above
         let word = match (&elem, item) {
             (Typ::Array(child), Expr::ArrayLit(_)) => {
-                // Relative child headers keep static data relocatable.
-                let offset = (data.len() - header) as i64;
-                append_array(data, child, Some(item), name, strings, earlier)?;
+                // Nested arrays retain relative child-header offsets.
+                let offset = i64::try_from(data.len() - header)
+                    .map_err(|_| "native nested array offset overflow")?;
+                append_array(
+                    data,
+                    child,
+                    Some(item),
+                    name,
+                    strings,
+                    earlier,
+                    structs,
+                    pointer_fixups,
+                )?;
                 offset
+            }
+            (Typ::Named(record), _) => {
+                let values = record_initial_values(
+                    record,
+                    record_fields
+                        .as_deref()
+                        .ok_or("missing native record array layout")?,
+                    item,
+                    name,
+                    earlier,
+                )?;
+                reserve_pointer_fixups(pointer_fixups, 1)?;
+                let target = data.len() as u64;
+                append_initial_values(data, &values, strings)?;
+                pointer_fixups.push((slot as u64, target));
+                0
             }
             (Typ::Int | Typ::Float | Typ::Bool | Typ::String, _) => {
                 match eval_initial_value(&elem, Some(item), name, earlier)? {
                     InitialValue::Scalar(value) => value,
                     InitialValue::String(value) => {
-                        // Array slots carry payload pointers rebased like String globals.
-                        strings.push(((header + 16 + index * 8) as u64, value));
+                        strings.push((slot as u64, value));
                         0
                     }
                 }
             }
             _ => {
                 return Err(format!(
-                    "unsupported native initializer for global `{name}`; expected scalar array elements or nested array literals"
+                    "unsupported native initializer for global `{name}`; expected scalar elements, record initializers, or nested array literals"
                 ));
             }
         };
-        let slot = header + 16 + index * 8;
         data[slot..slot + 8].copy_from_slice(&word.to_le_bytes());
     }
     Ok(())
@@ -180,7 +294,7 @@ pub(crate) fn indexed_root(expr: &Expr) -> Option<&str> {
 pub(crate) fn collect_globals(
     module: &UnifiedModule,
     structs: &HashMap<String, Vec<(String, Typ)>>,
-) -> HashMap<String, u64> {
+) -> Result<HashMap<String, u64>, String> {
     let mut globals = HashMap::new();
     let mut offset = 0u64;
     for decl in &module.decls {
@@ -193,8 +307,12 @@ pub(crate) fn collect_globals(
         } = decl
         {
             globals.insert(name.clone(), offset);
-            if matches!(typ.canonical(), Typ::Array(_)) {
-                offset += array_storage_size(init.as_deref()) as u64;
+            if let Typ::Array(elem) = typ.canonical() {
+                let size = u64::try_from(array_storage_size(&elem, init.as_deref(), structs)?)
+                    .map_err(|_| "native global size overflow")?;
+                offset = offset
+                    .checked_add(size)
+                    .ok_or("native global offset overflow")?;
                 continue;
             }
             // Struct-typed globals reserve one word per known field so that
@@ -202,16 +320,27 @@ pub(crate) fn collect_globals(
             if let Typ::Named(struct_name) = typ {
                 if let Some(fields) = structs.get(struct_name) {
                     for (idx, (field, _)) in fields.iter().enumerate() {
-                        globals.insert(format!("{name}.{field}"), offset + idx as u64 * 8);
+                        let field_offset = (idx as u64)
+                            .checked_mul(8)
+                            .and_then(|index| offset.checked_add(index))
+                            .ok_or("native global field offset overflow")?;
+                        globals.insert(format!("{name}.{field}"), field_offset);
                     }
-                    offset += (fields.len().max(1) as u64) * 8;
+                    let size = (fields.len().max(1) as u64)
+                        .checked_mul(8)
+                        .ok_or("native global size overflow")?;
+                    offset = offset
+                        .checked_add(size)
+                        .ok_or("native global offset overflow")?;
                     continue;
                 }
             }
-            offset += 8;
+            offset = offset
+                .checked_add(8)
+                .ok_or("native global offset overflow")?;
         }
     }
-    globals
+    Ok(globals)
 }
 
 /// Initial values are snapshots, independent of the mutable runtime slots.
@@ -259,6 +388,50 @@ fn eval_initial_value<'a>(
     }
 }
 
+fn record_initial_values<'a>(
+    schema_name: &str,
+    fields: &[(String, Typ)],
+    init: &'a Expr,
+    name: &str,
+    earlier: &HashMap<&str, (Typ, InitialValue<'a>)>,
+) -> Result<Vec<InitialValue<'a>>, String> {
+    let Expr::StructInit {
+        name: constructor,
+        fields: values,
+    } = init
+    else {
+        return Err(format!(
+            "unsupported native initializer for global `{name}`; expected a record initializer"
+        ));
+    };
+    let schema_names: std::collections::HashSet<_> =
+        fields.iter().map(|(name, _)| name.as_str()).collect();
+    if constructor != schema_name
+        || values.len() != fields.len()
+        || schema_names.len() != fields.len()
+    {
+        return Err(format!(
+            "unsupported native initializer for global `{name}`; struct constructor or field count mismatch"
+        ));
+    }
+    let supplied: HashMap<_, _> = values
+        .iter()
+        .map(|(field, value)| (field.as_str(), value))
+        .collect();
+    if supplied.len() != values.len() {
+        return Err(format!(
+            "unsupported native initializer for global `{name}`; duplicate struct field"
+        ));
+    }
+    fields.iter().map(|(field, typ)| {
+        if !matches!(typ.canonical(), Typ::Int | Typ::Bool | Typ::Float | Typ::String) {
+            return Err(format!("unsupported native initializer for global `{name}`; struct fields require a flat scalar layout"));
+        }
+        let value = supplied.get(field.as_str()).ok_or_else(|| format!("unsupported native initializer for global `{name}`; missing struct field `{field}`"))?;
+        eval_initial_value(typ, Some(value), name, earlier)
+    }).collect()
+}
+
 pub(crate) fn build_data_section(
     module: &UnifiedModule,
     globals: &HashMap<String, u64>,
@@ -269,6 +442,8 @@ pub(crate) fn build_data_section(
     }
     let mut data = Vec::new();
     let mut strings = Vec::new();
+    let mut pointer_fixups = Vec::new();
+    let mut array_structs = HashMap::new();
     let mut initial_values = HashMap::new();
     let structs: HashMap<_, _> = module
         .decls
@@ -307,6 +482,19 @@ pub(crate) fn build_data_section(
                 continue;
             }
             if let Typ::Array(elem) = typ.canonical() {
+                // Keep ordinary/unused schemas borrowed; cache only record schemas
+                // actually used by arrays, including nested arrays.
+                let mut leaf = elem.as_ref();
+                while let Typ::Array(child) = leaf {
+                    leaf = child;
+                }
+                if let Typ::Named(record) = leaf {
+                    if let Some(fields) = structs.get(record.as_str()) {
+                        array_structs
+                            .entry(record.clone())
+                            .or_insert_with(|| fields.to_vec());
+                    }
+                }
                 data.resize(offset as usize, 0);
                 append_array(
                     &mut data,
@@ -315,57 +503,24 @@ pub(crate) fn build_data_section(
                     name,
                     &mut strings,
                     &initial_values,
+                    &array_structs,
+                    &mut pointer_fixups,
                 )?;
                 continue;
             }
-            if let (
-                Typ::Named(schema_name),
-                Some(Expr::StructInit {
-                    name: constructor,
-                    fields: values,
-                }),
-            ) = (typ.canonical(), init.as_deref())
+            if let (Typ::Named(schema_name), Some(Expr::StructInit { .. })) =
+                (typ.canonical(), init.as_deref())
                 && let Some(fields) = structs.get(schema_name.as_str())
             {
-                let schema_names: std::collections::HashSet<_> =
-                    fields.iter().map(|(name, _)| name.as_str()).collect();
-                if constructor != &schema_name
-                    || values.len() != fields.len()
-                    || schema_names.len() != fields.len()
-                {
-                    return Err(format!(
-                        "unsupported native initializer for global `{name}`; struct constructor or field count mismatch"
-                    ));
-                }
-                let supplied: HashMap<_, _> = values
-                    .iter()
-                    .map(|(field, value)| (field.as_str(), value))
-                    .collect();
-                if supplied.len() != values.len() {
-                    return Err(format!(
-                        "unsupported native initializer for global `{name}`; duplicate struct field"
-                    ));
-                }
+                let values = record_initial_values(
+                    &schema_name,
+                    fields,
+                    init.as_deref().ok_or("missing global record initializer")?,
+                    name,
+                    &initial_values,
+                )?;
                 data.resize(offset as usize, 0);
-                for (field, field_type) in *fields {
-                    if !matches!(
-                        field_type.canonical(),
-                        Typ::Int | Typ::Bool | Typ::Float | Typ::String
-                    ) {
-                        return Err(format!(
-                            "unsupported native initializer for global `{name}`; struct fields require a flat scalar layout"
-                        ));
-                    }
-                    let value = supplied.get(field.as_str()).ok_or_else(|| format!("unsupported native initializer for global `{name}`; missing struct field `{field}`"))?;
-                    let slot = data.len() as u64;
-                    match eval_initial_value(field_type, Some(value), name, &initial_values)? {
-                        InitialValue::Scalar(value) => data.extend_from_slice(&value.to_le_bytes()),
-                        InitialValue::String(value) => {
-                            data.resize(data.len() + 8, 0);
-                            strings.push((slot, value));
-                        }
-                    }
-                }
+                append_initial_values(&mut data, &values, &mut strings)?;
                 // collect_globals reserves one word even for an empty known schema.
                 if fields.is_empty() {
                     data.resize(offset as usize + 8, 0);
@@ -434,12 +589,20 @@ pub(crate) fn build_data_section(
     }
     // Struct-typed globals reserve extra field slots past their base word;
     // extend the section so every mapped slot exists in the image.
-    let max_needed = globals.values().copied().max().unwrap_or(0) + 8;
-    while data.len() < max_needed as usize {
+    let max_needed = globals
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .checked_add(8)
+        .ok_or("native global size overflow")?;
+    let max_needed =
+        usize::try_from(max_needed).map_err(|_| "native global size exceeds host address space")?;
+    while data.len() < max_needed {
         data.push(0);
     }
     // All global slots and array storage precede payloads, regardless of declaration order.
-    let mut pointer_fixups = Vec::with_capacity(strings.len());
+    reserve_pointer_fixups(&mut pointer_fixups, strings.len())?;
     for (slot, value) in strings {
         let target = append_string_payload(&mut data, value, layout)?;
         pointer_fixups.push((slot, target));
@@ -486,7 +649,7 @@ mod tests {
             ),
             global("after", Typ::Int, Some(Expr::IntLit(22))),
         ]);
-        let globals = collect_globals(&module, &HashMap::new());
+        let globals = collect_globals(&module, &HashMap::new()).unwrap();
         for layout in [StringLayout::Instring, StringLayout::Cstring] {
             let mut section = build_data_section(&module, &globals, layout).unwrap();
             let word = |data: &[u8], offset: u64| {
@@ -555,7 +718,7 @@ mod tests {
                 Typ::Array(Box::new(Typ::String)),
                 Some(Expr::ArrayLit(vec![value])),
             )]);
-            let globals = collect_globals(&module, &HashMap::new());
+            let globals = collect_globals(&module, &HashMap::new()).unwrap();
             assert!(build_data_section(&module, &globals, StringLayout::Instring).is_err());
         }
     }
@@ -579,7 +742,7 @@ mod tests {
             global("last", Typ::String, Some(Expr::StringLit(String::new()))),
             global("sentinel", Typ::Int, Some(Expr::IntLit(7))),
         ]);
-        let globals = collect_globals(&module, &structs);
+        let globals = collect_globals(&module, &structs).unwrap();
         for layout in [StringLayout::Instring, StringLayout::Cstring] {
             let mut section = build_data_section(&module, &globals, layout).unwrap();
             assert_eq!(section.pointer_fixups.len(), 2);
@@ -635,7 +798,7 @@ mod tests {
     #[test]
     fn default_empty_string_has_a_real_payload_and_calls_stay_unsupported() {
         let empty = UnifiedModule::new(vec![global("empty", Typ::String, None)]);
-        let offsets = collect_globals(&empty, &HashMap::new());
+        let offsets = collect_globals(&empty, &HashMap::new()).unwrap();
         for layout in [StringLayout::Instring, StringLayout::Cstring] {
             let data = build_data_section(&empty, &offsets, layout).unwrap();
             assert_eq!(data.pointer_fixups, [(0, 8)]);
@@ -649,7 +812,7 @@ mod tests {
             },
         ] {
             let module = UnifiedModule::new(vec![global("text", Typ::String, Some(init))]);
-            let offsets = collect_globals(&module, &HashMap::new());
+            let offsets = collect_globals(&module, &HashMap::new()).unwrap();
             assert!(
                 build_data_section(&module, &offsets, StringLayout::Instring)
                     .unwrap_err()
@@ -702,7 +865,7 @@ mod tests {
             "var before: Int = 7;\nvar items: [[Int]] = [[20,22],[]];\nvar after: Int = 9;\nfn main() -> Int { return 42; }",
         )
         .unwrap();
-        let globals = collect_globals(&module, &HashMap::new());
+        let globals = collect_globals(&module, &HashMap::new()).unwrap();
         assert_eq!(globals["items"], 8);
         assert_eq!(globals["after"], 88);
         let data = build_data_section(&module, &globals, StringLayout::Instring)
@@ -720,7 +883,7 @@ mod tests {
     #[test]
     fn literal_array_headers_do_not_overlap_neighboring_globals() {
         let module = crate::in_lang_parse::parse_in_source("var before: Int = 7;\nvar items: [Int] = [20,22];\nvar after: Int = 9;\nfn main() -> Int { return 42; }").unwrap();
-        let globals = collect_globals(&module, &HashMap::new());
+        let globals = collect_globals(&module, &HashMap::new()).unwrap();
         assert_eq!(globals["before"], 0);
         assert_eq!(globals["items"], 8);
         assert_eq!(globals["after"], 40);
@@ -759,7 +922,7 @@ mod tests {
         ] {
             let mut module = crate::in_lang_parse::parse_in_source("struct Point { Int x; Int y }\nvar calls: Int = 0;\nfn effect() -> Int { calls += 1; return 0; }\nvar seed: Int = Point { x: 42, y: effect() }.x;\nfn main() -> Int { return seed + calls; }").unwrap();
             crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
-            let globals = collect_globals(&module, &HashMap::new());
+            let globals = collect_globals(&module, &HashMap::new()).unwrap();
             assert!(
                 build_data_section(&module, &globals, StringLayout::Instring)
                     .unwrap_err()
@@ -882,7 +1045,7 @@ mod tests {
     #[test]
     fn parsed_global_literals_initialize_shared_data() {
         let module = crate::in_lang_parse::parse_in_source("var count: Int = 3;\nvar value: Float = 1.5;\nconst enabled: Bool = true;\nfn main() -> Int { return count; }").expect("parse");
-        let globals = collect_globals(&module, &HashMap::new());
+        let globals = collect_globals(&module, &HashMap::new()).unwrap();
         let data = build_data_section(&module, &globals, StringLayout::Instring)
             .unwrap()
             .bytes;
@@ -898,7 +1061,7 @@ mod tests {
         assert!(
             build_data_section(
                 &empty,
-                &collect_globals(&empty, &HashMap::new()),
+                &collect_globals(&empty, &HashMap::new()).unwrap(),
                 StringLayout::Instring
             )
             .unwrap()
@@ -957,7 +1120,7 @@ mod initial_reference_tests {
             global("flag_copy", Typ::Bool, Some(Expr::Ident("flag".into()))),
         ]);
         let original = module.clone();
-        let offsets = collect_globals(&module, &HashMap::new());
+        let offsets = collect_globals(&module, &HashMap::new()).unwrap();
         for layout in [StringLayout::Instring, StringLayout::Cstring] {
             let mut data = build_data_section(&module, &offsets, layout).unwrap();
             assert_eq!(word(&data.bytes, offsets["sentinel"]), 42);
@@ -1021,7 +1184,7 @@ mod initial_reference_tests {
             ));
         }
         let module = UnifiedModule::new(decls);
-        let offsets = collect_globals(&module, &HashMap::new());
+        let offsets = collect_globals(&module, &HashMap::new()).unwrap();
         for layout in [StringLayout::Instring, StringLayout::Cstring] {
             let data = build_data_section(&module, &offsets, layout).unwrap();
             for name in [
@@ -1122,7 +1285,7 @@ mod initial_reference_tests {
         ];
         for decls in cases {
             let module = UnifiedModule::new(decls);
-            let offsets = collect_globals(&module, &HashMap::new());
+            let offsets = collect_globals(&module, &HashMap::new()).unwrap();
             for layout in [StringLayout::Instring, StringLayout::Cstring] {
                 let error = build_data_section(&module, &offsets, layout).unwrap_err();
                 assert!(
@@ -1174,7 +1337,7 @@ mod initial_reference_tests {
             global("sentinel", Typ::Int, Some(Expr::IntLit(42))),
         ]);
         let original = module.clone();
-        let globals = collect_globals(&module, &HashMap::new());
+        let globals = collect_globals(&module, &HashMap::new()).unwrap();
         for layout in [StringLayout::Instring, StringLayout::Cstring] {
             let mut data = build_data_section(&module, &globals, layout).unwrap();
             assert_eq!(word(&data.bytes, globals["ints"] + 16), 20);
@@ -1262,7 +1425,7 @@ mod initial_reference_tests {
         ];
         for decls in cases {
             let module = UnifiedModule::new(decls);
-            let globals = collect_globals(&module, &HashMap::new());
+            let globals = collect_globals(&module, &HashMap::new()).unwrap();
             for layout in [StringLayout::Instring, StringLayout::Cstring] {
                 assert!(
                     build_data_section(&module, &globals, layout)
@@ -1307,7 +1470,7 @@ var sentinel:Int=77;
 fn main()->Int{return record.count;}"#,
         )
         .unwrap();
-        let offsets = collect_globals(&module, &schema_map(&module));
+        let offsets = collect_globals(&module, &schema_map(&module)).unwrap();
         for layout in [StringLayout::Instring, StringLayout::Cstring] {
             let mut section = build_data_section(&module, &offsets, layout).unwrap();
             assert_eq!(word(&section.bytes, offsets["record.count"]), 42);
@@ -1370,7 +1533,7 @@ fn main()->Int{return record.count;}"#,
             "struct Record{{{fields}}}\nvar record:Record=Record{{{values}}};\nvar sentinel:Int=77;\nfn main()->Int{{let before=record.f12;record.f0=30;return record.f0+before;}}"
         );
         let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
-        let offsets = collect_globals(&module, &schema_map(&module));
+        let offsets = collect_globals(&module, &schema_map(&module)).unwrap();
         let section = build_data_section(&module, &offsets, StringLayout::Instring).unwrap();
         for i in 0..13 {
             assert_eq!(
@@ -1392,7 +1555,7 @@ fn main()->Int{return record.count;}"#,
     #[test]
     fn empty_record_initializer_reserves_its_existing_word() {
         let module=crate::in_lang_parse::parse_in_source("struct Empty{}\nvar empty:Empty=Empty{};\nvar sentinel:Int=42;\nfn main()->Int{return sentinel;}").unwrap();
-        let offsets = collect_globals(&module, &schema_map(&module));
+        let offsets = collect_globals(&module, &schema_map(&module)).unwrap();
         let section = build_data_section(&module, &offsets, StringLayout::Cstring).unwrap();
         assert_eq!(offsets["sentinel"], offsets["empty"] + 8);
         assert_eq!(word(&section.bytes, offsets["empty"]), 0);
@@ -1412,7 +1575,7 @@ fn main()->Int{return record.count;}"#,
                 "struct Point{{Int x;Int y}}\nvar point:Point={initializer};\nfn runtime()->Int{{return 20;}}\nfn main()->Int{{return 42;}}"
             );
             let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
-            let offsets = collect_globals(&module, &schema_map(&module));
+            let offsets = collect_globals(&module, &schema_map(&module)).unwrap();
             assert!(
                 build_data_section(&module, &offsets, StringLayout::Instring).is_err(),
                 "{source}"
@@ -1429,11 +1592,232 @@ fn main()->Int{return record.count;}"#,
             assert!(
                 build_data_section(
                     &module,
-                    &collect_globals(&module, &schema_map(&module)),
+                    &collect_globals(&module, &schema_map(&module)).unwrap(),
                     StringLayout::Instring
                 )
                 .is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod flat_record_array_storage_tests {
+    use super::*;
+    use crate::core_ir::FloatVal;
+
+    fn global(name: &str, typ: Typ, init: Expr) -> Decl {
+        Decl::Global {
+            name: name.into(),
+            typ,
+            init: Some(Box::new(init)),
+            mutable: true,
+            constant_value: false,
+        }
+    }
+    fn record() -> Expr {
+        Expr::StructInit {
+            name: "Row".into(),
+            fields: vec![
+                ("text".into(), Expr::Ident("label".into())),
+                ("weight".into(), Expr::FloatLit(FloatVal(1.5))),
+                ("ready".into(), Expr::BoolLit(true)),
+                ("count".into(), Expr::IntLit(42)),
+            ],
+        }
+    }
+    fn schema() -> HashMap<String, Vec<(String, Typ)>> {
+        HashMap::from([(
+            "Row".into(),
+            vec![
+                ("count".into(), Typ::Int),
+                ("ready".into(), Typ::Bool),
+                ("weight".into(), Typ::Float),
+                ("text".into(), Typ::String),
+            ],
+        )])
+    }
+    fn module(nested: bool) -> UnifiedModule {
+        let mut decls = vec![
+            Decl::Struct {
+                name: "Row".into(),
+                fields: schema().remove("Row").unwrap(),
+                type_params: vec![],
+            },
+            global("label", Typ::String, Expr::StringLit("λ\0雪".into())),
+            global("before", Typ::Int, Expr::IntLit(20)),
+        ];
+        let mut typ = Typ::Array(Box::new(Typ::Named("Row".into())));
+        let mut value = Expr::ArrayLit(vec![record(), record()]);
+        if nested {
+            typ = Typ::Array(Box::new(typ));
+            value = Expr::ArrayLit(vec![value]);
+        }
+        decls.push(global("rows", typ, value));
+        decls.push(global("after", Typ::Int, Expr::IntLit(22)));
+        UnifiedModule::new(decls)
+    }
+    fn word(bytes: &[u8], offset: u64) -> u64 {
+        u64::from_le_bytes(
+            bytes[offset as usize..offset as usize + 8]
+                .try_into()
+                .unwrap(),
+        )
+    }
+    #[test]
+    fn repeated_records_have_independent_payloads_and_string_fixups() {
+        for nested in [false, true] {
+            let module = module(nested);
+            let globals = collect_globals(&module, &schema()).unwrap();
+            for layout in [StringLayout::Instring, StringLayout::Cstring] {
+                let mut section = build_data_section(&module, &globals, layout).unwrap();
+                let root = globals["rows"];
+                let header = if nested {
+                    assert_eq!(word(&section.bytes, root + 16), 24);
+                    root + 24
+                } else {
+                    root
+                };
+                assert_eq!(word(&section.bytes, header), 2);
+                let payloads: Vec<_> = [header + 16, header + 24]
+                    .iter()
+                    .map(|slot| {
+                        section
+                            .pointer_fixups
+                            .iter()
+                            .find(|(site, _)| site == slot)
+                            .unwrap()
+                            .1
+                    })
+                    .collect();
+                assert_eq!(payloads, vec![header + 32, header + 64]);
+                assert_eq!(globals["after"], header + 96);
+                assert_eq!(word(&section.bytes, globals["before"]), 20);
+                assert_eq!(word(&section.bytes, globals["after"]), 22);
+                assert_eq!(section.pointer_fixups.len(), 5);
+                for &payload in &payloads {
+                    assert_eq!(word(&section.bytes, payload), 42);
+                    assert_eq!(word(&section.bytes, payload + 8), 1);
+                    assert_eq!(word(&section.bytes, payload + 16), 1.5f64.to_bits());
+                    let target = section
+                        .pointer_fixups
+                        .iter()
+                        .find(|(site, _)| *site == payload + 24)
+                        .unwrap()
+                        .1;
+                    let prefix = if layout == StringLayout::Instring {
+                        8
+                    } else {
+                        0
+                    };
+                    assert_eq!(
+                        &section.bytes
+                            [target as usize + prefix..target as usize + prefix + "λ\0雪".len()],
+                        "λ\0雪".as_bytes()
+                    );
+                }
+                apply_data_relocations(
+                    &mut section.bytes,
+                    &section.pointer_fixups,
+                    0x400000,
+                    u64::MAX,
+                )
+                .unwrap();
+                for (slot, target) in &section.pointer_fixups {
+                    assert_eq!(word(&section.bytes, *slot), 0x400000 + target);
+                }
+                section.bytes[payloads[0] as usize..payloads[0] as usize + 8]
+                    .copy_from_slice(&0u64.to_le_bytes());
+                assert_eq!(word(&section.bytes, payloads[1]), 42);
+                assert_eq!(word(&section.bytes, globals["after"]), 22);
+            }
+        }
+    }
+    #[test]
+    fn single_word_record_elements_are_payload_pointers_not_scalar_values() {
+        let fields = vec![("value".into(), Typ::Int)];
+        let record = Expr::StructInit {
+            name: "One".into(),
+            fields: vec![("value".into(), Expr::IntLit(42))],
+        };
+        let module = UnifiedModule::new(vec![
+            Decl::Struct {
+                name: "One".into(),
+                fields: fields.clone(),
+                type_params: vec![],
+            },
+            global(
+                "rows",
+                Typ::Array(Box::new(Typ::Named("One".into()))),
+                Expr::ArrayLit(vec![record.clone(), record]),
+            ),
+            global("after", Typ::Int, Expr::IntLit(77)),
+        ]);
+        let globals = collect_globals(&module, &HashMap::from([("One".into(), fields)])).unwrap();
+        let section = build_data_section(&module, &globals, StringLayout::Instring).unwrap();
+        assert_eq!(globals["after"], 48);
+        assert_eq!(section.pointer_fixups, vec![(16, 32), (24, 40)]);
+        assert_eq!(word(&section.bytes, 16), 0);
+        assert_eq!(word(&section.bytes, 32), 42);
+        assert_eq!(word(&section.bytes, 40), 42);
+        assert_eq!(word(&section.bytes, 48), 77);
+    }
+    #[test]
+    fn empty_outer_arrays_do_not_hide_invalid_record_schema() {
+        for fields in [
+            vec![],
+            vec![("nested".into(), Typ::Named("Bad".into()))],
+            vec![("x".into(), Typ::Int), ("x".into(), Typ::Bool)],
+        ] {
+            let item = Typ::Named("Bad".into());
+            let typ = Typ::Array(Box::new(Typ::Array(Box::new(item))));
+            let module = UnifiedModule::new(vec![global("rows", typ, Expr::ArrayLit(vec![]))]);
+            assert!(collect_globals(&module, &HashMap::from([("Bad".into(), fields)])).is_err());
+        }
+    }
+    #[test]
+    fn malformed_record_elements_remain_refused() {
+        let mut wrong_constructor = record();
+        if let Expr::StructInit { name, .. } = &mut wrong_constructor {
+            *name = "Other".into();
+        }
+        let mut duplicate = record();
+        if let Expr::StructInit { fields, .. } = &mut duplicate {
+            fields[1].0 = fields[0].0.clone();
+        }
+        let mut wrong_type = record();
+        if let Expr::StructInit { fields, .. } = &mut wrong_type {
+            fields[3].1 = Expr::BoolLit(false);
+        }
+        for bad in [
+            wrong_constructor,
+            duplicate,
+            wrong_type,
+            Expr::Ident("prior_record".into()),
+            Expr::Call {
+                callee: Box::new(Expr::Ident("make".into())),
+                args: vec![],
+            },
+        ] {
+            let mut module = module(false);
+            if let Decl::Global { init, .. } = &mut module.decls[3] {
+                *init = Some(Box::new(Expr::ArrayLit(vec![bad])));
+            }
+            let globals = collect_globals(&module, &schema()).unwrap();
+            assert!(build_data_section(&module, &globals, StringLayout::Instring).is_err());
+        }
+    }
+    #[test]
+    fn checked_storage_reservation_does_not_wrap_or_mutate_existing_bytes() {
+        let mut data = vec![42];
+        assert!(reserve_storage(&mut data, usize::MAX).is_err());
+        assert_eq!(data, vec![42]);
+        // Vec rejects capacity above isize::MAX without asking an allocator.
+        let mut empty = Vec::new();
+        assert!(reserve_storage(&mut empty, usize::MAX).is_err());
+        assert!(empty.is_empty());
+        let mut fixups = vec![(0, 8)];
+        assert!(reserve_pointer_fixups(&mut fixups, usize::MAX).is_err());
+        assert_eq!(fixups, vec![(0, 8)]);
     }
 }

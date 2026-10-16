@@ -621,6 +621,40 @@ pub(crate) fn lower_field_assign(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Expr::Index { base: array, index } = base {
+        let saved_value = ctx.acquire_binop_temp(fn_name)?;
+        let place = lower_expr::stage_record_index_place(
+            emitter,
+            ctx,
+            array,
+            index,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        let field = place
+            .fields
+            .iter()
+            .position(|(field, _)| field == name)
+            .ok_or("native-lower: unknown indexed record field")?;
+        let actual = lower_expr::native_expr_type(value, ctx, functions)
+            .ok_or("native-lower: unknown indexed record field value type")?;
+        if !array_item_matches(&place.fields[field].1, &actual) {
+            return Err("native-lower: indexed record field assignment type mismatch".into());
+        }
+        lower_expr::lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
+        emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, saved_value));
+        lower_expr::load_record_index_address(emitter, ctx, &place, 0, fn_name)?;
+        emitter.emit_u32(aarch64::ldr64(3, aarch64::REG_SP, saved_value));
+        let offset = field
+            .checked_mul(8)
+            .and_then(|offset| u32::try_from(offset).ok())
+            .filter(|offset| *offset <= 4095 * 8)
+            .ok_or("native-lower: indexed record field exceeds AArch64 store offset subset")?;
+        emitter.emit_u32(aarch64::str64(3, 0, offset));
+        ctx.release_binop_temp();
+        return Ok(());
+    }
     let field_type = lower_expr::native_expr_type(
         &Expr::Field {
             base: Box::new(base.clone()),
@@ -757,6 +791,34 @@ pub(crate) fn lower_index_assign(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Some(Typ::Array(elem)) =
+        lower_expr::native_expr_type(base, ctx, functions).map(|typ| typ.canonical())
+        && let Typ::Named(typ) = elem.canonical()
+    {
+        let place = lower_expr::stage_record_index_place(
+            emitter,
+            ctx,
+            base,
+            index,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        let stage = stage_record_array_value(
+            emitter,
+            ctx,
+            value,
+            &typ,
+            &place.fields,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        lower_expr::load_record_index_address(emitter, ctx, &place, 0, fn_name)?;
+        copy_record_stage(emitter, stage, place.fields.len(), 0);
+        ctx.release_record_array_scratch(place.fields.len())?;
+        return Ok(());
+    }
     if lower_expr::native_expr_type(base, ctx, functions)
         .is_some_and(|typ| typ.canonical() == Typ::Int)
     {
@@ -960,6 +1022,33 @@ pub(crate) fn lower_struct_expr_into_slots(
         );
     }
 
+    if let Expr::Index { base, index } = expr {
+        if !matches!(lower_expr::native_expr_type(expr, ctx, functions).map(|typ| typ.canonical()), Some(Typ::Named(actual)) if actual == typ)
+        {
+            return Err("native-lower: indexed record value nominal type mismatch".into());
+        }
+        let schema = lower_expr::lower_record_index_address(
+            emitter,
+            ctx,
+            base,
+            index,
+            0,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        let expected = crate::native_emit::struct_layout::flat_record_fields(ctx.structs, typ)?;
+        if schema != expected {
+            return Err("native-lower: indexed record value type mismatch".into());
+        }
+        for (word, (field, _)) in schema.iter().enumerate() {
+            let offset = find_field_offset(fields, field)
+                .ok_or("native-lower: missing record destination field")?;
+            emitter.emit_u32(aarch64::ldr64(3, 0, (word as u32) * 8));
+            emitter.emit_u32(aarch64::str64(3, aarch64::REG_SP, *offset));
+        }
+        return Ok(());
+    }
     match expr {
         Expr::Unary { op, .. } if typ == "Vec" && op == "vector-clone" => {
             lower_expr::lower_expr_into(emitter, ctx, expr, 0, functions, pending_calls, fn_name)?;
@@ -1477,6 +1566,77 @@ pub(crate) fn lower_struct_expr_into_regs(
     }
 }
 
+/// Allocate word-addressable owned storage using the existing array lifetime policy.
+/// R0 receives data after the two-word header; R1 is the requested word count.
+/// Record payloads can reuse this storage with a 16-byte physical header overhead.
+pub(crate) fn lower_owned_word_storage(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    words: usize,
+    pending_calls: &mut Vec<PendingCall>,
+    fn_name: &str,
+) -> Result<(), String> {
+    let (word_count, allocation_bytes) = owned_word_storage_size(words)?;
+    if words == 0 {
+        emitter.emit_insns(&aarch64::load_i64(0, 0));
+        emitter.emit_insns(&aarch64::load_i64(1, 0));
+        return Ok(());
+    }
+    if super::TL_NATIVE_MODE.with(|mode| *mode.borrow()) {
+        // Runtime allocation must not bind to same-named user functions.
+        let runtime_functions = HashMap::new();
+        super::lower_call::lower_call(
+            emitter,
+            ctx,
+            &Expr::Ident("malloc".into()),
+            &[Expr::IntLit(allocation_bytes)],
+            0,
+            &runtime_functions,
+            pending_calls,
+            fn_name,
+        )?;
+        emitter.emit_u32(aarch64::cmp_reg64(0, aarch64::REG_XZR));
+        let allocated = emitter.emit_insn(aarch64::b_cond(1, 0));
+        super::lower_call::lower_call(
+            emitter,
+            ctx,
+            &Expr::Ident("abort".into()),
+            &[],
+            0,
+            &runtime_functions,
+            pending_calls,
+            fn_name,
+        )?;
+        emitter.patch_u32(
+            allocated,
+            aarch64::b_cond(1, emitter.len() as i32 - allocated as i32),
+        );
+    } else {
+        emitter.emit_u32(aarch64::mov_reg64(0, 27));
+        emitter.emit_insns(&aarch64::load_i64(1, word_count));
+        emitter.emit_insns(&aarch64::load_i64(
+            15,
+            crate::jit_runtime::allocate_array as *const () as i64,
+        ));
+        emitter.emit_u32(0xD63F_0000 | (15 << 5));
+    }
+    emitter.emit_insns(&aarch64::load_i64(1, word_count));
+    emitter.emit_u32(aarch64::str64(1, 0, 0));
+    emitter.emit_u32(aarch64::str64(1, 0, 8));
+    emitter.emit_u32(aarch64::add_imm64(0, 0, 16));
+    Ok(())
+}
+
+fn owned_word_storage_size(words: usize) -> Result<(i64, i64), String> {
+    let word_count = i64::try_from(words).map_err(|_| "native-lower: array allocation overflow")?;
+    let allocation_bytes = words
+        .checked_add(2)
+        .and_then(|count| count.checked_mul(8))
+        .and_then(|bytes| i64::try_from(bytes).ok())
+        .ok_or("native-lower: array allocation overflow")?;
+    Ok((word_count, allocation_bytes))
+}
+
 pub(crate) fn lower_array_expr_into_regs(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -1486,6 +1646,9 @@ pub(crate) fn lower_array_expr_into_regs(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if matches!(elem.canonical(), Typ::Named(_)) {
+        super::lower_util::record_array_fields(elem, ctx.structs)?;
+    }
     if matches!(
         expr,
         Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
@@ -1534,7 +1697,8 @@ pub(crate) fn lower_array_expr_into_regs(
             fn_name,
         );
     }
-    if !is_native_scalar_type(elem) {
+    let record = super::lower_util::record_array_fields(elem, ctx.structs)?;
+    if !is_native_scalar_type(elem) && record.is_none() {
         return Err(format!(
             "native-lower: unsupported array element type `{elem:?}` in `{fn_name}`"
         ));
@@ -1650,65 +1814,40 @@ pub(crate) fn lower_array_expr_into_regs(
                 .checked_mul(8)
                 .and_then(|bytes| i64::try_from(bytes).ok())
                 .ok_or("native-lower: array allocation overflow")?;
-            if super::TL_NATIVE_MODE.with(|mode| *mode.borrow()) {
-                // Runtime allocation must not bind to same-named user functions.
-                let runtime_functions = HashMap::new();
-                let bytes = items
-                    .len()
-                    .checked_add(2)
-                    .and_then(|words| words.checked_mul(8))
-                    .ok_or("native-lower: array allocation overflow")?;
-                super::lower_call::lower_call(
-                    emitter,
-                    ctx,
-                    &Expr::Ident("malloc".into()),
-                    &[Expr::IntLit(bytes as i64)],
-                    0,
-                    &runtime_functions,
-                    pending_calls,
-                    fn_name,
-                )?;
-                emitter.emit_u32(aarch64::cmp_reg64(0, aarch64::REG_XZR));
-                let allocated = emitter.emit_insn(aarch64::b_cond(1, 0));
-                super::lower_call::lower_call(
-                    emitter,
-                    ctx,
-                    &Expr::Ident("abort".into()),
-                    &[],
-                    0,
-                    &runtime_functions,
-                    pending_calls,
-                    fn_name,
-                )?;
-                emitter.patch_u32(
-                    allocated,
-                    aarch64::b_cond(1, emitter.len() as i32 - allocated as i32),
-                );
-            } else {
-                emitter.emit_u32(aarch64::mov_reg64(0, 27));
-                emitter.emit_insns(&aarch64::load_i64(1, items.len() as i64));
-                emitter.emit_insns(&aarch64::load_i64(
-                    15,
-                    crate::jit_runtime::allocate_array as *const () as i64,
-                ));
-                emitter.emit_u32(0xD63F_0000 | (15 << 5));
-            }
-            emitter.emit_insns(&aarch64::load_i64(1, items.len() as i64));
-            emitter.emit_u32(aarch64::str64(1, 0, 0));
-            emitter.emit_u32(aarch64::str64(1, 0, 8));
+            lower_owned_word_storage(emitter, ctx, items.len(), pending_calls, fn_name)?;
             let cursor = ctx.acquire_binop_temp(fn_name)?;
-            emitter.emit_u32(aarch64::add_imm64(0, 0, 16));
             emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, cursor));
             for item in items {
-                lower_expr::lower_expr_into(
-                    emitter,
-                    ctx,
-                    item,
-                    0,
-                    functions,
-                    pending_calls,
-                    fn_name,
-                )?;
+                if let Some(fields) = &record {
+                    let Typ::Named(typ) = elem.canonical() else {
+                        unreachable!()
+                    };
+                    let stage = stage_record_array_value(
+                        emitter,
+                        ctx,
+                        item,
+                        &typ,
+                        fields,
+                        functions,
+                        pending_calls,
+                        fn_name,
+                    )?;
+                    // shortcut: each persistent payload uses the existing owned array allocator,
+                    // retaining its 16-byte header overhead until a dedicated payload allocator exists.
+                    lower_owned_word_storage(emitter, ctx, fields.len(), pending_calls, fn_name)?;
+                    copy_record_stage(emitter, stage, fields.len(), 0);
+                    ctx.release_record_array_scratch(fields.len())?;
+                } else {
+                    lower_expr::lower_expr_into(
+                        emitter,
+                        ctx,
+                        item,
+                        0,
+                        functions,
+                        pending_calls,
+                        fn_name,
+                    )?;
+                }
                 emitter.emit_u32(aarch64::ldr64(3, aarch64::REG_SP, cursor));
                 emitter.emit_u32(aarch64::str64(0, 3, 0));
                 emitter.emit_u32(aarch64::add_imm64(3, 3, 8));
@@ -2048,4 +2187,81 @@ pub(crate) fn lower_match(
         emitter.patch_u32(branch, aarch64::b(offset));
     }
     Ok(())
+}
+
+fn stage_record_array_value(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    value: &Expr,
+    typ: &str,
+    fields: &[(String, Typ)],
+    functions: &HashMap<String, FunctionInfo>,
+    pending_calls: &mut Vec<PendingCall>,
+    fn_name: &str,
+) -> Result<u32, String> {
+    if !matches!(lower_expr::native_expr_type(value, ctx, functions).map(|typ| typ.canonical()), Some(Typ::Named(actual)) if actual == typ)
+    {
+        return Err("native-lower: record array value type mismatch".into());
+    }
+    if let Expr::StructInit { fields: values, .. } = value {
+        for (name, value) in values {
+            let expected = fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, typ)| typ)
+                .ok_or("native-lower: unknown record array initializer field")?;
+            let actual = lower_expr::native_expr_type(value, ctx, functions)
+                .ok_or("native-lower: unknown record array initializer value type")?;
+            if !array_item_matches(expected, &actual) {
+                return Err("native-lower: record array initializer field type mismatch".into());
+            }
+        }
+    }
+    let offset = ctx.acquire_record_array_scratch(fields.len(), fn_name)?;
+    let slots: HashMap<_, _> = fields
+        .iter()
+        .enumerate()
+        .map(|(index, (name, _))| (name.clone(), offset + (index as u32) * 8))
+        .collect();
+    let result = lower_struct_expr_into_slots(
+        emitter,
+        ctx,
+        value,
+        typ,
+        &slots,
+        functions,
+        pending_calls,
+        fn_name,
+    );
+    if let Err(error) = result {
+        ctx.release_record_array_scratch(fields.len())?;
+        return Err(error);
+    }
+    Ok(offset)
+}
+
+fn copy_record_stage(emitter: &mut CodeEmitter, offset: u32, words: usize, pointer: u8) {
+    for word in 0..words {
+        emitter.emit_u32(aarch64::ldr64(
+            3,
+            aarch64::REG_SP,
+            offset + (word as u32) * 8,
+        ));
+        emitter.emit_u32(aarch64::str64(3, pointer, (word as u32) * 8));
+    }
+}
+
+#[cfg(test)]
+mod owned_word_storage_tests {
+    use super::*;
+
+    #[test]
+    fn physical_storage_includes_header_without_changing_logical_word_count() {
+        assert_eq!(owned_word_storage_size(0).unwrap(), (0, 16));
+        assert_eq!(owned_word_storage_size(1).unwrap(), (1, 24));
+        assert_eq!(owned_word_storage_size(65).unwrap(), (65, 536));
+        assert!(owned_word_storage_size(usize::MAX).is_err());
+        let overflowing = (i64::MAX as usize / 8) + 1;
+        assert!(owned_word_storage_size(overflowing).is_err());
+    }
 }

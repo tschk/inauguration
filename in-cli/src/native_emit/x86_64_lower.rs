@@ -282,6 +282,7 @@ impl<'a> LowerCtx<'a> {
 
     fn alloc_local(&mut self, name: &str, typ: &Typ) -> Result<(), String> {
         super::lower::ensure_unit_sequence_layout(typ)?;
+        record_array_fields(self.structs, typ)?;
         self.scalar_types.insert(name.to_string(), typ.clone());
         if self.locals.contains_key(name) {
             return Ok(());
@@ -440,7 +441,12 @@ fn lower_module_impl(
     let module = prepared.as_ref();
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
-    let globals = collect_globals(module, &structs);
+    for decl in &module.decls {
+        if let Decl::Global { typ, .. } = decl {
+            record_array_fields(&structs, typ)?;
+        }
+    }
+    let globals = collect_globals(module, &structs)?;
     let global_types: HashMap<String, Typ> = module
         .decls
         .iter()
@@ -1059,6 +1065,11 @@ fn lower_function(
     string_layout: X86StringLayout,
 ) -> Result<Vec<PendingGlobal>, String> {
     super::lower::ensure_unit_sequence_layout(&func.ret)?;
+    record_array_fields(structs, &func.ret)?;
+    for (_, typ) in &func.params {
+        record_array_fields(structs, typ)?;
+    }
+
     for (_, typ) in &func.params {
         super::lower::ensure_unit_sequence_layout(typ)?;
     }
@@ -1244,6 +1255,7 @@ fn alloc_declared_locals(ctx: &mut LowerCtx<'_>, body: &[Stmt]) -> Result<(), St
                         .clone()
                         .or_else(|| scalar_expr_type(expr, ctx))
                         .unwrap_or(Typ::Array(Box::new(Typ::Void)));
+                    record_array_fields(ctx.structs, &array_type)?;
                     ctx.scalar_types.insert(name.clone(), array_type);
                     if !ctx.locals.contains_key(name) {
                         let offsets = (0..items.len()).map(|_| ctx.alloc_slot()).collect();
@@ -1369,7 +1381,7 @@ fn lower_stmt(
                 } else if matches!(ret_typ, Typ::Named(_)) {
                     emitter.emit_insns(&x86_64::load_i64(RAX, 0));
                 } else {
-                    lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
+                    lower_typed_sequence_value(emitter, ctx, expr, &ret_typ, RAX, pending_calls)?;
                 }
             } else {
                 emitter.emit_insns(&x86_64::zero_reg(RAX));
@@ -1416,7 +1428,8 @@ fn lower_stmt(
             if let Some(StackSlot::Struct { fields }) = ctx.locals.get(name).cloned() {
                 return store_struct_value(emitter, ctx, expr, &fields, pending_calls);
             }
-            lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
+            let destination = ctx.scalar_types.get(name).cloned().unwrap_or(Typ::Int);
+            lower_typed_sequence_value(emitter, ctx, expr, &destination, RAX, pending_calls)?;
             if ctx.scalar_types.get(name).map(Typ::canonical) == Some(Typ::Void) {
                 emitter.emit_insns(&x86_64::zero_reg(RAX));
             }
@@ -1505,7 +1518,8 @@ fn lower_stmt(
                 Some(StackSlot::Scalar(off)) => Some(*off),
                 _ => None,
             };
-            lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
+            let destination = ctx.scalar_types.get(name).cloned().unwrap_or(Typ::Int);
+            lower_typed_sequence_value(emitter, ctx, expr, &destination, RAX, pending_calls)?;
             if ctx.scalar_types.get(name).map(Typ::canonical) == Some(Typ::Void) {
                 emitter.emit_insns(&x86_64::zero_reg(RAX));
             }
@@ -1518,6 +1532,30 @@ fn lower_stmt(
         Stmt::FieldAssign {
             base, name, value, ..
         } => {
+            if let Expr::Index { base: array, index } = base {
+                let typ =
+                    scalar_expr_type(array, ctx).ok_or("x86_64-lower: unknown record array")?;
+                let FlatRecordArray { fields: schema, .. } =
+                    record_array_fields(ctx.structs, &typ)?
+                        .ok_or("x86_64-lower: field store requires a flat record array")?;
+                let field = schema
+                    .iter()
+                    .position(|(field, _)| field == name)
+                    .ok_or("x86_64-lower: unknown record array field")?;
+                if scalar_expr_type(value, ctx).map(|typ| typ.canonical())
+                    != Some(schema[field].1.canonical())
+                {
+                    return Err("x86_64-lower: record array field type mismatch".into());
+                }
+                let slots = stage_record_index(emitter, ctx, array, index, pending_calls)?;
+                let rhs = ctx.alloc_slot();
+                lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::str64(RAX, rhs as u16));
+                load_record_index_address(emitter, ctx, slots)?;
+                emitter.emit_insns(&x86_64::ldr64(RCX, rhs as u16));
+                emitter.emit_insns(&x86_64::mov_m_r(RAX, (field * 8) as i32, RCX));
+                return Ok(());
+            }
             let (base_name, prefix) =
                 crate::native_emit::lower::field_path(base).ok_or_else(|| {
                     format!("x86_64-lower: unsupported field assignment base for `{name}`")
@@ -1568,6 +1606,30 @@ fn lower_stmt(
         Stmt::IndexAssign {
             base, index, value, ..
         } => {
+            if let Some(typ) = scalar_expr_type(base, ctx)
+                && let Some(FlatRecordArray {
+                    name,
+                    fields: schema,
+                }) = record_array_fields(ctx.structs, &typ)?
+            {
+                if scalar_expr_type(value, ctx).map(|typ| typ.canonical()) != Some(Typ::Named(name))
+                {
+                    return Err("x86_64-lower: record array replacement type mismatch".into());
+                }
+                let slots = stage_record_index(emitter, ctx, base, index, pending_calls)?;
+                let fields: HashMap<_, _> = schema
+                    .iter()
+                    .rev()
+                    .map(|(field, _)| (field.clone(), ctx.alloc_slot()))
+                    .collect();
+                store_struct_value(emitter, ctx, value, &fields, pending_calls)?;
+                load_record_index_address(emitter, ctx, slots)?;
+                for (index, (field, _)) in schema.iter().enumerate() {
+                    emitter.emit_insns(&x86_64::ldr64(RCX, fields[field] as u16));
+                    emitter.emit_insns(&x86_64::mov_m_r(RAX, (index * 8) as i32, RCX));
+                }
+                return Ok(());
+            }
             if matches!(scalar_expr_type(base, ctx), Some(Typ::Array(elem)) if matches!(elem.canonical(), Typ::Array(_)))
             {
                 return Err("x86_64-lower: whole nested array assignment is unsupported".into());
@@ -3547,7 +3609,11 @@ fn lower_call_args(
     // Capture every value in source order before selecting ABI registers or stack slots.
     for (index, arg) in args.iter().enumerate() {
         let slot = ctx.alloc_slot();
-        if let Some((param_name, typ)) = params.as_ref().and_then(|params| params.get(index))
+        if let Some((_, typ)) = params.as_ref().and_then(|params| params.get(index))
+            && record_array_fields(ctx.structs, typ)?.is_some()
+        {
+            lower_typed_sequence_value(emitter, ctx, arg, typ, RAX, pending_calls)?;
+        } else if let Some((param_name, typ)) = params.as_ref().and_then(|params| params.get(index))
             && param_name != "self"
             && let Typ::Named(name) = typ.canonical()
             && ctx.structs.contains_key(&name)
@@ -3573,6 +3639,22 @@ fn lower_call_args(
                 .unwrap_or_else(|| ctx.alloc_slot());
             emitter.emit_insns(&x86_64::mov_rr(RAX, RBP));
             emitter.emit_insns(&x86_64::sub_rmi32(RAX, base as i32 + 8));
+        } else if matches!(params.as_ref().and_then(|params| params.get(index)), Some((name, Typ::Named(_))) if name == "self")
+            && let Expr::Index {
+                base,
+                index: element_index,
+            } = arg
+        {
+            if scalar_expr_type(arg, ctx).map(|typ| typ.canonical())
+                != params
+                    .as_ref()
+                    .and_then(|params| params.get(index))
+                    .map(|(_, typ)| typ.canonical())
+            {
+                return Err("x86_64-lower: indexed receiver type mismatch".into());
+            }
+            let slots = stage_record_index(emitter, ctx, base, element_index, pending_calls)?;
+            load_record_index_address(emitter, ctx, slots)?;
         } else if matches!(params.as_ref().and_then(|params| params.get(index)), Some((name, Typ::Named(_))) if name == "self")
             && matches!(arg, Expr::Field { .. })
         {
@@ -3945,6 +4027,15 @@ fn store_struct_value(
     if crate::native_emit::struct_layout::x86_fields(ctx.structs, &name).is_err() {
         return Err("x86_64-lower: struct value needs a known scalar-field layout".into());
     }
+    if let Expr::Index { base, .. } = expr {
+        let typ =
+            scalar_expr_type(base, ctx).ok_or("x86_64-lower: unknown indexed record source")?;
+        if record_array_fields(ctx.structs, &typ)?.is_none() {
+            return Err(
+                "x86_64-lower: indexed record transfer requires a fixed record array".into(),
+            );
+        }
+    }
     if let Expr::Field { .. } = expr {
         let mut ordered: Vec<_> = fields
             .iter()
@@ -3978,7 +4069,7 @@ fn store_struct_value(
                 ));
             }
         }
-        Expr::Call { .. } => {}
+        Expr::Call { .. } | Expr::Index { .. } => {}
         _ => {
             return Err(
                 "x86_64-lower: struct value needs an addressable local, constructor, or call"
@@ -3989,7 +4080,12 @@ fn store_struct_value(
     if offsets.is_empty() && ctx.structs[&name].is_empty() && !matches!(expr, Expr::Call { .. }) {
         return Ok(());
     }
-    lower_call_argument(emitter, ctx, expr, RAX, pending_calls)?;
+    if let Expr::Index { base, index } = expr {
+        // Only this aggregate copy seam consumes a record payload address.
+        lower_index_expr(emitter, ctx, RAX, base, index, pending_calls)?;
+    } else {
+        lower_call_argument(emitter, ctx, expr, RAX, pending_calls)?;
+    }
     emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 1));
     let valid = emitter.len();
     emitter.emit_insns(&x86_64::jcc_near(0x07, 0));
@@ -4060,6 +4156,19 @@ fn lower_field_access(
     name: &str,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if let Expr::Index { base: array, index } = base {
+        let typ = scalar_expr_type(array, ctx).ok_or("x86_64-lower: unknown record array")?;
+        let FlatRecordArray { fields: schema, .. } = record_array_fields(ctx.structs, &typ)?
+            .ok_or("x86_64-lower: field access requires a flat record array")?;
+        let field = schema
+            .iter()
+            .position(|(field, _)| field == name)
+            .ok_or("x86_64-lower: unknown record array field")?;
+        let slots = stage_record_index(emitter, ctx, array, index, pending_calls)?;
+        load_record_index_address(emitter, ctx, slots)?;
+        emitter.emit_insns(&x86_64::mov_r_m(target_reg, RAX, (field * 8) as i32));
+        return Ok(());
+    }
     if let Expr::Field { base, name: parent } = base {
         return lower_field_access(
             emitter,
@@ -4309,6 +4418,119 @@ fn lower_unary_expr(
     Ok(())
 }
 
+struct FlatRecordArray {
+    name: String,
+    fields: Vec<(String, Typ)>,
+}
+
+/// Fixed arrays keep word slots; flat record slots hold independent payloads.
+fn record_array_fields(
+    structs: &HashMap<String, Vec<(String, Typ)>>,
+    typ: &Typ,
+) -> Result<Option<FlatRecordArray>, String> {
+    let Typ::Array(item) = typ.canonical() else {
+        return Ok(None);
+    };
+    fn contains_record(typ: &Typ) -> bool {
+        match typ.canonical() {
+            Typ::Named(_) => true,
+            Typ::Array(item) | Typ::Vector(item) => contains_record(&item),
+            _ => false,
+        }
+    }
+    let Typ::Named(name) = item.as_ref() else {
+        if contains_record(&item) {
+            return Err("x86_64-lower: nested record arrays require a nested aggregate ABI".into());
+        }
+        return Ok(None);
+    };
+    if x86_64::is_32bit() {
+        return Err("x86_64-lower: record arrays require 64-bit mode".into());
+    }
+    let fields = crate::native_emit::struct_layout::flat_record_fields(structs, name)?;
+    Ok(Some(FlatRecordArray {
+        name: name.clone(),
+        fields,
+    }))
+}
+
+fn stage_record_index(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    base: &Expr,
+    index: &Expr,
+    pending_calls: &mut Vec<PendingCall>,
+) -> Result<(u32, u32), String> {
+    let typ =
+        scalar_expr_type(base, ctx).ok_or("x86_64-lower: record index needs a known array type")?;
+    if record_array_fields(ctx.structs, &typ)?.is_none() {
+        return Err("x86_64-lower: record index needs a flat record array".into());
+    }
+    let base_slot = ctx.alloc_slot();
+    let index_slot = ctx.alloc_slot();
+    lower_typed_sequence_value(emitter, ctx, base, &typ, RAX, pending_calls)?;
+    emitter.emit_insns(&x86_64::str64(RAX, base_slot as u16));
+    lower_expr_into(emitter, ctx, index, RAX, pending_calls)?;
+    emitter.emit_insns(&x86_64::str64(RAX, index_slot as u16));
+    Ok((base_slot, index_slot))
+}
+
+/// Complete a staged place after RHS evaluation, before any destination write.
+fn load_record_index_address(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    slots: (u32, u32),
+) -> Result<(), String> {
+    emitter.emit_insns(&x86_64::ldr64(RDI, slots.0 as u16));
+    emitter.emit_insns(&x86_64::ldr64(RAX, slots.1 as u16));
+    emitter.emit_insns(&x86_64::test_rr(RDI, RDI));
+    let null = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
+    emitter.emit_insns(&x86_64::mov_r_m(RDX, RDI, 0));
+    emitter.emit_insns(&x86_64::cmp_rr(RAX, RDX));
+    let bounds = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(0x03, 0));
+    emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 3));
+    emitter.emit_insns(&x86_64::add_rr(RDI, RAX));
+    emitter.emit_insns(&x86_64::mov_r_m(RAX, RDI, 16));
+    emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 1));
+    let payload = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(0x06, 0));
+    let end = emitter.len();
+    emitter.emit_insns(&x86_64::jmp_rel32(0));
+    for branch in [null, bounds, payload] {
+        emitter.patch_u32(branch + 2, emitter.len() - branch - 6);
+    }
+    emit_failure_return(emitter, ctx)?;
+    emitter.patch_u32(end + 1, emitter.len() - end - 5);
+    Ok(())
+}
+
+fn lower_record_array_item(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    item: &Expr,
+    name: &str,
+    schema: &[(String, Typ)],
+    pending_calls: &mut Vec<PendingCall>,
+) -> Result<(), String> {
+    if scalar_expr_type(item, ctx).map(|typ| typ.canonical()) != Some(Typ::Named(name.into())) {
+        return Err("x86_64-lower: record array element type mismatch".into());
+    }
+    let fields: HashMap<_, _> = schema
+        .iter()
+        .rev()
+        .map(|(field, _)| (field.clone(), ctx.alloc_slot()))
+        .collect();
+    store_struct_value(emitter, ctx, item, &fields, pending_calls)?;
+    let offsets: Vec<_> = schema.iter().map(|(field, _)| fields[field]).collect();
+    // shortcut: Each element uses a process-lifetime allocation plus a 16-byte
+    // header; coallocate payloads if profiling shows this overhead matters.
+    lower_heap_array(emitter, ctx, &offsets, pending_calls)?;
+    emitter.emit_insns(&x86_64::add_rmi8(RAX, 16));
+    Ok(())
+}
+
 fn lower_array_elem_read(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -4430,6 +4652,7 @@ fn materialize_array_literal(
     ctx: &mut LowerCtx<'_>,
     items: &[Expr],
     pending_calls: &mut Vec<PendingCall>,
+    record: Option<&FlatRecordArray>,
 ) -> Result<Vec<u32>, String> {
     if items
         .iter()
@@ -4442,10 +4665,56 @@ fn materialize_array_literal(
         offsets.push(ctx.alloc_slot());
     }
     for (item, &off) in items.iter().zip(offsets.iter()) {
-        lower_expr_into(emitter, ctx, item, RAX, pending_calls)?;
+        if let Some(FlatRecordArray {
+            name,
+            fields: schema,
+        }) = record
+        {
+            lower_record_array_item(emitter, ctx, item, name, schema, pending_calls)?;
+        } else {
+            lower_expr_into(emitter, ctx, item, RAX, pending_calls)?;
+        }
         emitter.emit_insns(&x86_64::str64(RAX, off as u16));
     }
     Ok(offsets)
+}
+
+/// A vector literal keeps its legacy lowering. Only a known fixed-array
+/// destination selects record payload storage; inference alone is ambiguous.
+fn lower_typed_sequence_value(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    expr: &Expr,
+    typ: &Typ,
+    target: u8,
+    pending_calls: &mut Vec<PendingCall>,
+) -> Result<(), String> {
+    let record = record_array_fields(ctx.structs, typ)?;
+    if record.is_some()
+        && matches!(
+            expr,
+            Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
+        )
+    {
+        return lower_value_control(
+            emitter,
+            ctx,
+            expr,
+            pending_calls,
+            |emitter, ctx, value, pending_calls| {
+                lower_typed_sequence_value(emitter, ctx, value, typ, target, pending_calls)
+            },
+        );
+    }
+    if let (Some(record), Expr::ArrayLit(items)) = (&record, expr) {
+        let offsets = materialize_array_literal(emitter, ctx, items, pending_calls, Some(record))?;
+        lower_heap_array(emitter, ctx, &offsets, pending_calls)?;
+        if target != RAX {
+            emitter.emit_insns(&x86_64::mov_rr(target, RAX));
+        }
+        return Ok(());
+    }
+    lower_expr_into(emitter, ctx, expr, target, pending_calls)
 }
 
 fn lower_index_expr(
@@ -4456,13 +4725,23 @@ fn lower_index_expr(
     index: &Expr,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if let Some(typ) = scalar_expr_type(base, ctx)
+        && record_array_fields(ctx.structs, &typ)?.is_some()
+    {
+        let slots = stage_record_index(emitter, ctx, base, index, pending_calls)?;
+        load_record_index_address(emitter, ctx, slots)?;
+        if target_reg != RAX {
+            emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+        }
+        return Ok(());
+    }
     if let Expr::Ident(name) = base
         && let Some(StackSlot::InlineArray { offsets }) = ctx.locals.get(name).cloned()
     {
         return lower_array_elem_read(emitter, ctx, &offsets, index, target_reg, pending_calls);
     }
     if let Expr::ArrayLit(items) = base {
-        let offsets = materialize_array_literal(emitter, ctx, items, pending_calls)?;
+        let offsets = materialize_array_literal(emitter, ctx, items, pending_calls, None)?;
         return lower_array_elem_read(emitter, ctx, &offsets, index, target_reg, pending_calls);
     }
     let base_slot = ctx.alloc_slot();
@@ -4754,6 +5033,13 @@ fn lower_expr_into(
             lower_unary_expr(emitter, ctx, target_reg, op.as_str(), expr, pending_calls)
         }
         Expr::Index { base, index, .. } => {
+            if let Some(typ) = scalar_expr_type(base, ctx)
+                && record_array_fields(ctx.structs, &typ)?.is_some()
+            {
+                return Err(
+                    "x86_64-lower: record array value requires typed aggregate transfer".into(),
+                );
+            }
             lower_index_expr(emitter, ctx, target_reg, base, index, pending_calls)
         }
         Expr::StringLit(content) => {
@@ -4772,7 +5058,7 @@ fn lower_expr_into(
                 return Err("x86_64-lower: unit array elements require a zero-width layout".into());
             }
 
-            let offsets = materialize_array_literal(emitter, ctx, items, pending_calls)?;
+            let offsets = materialize_array_literal(emitter, ctx, items, pending_calls, None)?;
             lower_heap_array(emitter, ctx, &offsets, pending_calls)?;
             if target_reg != RAX {
                 emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
@@ -6246,5 +6532,196 @@ mod selected_inline_length_tests {
         }
         let module = crate::in_lang_parse::parse_in_source("fn str-len(value:Float)->Float{return value;}\nfn main()->Int{let value:Float=str-len(2.5);return 42;}").unwrap();
         lower_module(&module, "main").unwrap();
+    }
+}
+
+#[cfg(test)]
+mod flat_record_array_tests {
+    use super::*;
+
+    #[test]
+    fn record_arrays_refuse_32bit_and_nonflat_schemas() {
+        struct WidthGuard(bool);
+        impl Drop for WidthGuard {
+            fn drop(&mut self) {
+                x86_64::set_32bit(self.0);
+            }
+        }
+        let _width = WidthGuard(x86_64::is_32bit());
+        let structs = HashMap::from([
+            ("Row".into(), vec![("x".into(), Typ::Int)]),
+            (
+                "Nested".into(),
+                vec![("inner".into(), Typ::Named("Row".into()))],
+            ),
+        ]);
+        x86_64::set_32bit(true);
+        assert!(
+            record_array_fields(&structs, &Typ::Array(Box::new(Typ::Named("Row".into())))).is_err()
+        );
+        x86_64::set_32bit(false);
+        assert!(
+            record_array_fields(&structs, &Typ::Array(Box::new(Typ::Named("Nested".into()))))
+                .is_err()
+        );
+        assert!(
+            record_array_fields(
+                &structs,
+                &Typ::Array(Box::new(Typ::Named("Unknown".into())))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn vector_record_literals_keep_legacy_layout_and_index_refusal() {
+        let source = "struct Row{Int x}\nfn main()->Int{let first:Row=Row{x:20};let second:Row=Row{x:22};let rows:[Row]=[first,second];return array-len(rows)+40;}";
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        for decl in &mut module.decls {
+            if let Decl::Function { body, .. } = decl {
+                for stmt in body {
+                    if let Stmt::Let(name, typ, _) = stmt
+                        && name == "rows"
+                    {
+                        *typ = Some(Typ::Vector(Box::new(Typ::Named("Row".into()))));
+                    }
+                }
+            }
+        }
+        let result = lower_module_with_bases(&module, "main", 0, 0).unwrap();
+        // Legacy vector construction allocates one slot table, without the new
+        // per-element record payload allocations of a fixed record array.
+        assert_eq!(
+            result
+                .extern_calls
+                .iter()
+                .filter(|(name, _)| name == "malloc")
+                .count(),
+            1
+        );
+        for decl in &mut module.decls {
+            if let Decl::Function { body, .. } = decl {
+                body.pop();
+                body.push(Stmt::Let(
+                    "copy".into(),
+                    Some(Typ::Named("Row".into())),
+                    Expr::Index {
+                        base: Box::new(Expr::Ident("rows".into())),
+                        index: Box::new(Expr::IntLit(0)),
+                    },
+                ));
+                body.push(Stmt::Return(Some(Expr::IntLit(42))));
+            }
+        }
+        assert!(
+            lower_module(&module, "main")
+                .err()
+                .unwrap()
+                .contains("fixed record array")
+        );
+    }
+
+    #[test]
+    fn nested_record_arrays_do_not_use_pointer_slots_as_relative_child_headers() {
+        let structs = HashMap::from([("Row".into(), vec![("x".into(), Typ::Int)])]);
+        let nested = Typ::Array(Box::new(Typ::Array(Box::new(Typ::Named("Row".into())))));
+        assert!(
+            record_array_fields(&structs, &nested)
+                .err()
+                .unwrap()
+                .contains("nested record arrays")
+        );
+        let module = crate::in_lang_parse::parse_in_source("struct Row{Int x}\nvar rows:[[Row]]=[[Row{x:42}]]\nfn main()->Int{return array-len(rows);}").unwrap();
+        assert!(
+            lower_module(&module, "main")
+                .err()
+                .unwrap()
+                .contains("nested record arrays")
+        );
+    }
+
+    #[cfg(all(unix, target_arch = "x86_64"))]
+    #[test]
+    fn flat_record_arrays_preserve_values_aliases_and_heap_lifetimes() {
+        for source in [
+            r#"struct Row{Int x}
+fn main()->Int{let rows:[Row]=[Row{x:20},Row{x:22}];return rows[0].x+rows[1].x;}"#,
+            r#"struct Row{Int x}
+fn main()->Int{let same:Row=Row{x:20};let rows:[Row]=[same,same];let copy:Row=rows[0];rows[0].x=22;return copy.x+rows[1].x+rows[0].x - 20;}"#,
+            r#"struct Row{Int x;Int y}
+fn main()->Int{let rows:[Row]=[Row{x:20,y:1},Row{x:1,y:2}];let alias=rows;alias[0]=Row{x:21,y:2};alias[0]=alias[0];let copy:Row=rows[0];rows[0].x=19;return copy.x+copy.y+rows[0].x;}"#,
+            r#"struct Row{Int x}
+fn make()->[Row]{let rows:[Row]=[Row{x:20},Row{x:22}];return rows;}
+fn main()->Int{let rows=make();let trash:[Int]=[99,99,99];return rows[0].x+rows[1].x;}"#,
+            r#"struct Row{Int x}
+fn alter(rows:[Row])->Void{rows[0].x=22;}
+fn main()->Int{let rows:[Row]=[Row{x:20},Row{x:20}];alter(rows);return rows[0].x+rows[1].x;}"#,
+            r#"struct Row{Int x}
+fn change(self:Row)->Void{self.x=self.x+2;}
+fn main()->Int{let rows:[Row]=[Row{x:20},Row{x:20}];change(rows[0]);return rows[0].x+rows[1].x;}"#,
+            r#"struct Row{Int x}
+fn byvalue(value:Row)->Int{value.x=99;return 22;}
+fn main()->Int{let rows:[Row]=[Row{x:20}];return byvalue(rows[0])+rows[0].x;}"#,
+            r#"struct Row{Float amount;String text;Bool flag}
+fn main()->Int{let rows:[Row]=[Row{amount:1.5,text:"λ",flag:false}];rows[0].text="雪";rows[0].flag=true;rows[0].amount=2.5;if rows[0].amount==2.5 && rows[0].text=="雪" && rows[0].flag{return 42;}return 0;}"#,
+            r#"struct Row{Int x}
+var rows:[Row]=[Row{x:20},Row{x:22}]
+fn main()->Int{let copy:Row=rows[0];rows[0]=rows[1];rows[1].x=20;return copy.x+rows[0].x;}"#,
+            r#"struct Row{Int x;Int y}
+var rows:[Row]=[Row{x:20,y:1}]
+var trace:Int=0
+fn get()->[Row]{trace=trace*10+1;return rows;}
+fn at()->Int{trace=trace*10+2;return 0;}
+fn next()->Row{trace=trace*10+3;return Row{x:40,y:2};}
+fn main()->Int{get()[at()]=next();if trace!=123{return 1;}return rows[0].x+rows[0].y;}"#,
+            r#"struct Row{Int x;Int y}
+fn fail()->Row{throw 7;return Row{x:99,y:99};}
+fn main()->Int{let rows:[Row]=[Row{x:20,y:22}];try{rows[0]=fail();}catch e{}return rows[0].x+rows[0].y;}"#,
+            r#"struct Row{Int x}
+fn read(rows:[Row],index:Int)->Int{return rows[index].x;}
+fn main()->Int{let rows:[Row]=[Row{x:42}];if read(rows,-1)!=1 || read(rows,1)!=1{return 2;}return read(rows,0);}"#,
+            r#"struct Row{Int x}
+fn read(rows:[Row],index:Int)->Int{return rows[index].x;}
+fn main()->Int{let rows:[Row]=[];if read(rows,0)==1{return 42;}return 0;}"#,
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let _profile = antidecomp::ProfileGuard::new(profile);
+                let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                let result =
+                    lower_module_impl(&module, "main", 0, 0, X86StringLayout::Instring, true)
+                        .unwrap();
+                let offsets: Vec<_> = result
+                    .exports
+                    .iter()
+                    .map(|(name, offset)| (name.clone(), *offset, 0))
+                    .collect();
+                let relocations: Vec<_> = result
+                    .relocations
+                    .iter()
+                    .map(|site| (*site, result.codegen_base))
+                    .collect();
+                let mut runtime = crate::jit_runtime::JitRuntime::new();
+                runtime
+                    .load_with_data_relocations(
+                        &result.code,
+                        &offsets,
+                        &relocations,
+                        &result.data,
+                        &result.global_relocs,
+                        &result.data_relocations,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    unsafe { runtime.invoke("main", &[]) },
+                    Some(42),
+                    "{profile:?}: {source}"
+                );
+            }
+        }
     }
 }

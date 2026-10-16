@@ -463,6 +463,11 @@ pub(crate) fn lower_call_arg(
         Typ::Named(struct_name) => {
             // ponytail: "self" parameter in impl methods is always &self (reference)
             if param_name == "self" {
+                if matches!(arg, Expr::Index { .. })
+                    && !matches!(super::lower_expr::native_expr_type(arg, ctx, functions).map(|typ| typ.canonical()), Some(Typ::Named(actual)) if actual == *struct_name)
+                {
+                    return Err("native-lower: indexed record receiver type mismatch".into());
+                }
                 // Pass pointer to struct by emitting address of first field into reg
                 lower_struct_ptr_arg(emitter, ctx, arg, reg, functions, pending_calls, fn_name)
             } else {
@@ -744,6 +749,19 @@ pub(crate) fn lower_struct_ptr_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
+    if let Expr::Index { base, index } = arg {
+        super::lower_expr::lower_record_index_address(
+            emitter,
+            ctx,
+            base,
+            index,
+            reg,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        return Ok(reg + 1);
+    }
     if let Some((root, field)) = super::lower_util::field_path(arg)
         && !field.is_empty()
     {
@@ -950,6 +968,9 @@ pub(crate) fn lower_array_call_arg(
         return Ok(reg + words);
     }
 
+    if matches!(elem.canonical(), Typ::Named(_)) {
+        super::lower_util::record_array_fields(elem, ctx.structs)?;
+    }
     if let Expr::Ident(name) = arg
         && !ctx.locals.contains_key(name)
         && matches!(
@@ -966,7 +987,9 @@ pub(crate) fn lower_array_call_arg(
         lower_expr_into(emitter, ctx, arg, reg, functions, pending_calls, fn_name)?;
         return Ok(reg + 2);
     }
-    if !is_native_scalar_type(elem) {
+    if !is_native_scalar_type(elem)
+        && super::lower_util::record_array_fields(elem, ctx.structs)?.is_none()
+    {
         return Err(format!(
             "native-lower: array argument must have scalar element type, got `{elem:?}` in `{fn_name}`"
         ));

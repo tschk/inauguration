@@ -633,7 +633,7 @@ pub fn lower_module_with_jobs(
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
     let strings = collect_strings(module);
-    let globals = super::global_data::collect_globals(module, &structs);
+    let globals = super::global_data::collect_globals(module, &structs)?;
     let super::global_data::DataSection {
         bytes: data,
         pointer_fixups: data_relocations,
@@ -1003,8 +1003,8 @@ fn lower_function(
     for index in 0..ctx.call_arg_temps.len() {
         ctx.call_arg_temps[index] = ctx.alloc_slot();
     }
-    let aggregate_vector_words =
-        max_aggregate_vector_literal_words(&func.body, structs, &func.name)?;
+    let staging = native_staging_plan(&func.body, &ctx, functions, &func.name)?;
+    let aggregate_vector_words = (staging.vector != 0).then_some(staging.vector);
     if has_struct_return_vec_literal(&func.body)
         || aggregate_vector_words.is_some()
         || has_iter_once(&func.body)
@@ -1033,6 +1033,20 @@ fn lower_function(
             ctx.alloc_slot();
         }
         ctx.aggregate_vector_scratch = Some((offset, words));
+    }
+    let record_words = staging.record;
+    if record_words != 0 {
+        let bytes = record_words
+            .checked_mul(8)
+            .ok_or("native-lower: record array staging size overflow")?;
+        if bytes > 4095 {
+            return Err("native-lower: record array staging exceeds AArch64 frame subset".into());
+        }
+        let offset = ctx.alloc_slot();
+        for _ in 1..record_words {
+            ctx.alloc_slot();
+        }
+        ctx.record_array_scratch = Some((offset, record_words));
     }
     if ctx.stack_reserve() > 4095 {
         return Err(format!(
@@ -1389,229 +1403,332 @@ fn has_struct_return_vec_literal(body: &[Stmt]) -> bool {
     })
 }
 
-fn max_aggregate_vector_literal_words(
-    body: &[Stmt],
+fn max_nested_vector_element_words(
+    typ: &Typ,
     structs: &HashMap<String, Vec<(String, Typ)>>,
     fn_name: &str,
-) -> Result<Option<usize>, String> {
-    fn max_nested_vector_element_words(
-        typ: &Typ,
-        structs: &HashMap<String, Vec<(String, Typ)>>,
-        fn_name: &str,
-        visited: &mut Vec<String>,
-        depth: u32,
-    ) -> Result<usize, String> {
-        if depth > 40 {
-            return Ok(0);
+    visited: &mut Vec<String>,
+    depth: u32,
+) -> Result<usize, String> {
+    if depth > 40 {
+        return Ok(0);
+    }
+    match typ {
+        Typ::Vector(element) => {
+            let mut max = lower_util::native_param_abi_slots(
+                &[("value".to_string(), (**element).clone())],
+                structs,
+                fn_name,
+            )?;
+            max = max.max(max_nested_vector_element_words(
+                element,
+                structs,
+                fn_name,
+                visited,
+                depth + 1,
+            )?);
+            Ok(max)
         }
-        match typ {
-            Typ::Vector(element) => {
-                let mut max = lower_util::native_param_abi_slots(
-                    &[("value".to_string(), (**element).clone())],
-                    structs,
-                    fn_name,
-                )?;
+        Typ::Named(name) => {
+            let base = base_struct_name(name);
+            if visited.iter().any(|v| v == base) {
+                return Ok(0);
+            }
+            visited.push(base.to_string());
+            let fields = lower_util::native_struct_fields(structs, name, fn_name)?;
+            let mut max = 0;
+            for (_, field_typ) in fields {
                 max = max.max(max_nested_vector_element_words(
-                    element,
+                    &field_typ,
                     structs,
                     fn_name,
                     visited,
                     depth + 1,
                 )?);
-                Ok(max)
             }
-            Typ::Named(name) => {
-                let base = base_struct_name(name);
-                if visited.iter().any(|v| v == base) {
-                    return Ok(0);
-                }
-                visited.push(base.to_string());
-                let fields = lower_util::native_struct_fields(structs, name, fn_name)?;
-                let mut max = 0;
-                for (_, field_typ) in fields {
-                    max = max.max(max_nested_vector_element_words(
-                        &field_typ,
-                        structs,
-                        fn_name,
-                        visited,
-                        depth + 1,
-                    )?);
-                }
-                visited.pop();
-                Ok(max)
-            }
-            Typ::Array(element) => {
-                max_nested_vector_element_words(element, structs, fn_name, visited, depth + 1)
-            }
-            _ => Ok(0),
+            visited.pop();
+            Ok(max)
         }
+        Typ::Array(element) => {
+            max_nested_vector_element_words(element, structs, fn_name, visited, depth + 1)
+        }
+        _ => Ok(0),
     }
-    fn inspect_expr(
-        expr: &Expr,
-        structs: &HashMap<String, Vec<(String, Typ)>>,
-        fn_name: &str,
-        max: &mut usize,
-    ) -> Result<(), String> {
-        match expr {
-            Expr::MatchValue { scrutinee, arms } => {
-                inspect_expr(scrutinee, structs, fn_name, max)?;
-                for arm in arms {
-                    if let Some(guard) = &arm.guard {
-                        inspect_expr(guard, structs, fn_name, max)?;
-                    }
-                    inspect_expr(&arm.value, structs, fn_name, max)?;
-                }
-            }
-            Expr::Conditional {
-                cond,
-                then_expr,
-                else_expr,
-            } => {
-                for value in [cond, then_expr, else_expr] {
-                    inspect_expr(value, structs, fn_name, max)?;
-                }
-            }
-            Expr::Block { body, result } => {
-                inspect_body(body, structs, fn_name, max)?;
-                if let Some(value) = result {
-                    inspect_expr(value, structs, fn_name, max)?;
-                }
-            }
+}
 
-            Expr::ArrayLit(items) => {
-                if let Some(Expr::StructInit { name, .. }) = items.first() {
-                    let words = lower_util::native_param_abi_slots(
-                        &[("value".to_string(), Typ::Named(name.clone()))],
-                        structs,
-                        fn_name,
-                    )?;
-                    *max = (*max).max(words);
-                    let mut visited = Vec::new();
-                    *max = (*max).max(max_nested_vector_element_words(
-                        &Typ::Named(name.clone()),
-                        structs,
-                        fn_name,
-                        &mut visited,
-                        0,
-                    )?);
-                }
-                for item in items {
-                    inspect_expr(item, structs, fn_name, max)?;
-                }
-            }
-            Expr::Binary { lhs, rhs, .. } => {
-                inspect_expr(lhs, structs, fn_name, max)?;
-                inspect_expr(rhs, structs, fn_name, max)?;
-            }
-            Expr::Unary { expr, .. } | Expr::Field { base: expr, .. } => {
-                inspect_expr(expr, structs, fn_name, max)?;
-            }
-            Expr::Index { base, index } => {
-                inspect_expr(base, structs, fn_name, max)?;
-                inspect_expr(index, structs, fn_name, max)?;
-            }
-            Expr::Call { callee, args, .. } => {
-                inspect_expr(callee, structs, fn_name, max)?;
-                for arg in args {
-                    inspect_expr(arg, structs, fn_name, max)?;
-                }
-            }
-            Expr::StructInit { fields, .. } => {
-                for (_, value) in fields {
-                    inspect_expr(value, structs, fn_name, max)?;
-                }
-            }
-            Expr::Closure { body, .. } => {
-                for stmt in body {
-                    if let Stmt::Return(Some(Expr::StructInit { name, .. })) = stmt {
-                        let words = lower_util::native_param_abi_slots(
-                            &[("value".to_string(), Typ::Named(name.clone()))],
-                            structs,
-                            fn_name,
-                        )?;
-                        *max = (*max).max(words);
-                        let mut visited = Vec::new();
-                        *max = (*max).max(max_nested_vector_element_words(
-                            &Typ::Named(name.clone()),
-                            structs,
-                            fn_name,
-                            &mut visited,
-                            0,
-                        )?);
-                    }
-                }
-                inspect_body(body, structs, fn_name, max)?;
-            }
-            Expr::UnitLit
-            | Expr::IntLit(_)
-            | Expr::FloatLit(_)
-            | Expr::StringLit(_)
-            | Expr::BoolLit(_)
-            | Expr::Ident(_) => {}
-        }
-        Ok(())
+/// Peak simultaneously live typed record staging words. Sequential items and
+/// branches reuse storage; a record being built retains its fields while a
+/// nested record operation runs. Each called function plans its own frame.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct NativeStagingPlan {
+    record: usize,
+    vector: usize,
+}
+
+fn native_staging_plan(
+    body: &[Stmt],
+    ctx: &LowerCtx<'_>,
+    functions: &HashMap<String, FunctionInfo>,
+    fn_name: &str,
+) -> Result<NativeStagingPlan, String> {
+    struct Planner<'a, 'b> {
+        ctx: &'a LowerCtx<'b>,
+        functions: &'a HashMap<String, FunctionInfo>,
+        vector: std::cell::Cell<usize>,
+        fn_name: &'a str,
     }
-    fn inspect_body(
-        body: &[Stmt],
-        structs: &HashMap<String, Vec<(String, Typ)>>,
-        fn_name: &str,
-        max: &mut usize,
-    ) -> Result<(), String> {
-        for stmt in body {
-            match stmt {
-                Stmt::Let(_, _, expr)
-                | Stmt::Assign(_, expr)
-                | Stmt::Expr(expr)
-                | Stmt::Return(Some(expr))
-                | Stmt::Throw(expr) => inspect_expr(expr, structs, fn_name, max)?,
-                Stmt::IndexAssign {
-                    base, index, value, ..
-                } => {
-                    inspect_expr(base, structs, fn_name, max)?;
-                    inspect_expr(index, structs, fn_name, max)?;
-                    inspect_expr(value, structs, fn_name, max)?;
+    impl Planner<'_, '_> {
+        fn record_words(&self, typ: &Typ) -> Result<usize, String> {
+            Ok(lower_util::record_array_fields(typ, self.ctx.structs)?
+                .map_or(0, |fields| fields.len()))
+        }
+        fn value(&self, expr: &Expr, expected: Option<&Typ>) -> Result<usize, String> {
+            match expr {
+                Expr::ArrayLit(items) => {
+                    // An explicit Array destination does not use Vec staging. For
+                    // ambiguous literals retain the previous conservative Vec plan.
+                    let destination = expected.map(Typ::canonical);
+                    if !matches!(destination, Some(Typ::Array(_))) {
+                        let nominal = match &destination {
+                            Some(Typ::Vector(element)) => match element.canonical() {
+                                Typ::Named(name) => Some(name),
+                                _ => None,
+                            },
+                            _ => items.first().and_then(|item| match item {
+                                Expr::StructInit { name, .. } => Some(name.clone()),
+                                _ => None,
+                            }),
+                        };
+                        if let Some(name) = nominal {
+                            let words = lower_util::native_param_abi_slots(
+                                &[("value".to_string(), Typ::Named(name.clone()))],
+                                self.ctx.structs,
+                                self.fn_name,
+                            )?;
+                            let nested = max_nested_vector_element_words(
+                                &Typ::Named(name),
+                                self.ctx.structs,
+                                self.fn_name,
+                                &mut Vec::new(),
+                                0,
+                            )?;
+                            self.vector.set(self.vector.get().max(words).max(nested));
+                        }
+                    }
+                    let typ = expected
+                        .cloned()
+                        .or_else(|| lower_expr::native_expr_type(expr, self.ctx, self.functions));
+                    let (element, staged) = match typ.map(|typ| typ.canonical()) {
+                        Some(Typ::Array(element)) => {
+                            let words = if expected.is_some() {
+                                self.record_words(&element)?
+                            } else {
+                                self.record_words(&element).unwrap_or(0)
+                            };
+                            (Some(element), words)
+                        }
+                        Some(Typ::Vector(element)) => (Some(element), 0),
+                        _ => (None, 0),
+                    };
+                    let nested = items.iter().try_fold(0usize, |peak, item| {
+                        self.value(item, element.as_deref())
+                            .map(|words| peak.max(words))
+                    })?;
+                    staged
+                        .checked_add(nested)
+                        .ok_or_else(|| "native-lower: record array staging size overflow".into())
                 }
-                Stmt::FieldAssign { base, value, .. } => {
-                    inspect_expr(base, structs, fn_name, max)?;
-                    inspect_expr(value, structs, fn_name, max)?;
-                }
-                Stmt::If {
+                Expr::Block { body, result } => Ok(self.body(body)?.max(
+                    result
+                        .as_ref()
+                        .map(|value| self.value(value, expected))
+                        .transpose()?
+                        .unwrap_or(0),
+                )),
+                Expr::Conditional {
                     cond,
-                    then_body,
-                    else_body,
-                } => {
-                    inspect_expr(cond, structs, fn_name, max)?;
-                    inspect_body(then_body, structs, fn_name, max)?;
-                    inspect_body(else_body, structs, fn_name, max)?;
-                }
-                Stmt::Loop { cond, body, .. } => {
-                    if let Some(cond) = cond {
-                        inspect_expr(cond, structs, fn_name, max)?;
-                    }
-                    inspect_body(body, structs, fn_name, max)?;
-                }
-                Stmt::Match {
-                    scrutinee, arms, ..
-                } => {
-                    inspect_expr(scrutinee, structs, fn_name, max)?;
+                    then_expr,
+                    else_expr,
+                } => Ok(self
+                    .value(cond, None)?
+                    .max(self.value(then_expr, expected)?)
+                    .max(self.value(else_expr, expected)?)),
+                Expr::MatchValue { scrutinee, arms } => {
+                    let mut peak = self.value(scrutinee, None)?;
                     for arm in arms {
-                        inspect_body(&arm.body, structs, fn_name, max)?;
+                        if let Some(guard) = &arm.guard {
+                            peak = peak.max(self.value(guard, None)?);
+                        }
+                        peak = peak.max(self.value(&arm.value, expected)?);
                     }
+                    Ok(peak)
                 }
-                Stmt::Try { body, catches, .. } => {
-                    inspect_body(body, structs, fn_name, max)?;
-                    for catch in catches {
-                        inspect_body(&catch.body, structs, fn_name, max)?;
+                Expr::StructInit { name, fields } => {
+                    let schema = self.ctx.structs.get(name);
+                    let mut peak = 0;
+                    for (field, value) in fields {
+                        let typ = schema
+                            .and_then(|schema| schema.iter().find(|(name, _)| name == field))
+                            .map(|(_, typ)| typ);
+                        peak = peak.max(self.value(value, typ)?);
                     }
+                    Ok(peak)
                 }
-                Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
+                Expr::Call { callee, args } => {
+                    let mut peak = self.value(callee, None)?;
+                    let function = if let Expr::Ident(name) = callee.as_ref() {
+                        self.functions.get(name)
+                    } else {
+                        None
+                    };
+                    for (index, arg) in args.iter().enumerate() {
+                        peak = peak.max(
+                            self.value(
+                                arg,
+                                function
+                                    .and_then(|function| function.params.get(index))
+                                    .map(|(_, typ)| typ),
+                            )?,
+                        );
+                    }
+                    Ok(peak)
+                }
+                // A closure owns another function frame after shared preparation.
+                Expr::Closure { body, .. } => {
+                    for stmt in body {
+                        if let Stmt::Return(Some(Expr::StructInit { name, .. })) = stmt {
+                            let words = lower_util::native_param_abi_slots(
+                                &[("value".to_string(), Typ::Named(name.clone()))],
+                                self.ctx.structs,
+                                self.fn_name,
+                            )?;
+                            let nested = max_nested_vector_element_words(
+                                &Typ::Named(name.clone()),
+                                self.ctx.structs,
+                                self.fn_name,
+                                &mut Vec::new(),
+                                0,
+                            )?;
+                            self.vector.set(self.vector.get().max(words).max(nested));
+                        }
+                    }
+                    self.body(body)?;
+                    Ok(0)
+                }
+                _ => {
+                    let mut peak = Ok(0usize);
+                    crate::core_ir::for_each_expr_child(expr, &mut |child| {
+                        peak = peak.as_ref().map_err(Clone::clone).and_then(|current| {
+                            self.value(child, None).map(|words| (*current).max(words))
+                        });
+                    });
+                    peak
+                }
             }
         }
-        Ok(())
+        fn body(&self, body: &[Stmt]) -> Result<usize, String> {
+            let mut peak = 0;
+            for stmt in body {
+                let words = match stmt {
+                    Stmt::Let(name, typ, value) => {
+                        let inferred = lower_expr::native_expr_type(
+                            &Expr::Ident(name.clone()),
+                            self.ctx,
+                            self.functions,
+                        );
+                        self.value(value, typ.as_ref().or(inferred.as_ref()))?
+                    }
+                    Stmt::Assign(name, value) => {
+                        let typ = lower_expr::native_expr_type(
+                            &Expr::Ident(name.clone()),
+                            self.ctx,
+                            self.functions,
+                        );
+                        self.value(value, typ.as_ref())?
+                    }
+                    Stmt::Return(Some(value)) => self.value(value, Some(&self.ctx.ret_typ))?,
+                    Stmt::Expr(value) | Stmt::Throw(value) => self.value(value, None)?,
+                    Stmt::IndexAssign { base, index, value } => {
+                        let element =
+                            match lower_expr::native_expr_type(base, self.ctx, self.functions)
+                                .map(|typ| typ.canonical())
+                            {
+                                Some(Typ::Array(element)) => Some(element),
+                                _ => None,
+                            };
+                        let stage = element
+                            .as_ref()
+                            .map(|typ| self.record_words(typ))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let replacement = stage
+                            .checked_add(self.value(value, element.as_deref())?)
+                            .ok_or("native-lower: record array staging size overflow")?;
+                        self.value(base, None)?
+                            .max(self.value(index, None)?)
+                            .max(replacement)
+                    }
+                    Stmt::FieldAssign { base, name, value } => {
+                        let typ = lower_expr::native_expr_type(
+                            &Expr::Field {
+                                base: Box::new(base.clone()),
+                                name: name.clone(),
+                            },
+                            self.ctx,
+                            self.functions,
+                        );
+                        self.value(base, None)?
+                            .max(self.value(value, typ.as_ref())?)
+                    }
+                    Stmt::If {
+                        cond,
+                        then_body,
+                        else_body,
+                    } => self
+                        .value(cond, None)?
+                        .max(self.body(then_body)?)
+                        .max(self.body(else_body)?),
+                    Stmt::Loop { cond, body, .. } => cond
+                        .as_ref()
+                        .map(|cond| self.value(cond, None))
+                        .transpose()?
+                        .unwrap_or(0)
+                        .max(self.body(body)?),
+                    Stmt::Match { scrutinee, arms } => {
+                        let mut words = self.value(scrutinee, None)?;
+                        for arm in arms {
+                            if let Some(guard) = &arm.guard {
+                                words = words.max(self.value(guard, None)?);
+                            }
+                            words = words.max(self.body(&arm.body)?);
+                        }
+                        words
+                    }
+                    Stmt::Try { body, catches, .. } => {
+                        let mut words = self.body(body)?;
+                        for catch in catches {
+                            words = words.max(self.body(&catch.body)?);
+                        }
+                        words
+                    }
+                    Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => 0,
+                };
+                peak = peak.max(words);
+            }
+            Ok(peak)
+        }
     }
-    let mut max = 0;
-    inspect_body(body, structs, fn_name, &mut max)?;
-    Ok((max != 0).then_some(max))
+    let planner = Planner {
+        ctx,
+        functions,
+        vector: std::cell::Cell::new(0),
+        fn_name,
+    };
+    let record = planner.body(body)?;
+    Ok(NativeStagingPlan {
+        record,
+        vector: planner.vector.get(),
+    })
 }
 
 #[cfg(test)]
@@ -1627,5 +1744,171 @@ mod global_data_assembly_tests {
         assert_eq!(asm.matches(".byte 99").count(), 8, "{asm}");
         let raw = super::build_assembly(&[], &[], &[], &[], &[42], &[], &[], "main");
         assert!(raw.contains("_inrt_globals:\n\t.byte 42"), "{raw}");
+    }
+}
+
+#[cfg(test)]
+mod record_array_plan_tests {
+    use super::*;
+
+    fn row(x: Expr, y: Expr) -> Expr {
+        Expr::StructInit {
+            name: "Row".into(),
+            fields: vec![("x".into(), x), ("y".into(), y)],
+        }
+    }
+    fn plan(body: &[Stmt], params: &[(String, Typ)]) -> NativeStagingPlan {
+        let structs = HashMap::from([(
+            "Row".into(),
+            vec![("x".into(), Typ::Int), ("y".into(), Typ::Int)],
+        )]);
+        let string_offsets = HashMap::new();
+        let globals = HashMap::new();
+        let global_types = HashMap::new();
+        let mut runtime = Vec::new();
+        let mut strings = Vec::new();
+        let mut ctx = LowerCtx::new(
+            params,
+            &structs,
+            &string_offsets,
+            &globals,
+            &global_types,
+            &mut runtime,
+            &mut strings,
+            "test",
+        )
+        .unwrap();
+        let functions = HashMap::new();
+        alloc_declared_locals(&mut ctx, body, "test", &functions).unwrap();
+        native_staging_plan(body, &ctx, &functions, "test").unwrap()
+    }
+    fn array_typ() -> Typ {
+        Typ::Array(Box::new(Typ::Named("Row".into())))
+    }
+    fn replace(value: Expr) -> Stmt {
+        Stmt::IndexAssign {
+            base: Expr::Ident("rows".into()),
+            index: Expr::IntLit(0),
+            value,
+        }
+    }
+
+    #[test]
+    fn fixed_record_literal_does_not_reserve_unrelated_vector_stage() {
+        let body = [Stmt::Let(
+            "rows".into(),
+            Some(array_typ()),
+            Expr::ArrayLit(vec![row(Expr::IntLit(20), Expr::IntLit(22))]),
+        )];
+        assert_eq!(
+            plan(&body, &[]),
+            NativeStagingPlan {
+                record: 2,
+                vector: 0
+            }
+        );
+    }
+
+    #[test]
+    fn nested_replacement_retains_outer_stage_but_siblings_reuse_it() {
+        let inner = replace(row(Expr::IntLit(1), Expr::IntLit(2)));
+        let outer = replace(row(
+            Expr::IntLit(20),
+            Expr::Block {
+                body: vec![inner],
+                result: Some(Box::new(Expr::IntLit(22))),
+            },
+        ));
+        assert_eq!(plan(&[outer], &[("rows".into(), array_typ())]).record, 4);
+        let sibling = replace(row(Expr::IntLit(20), Expr::IntLit(22)));
+        assert_eq!(
+            plan(&[sibling.clone(), sibling], &[("rows".into(), array_typ())]).record,
+            2
+        );
+    }
+
+    #[test]
+    fn array_of_record_identifiers_uses_schema_sized_stage() {
+        let body = [Stmt::Let(
+            "rows".into(),
+            Some(array_typ()),
+            Expr::ArrayLit(vec![Expr::Ident("value".into())]),
+        )];
+        assert_eq!(
+            plan(&body, &[("value".into(), Typ::Named("Row".into()))]),
+            NativeStagingPlan {
+                record: 2,
+                vector: 0
+            }
+        );
+    }
+
+    #[test]
+    fn contextual_vector_still_plans_existing_aggregate_materializer() {
+        let structs = HashMap::from([(
+            "Row".into(),
+            vec![("x".into(), Typ::Int), ("y".into(), Typ::Int)],
+        )]);
+        let strings = HashMap::new();
+        let globals = HashMap::new();
+        let global_types = HashMap::new();
+        let mut runtime = Vec::new();
+        let mut pending_strings = Vec::new();
+        let ctx = LowerCtx::new(
+            &[],
+            &structs,
+            &strings,
+            &globals,
+            &global_types,
+            &mut runtime,
+            &mut pending_strings,
+            "test",
+        )
+        .unwrap();
+        let body = [Stmt::Let(
+            "values".into(),
+            Some(Typ::Vector(Box::new(Typ::Named("Row".into())))),
+            Expr::ArrayLit(vec![row(Expr::IntLit(20), Expr::IntLit(22))]),
+        )];
+        assert_eq!(
+            native_staging_plan(&body, &ctx, &HashMap::new(), "test").unwrap(),
+            NativeStagingPlan {
+                record: 0,
+                vector: 2
+            }
+        );
+    }
+}
+
+#[cfg(test)]
+mod record_array_lowering_tests {
+    use super::*;
+
+    #[test]
+    fn lowers_owned_record_array_value_and_place_flows() {
+        for source in [
+            "struct Row{Int x;Int y}\nfn main()->Int{let rows:[Row]=[Row{x:20,y:22}];return rows[0].x+rows[0].y;}",
+            "struct Row{Int x;Int y}\nfn make()->[Row]{let value=Row{x:20,y:22};return [value,value];}\nfn sum(rows:[Row])->Int{let value=rows[0];rows[1]=value;rows[0].x=20;return rows[1].x+rows[1].y;}\nfn main()->Int{return sum(make());}",
+            "struct Row{Int x;Int y}\nfn main()->Int{let rows:[Row]=[Row{x:1,y:2}];rows[0]=Row{x:20,y:{rows[0]=Row{x:3,y:4};22}};return rows[0].x+rows[0].y;}",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).expect("parse record array");
+            lower_module(&module, "main", NativeLinkage::Executable).expect(source);
+        }
+    }
+
+    #[test]
+    fn retains_unsupported_record_array_schema_refusals() {
+        for source in [
+            "struct Empty{}\nfn main()->Int{let values:[Empty]=[Empty{}];return 42;}",
+            "struct Inner{Int x}\nstruct Outer{Inner nested}\nfn main()->Int{let values:[Outer]=[Outer{nested:Inner{x:42}}];return 42;}",
+            "struct Row{[Int] values}\nfn main()->Int{let values:[Row]=[Row{values:[42]}];return 42;}",
+        ] {
+            let module =
+                crate::in_lang_parse::parse_in_source(source).expect("parse unsupported schema");
+            assert!(
+                lower_module(&module, "main", NativeLinkage::Executable).is_err(),
+                "{source}"
+            );
+        }
     }
 }

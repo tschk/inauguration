@@ -27,7 +27,7 @@ fn is_variable_modify(expr: &Expr) -> bool {
 fn is_addressable(expr: &Expr) -> bool {
     match expr {
         Expr::Ident(_) => true,
-        Expr::Field { base, .. } => is_addressable(base),
+        Expr::Field { base, .. } | Expr::Index { base, .. } => is_addressable(base),
         Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW) =>
         {
             matches!(args.as_slice(), [value] if is_addressable(value))
@@ -300,6 +300,24 @@ impl Lower {
         Expr::Ident(name)
     }
 
+    fn stage_receiver_place(&mut self, expr: &mut Expr, out: &mut Vec<Stmt>) {
+        match expr {
+            Expr::Index { base, index } => {
+                self.expr(base, out);
+                **base = self.save((**base).clone(), out);
+                self.expr(index, out);
+                **index = self.save((**index).clone(), out);
+            }
+            Expr::Field { base, .. } => self.stage_receiver_place(base, out),
+            Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW) => {
+                if let [value] = args.as_mut_slice() {
+                    self.stage_receiver_place(value, out);
+                }
+            }
+            _ => self.expr(expr, out),
+        }
+    }
+
     fn expr_type(&self, expr: &Expr) -> Option<Typ> {
         crate::typecheck::TypeChecker::new().expr_type(expr, &self.facts, &self.types)
     }
@@ -561,7 +579,12 @@ impl Lower {
                 None
             };
             for (index, arg) in args.iter_mut().enumerate() {
-                self.expr(arg, out);
+                if receiver == Some(index) {
+                    // Freeze indexed places before later argument prefixes, without copying the receiver.
+                    self.stage_receiver_place(arg, out);
+                } else {
+                    self.expr(arg, out);
+                }
                 if receiver != Some(index) || !is_addressable(arg) {
                     let literal_vector = index == 1 && matches!(arg, Expr::ArrayLit(_));
                     *arg = self.save(arg.clone(), out);
@@ -905,5 +928,104 @@ mod tests {
             assert!(!report.ok, "{report:?}");
             assert_eq!(report.reason_code.as_deref(), Some("unresolved-symbol"));
         }
+    }
+}
+
+#[cfg(test)]
+mod indexed_receiver_place_tests {
+    use super::*;
+
+    #[test]
+    fn indexed_receiver_stages_base_and_index_before_later_argument_spills() {
+        for form in ["direct", "borrow", "field"] {
+            let (schemas, storage, receiver) = if form == "field" {
+                (
+                    "struct Row{Int value}\nstruct Holder{Row inner}",
+                    "var rows:[Holder]=[Holder{inner:Row{value:42}}]\nfn get()->[Holder]{return rows;}",
+                    "get()[at()].inner",
+                )
+            } else {
+                (
+                    "struct Row{Int value}",
+                    "var rows:[Row]=[Row{value:42}]\nfn get()->[Row]{return rows;}",
+                    "get()[at()]",
+                )
+            };
+            let source = format!(
+                "{schemas}\n{storage}\nfn at()->Int{{return 0;}}\nfn next()->Int{{return 1;}}\nfn change(self:Row,values:[Int])->Void{{return;}}\nfn main()->Int{{change({receiver},array-repeat(next(),2));return 42;}}"
+            );
+            let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            if form == "borrow" {
+                let Decl::Function { body, .. } = module.decls.last_mut().unwrap() else {
+                    panic!("missing main")
+                };
+                let Stmt::Expr(Expr::Call { args, .. }) = &mut body[0] else {
+                    panic!("missing call")
+                };
+                args[0] = Expr::Call {
+                    callee: Box::new(Expr::Ident(crate::core_ir::BORROW.into())),
+                    args: vec![args[0].clone()],
+                };
+            }
+            lower_value_spills(&mut module.decls);
+            let body = module
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Function { name, body, .. } if name == "main" => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            let calls: Vec<_> = body
+                .iter()
+                .filter_map(|stmt| match stmt {
+                    Stmt::Let(_, _, Expr::Call { callee, .. }) => match callee.as_ref() {
+                        Expr::Ident(name) => Some(name.as_str()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(calls, ["get", "at", "next"], "{form}");
+            let args=body.iter().find_map(|stmt|match stmt {
+                Stmt::Expr(Expr::Call{callee,args}) if matches!(callee.as_ref(),Expr::Ident(name) if name=="change")=>Some(args),
+                _=>None,
+            }).unwrap();
+            let place = match (form, &args[0]) {
+                ("borrow", Expr::Call { callee, args }) if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::BORROW) => {
+                    &args[0]
+                }
+                ("field", Expr::Field { base, name }) if name == "inner" => base.as_ref(),
+                ("direct", place) => place,
+                _ => panic!("receiver wrapper changed: {form}"),
+            };
+            let Expr::Index { base, index } = place else {
+                panic!("receiver was copied into a value: {form}")
+            };
+            let (Expr::Ident(base), Expr::Ident(index)) = (base.as_ref(), index.as_ref()) else {
+                panic!("place operands were not staged: {form}")
+            };
+            for (name, call) in [(base, "get"), (index, "at")] {
+                assert!(body.iter().any(|stmt|matches!(stmt,Stmt::Let(saved,_,Expr::Call{callee,..}) if saved==name && matches!(callee.as_ref(),Expr::Ident(name) if name==call))),"{form}");
+            }
+            assert!(
+                !body.iter().any(
+                    |stmt| matches!(stmt,Stmt::Let(_,Some(Typ::Named(name)),_) if name=="Row")
+                ),
+                "{form}"
+            );
+            let once = module.decls.clone();
+            lower_value_spills(&mut module.decls);
+            assert_eq!(module.decls, once, "{form}");
+        }
+    }
+
+    #[test]
+    fn pure_indexed_receiver_needs_no_value_copy_spill() {
+        let source = "struct Row{Int value}\nfn change(self:Row)->Void{return;}\nfn main()->Int{let rows:[Row]=[Row{value:41}];change(rows[0]);return rows[0].value;}";
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        let original = module.decls.clone();
+        lower_value_spills(&mut module.decls);
+        assert_eq!(module.decls, original);
     }
 }

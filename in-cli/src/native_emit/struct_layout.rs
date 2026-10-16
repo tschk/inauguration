@@ -2,6 +2,33 @@
 use crate::core_ir::Typ;
 use std::collections::HashMap;
 
+/// Strict admission for independently stored fixed-array record payloads.
+pub(crate) fn flat_record_fields(
+    structs: &HashMap<String, Vec<(String, Typ)>>,
+    name: &str,
+) -> Result<Vec<(String, Typ)>, String> {
+    let fields = structs
+        .get(name)
+        .ok_or_else(|| format!("unknown flat record layout `{name}`"))?;
+    if fields.is_empty() {
+        return Err(format!("empty flat record layout `{name}`"));
+    }
+    let mut names = std::collections::HashSet::with_capacity(fields.len());
+    fields
+        .iter()
+        .map(|(field, typ)| {
+            if !names.insert(field.as_str()) {
+                return Err(format!("duplicate flat record field `{name}.{field}`"));
+            }
+            let typ = typ.canonical();
+            if !matches!(typ, Typ::Int | Typ::Bool | Typ::Float | Typ::String) {
+                return Err(format!("unsupported flat record field `{name}.{field}`"));
+            }
+            Ok((field.clone(), typ))
+        })
+        .collect()
+}
+
 pub(crate) fn scalar_fields(
     structs: &HashMap<String, Vec<(String, Typ)>>,
     name: &str,
@@ -160,5 +187,45 @@ mod tests {
             ]
         );
         assert!(scalar_fields(&structs, "Outer").is_err());
+    }
+}
+
+#[cfg(test)]
+mod flat_record_admission_tests {
+    use super::*;
+
+    #[test]
+    fn flat_admission_does_not_inherit_recursive_scalar_flattening() {
+        let schemas = HashMap::from([
+            ("Leaf".into(), vec![("value".into(), Typ::Int)]),
+            (
+                "Outer".into(),
+                vec![("leaf".into(), Typ::Named("Leaf".into()))],
+            ),
+            ("Empty".into(), vec![]),
+            (
+                "Duplicate".into(),
+                vec![("value".into(), Typ::Int), ("value".into(), Typ::Bool)],
+            ),
+            (
+                "Array".into(),
+                vec![("values".into(), Typ::Array(Box::new(Typ::Int)))],
+            ),
+            (
+                "Vector".into(),
+                vec![("values".into(), Typ::Vector(Box::new(Typ::Int)))],
+            ),
+        ]);
+        assert_eq!(
+            flat_record_fields(&schemas, "Leaf").unwrap(),
+            vec![("value".into(), Typ::Int)]
+        );
+        assert_eq!(
+            scalar_fields(&schemas, "Outer").unwrap(),
+            vec![("leaf.value".into(), Typ::Int)]
+        );
+        for name in ["Outer", "Empty", "Duplicate", "Array", "Vector", "Unknown"] {
+            assert!(flat_record_fields(&schemas, name).is_err(), "{name}");
+        }
     }
 }

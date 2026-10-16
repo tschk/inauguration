@@ -16,6 +16,10 @@ pub(crate) fn lower_vec_for(
     fn_name: &str,
     ret_typ: &Typ,
 ) -> Result<(), String> {
+    if matches!(super::lower_expr::native_expr_type(iterator, ctx, functions).map(|typ| typ.canonical()), Some(Typ::Array(element)) if matches!(element.canonical(), Typ::Named(_)))
+    {
+        return Err("native-lower: record arrays require typed indexed iteration, not vector iterator storage".into());
+    }
     let binding = binding.trim();
     // Parse the binding pattern into (element_names, offsets, stride_per_element)
     let (elem_names, offsets, stride): (Vec<&str>, Vec<u32>, u32) = if binding.starts_with('(')

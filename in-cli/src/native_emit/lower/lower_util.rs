@@ -141,7 +141,11 @@ pub(crate) fn ensure_return_type(
             native_struct_fields(structs, struct_name, fn_name)?;
             Ok(())
         }
-        Typ::Array(elem) => ensure_native_array_element(elem, fn_name, "return"),
+        Typ::Array(elem) => {
+            ensure_native_array_element(elem, fn_name, "return")?;
+            record_array_fields(elem, structs)?;
+            Ok(())
+        }
         Typ::Vector(_) => Ok(()),
         Typ::Generic(_) => Ok(()),
     }
@@ -393,6 +397,20 @@ pub(crate) fn expr_type(expr: &Expr) -> Option<Typ> {
 }
 
 pub(crate) use crate::core_ir::expr_contains_call;
+
+/// Record array slots contain pointers to independent, declaration-ordered payloads.
+/// This is deliberately narrower than recursively flattened scalar struct ABI layouts.
+pub(crate) fn record_array_fields(
+    elem: &Typ,
+    structs: &HashMap<String, Vec<(String, Typ)>>,
+) -> Result<Option<Vec<(String, Typ)>>, String> {
+    match elem.canonical() {
+        Typ::Named(name) => {
+            crate::native_emit::struct_layout::flat_record_fields(structs, &name).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
 
 #[cfg(test)]
 mod tests {

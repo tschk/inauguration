@@ -1925,6 +1925,9 @@ pub(crate) fn lower_stdlib_call(
                     Some(Typ::Array(_))
                 )
             {
+                if matches!(item.canonical(), Typ::Named(_)) {
+                    return Err("native-lower: record array storage cannot be extended into aggregate vector storage".into());
+                }
                 super::lower_call::lower_array_call_arg(
                     emitter,
                     ctx,

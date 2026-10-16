@@ -398,6 +398,12 @@ pub(crate) fn lower_index(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if matches!(native_expr_type(base, ctx, functions).map(|typ| typ.canonical()), Some(Typ::Array(elem)) if matches!(elem.canonical(), Typ::Named(_)))
+    {
+        return Err(
+            "native-lower: record array index requires a typed value or field context".into(),
+        );
+    }
     if native_expr_type(base, ctx, functions).is_some_and(|typ| typ.canonical() == Typ::Int) {
         let temp = ctx.acquire_binop_temp(fn_name)?;
         lower_expr_into(emitter, ctx, base, 0, functions, pending_calls, fn_name)?;
@@ -687,6 +693,35 @@ pub(crate) fn lower_field(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Expr::Index { base: array, index } = base {
+        let fields = lower_record_index_address(
+            emitter,
+            ctx,
+            array,
+            index,
+            rd,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        let field = fields
+            .iter()
+            .position(|(field, _)| field == name)
+            .ok_or_else(|| format!("native-lower: unknown record field `{name}`"))?;
+        let offset = u32::try_from(
+            field
+                .checked_mul(8)
+                .ok_or("native-lower: record field offset overflow")?,
+        )
+        .map_err(|_| "native-lower: record field offset overflow")?;
+        if offset > 4095 * 8 {
+            return Err(
+                "native-lower: indexed record field exceeds AArch64 load offset subset".into(),
+            );
+        }
+        emitter.emit_u32(aarch64::ldr64(rd, rd, offset));
+        return Ok(());
+    }
     match base {
         Expr::Ident(local) => {
             if ctx
@@ -1523,4 +1558,176 @@ pub(crate) fn lower_truthy_result(emitter: &mut CodeEmitter, rd: u8) {
     emitter.emit_insns(&aarch64::load_i64(rd, 1));
     let end_offset = emitter.len() as i32 - end_branch as i32;
     emitter.patch_u32(end_branch, aarch64::b(end_offset));
+}
+
+/// Snapshot an indexed record place without reading the payload or checking
+/// bounds. Stores evaluate their entire RHS before the checked payload load.
+pub(crate) struct RecordIndexPlace {
+    ptr: u32,
+    len: u32,
+    index: u32,
+    pub(crate) fields: Vec<(String, Typ)>,
+}
+
+pub(crate) fn stage_record_index_place(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    base: &Expr,
+    index: &Expr,
+    functions: &HashMap<String, FunctionInfo>,
+    pending_calls: &mut Vec<PendingCall>,
+    fn_name: &str,
+) -> Result<RecordIndexPlace, String> {
+    let Some(Typ::Array(elem)) = native_expr_type(base, ctx, functions).map(|typ| typ.canonical())
+    else {
+        return Err("native-lower: record indexing requires an array".into());
+    };
+    let fields = super::lower_util::record_array_fields(&elem, ctx.structs)?
+        .ok_or("native-lower: record indexing requires a flat record element")?;
+    let ptr = ctx.acquire_binop_temp(fn_name)?;
+    let len = ctx.acquire_binop_temp(fn_name)?;
+    let saved_index = ctx.acquire_binop_temp(fn_name)?;
+    super::lower_stmt::lower_array_expr_into_regs(
+        emitter,
+        ctx,
+        base,
+        &elem,
+        functions,
+        pending_calls,
+        fn_name,
+    )?;
+    emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, ptr));
+    emitter.emit_u32(aarch64::str64(1, aarch64::REG_SP, len));
+    lower_expr_into(emitter, ctx, index, 2, functions, pending_calls, fn_name)?;
+    emitter.emit_u32(aarch64::str64(2, aarch64::REG_SP, saved_index));
+    Ok(RecordIndexPlace {
+        ptr,
+        len,
+        index: saved_index,
+        fields,
+    })
+}
+
+/// Complete one staged place and release its three snapshot slots. No source
+/// expression is reevaluated. Null/sentinel storage and payloads take the same
+/// existing failure exit as negative/out-of-bounds indices.
+pub(crate) fn load_record_index_address(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    place: &RecordIndexPlace,
+    rd: u8,
+    fn_name: &str,
+) -> Result<(), String> {
+    emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, place.ptr));
+    emitter.emit_u32(aarch64::ldr64(1, aarch64::REG_SP, place.len));
+    emitter.emit_u32(aarch64::ldr64(2, aarch64::REG_SP, place.index));
+    let sentinel = if rd == 3 { 4 } else { 3 };
+    emitter.emit_insns(&aarch64::load_i64(sentinel, 1));
+    emitter.emit_u32(aarch64::cmp_reg64(0, sentinel));
+    let invalid_base = emitter.emit_insn(aarch64::b_cond(9, 0));
+    emitter.emit_u32(aarch64::cmp_reg64(2, aarch64::REG_XZR));
+    let negative = emitter.emit_insn(aarch64::b_cond(11, 0));
+    emitter.emit_u32(aarch64::cmp_reg64(2, 1));
+    let outside = emitter.emit_insn(aarch64::b_cond(10, 0));
+    emitter.emit_u32(aarch64::ldr64_reg_offset(rd, 0, 2));
+    emitter.emit_u32(aarch64::cmp_reg64(rd, sentinel));
+    let invalid_payload = emitter.emit_insn(aarch64::b_cond(9, 0));
+    let done = emitter.emit_insn(aarch64::b(0));
+    let failure = emitter.len() as i32;
+    for (site, condition) in [
+        (invalid_base, 9),
+        (negative, 11),
+        (outside, 10),
+        (invalid_payload, 9),
+    ] {
+        emitter.patch_u32(site, aarch64::b_cond(condition, failure - site as i32));
+    }
+    emit_failure_return(emitter, ctx, fn_name)?;
+    emitter.patch_u32(done, aarch64::b(emitter.len() as i32 - done as i32));
+    for _ in 0..3 {
+        ctx.release_binop_temp();
+    }
+    Ok(())
+}
+
+/// Reads and receivers check immediately; stores deliberately split these steps.
+pub(crate) fn lower_record_index_address(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    base: &Expr,
+    index: &Expr,
+    rd: u8,
+    functions: &HashMap<String, FunctionInfo>,
+    pending_calls: &mut Vec<PendingCall>,
+    fn_name: &str,
+) -> Result<Vec<(String, Typ)>, String> {
+    let place =
+        stage_record_index_place(emitter, ctx, base, index, functions, pending_calls, fn_name)?;
+    load_record_index_address(emitter, ctx, &place, rd, fn_name)?;
+    Ok(place.fields)
+}
+
+#[cfg(test)]
+mod record_index_place_tests {
+    use super::*;
+
+    #[test]
+    fn checked_record_place_has_base_and_payload_sentinel_guards() {
+        let structs = HashMap::from([("Row".into(), vec![("x".into(), Typ::Int)])]);
+        let strings = HashMap::new();
+        let globals = HashMap::new();
+        let types = HashMap::new();
+        let params = vec![(
+            "rows".into(),
+            Typ::Array(Box::new(Typ::Named("Row".into()))),
+        )];
+        let mut runtime = Vec::new();
+        let mut pending_strings = Vec::new();
+        let mut ctx = LowerCtx::new(
+            &params,
+            &structs,
+            &strings,
+            &globals,
+            &types,
+            &mut runtime,
+            &mut pending_strings,
+            "test",
+        )
+        .unwrap();
+        for index in 0..ctx.binop_temps.len() {
+            ctx.binop_temps[index] = ctx.alloc_slot();
+        }
+        let mut emitter = CodeEmitter::new();
+        let mut calls = Vec::new();
+        let place = stage_record_index_place(
+            &mut emitter,
+            &mut ctx,
+            &Expr::Ident("rows".into()),
+            &Expr::IntLit(0),
+            &HashMap::new(),
+            &mut calls,
+            "test",
+        )
+        .unwrap();
+        let staged_end = emitter.len();
+        assert_eq!(ctx.binop_depth, 3);
+        load_record_index_address(&mut emitter, &mut ctx, &place, 0, "test").unwrap();
+        assert_eq!(ctx.binop_depth, 0);
+        let words = emitter.bytes[staged_end as usize..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| u32::from_le_bytes(*bytes))
+            .collect::<Vec<_>>();
+        // LS rejects both null and the existing failure sentinel (1).
+        assert_eq!(
+            words
+                .iter()
+                .filter(|word| **word & 0xff00_001f == 0x5400_0009)
+                .count(),
+            2
+        );
+        assert!(words.iter().any(|word| *word & 0xff00_001f == 0x5400_000b));
+        assert!(words.iter().any(|word| *word & 0xff00_001f == 0x5400_000a));
+    }
 }

@@ -524,6 +524,8 @@ pub(crate) struct LowerCtx<'a> {
     call_arg_frames: Vec<usize>,
     pub(crate) vec_literal_header_offset: Option<u32>,
     pub(crate) aggregate_vector_scratch: Option<(u32, usize)>,
+    pub(crate) record_array_scratch: Option<(u32, usize)>,
+    record_array_depth: usize,
     pub(crate) iterator_chain_header_offset: Option<u32>,
     pub(crate) iterator_map_slots: Option<IteratorMapSlots>,
 }
@@ -767,6 +769,8 @@ impl<'a> LowerCtx<'a> {
             call_arg_frames: Vec::new(),
             vec_literal_header_offset: None,
             aggregate_vector_scratch: None,
+            record_array_scratch: None,
+            record_array_depth: 0,
             iterator_chain_header_offset: None,
             iterator_map_slots: None,
         };
@@ -790,6 +794,7 @@ impl<'a> LowerCtx<'a> {
                         // Java `String[] args` is emitted as a named type by the Java front.
                         let elem = Typ::String;
                         ensure_native_array_element(&elem, fn_name, "parameter")?;
+                        super::lower_util::record_array_fields(&elem, structs)?;
                         let ptr_offset = ctx.alloc_slot();
                         let len_offset = ctx.alloc_slot();
                         if abi_idx + 1 < 8 {
@@ -871,6 +876,7 @@ impl<'a> LowerCtx<'a> {
                 }
                 Typ::Array(elem) => {
                     ensure_native_array_element(elem, fn_name, "parameter")?;
+                    super::lower_util::record_array_fields(elem, structs)?;
                     let ptr_offset = ctx.alloc_slot();
                     let len_offset = ctx.alloc_slot();
                     if abi_idx + 1 < 8 {
@@ -1041,6 +1047,8 @@ impl<'a> LowerCtx<'a> {
         }
         if let Some(Typ::Array(elem)) = resolved.as_ref() {
             ensure_native_array_element(elem, fn_name, "local")?;
+            let record = super::lower_util::record_array_fields(elem, self.structs)?;
+
             // Local aliases share inline array metadata rather than pretending
             // an inline array is a returned pointer/length pair.
             if !self.rebound_arrays.contains(name)
@@ -1056,7 +1064,8 @@ impl<'a> LowerCtx<'a> {
             // shortcut: any array-bearing schema disables inline locals; refine with escape analysis.
             let inline_items = match expr {
                 Expr::ArrayLit(items)
-                    if !self.rebound_arrays.contains(name)
+                    if record.is_none()
+                        && !self.rebound_arrays.contains(name)
                         && !self.arrays_in_aggregates
                         && !matches!(self.ret_typ, Typ::Array(_)) =>
                 {
@@ -1182,6 +1191,41 @@ impl<'a> LowerCtx<'a> {
         offset
     }
 
+    pub(crate) fn acquire_record_array_scratch(
+        &mut self,
+        words: usize,
+        fn_name: &str,
+    ) -> Result<u32, String> {
+        let (offset, capacity) = self.record_array_scratch.ok_or_else(|| {
+            format!("native-lower: record array staging was not planned in `{fn_name}`")
+        })?;
+        let end = self
+            .record_array_depth
+            .checked_add(words)
+            .filter(|end| *end <= capacity)
+            .ok_or_else(|| {
+                format!("native-lower: record array staging exceeds planned frame in `{fn_name}`")
+            })?;
+        let delta = self
+            .record_array_depth
+            .checked_mul(8)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or("native-lower: record array staging offset overflow")?;
+        let result = offset
+            .checked_add(delta)
+            .ok_or("native-lower: record array staging offset overflow")?;
+        self.record_array_depth = end;
+        Ok(result)
+    }
+
+    pub(crate) fn release_record_array_scratch(&mut self, words: usize) -> Result<(), String> {
+        self.record_array_depth = self
+            .record_array_depth
+            .checked_sub(words)
+            .ok_or("native-lower: unbalanced record array staging")?;
+        Ok(())
+    }
+
     pub(crate) fn acquire_binop_temp(&mut self, fn_name: &str) -> Result<u32, String> {
         let Some(offset) = self.binop_temps.get(self.binop_depth).copied() else {
             return Err(format!(
@@ -1296,5 +1340,46 @@ mod array_rebinding_plan_tests {
             ctx.locals.get("untouched"),
             Some(LocalSlot::Array { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod record_staging_tests {
+    use super::*;
+
+    #[test]
+    fn staging_is_disjoint_checked_and_reused_after_release() {
+        let structs = HashMap::new();
+        let strings = HashMap::new();
+        let globals = HashMap::new();
+        let types = HashMap::new();
+        let mut calls = Vec::new();
+        let mut pending_strings = Vec::new();
+        let mut ctx = LowerCtx::new(
+            &[],
+            &structs,
+            &strings,
+            &globals,
+            &types,
+            &mut calls,
+            &mut pending_strings,
+            "main",
+        )
+        .unwrap();
+        ctx.record_array_scratch = Some((16, 70));
+        assert_eq!(ctx.acquire_record_array_scratch(65, "main").unwrap(), 16);
+        assert_eq!(
+            ctx.acquire_record_array_scratch(5, "main").unwrap(),
+            16 + 65 * 8
+        );
+        assert!(ctx.acquire_record_array_scratch(1, "main").is_err());
+        assert!(ctx.release_record_array_scratch(71).is_err());
+        ctx.release_record_array_scratch(5).unwrap();
+        assert_eq!(
+            ctx.acquire_record_array_scratch(5, "main").unwrap(),
+            16 + 65 * 8
+        );
+        ctx.release_record_array_scratch(70).unwrap();
+        assert_eq!(ctx.acquire_record_array_scratch(70, "main").unwrap(), 16);
     }
 }

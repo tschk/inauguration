@@ -2477,12 +2477,19 @@ fn native_backends_refuse_unresolved_private_compiler_operations() {
 }
 
 #[test]
-fn nested_struct_arrays_refuse_unsupported_layouts() {
+fn flat_struct_array_patterns_use_typed_record_slots() {
     let parsed = crate::compiler::rust_front::parse_rust_source("struct Point {x:i64,y:i64} fn main()->i64 { let values=[Point{x:20,y:22}]; match values {[Point{x:20,y:22}]=>42,_=>0} }").unwrap();
     let mut module =
         crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
     crate::lower_core::desugar_module(&mut module);
     assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+    crate::native_emit::lower::lower_module(&module, "main", NativeLinkage::Executable).unwrap();
+    crate::native_emit::x86_64_lower::lower_module(&module, "main").unwrap();
+}
+
+#[test]
+fn nested_struct_arrays_refuse_unsupported_layouts() {
+    let module = crate::in_lang_parse::parse_in_source("struct Point{Int x;Int y} struct Nested{Point point} fn main()->Int{let values:[Nested]=[Nested{point:Point{x:20,y:22}}];return 42;}").unwrap();
     for result in [
         crate::native_emit::lower::lower_module(&module, "main", NativeLinkage::Executable)
             .map(|_| ()),
@@ -2490,11 +2497,7 @@ fn nested_struct_arrays_refuse_unsupported_layouts() {
     ] {
         let error = result.unwrap_err();
         assert!(
-            error.contains("unsupported field base")
-                || error.contains("incomplete struct initializer")
-                || error.contains("missing struct initializer layout")
-                || error.contains("unsupported struct assignment expression")
-                || error.contains("struct value needs an addressable local, constructor, or call"),
+            error.contains("unsupported flat record field `Nested.point`"),
             "{error}"
         );
     }
@@ -3425,7 +3428,7 @@ fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
         return;
     }
     let path = temp_path("rust-static-ir-only.rs");
-    fs::write(&path, "struct Bag { value: i64 } static VALUES: [Bag;1]=[Bag { value: 42 }]; fn main() -> Bag { return Bag { value: 42 }; }").unwrap();
+    fs::write(&path, "struct Bag { value: i64 } static VALUE: i64=make(); fn make() -> i64 { return 42; } fn main() -> Bag { return Bag { value: 42 }; }").unwrap();
     let report = compile_owned(&default_request(
         path.clone(),
         CompileTarget::Jit,
@@ -3444,12 +3447,12 @@ fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
         report
             .reason
             .unwrap()
-            .contains("unsupported native initializer for global `VALUES`")
+            .contains("unsupported native initializer for global `VALUE`")
     );
     let path = temp_path("rust-static-executable.rs");
     fs::write(
         &path,
-        "struct Bag { value: i64 } static VALUES: [Bag;1]=[Bag { value: 42 }]; fn main() -> i64 { return 42; }",
+        "static VALUE: i64=make(); fn make() -> i64 { return 42; } fn main() -> i64 { return 42; }",
     )
     .unwrap();
     let report = compile_owned(&default_request(
