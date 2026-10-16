@@ -57,6 +57,14 @@ pub(super) fn lua_closed_integer_initializer(src: &[u8], node: Node<'_>) -> Opti
                 .then(|| fold(src, children[0], depth + 1))
                 .flatten();
         }
+        if node.kind() == "unary_expression" {
+            let operand = node.child_by_field_name("operand")?;
+            let operator = node.child_by_field_name("operator")?;
+            if children != [operand] || node_txt(src, operator) != "-" {
+                return None;
+            }
+            return fold(src, operand, depth + 1).map(i64::wrapping_neg);
+        }
         if node.kind() != "binary_expression" || children.len() != 2 {
             return None;
         }
@@ -436,13 +444,41 @@ mod decoder_ast_tests {
                 "{expression}: {body:?}"
             );
         }
+        for expression in ["other + 1", "effect() + 1", "1.0 + 41", "21 << 1", "84 / 2"] {
+            let body = parsed_body(&format!(
+                "function main() local value = {expression} return value end"
+            ));
+            assert!(!matches!(&body[0], Stmt::Let(..)), "{expression}: {body:?}");
+        }
+    }
+
+    #[test]
+    fn closed_integer_unary_minus_preserves_lua_integer_kind_and_wrapping() {
+        for (expression, expected) in [
+            ("-1 + 43", 42),
+            ("-(20 - 62)", 42),
+            ("-(-(-42))", -42),
+            ("-(-(-(20 - 62)))", 42),
+            ("-0x8000000000000000", i64::MIN),
+            ("-(-0x8000000000000000)", i64::MIN),
+            ("-0x8000000000000000 - 0x7fffffffffffffd6", 42),
+        ] {
+            let body = parsed_body(&format!(
+                "function main() local value = {expression} return value end"
+            ));
+            assert!(
+                matches!(&body[0], Stmt::Let(_, None, Expr::IntLit(value)) if *value == expected),
+                "{expression}: {body:?}"
+            );
+        }
         for expression in [
-            "other + 1",
-            "effect() + 1",
-            "1.0 + 41",
-            "21 << 1",
-            "84 / 2",
-            "-1 + 43",
+            "-9223372036854775808",
+            "-1.0",
+            "-(1 + 1.0)",
+            "~1",
+            "-effect()",
+            "-other",
+            "not 1",
         ] {
             let body = parsed_body(&format!(
                 "function main() local value = {expression} return value end"

@@ -5948,7 +5948,6 @@ end
             "function() return 42 end",
             "...",
             "helper(...)",
-            "-42",
             "2 ^ 3",
             "1 / 2",
             "-5 % 2",
@@ -5971,6 +5970,9 @@ end
             assert!(matches!(body.last(), Some(Stmt::Return(None))), "{body:?}");
         }
         for rhs in [
+            "-42",
+            "-1 + 43",
+            "-(20 - 62)",
             "1 + 2",
             "42",
             "true",

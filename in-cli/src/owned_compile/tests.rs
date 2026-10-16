@@ -8074,6 +8074,11 @@ fn lua_return_inference_refuses_unowned_operator_semantics_before_execution() {
         ("return 2 ^ 3", None),
         ("local value = 5; value = value % 2; return value", None),
         ("local value = 20 + 22; return value", Some(42)),
+        ("local value = -1 + 43; return value", Some(42)),
+        (
+            "local value = -0x8000000000000000 - 0x7fffffffffffffd6; return value",
+            Some(42),
+        ),
         ("local value = 20; value = 42; return value", Some(42)),
     ] {
         fs::write(&path, format!("function main()\n{body}\nend\n")).unwrap();
