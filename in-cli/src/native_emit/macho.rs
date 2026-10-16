@@ -137,7 +137,7 @@ fn write_ar_member(out: &mut Vec<u8>, name: &str, payload: &[u8]) {
     let uid = b"0     ";
     let gid = b"0     ";
     let mode: &[u8] = b"644     ";
-    let size_field = format!("{:10}", payload.len() + name_size);
+    let size_field = format!("{:<10}", payload.len() + name_size);
     out.extend_from_slice(&header_name);
     out.extend_from_slice(timestamp);
     out.extend_from_slice(uid);
@@ -776,6 +776,38 @@ mod tests {
             );
             assert!(String::from_utf8_lossy(&out).contains("_answer"));
             assert!(String::from_utf8_lossy(&out).contains(&format!("_{export}")));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn staticlib_archive_is_readable_by_system_nm() {
+        for member in ["sample", "a-long-static-library-object-name"] {
+            let mut bytes = Vec::new();
+            write_image(&sample_image(), MachOLinkage::StaticLib, member, &mut bytes);
+            let path = std::env::temp_dir().join(format!(
+                "inauguration-macho-archive-{}-{}.a",
+                std::process::id(),
+                member.len()
+            ));
+            std::fs::write(&path, bytes).unwrap();
+            let result = std::process::Command::new("/usr/bin/nm")
+                .arg(&path)
+                .output();
+            std::fs::remove_file(&path).unwrap();
+            let output = result.expect("run system nm on emitted static archive");
+            assert!(
+                output.status.success(),
+                "{member}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.split_whitespace().last() == Some("_answer")),
+                "{member}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
         }
     }
 
