@@ -66,8 +66,7 @@ pub enum EvalValue {
 }
 
 impl EvalValue {
-    /// Integer form for consumers that can only carry one, such as the daemon's
-    /// response protocol. Non-integer values have no integer form.
+    /// Integer form for legacy consumers. Non-integer values have no integer form.
     pub fn as_int(&self) -> Option<i64> {
         match self {
             EvalValue::Int(value) => Some(*value),

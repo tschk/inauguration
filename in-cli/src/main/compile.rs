@@ -593,15 +593,6 @@ pub(crate) fn compile_and_run_jit_report(
     Ok((report, execution))
 }
 
-pub(crate) fn compile_and_run_jit_source_path(
-    source_path: &Path,
-    module_id: &str,
-    parser: ParserCli,
-    debug: bool,
-) -> Result<JitExecution> {
-    compile_and_run_jit_report(source_path, module_id, parser, debug).map(|(_, exec)| exec)
-}
-
 pub(crate) fn cmd_execute(
     cwd: &Path,
     path: &str,

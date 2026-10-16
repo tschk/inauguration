@@ -1,4 +1,4 @@
-use crate::compile::{JitExecution, cmd_execute, compile_and_run_jit_source_path};
+use crate::compile::{JitExecution, cmd_execute, compile_and_run_jit_report};
 use crate::util::{extract_cargo_bin_path, resolve_invocation_path};
 use crate::{InError, Result};
 use inauguration::parser_registry::{self, ParserCli};
@@ -90,7 +90,7 @@ pub(crate) fn cmd_eval(
 
     #[cfg(unix)]
     if inauguration::daemon_client::daemon_is_running() {
-        return cmd_eval_daemon(parser_id, code, parser, verbose, debug);
+        return cmd_eval_daemon(parser_id, code, verbose, debug);
     }
 
     let dir = std::env::temp_dir().join(format!(
@@ -117,8 +117,12 @@ pub(crate) fn cmd_eval(
     for plan in eval_plans(parser_id, code) {
         std::fs::write(&path, &plan.wrapped)
             .map_err(|e| InError::Message(format!("write eval temp: {e}")))?;
-        match compile_and_run_jit_source_path(&source_path, &module_id, ParserCli::Auto, debug) {
-            Ok(run) => {
+        match compile_and_run_jit_report(&source_path, &module_id, ParserCli::Auto, debug) {
+            Ok((report, run)) => {
+                if plan.print_result && report.eval_result.is_none() {
+                    last_err = Some(InError::Message("eval expression produced no value".into()));
+                    break;
+                }
                 print_result = plan.print_result;
                 execution = Some(run);
                 break;
@@ -154,22 +158,38 @@ pub(crate) fn cmd_eval(
 fn cmd_eval_daemon(
     parser_id: parser_registry::ParserId,
     code: &str,
-    parser: Option<&str>,
     verbose: bool,
     _debug: bool,
 ) -> Result<()> {
     let mut last_err = None;
     for plan in eval_plans(parser_id, code) {
-        let response =
-            inauguration::daemon_client::daemon_eval_code(&plan.wrapped, parser, verbose)
-                .map_err(|e| InError::Message(format!("daemon eval: {e}")))?;
+        let response = inauguration::daemon_client::daemon_eval_code(
+            &plan.wrapped,
+            Some(parser_id.as_str()),
+            verbose,
+        )
+        .map_err(|e| InError::Message(format!("daemon eval: {e}")))?;
         if response.success {
-            if verbose {
-                eprintln!("> {:?}", response.result);
-            } else if plan.print_result
-                && let Some(result) = response.result
-            {
-                println!("{}", result);
+            let value = response.eval_result.or_else(|| {
+                response
+                    .result
+                    .map(inauguration::owned_compile::EvalValue::Int)
+            });
+            if plan.print_result && value.is_none() {
+                return Err(InError::Message("eval expression produced no value".into()));
+            }
+            if let Some(value) = value {
+                let text = match value {
+                    inauguration::owned_compile::EvalValue::Int(value) => value.to_string(),
+                    inauguration::owned_compile::EvalValue::Bool(value) => value.to_string(),
+                    inauguration::owned_compile::EvalValue::Float(value) => value.to_string(),
+                    inauguration::owned_compile::EvalValue::Str(value) => value,
+                };
+                if verbose {
+                    eprintln!("> {}", text);
+                } else if plan.print_result {
+                    println!("{}", text);
+                }
             }
             return Ok(());
         }
@@ -747,7 +767,9 @@ pub(crate) fn wrap_eval_statement(
                 Some(format!("main:\n  {trimmed}"))
             }
         }
-        parser_registry::ParserId::JavaScript => Some(format!("function main() {{ {code} }}")),
+        parser_registry::ParserId::JavaScript => {
+            Some(format!("function main() {{ {code}; return 0; }}"))
+        }
         parser_registry::ParserId::TypeScript => {
             Some(format!("function main(): void {{ {code} }}"))
         }

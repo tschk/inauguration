@@ -60,6 +60,12 @@ pub struct DaemonResponse {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<i64>,
+    #[serde(
+        default,
+        with = "daemon_eval_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub eval_result: Option<crate::owned_compile::EvalValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_json: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,23 +76,70 @@ pub struct DaemonResponse {
     pub timing_us: Option<u128>,
 }
 
+// Keep the existing EvalValue JSON for ordinary values; JSON cannot represent
+// nonfinite f64 values, so only those use an exact bit-preserving payload.
+mod daemon_eval_value {
+    use crate::owned_compile::EvalValue;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    enum FloatBits {
+        FloatBits(u64),
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Bits(FloatBits),
+        Value(EvalValue),
+    }
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<EvalValue>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(EvalValue::Float(value)) if !value.is_finite() => {
+                FloatBits::FloatBits(value.to_bits()).serialize(serializer)
+            }
+            _ => value.serialize(serializer),
+        }
+    }
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<EvalValue>, D::Error> {
+        Ok(
+            Option::<Wire>::deserialize(deserializer)?.map(|value| match value {
+                Wire::Bits(FloatBits::FloatBits(bits)) => EvalValue::Float(f64::from_bits(bits)),
+                Wire::Value(value) => value,
+            }),
+        )
+    }
+}
+
+fn create_eval_dir() -> std::io::Result<PathBuf> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    for _ in 0..128 {
+        let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "inaug-daemon-eval-{}-{sequence}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not reserve unique eval directory",
+    ))
+}
+
 fn write_response(stream: &mut UnixStream, response: &DaemonResponse) -> std::io::Result<()> {
     let json = serde_json::to_string(response)?;
     stream.write_all(json.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()
-}
-
-fn parser_from_cli(s: Option<&str>) -> ParserCli {
-    match s {
-        Some("auto") | None => ParserCli::Auto,
-        Some("in") => ParserCli::In,
-        Some("icore") => ParserCli::Icore,
-        Some(other) => {
-            eprintln!("[in daemon] unsupported parser '{other}', defaulting to auto");
-            ParserCli::Auto
-        }
-    }
 }
 
 fn target_from_cli(s: Option<&str>) -> CompileTarget {
@@ -98,33 +151,51 @@ fn target_from_cli(s: Option<&str>) -> CompileTarget {
 
 fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonResponse {
     let start = Instant::now();
-    let dir = std::env::temp_dir().join(format!(
-        "inaug-daemon-eval-{}-{}",
-        std::process::id(),
-        start.elapsed().as_nanos()
-    ));
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return DaemonResponse {
-            success: false,
-            result: None,
-            report_json: None,
-            output: None,
-            error: Some(format!("create eval dir: {e}")),
-            timing_us: None,
-        };
-    }
-    let parser_id = parser_from_cli(parser);
-    let ext = if parser_id == ParserCli::Icore {
-        "icore"
-    } else {
-        "in"
+    let dir = match create_eval_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            return DaemonResponse {
+                success: false,
+                result: None,
+                eval_result: None,
+                report_json: None,
+                output: None,
+                error: Some(format!("create eval dir: {error}")),
+                timing_us: None,
+            };
+        }
     };
+    let source_parser = match parser {
+        None | Some("auto") => crate::parser_registry::ParserId::In,
+        Some(name) => match crate::parser_registry::parser_id_from_cli_token(name) {
+            Some(parser) => parser,
+            None => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return DaemonResponse {
+                    success: false,
+                    result: None,
+                    eval_result: None,
+                    report_json: None,
+                    output: None,
+                    error: Some(format!("unsupported eval parser `{name}`")),
+                    timing_us: None,
+                };
+            }
+        },
+    };
+    let parser_id = match source_parser {
+        crate::parser_registry::ParserId::In => ParserCli::In,
+        crate::parser_registry::ParserId::Icore => ParserCli::Icore,
+        _ => ParserCli::Auto,
+    };
+    let ext = source_parser.default_extension();
     let path = dir.join(format!("eval.{ext}"));
     if let Err(e) = std::fs::write(&path, code) {
         let _ = std::fs::remove_dir_all(&dir);
         return DaemonResponse {
             success: false,
             result: None,
+            eval_result: None,
             report_json: None,
             output: None,
             error: Some(format!("write eval source: {e}")),
@@ -153,6 +224,7 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
         DaemonResponse {
             success: true,
             result: report.eval_result.as_ref().and_then(|value| value.as_int()),
+            eval_result: report.eval_result.clone(),
             report_json: None,
             output: None,
             error: None,
@@ -162,6 +234,7 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
         DaemonResponse {
             success: false,
             result: None,
+            eval_result: None,
             report_json: None,
             output: None,
             error: Some(report.error.unwrap_or_else(|| "eval failed".to_string())),
@@ -202,6 +275,7 @@ fn handle_compile(
     DaemonResponse {
         success: report.success,
         result: None,
+        eval_result: None,
         report_json,
         output: None,
         error: report.error,
@@ -215,6 +289,7 @@ fn handle_request(request: DaemonRequest) -> (DaemonResponse, bool) {
             DaemonResponse {
                 success: true,
                 result: None,
+                eval_result: None,
                 report_json: None,
                 output: None,
                 error: None,
@@ -226,6 +301,7 @@ fn handle_request(request: DaemonRequest) -> (DaemonResponse, bool) {
             DaemonResponse {
                 success: true,
                 result: None,
+                eval_result: None,
                 report_json: None,
                 output: None,
                 error: None,
@@ -287,6 +363,7 @@ fn handle_client(mut stream: UnixStream) -> std::io::Result<bool> {
             DaemonResponse {
                 success: false,
                 result: None,
+                eval_result: None,
                 report_json: None,
                 output: None,
                 error: Some(format!("invalid request: {e}")),
@@ -351,15 +428,6 @@ mod tests {
         let custom_path = PathBuf::from("/tmp/custom.sock");
         let path = resolve_socket_path(Some(&custom_path));
         assert_eq!(path, custom_path);
-    }
-
-    #[test]
-    fn test_parser_from_cli() {
-        assert_eq!(parser_from_cli(None), ParserCli::Auto);
-        assert_eq!(parser_from_cli(Some("auto")), ParserCli::Auto);
-        assert_eq!(parser_from_cli(Some("in")), ParserCli::In);
-        assert_eq!(parser_from_cli(Some("icore")), ParserCli::Icore);
-        assert_eq!(parser_from_cli(Some("unsupported")), ParserCli::Auto);
     }
 
     #[test]
@@ -494,5 +562,166 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod typed_eval_response_tests {
+    use super::*;
+    use crate::owned_compile::EvalValue;
+
+    #[test]
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    ))]
+    fn typed_eval_values_keep_legacy_integer_field_and_unit_absence() {
+        for (source, expected, legacy) in [
+            (
+                "fn main()->Int{return 0;}",
+                Some(EvalValue::Int(0)),
+                Some(0),
+            ),
+            (
+                "fn main()->Bool{return true;}",
+                Some(EvalValue::Bool(true)),
+                Some(1),
+            ),
+            (
+                "fn main()->Float{return 1.5;}",
+                Some(EvalValue::Float(1.5)),
+                None,
+            ),
+            (
+                "fn main()->String{return \"hi\";}",
+                Some(EvalValue::Str("hi".into())),
+                None,
+            ),
+            ("fn main()->Void{}", None, None),
+        ] {
+            let response = handle_eval(source, Some("in"), false);
+            assert!(response.success, "{source}: {:?}", response.error);
+            assert_eq!(response.eval_result, expected, "{source}");
+            assert_eq!(response.result, legacy);
+            let wire = serde_json::to_string(&response).unwrap();
+            let decoded: DaemonResponse = serde_json::from_str(&wire).unwrap();
+            assert_eq!(decoded.eval_result, expected);
+        }
+    }
+    #[test]
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    ))]
+    fn foreign_eval_routes_actual_rust_and_javascript_sources() {
+        for (parser, source, expected) in [
+            ("rust", "fn main()->i64{42}", Some(EvalValue::Int(42))),
+            ("rust", "fn main()->f64{1.5}", Some(EvalValue::Float(1.5))),
+            ("rust", "fn main()->bool{true}", Some(EvalValue::Bool(true))),
+            (
+                "rust",
+                "fn main()->&'static str{\"hi\"}",
+                Some(EvalValue::Str("hi".into())),
+            ),
+            ("rust", "fn main(){}", None),
+            (
+                "javascript",
+                "function main(){return 1.5;}",
+                Some(EvalValue::Float(1.5)),
+            ),
+            (
+                "javascript",
+                "function main(){return true;}",
+                Some(EvalValue::Bool(true)),
+            ),
+            (
+                "javascript",
+                "function main(){return \"hi\";}",
+                Some(EvalValue::Str("hi".into())),
+            ),
+            ("javascript", "function main(){}", None),
+        ] {
+            let response = handle_eval(source, Some(parser), false);
+            assert!(response.success, "{parser} {source}: {:?}", response.error);
+            assert_eq!(response.eval_result, expected, "{parser}: {source}");
+        }
+        let unknown = handle_eval("unused", Some("not-a-parser"), false);
+        assert!(!unknown.success);
+        assert!(unknown.error.unwrap().contains("unsupported eval parser"));
+    }
+    #[test]
+    fn legacy_wire_missing_typed_field_still_deserializes() {
+        let response: DaemonResponse =
+            serde_json::from_str(r#"{"success":true,"result":0}"#).unwrap();
+        assert_eq!(response.result, Some(0));
+        assert_eq!(response.eval_result, None);
+    }
+    #[test]
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    ))]
+    fn errors_and_missing_results_do_not_invent_zero() {
+        let missing = handle_eval("proc main(): int =\n  1 + 2", Some("nim"), false);
+        assert!(missing.success);
+        assert_eq!(missing.eval_result, None);
+        assert_eq!(missing.result, None);
+        let error = handle_eval("fn main()->Int{return unknown();}", Some("in"), false);
+        assert!(!error.success);
+        assert_eq!(error.eval_result, None);
+        assert_eq!(error.result, None);
+    }
+    #[test]
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    ))]
+    fn one_eval_request_executes_effectful_entry_once() {
+        let response = handle_eval(
+            "var count:Int=0;\nfn main()->Int{count+=1;if count==1{return 42;}return 7;}",
+            Some("in"),
+            false,
+        );
+        assert!(response.success, "{:?}", response.error);
+        assert_eq!(response.eval_result, Some(EvalValue::Int(42)));
+    }
+    #[test]
+    fn typed_float_wire_preserves_finite_zero_and_nonfinite_bits() {
+        for bits in [
+            0.0f64.to_bits(),
+            (-0.0f64).to_bits(),
+            1.5f64.to_bits(),
+            f64::INFINITY.to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+            0x7ff8_0000_0000_0042,
+            0xfff8_0000_0000_0012,
+        ] {
+            let value = f64::from_bits(bits);
+            let response = DaemonResponse {
+                success: true,
+                result: None,
+                eval_result: Some(EvalValue::Float(value)),
+                report_json: None,
+                output: None,
+                error: None,
+                timing_us: None,
+            };
+            let json = serde_json::to_string(&response).unwrap();
+            assert_eq!(json.contains("FloatBits"), !value.is_finite());
+            let decoded: DaemonResponse = serde_json::from_str(&json).unwrap();
+            let Some(EvalValue::Float(actual)) = decoded.eval_result else {
+                panic!("float response");
+            };
+            assert_eq!(actual.to_bits(), bits);
+        }
+    }
+    #[test]
+    fn eval_directories_are_distinct_live_reservations() {
+        let first = create_eval_dir().unwrap();
+        let second = create_eval_dir().unwrap();
+        assert_ne!(first, second);
+        assert!(first.is_dir() && second.is_dir());
+        std::fs::remove_dir(first).unwrap();
+        std::fs::remove_dir(second).unwrap();
     }
 }

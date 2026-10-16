@@ -51,7 +51,7 @@ use crate::boundary_ir::CompileArtifact;
 use crate::core_ir::{CatchArm, Expr, MatchArm, Stmt, Typ};
 use crate::core_ir::{Decl, UnifiedModule};
 use crate::parser_registry::ParserId;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tree_sitter::{Language, Node, Parser};
 
@@ -1309,7 +1309,14 @@ pub(super) fn ast_expr(src: &[u8], expr: Node<'_>, shape: AstShape) -> Option<Ex
         ));
     }
     if kind_in(expr, shape.int_kinds) {
-        return java_int_literal(node_txt(src, expr)).map(Expr::IntLit);
+        let raw = node_txt(src, expr);
+        return java_int_literal(raw).map(Expr::IntLit).or_else(|| {
+            raw.contains(['.', 'e', 'E'])
+                .then(|| raw.replace('_', "").parse::<f64>().ok())
+                .flatten()
+                .filter(|value| value.is_finite())
+                .map(|value| Expr::FloatLit(crate::core_ir::FloatVal(value)))
+        });
     }
     if kind_in(expr, shape.string_kinds) {
         return Some(Expr::StringLit(
@@ -1607,16 +1614,11 @@ pub(super) fn find_return_expr(stmts: &[Stmt]) -> Option<&Expr> {
 }
 
 pub(super) fn infer_expr_type(expr: &Expr) -> Typ {
-    match expr {
-        Expr::IntLit(_) => Typ::Int,
-        Expr::StringLit(_) => Typ::String,
-        Expr::BoolLit(_) => Typ::Bool,
-        Expr::Binary { op, .. } => match op.as_str() {
-            "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => Typ::Bool,
-            _ => Typ::Int,
-        },
-        _ => Typ::Named("Any".into()),
-    }
+    let checker = crate::typecheck::TypeChecker::new();
+    let facts = checker.collect_decl_facts(&[]);
+    checker
+        .expr_type(expr, &facts, &HashMap::new())
+        .unwrap_or_else(|| Typ::Named("Any".into()))
 }
 
 pub(super) fn simple_bounded_body(text: &str, assign_op: &str) -> Option<Vec<Stmt>> {
@@ -5104,6 +5106,97 @@ KTHXBYE
                 .iter()
                 .any(|d| matches!(d, Decl::Function { name, .. } if name == "main"))
         );
+    }
+
+    #[test]
+    fn literal_expression_inference_reuses_shared_scalar_type_rules() {
+        let binary = |op: &str, lhs, rhs| Expr::Binary {
+            op: op.into(),
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        };
+        let float = || Expr::FloatLit(crate::core_ir::FloatVal(1.5));
+        for op in ["+", "-", "*", "/", "%"] {
+            assert_eq!(
+                infer_expr_type(&binary(op, float(), Expr::IntLit(2))),
+                Typ::Float
+            );
+            assert_eq!(
+                infer_expr_type(&binary(op, Expr::IntLit(2), float())),
+                Typ::Float
+            );
+            assert_eq!(
+                infer_expr_type(&binary(op, Expr::IntLit(2), Expr::IntLit(1))),
+                Typ::Int
+            );
+            assert_eq!(
+                infer_expr_type(&binary(op, Expr::Ident("unknown".into()), float())),
+                Typ::Float
+            );
+        }
+        assert_eq!(
+            infer_expr_type(&Expr::Unary {
+                op: "-".into(),
+                expr: Box::new(float())
+            }),
+            Typ::Float
+        );
+        assert_eq!(
+            infer_expr_type(&Expr::Unary {
+                op: "-".into(),
+                expr: Box::new(Expr::Ident("unknown".into()))
+            }),
+            Typ::Named("Any".into())
+        );
+        assert_eq!(
+            infer_expr_type(&Expr::Ident("unknown".into())),
+            Typ::Named("Any".into())
+        );
+        assert_eq!(
+            infer_expr_type(&binary("<", float(), Expr::IntLit(2))),
+            Typ::Bool
+        );
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("unknown".into())),
+            args: vec![],
+        };
+        assert_eq!(infer_expr_type(&call), Typ::Named("Any".into()));
+        assert_eq!(
+            infer_expr_type(&binary("+", call, Expr::IntLit(1))),
+            Typ::Int
+        );
+        assert_eq!(
+            infer_expr_type(&binary(
+                "+",
+                Expr::StringLit("a".into()),
+                Expr::StringLit("b".into())
+            )),
+            Typ::String
+        );
+    }
+
+    #[test]
+    fn javascript_literal_arithmetic_and_unary_return_kinds_are_preserved() {
+        for (source, expected) in [
+            ("function main(){return 1.5 + 2.25;}", Typ::Float),
+            ("function main(){return 1 + 2.5;}", Typ::Float),
+            ("function main(){return -1.5;}", Typ::Float),
+            ("function main(){return -(1.5 + 2.25);}", Typ::Float),
+            ("function main(){return 1 + 2;}", Typ::Int),
+            ("function main(){return 1.5 < 2.25;}", Typ::Bool),
+            ("function main(){return \"a\" + \"b\";}", Typ::String),
+        ] {
+            let module = parse_lang(
+                try_lang_for(ParserId::JavaScript).unwrap(),
+                source,
+                extract_js_with_classes,
+            )
+            .unwrap();
+            assert!(
+                matches!(&module.decls[0], Decl::Function{ret,..} if ret == &expected),
+                "{source}: {module:?}"
+            );
+        }
     }
 
     #[test]

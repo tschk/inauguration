@@ -1092,7 +1092,10 @@ fn eval_wraps_javascript_statement() {
         "console.log(\"hi\")",
     );
     assert_eq!(plans.len(), 1);
-    assert_eq!(plans[0].wrapped, "function main() { print(\"hi\") }");
+    assert_eq!(
+        plans[0].wrapped,
+        "function main() { print(\"hi\"); return 0; }"
+    );
     assert!(!plans[0].print_result);
 }
 

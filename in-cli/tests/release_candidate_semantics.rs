@@ -720,3 +720,37 @@ fn native_legacy_operation_names_respect_functions_and_local_closures() {
         }
     }
 }
+#[test]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn native_javascript_literal_float_arithmetic_uses_float_return_abi() {
+    use inauguration::{emit_profile::EmitProfile, parser_registry::ParserId};
+    let directory = std::env::temp_dir().join(format!("in-js-float-return-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("main.js");
+    for (source, expected) in [
+        ("function main(){return 1.5 + 2.25;}", 3.75),
+        ("function main(){return 5.5 - 2.25;}", 3.25),
+        ("function main(){return 1.5 * 2.0;}", 3.0),
+        ("function main(){return 7.5 / 2.5;}", 3.0),
+        ("function main(){return -1.5;}", -1.5),
+        ("function main(){return -(1.5 + 2.25);}", -3.75),
+    ] {
+        std::fs::write(&path, source).unwrap();
+        let parsed =
+            inauguration::compiler::tree_front::parse_polyglot_file(ParserId::JavaScript, &path)
+                .unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut module =
+                inauguration::typecheck::normalize_module(ParserId::JavaScript, &parsed);
+            inauguration::lower_core::desugar_module(&mut module);
+            core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            let runtime = native_runtime(&module);
+            assert_eq!(
+                unsafe { runtime.invoke_float("main") },
+                Some(expected),
+                "{source} {profile:?}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
