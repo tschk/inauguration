@@ -904,7 +904,7 @@ fn simplify_binary_expr(
             if is_zero(rhs) {
                 return lhs.clone();
             }
-            if lhs == rhs && matches!(lhs, Expr::Ident(_) | Expr::IntLit(_)) {
+            if lhs == rhs && matches!(lhs, Expr::IntLit(_)) {
                 return Expr::IntLit(0);
             }
         }
@@ -4297,7 +4297,8 @@ mod tests {
             lhs: Box::new(ident("a")),
             rhs: Box::new(ident("a")),
         });
-        assert_eq!(self_sub, Expr::IntLit(0));
+        // An untyped identifier may be infinite or NaN, making x - x NaN.
+        assert_eq!(self_sub, bin("-", ident("a"), ident("a")));
 
         // `a == a` must NOT fold when `a`'s type is unknown: a Float NaN
         // operand makes `==` false and `!=` true (IEEE 754), so only
@@ -4845,6 +4846,71 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod self_subtraction_tests {
+    use super::*;
+
+    #[test]
+    fn untyped_identifier_subtraction_keeps_ieee_semantics() {
+        for op in ["-", "sub"] {
+            let operand = Expr::Ident("value".into());
+            let original = bin_expr(op, operand.clone(), operand.clone());
+            assert_eq!(
+                simplify_binary_expr(
+                    original.clone(),
+                    op,
+                    &operand,
+                    &operand,
+                    IntegerSemantics::Word64
+                ),
+                original
+            );
+        }
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 42.5, -0.0] {
+            let original = bin_expr(
+                "-",
+                Expr::FloatLit(crate::core_ir::FloatVal(value)),
+                Expr::FloatLit(crate::core_ir::FloatVal(value)),
+            );
+            let Expr::FloatLit(result) = fold_expr(original) else {
+                panic!("float subtraction lost its result type");
+            };
+            if value.is_finite() {
+                assert_eq!(result.0, 0.0);
+            } else {
+                assert!(result.0.is_nan());
+            }
+        }
+        assert_eq!(
+            fold_expr(bin_expr("-", Expr::IntLit(42), Expr::IntLit(42))),
+            Expr::IntLit(0)
+        );
+    }
+
+    #[test]
+    fn every_profile_preserves_dynamic_float_subtraction() {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut declarations = vec![Decl::Function {
+                name: "difference".into(),
+                params: vec![("value".into(), Typ::Float)],
+                ret: Typ::Float,
+                body: vec![Stmt::Return(Some(bin_expr(
+                    "-",
+                    Expr::Ident("value".into()),
+                    Expr::Ident("value".into()),
+                )))],
+                type_params: vec![],
+            }];
+            optimize_with_profile(&mut declarations, Some("difference"), profile);
+            let mut found = false;
+            map_decl_exprs_mut(&mut declarations, &mut |expr| {
+                found |= matches!(expr, Expr::Binary{op,lhs,rhs} if op=="-" && lhs==rhs && matches!(lhs.as_ref(),Expr::Ident(_)));
+            });
+            assert!(found, "{profile:?}: {declarations:?}");
         }
     }
 }
