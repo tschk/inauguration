@@ -64,6 +64,14 @@ native lowering, including Thumb `Int` and `Bool` array literals and
 `array-repeat` initializers. Empty arrays still need an explicit element type;
 Thumb array aliases and call-bearing store spills remain unsupported.
 
+Python scalar-name augmented assignments support `+=`, `-=`, `*=`, `&=`,
+`|=` and `^=` through the existing typed native operations. They read the old
+binding before evaluating the RHS once; supported conditional branches stay lazy.
+Computed targets, Python-specific numeric operators and unsupported RHS syntax
+refuse explicitly. Integer operands and intermediates must fit the existing
+signed 64-bit native carrier: arbitrary-precision integers and overflow checking
+are not implemented. Existing print formatting remains unchanged.
+
 Rust assignments produce Unit in statement and value contexts. Tuple
 destructuring evaluates the RHS once, stages its leaf values, then stores
 assignees from left to right. Scalar compound assignments evaluate the RHS

@@ -8029,3 +8029,35 @@ fn jit_without_optimizer_root_keeps_library_discovery_policy() {
     }
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn python_augmented_rhs_preserves_lazy_branches_and_old_binding_order() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("python-augmented.py");
+    for (rhs, expected) in [
+        ("(10 if False else 22)", 42),
+        ("(value := 40)", 60),
+        ("next_value(10 if False else 22)", 42),
+    ] {
+        fs::write(&path, format!("def next_value(value:int)->int:\n    return value\ndef main()->int:\n    value=20\n    value += {rhs}\n    return value\n")).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{rhs} {profile:?}: {report:?}");
+            assert!(report.execution_started, "{report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(expected)),
+                "{rhs} {profile:?}"
+            );
+        }
+    }
+    fs::remove_file(path).unwrap();
+}

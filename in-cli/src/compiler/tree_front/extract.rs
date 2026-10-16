@@ -1216,6 +1216,9 @@ fn ast_assignment(
     shape: AstShape,
     locals: &mut HashSet<String>,
 ) -> Option<Stmt> {
+    if expr.kind() == "augmented_assignment" {
+        return Some(super::python::augmented_assignment(src, expr));
+    }
     let left = expr
         .child_by_field_name("left")
         .or_else(|| expr.named_child(0))?;
