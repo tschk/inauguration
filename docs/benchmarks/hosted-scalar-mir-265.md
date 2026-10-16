@@ -48,7 +48,7 @@ evidence. The baseline is native 0.9.263; both MIR candidates are unpublished
 
 Before the verification refactor, the full Cargo suite passed 2,151 library
 checks (one manual test ignored), 119 CLI checks, 11 evaluation checks and 21
-release-semantics checks. After the refactor, all 33 MIR tests, five hosted MIR
+release-semantics checks. After the refactor, all 33 MIR tests, three hosted MIR
 tests and the exact-entry regression passed, along with strict Clippy and all
 required CLI gates: 119 conformance cases, 89 backend comparisons, target matrix,
 owned-native, protocol generation and installer verification. All 45 source-CLI

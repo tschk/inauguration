@@ -7918,7 +7918,7 @@ fn owned_scalar_mir_uses_resolved_entry_and_normalized_calls() {
 }
 
 #[test]
-fn owned_scalar_mir_preserves_reserved_intrinsic_call_refusals() {
+fn owned_scalar_mir_preserves_native_intrinsic_contracts() {
     if !super::jit::host_supports_jit() {
         return;
     }
@@ -7941,14 +7941,30 @@ fn owned_scalar_mir_preserves_reserved_intrinsic_call_refusals() {
             request.profile = profile;
             request.linkage = NativeLinkage::StaticLib;
             let report = compile_owned(&request);
-            assert!(!report.success, "{profile:?} {name}: {report:?}");
-            assert!(!report.execution_started, "{report:?}");
-            assert_eq!(report.eval_result, None);
+            // Native x86 permits this defined runtime-name override; ARM dispatches the builtin.
+            if cfg!(target_arch = "x86_64") && name == "__inrt_print_int" {
+                assert!(report.success, "{profile:?} {name}: {report:?}");
+                assert!(report.execution_started, "{report:?}");
+                assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
+                assert_eq!(report.eval_exit_code, Some(42));
+                assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+            } else {
+                assert!(!report.success, "{profile:?} {name}: {report:?}");
+                assert!(!report.execution_started, "{report:?}");
+                assert_eq!(report.eval_result, None);
+                assert!(
+                    report
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.contains(diagnostic)),
+                    "{report:?}"
+                );
+            }
             assert!(
-                report
-                    .error
+                !report
+                    .reason
                     .as_deref()
-                    .is_some_and(|error| error.contains(diagnostic)),
+                    .is_some_and(|reason| reason.contains("scalar MIR")),
                 "{report:?}"
             );
             fs::remove_file(path).unwrap();
