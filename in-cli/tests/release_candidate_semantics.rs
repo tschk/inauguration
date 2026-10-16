@@ -417,3 +417,176 @@ fn native_rust_flat_record_globals_use_initialized_payloads() {
     let runtime = native_runtime(&module);
     assert_eq!(unsafe { runtime.invoke("main", &[]) }, Some(42));
 }
+
+#[test]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn native_field_compounds_preserve_place_read_and_rhs_order() {
+    use inauguration::emit_profile::EmitProfile;
+    let mut cases = vec![
+        (
+            "changing-index-once".to_string(),
+            "struct Row{Int x}\nvar calls:Int=0;\nfn at()->Int{let result=calls;calls=calls+1;return result;}\nfn main()->Int{let rows:[Row]=[Row{x:20},Row{x:100}];rows[at()].x+=2;if calls==1&&rows[0].x==22&&rows[1].x==100{return 42;}return 7;}".to_string(),
+        ),
+        (
+            "base-index-read-before-rhs".to_string(),
+            "struct Row{Int x}\nvar trace:Int=0;\nvar rows:[Row]=[Row{x:20}];\nfn backing()->[Row]{trace=trace*10+1;return rows;}\nfn at()->Int{trace=trace*10+2;return 0;}\nfn rhs()->Int{trace=trace*10+3;rows[0].x=100;return 2;}\nfn main()->Int{backing()[at()].x+=rhs();if trace==123&&rows[0].x==22{return 42;}return 7;}".to_string(),
+        ),
+        (
+            "rhs-rebind-keeps-original-backing".to_string(),
+            "struct Row{Int x}\nfn main()->Int{let rows:[Row]=[Row{x:20}];let old=rows;rows[0].x+={rows=[Row{x:100}];2};return old[0].x+rows[0].x - 80;}".to_string(),
+        ),
+        (
+            "throwing-rhs-no-final-store".to_string(),
+            "struct Row{Int x}\nvar effects:Int=0;\nfn fail()->Int{effects=effects+1;throw 99;}\nfn main()->Int{let rows:[Row]=[Row{x:20}];try{rows[0].x+=fail();}catch(_){if effects==1&&rows[0].x==20{return 42;}}return 7;}".to_string(),
+        ),
+        (
+            "plain-local-field-read-before-rhs".to_string(),
+            "struct Row{Int x}\nfn main()->Int{let row=Row{x:20};row.x+={row.x=100;2};return row.x+20;}".to_string(),
+        ),
+        (
+            "plain-global-field-read-before-rhs".to_string(),
+            "struct Row{Int x}\nvar row:Row=Row{x:20};\nfn rhs()->Int{row.x=100;return 2;}\nfn main()->Int{row.x+=rhs();return row.x+20;}".to_string(),
+        ),
+        (
+            "out-of-bounds-read-skips-rhs".to_string(),
+            "struct Row{Int x}\nvar effects:Int=0;\nfn effect()->Int{effects=effects+1;return 2;}\nfn write()->Int{let rows:[Row]=[Row{x:20}];rows[9].x+=effect();return 7;}\nfn main()->Int{let failed=write();if failed==1&&effects==0{return 42;}return 7;}".to_string(),
+        ),
+        (
+            "float-field-add".to_string(),
+            "struct Row{Float x}\nfn main()->Int{let rows:[Row]=[Row{x:20.5}];rows[0].x+=21.5;if rows[0].x==42.0{return 42;}return 7;}".to_string(),
+        ),
+    ];
+    for (op, initial, rhs, adjustment) in [
+        ("+", 20, 2, 20),
+        ("-", 44, 2, 0),
+        ("*", 21, 2, 0),
+        ("/", 84, 2, 0),
+        ("%", 85, 43, 0),
+        ("&", 63, 42, 0),
+        ("|", 40, 2, 0),
+        ("^", 40, 2, 0),
+        ("<<", 21, 1, 0),
+        (">>", 84, 1, 0),
+    ] {
+        cases.push((
+            format!("operator-{op}"),
+            format!("struct Row{{Int x}}\nvar calls:Int=0;\nfn rhs()->Int{{calls=calls+1;return {rhs};}}\nfn main()->Int{{let rows:[Row]=[Row{{x:{initial}}}];rows[0].x{op}=rhs();if calls!=1{{return 7;}}return rows[0].x+{adjustment};}}"),
+        ));
+    }
+    for (name, source) in cases {
+        let raw = parse_in_source(&source).expect(&name);
+        let runtime = native_runtime(&raw);
+        assert_eq!(
+            unsafe { runtime.invoke("main", &[]) },
+            Some(42),
+            "raw: {name}"
+        );
+        let mut desugared = raw;
+        inauguration::lower_core::desugar_module(&mut desugared);
+        let runtime = native_runtime(&desugared);
+        assert_eq!(
+            unsafe { runtime.invoke("main", &[]) },
+            Some(42),
+            "desugared: {name}"
+        );
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut module = desugared.clone();
+            core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            let runtime = native_runtime(&module);
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]) },
+                Some(42),
+                "{name}: {profile:?}"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn native_rust_field_compound_keeps_value_first_contract() {
+    use inauguration::emit_profile::EmitProfile;
+    // Rust's existing private value-first operation reads the field after RHS.
+    // The .in read-before-RHS cases above deliberately have a different contract.
+    let parsed = inauguration::compiler::rust_front::parse_rust_source(
+        "struct Row{x:i64} fn main()->i64{let mut row=Row{x:20};row.x+={row.x=40;2};row.x}",
+    )
+    .unwrap();
+    let mut module = inauguration::typecheck::normalize_module(
+        inauguration::parser_registry::ParserId::Rust,
+        &parsed,
+    );
+    inauguration::lower_core::desugar_module(&mut module);
+    for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+        let mut optimized = module.clone();
+        core_opt::optimize_with_profile(&mut optimized.decls, Some("main"), profile);
+        let runtime = native_runtime(&optimized);
+        assert_eq!(
+            unsafe { runtime.invoke("main", &[]) },
+            Some(42),
+            "{profile:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn native_declared_field_modify_name_and_compound_syntax_are_distinct() {
+    use inauguration::emit_profile::EmitProfile;
+    let source = "struct Row{Int x}\nvar calls:Int=0;\nfn field-modify-place-first(row:Row,field:String,value:Int,op:String)->Void{calls=calls+1;}\nfn main()->Int{let row=Row{x:20};field-modify-place-first(row,\"x\",2,\"+\");row.x+=1;return row.x+calls+20;}";
+    let canonical = inauguration::in_canonical::canonicalize_in_source(source).unwrap();
+    for source in [source, canonical.as_str()] {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut module = parse_in_source(source).unwrap();
+            inauguration::lower_core::desugar_module(&mut module);
+            core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            let runtime = native_runtime(&module);
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]) },
+                Some(42),
+                "{profile:?}"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn native_pure_field_updates_do_not_exhaust_frame_with_capture_slots() {
+    use inauguration::emit_profile::EmitProfile;
+    let source = format!(
+        "struct Row{{Int x}}\nvar rows:[Row]=[Row{{x:0}}]\nfn main()->Int{{rows[0].x=0;{}if rows[0].x==300{{return 42;}}return 7;}}",
+        "rows[0].x+=1;".repeat(300)
+    );
+    let raw = parse_in_source(&source).unwrap();
+    let runtime = native_runtime(&raw);
+    assert_eq!(unsafe { runtime.invoke("main", &[]) }, Some(42), "raw");
+    for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+        let mut module = raw.clone();
+        inauguration::lower_core::desugar_module(&mut module);
+        core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+        let runtime = native_runtime(&module);
+        assert_eq!(
+            unsafe { runtime.invoke("main", &[]) },
+            Some(42),
+            "{profile:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn native_wide_harden_dispatch_preserves_effect_order() {
+    use inauguration::emit_profile::EmitProfile;
+    let calls = (0..300)
+        .map(|index| format!("step({index});"))
+        .collect::<String>();
+    let source = format!(
+        "var next:Int=0;var bad:Int=0;fn step(value:Int)->Void{{if value!=next{{bad=1;}}next=next+1;}}fn main()->Int{{{calls}if next==300 && bad==0{{return 42;}}return 7;}}"
+    );
+    let mut module = parse_in_source(&source).unwrap();
+    inauguration::lower_core::desugar_module(&mut module);
+    core_opt::optimize_with_profile(&mut module.decls, Some("main"), EmitProfile::Harden);
+    let runtime = native_runtime(&module);
+    assert_eq!(unsafe { runtime.invoke("main", &[]) }, Some(42));
+}

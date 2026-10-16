@@ -2,12 +2,14 @@
 
 pub(crate) mod tuples;
 
+pub(crate) const FIELD_MODIFY_PLACE_FIRST: &str = "#field-modify-place-first";
 pub(crate) const INLINE_CONST: &str = "#rust-inline-const";
 pub(crate) const VECTOR_ALLOCATION: &str = "#vector-with-capacity";
 pub(crate) const BORROW: &str = "#rust-borrow";
 pub(crate) const METHOD_PREFIX: &str = "#receiver-method:";
 pub(crate) fn is_compiler_callee(name: &str) -> bool {
     tuples::is_marker(name)
+        || name == FIELD_MODIFY_PLACE_FIRST
         || name == INLINE_CONST
         || name == BORROW
         || name == VECTOR_ALLOCATION
@@ -2230,5 +2232,33 @@ mod tests {
         };
         assert_eq!(sig.name, "foo");
         assert_eq!(sig.params.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod private_field_modify_marker_tests {
+    use super::*;
+    #[test]
+    fn private_field_marker_is_reserved_without_claiming_plain_name() {
+        assert!(is_compiler_callee(FIELD_MODIFY_PLACE_FIRST));
+        assert!(!is_compiler_callee("field-modify-place-first"));
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: FIELD_MODIFY_PLACE_FIRST.into(),
+            params: vec![],
+            ret: Typ::Void,
+            body: vec![Stmt::Return(None)],
+            type_params: vec![],
+        }]);
+        let report = crate::core_ir_verifier::verify_module(
+            &module,
+            &crate::core_ir_verifier::VerifyOptions {
+                entry: None,
+                require_entry: false,
+            },
+        );
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("reserved-intrinsic-name")
+        );
     }
 }

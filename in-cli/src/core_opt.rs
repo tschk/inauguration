@@ -161,7 +161,7 @@ fn walk_expr<F: FnMut(&Expr)>(e: &Expr, f: &mut F) {
 /// Checked indexing, division and remainder can return early on failure, just as
 /// calls and structured values can carry effects or nonlocal exits. Retain their
 /// evaluation when removing bindings or substituting function bodies.
-fn expr_has_effects(e: &Expr) -> bool {
+pub(crate) fn expr_has_effects(e: &Expr) -> bool {
     let mut has = false;
     walk_expr(e, &mut |n| {
         // Cloning allocates; substitution must not duplicate its storage or evaluation.
@@ -2478,27 +2478,34 @@ fn harden_cfg_dispatch_lite(decls: &mut [Decl]) {
             chunks.push(cur);
         }
         let state_count = chunks.len() as i64;
-        let mut chain: Option<Stmt> = None;
-        for (i, chunk_stmts) in chunks.into_iter().enumerate().rev() {
-            let i = i as i64;
-            let mut then_body = chunk_stmts;
-            then_body.push(Stmt::Assign(pc.clone(), Expr::IntLit(i + 1)));
-            let cond = Expr::Binary {
-                op: "==".into(),
-                lhs: Box::new(Expr::Ident(pc.clone())),
-                rhs: Box::new(Expr::IntLit(i)),
-            };
-            let else_body = match chain.take() {
-                Some(s) => vec![s],
-                None => vec![Stmt::Assign(pc.clone(), Expr::IntLit(state_count))],
-            };
-            chain = Some(Stmt::If {
-                cond,
-                then_body,
-                else_body,
-            });
+        fn dispatch_tree(
+            mut chunks: Vec<Vec<Stmt>>,
+            first: i64,
+            pc: &str,
+            state_count: i64,
+        ) -> Stmt {
+            if chunks.len() == 1 {
+                let mut then_body = chunks.pop().expect("nonempty dispatcher leaf");
+                then_body.push(Stmt::Assign(pc.to_string(), Expr::IntLit(first + 1)));
+                return Stmt::If {
+                    cond: bin_expr("==", Expr::Ident(pc.to_string()), Expr::IntLit(first)),
+                    then_body,
+                    else_body: vec![Stmt::Assign(pc.to_string(), Expr::IntLit(state_count))],
+                };
+            }
+            let middle = chunks.len() / 2;
+            let right = chunks.split_off(middle);
+            let middle_state = first + middle as i64;
+            Stmt::If {
+                cond: bin_expr("<", Expr::Ident(pc.to_string()), Expr::IntLit(middle_state)),
+                then_body: vec![dispatch_tree(chunks, first, pc, state_count)],
+                else_body: vec![dispatch_tree(right, middle_state, pc, state_count)],
+            }
         }
-        let dispatch = chain.expect("chunks non-empty");
+        // A linear else chain makes a wide source body recursively deep in
+        // every later IR walker/lowerer. Balanced routing retains one guarded
+        // state per iteration with logarithmic synthetic nesting instead.
+        let dispatch = dispatch_tree(chunks, 0, &pc, state_count);
         *body = vec![
             Stmt::Let(pc.clone(), Some(Typ::Int), Expr::IntLit(0)),
             Stmt::Loop {
@@ -4997,5 +5004,80 @@ mod float_literal_logical_not_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod balanced_dispatch_tests {
+    use super::*;
+
+    fn if_depth(body: &[Stmt]) -> usize {
+        body.iter()
+            .map(|stmt| match stmt {
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => 1 + if_depth(then_body).max(if_depth(else_body)),
+                Stmt::Loop { body, .. } => if_depth(body),
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn wide_dispatch_is_logarithmic_and_preserves_short_lived_values() {
+        let calls = (0..300)
+            .map(|index| {
+                format!(
+                    "let value{index}:Int=step({index});if value{index}!={}{{return 7;}}",
+                    index + 1
+                )
+            })
+            .collect::<String>();
+        let source = format!(
+            "fn step(value:Int)->Int{{return value+1;}}fn main()->Int{{let _pc:Int=20;let _pc_:Int=21;let first:Int=step(_pc+_pc_);if first!=42{{return 7;}}{calls}return 42;}}"
+        );
+        let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+        assert_eq!(
+            crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
+            42
+        );
+        harden_cfg_dispatch_lite(&mut module.decls);
+        let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+        assert!(verified.ok, "{verified:?}");
+        assert_eq!(
+            crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
+            42
+        );
+        let body = module
+            .decls
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Function { name, body, .. } if name == "main" => Some(body),
+                _ => None,
+            })
+            .unwrap();
+        assert!(matches!(&body[0],Stmt::Let(name,..) if name!="_pc"&&name!="_pc_"));
+        let Stmt::Loop {
+            cond: Some(Expr::Binary { rhs, .. }),
+            body: dispatch,
+            ..
+        } = &body[1]
+        else {
+            panic!("dispatcher")
+        };
+        let Expr::IntLit(states) = rhs.as_ref() else {
+            panic!("state count")
+        };
+        assert!(*states > 100, "must split after local bindings expire");
+        let routing_levels = (*states as usize).next_power_of_two().ilog2() as usize;
+        assert!(
+            if_depth(dispatch) <= routing_levels + 2,
+            "{} states plus one source if must have logarithmic depth: {}",
+            states,
+            if_depth(dispatch)
+        );
     }
 }

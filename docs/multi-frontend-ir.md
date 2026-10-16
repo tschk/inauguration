@@ -98,6 +98,8 @@ Rust type: `in_cli::core_ir::UnifiedModule`.
 
 Rust indexed assignment uses `index-assign-value-first(base, index, value)` in statement position. Shared operand spilling evaluates the assigned value before the place, evaluates each operand once, and skips place evaluation when the value throws. Primitive indexed compound assignments use `index-modify-value-first(base, index, value, operator)`; the old element is read after the right-hand operand has completed, and the same saved place receives the result. Numeric field compounds use `field-modify-value-first(base, field, value, operator)` and retain the original object storage rather than updating a copied struct. A throwing RHS skips the update.
 
+`.in` numeric field compounds use `#field-modify-place-first(base, field, value, operator)`. Shared lowering retains the destination across effectful operands, reads the old field before RHS effects, and writes back through that same place. Pure updates reuse ordinary binary evaluation without extra capture slots. Rebinding the source array during the RHS does not redirect the update. A failed old-field read skips the RHS; a throwing RHS skips the final store.
+
 ## Array repetition and collection loops
 
 Rust `[value; count]` lowers to the reserved Core IR operation `array-repeat(value, count)`. The shared pass evaluates an ordinary value expression once, including when the count is zero, and copies that value into an array. It preserves surrounding argument order, short-circuit branches, and repeated while-condition evaluation. Generated bindings avoid source names. Empty arrays retain the element type for checking unreachable loop bodies.
@@ -150,7 +152,7 @@ Assignment scans share the character-aware operator scanner with expressions, re
 
 ## Harden dispatcher scopes
 
-Control-flow dispatcher states keep a local declaration with its last read or write, preserving lexical scope without moving initialization effects. A single scan computes the use boundaries, and the synthetic program counter avoids existing names. Hardened programs retain valid bindings across assignments and returns.
+Control-flow dispatcher states keep a local declaration with its last read or write, preserving lexical scope without moving initialization effects. A single scan computes the use boundaries, and the synthetic program counter avoids existing names. Hardened programs retain valid bindings across assignments and returns. State dispatch uses a balanced decision tree with exact state guards, keeping synthetic nesting logarithmic for wide function bodies.
 
 ## Signed shifts
 

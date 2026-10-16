@@ -17,7 +17,7 @@ fn is_index_store(expr: &Expr) -> bool {
 }
 
 fn is_field_modify(expr: &Expr) -> bool {
-    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "field-modify-value-first"))
+    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "field-modify-value-first" || name == crate::core_ir::FIELD_MODIFY_PLACE_FIRST))
 }
 
 fn is_variable_modify(expr: &Expr) -> bool {
@@ -655,7 +655,7 @@ impl Lower {
             }
             if let Stmt::Expr(expr) = &stmt
                 && is_field_modify(expr)
-                && let Expr::Call { args, .. } = expr
+                && let Expr::Call { callee, args } = expr
                 && args.len() == 4
                 && let (Expr::StringLit(field), Expr::StringLit(op)) = (&args[1], &args[3])
                 && matches!(
@@ -663,21 +663,54 @@ impl Lower {
                     "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"
                 )
             {
+                let place_first = matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::FIELD_MODIFY_PLACE_FIRST);
+                let spill_rhs = !place_first || expr_needs_spills(&args[2], &self.facts);
+                let mut base = args[0].clone();
+                // An indexed place must retain its array alias and index across
+                // RHS prefixes; saving the Named receiver would mutate a copy.
+                let previous = if place_first {
+                    let mut capture_place =
+                        !is_addressable(&base) || crate::core_opt::expr_has_effects(&args[2]);
+                    crate::core_ir::for_each_expr_child(&base, &mut |child| {
+                        capture_place |= crate::core_opt::expr_has_effects(child);
+                    });
+                    // Pure repeated updates need no extra capture slots.
+                    if capture_place {
+                        self.stage_receiver_place(&mut base, &mut prefix);
+                    }
+                    if !is_addressable(&base) {
+                        base = self.save(base, &mut prefix);
+                    }
+                    spill_rhs.then(|| {
+                        self.save(
+                            Expr::Field {
+                                base: Box::new(base.clone()),
+                                name: field.clone(),
+                            },
+                            &mut prefix,
+                        )
+                    })
+                } else {
+                    None
+                };
                 let mut value = args[2].clone();
-                self.expr(&mut value, &mut prefix);
-                let value = self.save(value, &mut prefix);
-                // Keep the original place. Saving a struct as a value would
-                // make a copy and update that copy instead of the source object.
-                let base = args[0].clone();
+                // Ordinary binary evaluation already reads the field first;
+                // materialize it only when RHS prefixes would move ahead of it.
+                if spill_rhs {
+                    self.expr(&mut value, &mut prefix);
+                    value = self.save(value, &mut prefix);
+                }
+                // Rust's value-first marker retains the original delayed read.
+                let previous = previous.unwrap_or_else(|| Expr::Field {
+                    base: Box::new(base.clone()),
+                    name: field.clone(),
+                });
                 stmt = Stmt::FieldAssign {
-                    base: base.clone(),
+                    base,
                     name: field.clone(),
                     value: Expr::Binary {
                         op: op.clone(),
-                        lhs: Box::new(Expr::Field {
-                            base: Box::new(base),
-                            name: field.clone(),
-                        }),
+                        lhs: Box::new(previous),
                         rhs: Box::new(value),
                     },
                 };
@@ -1027,5 +1060,75 @@ mod indexed_receiver_place_tests {
         let original = module.decls.clone();
         lower_value_spills(&mut module.decls);
         assert_eq!(module.decls, original);
+    }
+}
+
+#[cfg(test)]
+mod compound_field_place_tests {
+    use super::*;
+
+    fn main_body(decls: &[Decl]) -> &[Stmt] {
+        decls
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Function { name, body, .. } if name == "main" => Some(body.as_slice()),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn place_first_saves_array_index_and_old_field_before_rhs_once() {
+        let source = "struct Row{Int x}\nvar rows:[Row]=[Row{x:40}]\nfn get()->[Row]{return rows;}\nfn at()->Int{return 0;}\nfn effect()->Int{return 2;}\nfn next(values:[Int])->Int{return values[0];}\nfn main()->Int{get()[at()].x+=next(array-repeat(effect(),1));return rows[0].x;}";
+        let canonical = crate::in_canonical::canonicalize_in_source(source).unwrap();
+        for source in [source, canonical.as_str()] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            lower_value_spills(&mut module.decls);
+            let body = main_body(&module.decls);
+            let calls: Vec<_> = body
+                .iter()
+                .filter_map(|stmt| match stmt {
+                    Stmt::Let(_, _, Expr::Call { callee, .. }) => match callee.as_ref() {
+                        Expr::Ident(name) => Some(name.as_str()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(calls, ["get", "at", "effect", "next"]);
+            let old = body.iter().position(|stmt| matches!(stmt,
+                Stmt::Let(_, _, Expr::Field {base, name}) if name == "x" && matches!(base.as_ref(), Expr::Index {base,index} if matches!(base.as_ref(),Expr::Ident(_)) && matches!(index.as_ref(),Expr::Ident(_)))
+            )).unwrap();
+            let rhs = body.iter().position(|stmt| matches!(stmt,
+                Stmt::Let(_,_,Expr::Call {callee,..}) if matches!(callee.as_ref(),Expr::Ident(name) if name=="next")
+            )).unwrap();
+            assert!(old < rhs);
+            assert!(body.iter().any(|stmt| matches!(stmt,
+                Stmt::FieldAssign {base:Expr::Index {base,index},value:Expr::Binary {lhs,rhs,..},..}
+                if matches!(base.as_ref(),Expr::Ident(_)) && matches!(index.as_ref(),Expr::Ident(_)) && matches!(lhs.as_ref(),Expr::Ident(_)) && matches!(rhs.as_ref(),Expr::Ident(_))
+            )));
+            assert!(
+                !body.iter().any(
+                    |stmt| matches!(stmt,Stmt::Let(_,Some(Typ::Named(name)),_) if name=="Row")
+                )
+            );
+            let once = module.decls.clone();
+            lower_value_spills(&mut module.decls);
+            assert_eq!(module.decls, once);
+        }
+    }
+
+    #[test]
+    fn rust_value_first_marker_keeps_rhs_before_old_field_read() {
+        let source = "struct Row{Int x}\nvar row:Row=Row{x:20}\nfn next()->Int{return 22;}\nfn main()->Int{field-modify-value-first(row,\"x\",next(),\"+\");return row.x;}";
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        lower_value_spills(&mut module.decls);
+        let body = main_body(&module.decls);
+        assert!(
+            matches!(&body[0],Stmt::Let(_,_,Expr::Call {callee,..}) if matches!(callee.as_ref(),Expr::Ident(name) if name=="next"))
+        );
+        assert!(
+            matches!(&body[1],Stmt::FieldAssign {value:Expr::Binary {lhs,..},..} if matches!(lhs.as_ref(),Expr::Field {..}))
+        );
     }
 }

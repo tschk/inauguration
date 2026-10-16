@@ -118,17 +118,15 @@ fn parse_assign_stmt_with_context(s: &str, context: &mut LoopParseContext<'_>) -
                     Expr::StringLit(op.strip_suffix('=').unwrap().into()),
                 ],
             })),
-            Expr::Field { base, name: field } => {
-                let read = Expr::Field {
-                    base: base.clone(),
-                    name: field.clone(),
-                };
-                Some(Stmt::FieldAssign {
-                    base: *base,
-                    name: field,
-                    value: compound_binary(op, read, rhs),
-                })
-            }
+            Expr::Field { base, name: field } => Some(Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident(crate::core_ir::FIELD_MODIFY_PLACE_FIRST.into())),
+                args: vec![
+                    *base,
+                    Expr::StringLit(field),
+                    rhs,
+                    Expr::StringLit(op.strip_suffix('=').unwrap().into()),
+                ],
+            })),
             Expr::Ident(name) => {
                 let read = Expr::Ident(name.clone());
                 Some(Stmt::Assign(name, compound_binary(op, read, rhs)))
@@ -607,6 +605,26 @@ mod for_header_boundary_tests {
         assert_eq!(
             crate::in_lang_parse::parse_in_source(&canonical).unwrap(),
             parsed
+        );
+    }
+}
+
+#[cfg(test)]
+mod compound_field_marker_tests {
+    use super::*;
+
+    #[test]
+    fn compound_field_assignment_keeps_one_place_and_rhs() {
+        let Some(Stmt::Expr(Expr::Call { callee, args })) =
+            parse_assign_stmt("rows[at()].value += next()")
+        else {
+            panic!("missing compound field marker")
+        };
+        assert!(
+            matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::FIELD_MODIFY_PLACE_FIRST)
+        );
+        assert!(
+            matches!(args.as_slice(),[Expr::Index {..},Expr::StringLit(field),Expr::Call {..},Expr::StringLit(op)] if field=="value" && op=="+")
         );
     }
 }

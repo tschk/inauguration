@@ -269,6 +269,25 @@ fn format_stmt(stmt: &Stmt, depth: usize, out: &mut String) {
             out.push_str(&format_expr(expr));
             out.push('\n');
         }
+        Stmt::Expr(Expr::Call { callee, args })
+            if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::FIELD_MODIFY_PLACE_FIRST)
+                && matches!(args.as_slice(), [_, Expr::StringLit(field), _, Expr::StringLit(op)]
+                    if !field.is_empty() && field.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || (!ch.is_ascii() && !ch.is_whitespace() && !ch.is_control()))
+                        && matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>")) =>
+        {
+            let [base, Expr::StringLit(field), rhs, Expr::StringLit(op)] = args.as_slice() else {
+                unreachable!()
+            };
+            out.push_str(&indent);
+            out.push_str(&format_expr(base));
+            out.push('.');
+            out.push_str(field);
+            out.push(' ');
+            out.push_str(op);
+            out.push_str("= ");
+            out.push_str(&format_expr(rhs));
+            out.push('\n');
+        }
         Stmt::Expr(expr) => {
             out.push_str(&indent);
             out.push_str(&format_expr(expr));
@@ -946,5 +965,68 @@ return 42;
         assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
         assert_eq!(canonical.matches("fn read(").count(), 1);
         assert!(!canonical.contains("fn Pair_read("));
+    }
+}
+
+#[cfg(test)]
+mod private_field_modify_canonical_tests {
+    use super::*;
+    #[test]
+    fn all_compound_fields_roundtrip_without_exposing_private_marker() {
+        for op in ["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>"] {
+            let source = format!(
+                "struct Row{{Int x}}\nfn at()->Int{{return 0;}}\nfn rhs()->Int{{return 2;}}\nfn main()->Int{{let rows:[Row]=[Row{{x:40}}];rows[at()].x{op}=rhs();return rows[0].x;}}"
+            );
+            let before = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let canonical = canonicalize_in_source(&source).unwrap();
+            assert!(!canonical.contains(crate::core_ir::FIELD_MODIFY_PLACE_FIRST));
+            assert_eq!(
+                crate::in_lang_parse::parse_in_source(&canonical).unwrap(),
+                before
+            );
+            assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+        }
+    }
+    #[test]
+    fn unicode_compound_fields_preserve_source_roundtrip() {
+        for field in ["café", "变量", "🦀", "field_1"] {
+            let source = format!(
+                "struct Row{{Int {field}}}\nfn main()->Int{{let row=Row{{{field}:40}};row.{field}+=2;return row.{field};}}"
+            );
+            let before = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let canonical = canonicalize_in_source(&source).unwrap();
+            assert!(!canonical.contains(crate::core_ir::FIELD_MODIFY_PLACE_FIRST));
+            assert_eq!(
+                crate::in_lang_parse::parse_in_source(&canonical).unwrap(),
+                before
+            );
+            assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+        }
+    }
+    #[test]
+    fn malformed_private_marker_remains_private_and_refused() {
+        for args in [
+            vec![Expr::IntLit(0)],
+            vec![
+                Expr::Ident("row".into()),
+                Expr::StringLit("x".into()),
+                Expr::IntLit(1),
+                Expr::StringLit("invalid".into()),
+            ],
+            vec![
+                Expr::Ident("row".into()),
+                Expr::StringLit("x; injected()".into()),
+                Expr::IntLit(1),
+                Expr::StringLit("+".into()),
+            ],
+        ] {
+            let stmt = Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident(crate::core_ir::FIELD_MODIFY_PLACE_FIRST.into())),
+                args,
+            });
+            let mut text = String::new();
+            format_stmt(&stmt, 0, &mut text);
+            assert!(text.contains(crate::core_ir::FIELD_MODIFY_PLACE_FIRST));
+        }
     }
 }
