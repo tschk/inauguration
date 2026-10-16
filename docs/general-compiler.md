@@ -63,10 +63,11 @@ operations expand, including unsigned division and right shifts. Inferred RHS
 locals retain their contextual integer kinds; canonical native-call integer
 results do not acquire an arbitrary Rust width.
 
-Declaration origin is still inferred from retained Rust metadata. A Void
-helper accessing a global nominal field can miss numeric normalization when
-its body contains no such metadata; unsigned shifts using a canonical builtin
-count are a known remaining case.
+Rust functions retain transient declaration-origin metadata when their syntax
+otherwise lacks numeric metadata. This keeps Void helpers accessing global
+nominal fields in Rust numeric normalization, including unsigned shifts using a
+canonical builtin count. Normalization consumes the origin marker before
+executable lowering and leaves unmarked mixed-language functions unchanged.
 
 Array and struct destructuring, and dereference assignees, currently refuse
 explicitly rather than silently discarding stores. Native output can still

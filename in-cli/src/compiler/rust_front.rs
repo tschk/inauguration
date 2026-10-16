@@ -88,6 +88,7 @@ fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<UnifiedModul
     rewrite_global_references(&mut module.decls, &references, file);
     register_explicit_vector_constructors(&mut module);
     refuse_static_array_value_uses(&mut module);
+    crate::typecheck::rust_integers::mark_declaration_origins(&mut module.decls);
     Ok(module)
 }
 

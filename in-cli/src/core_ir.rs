@@ -15,6 +15,8 @@ pub(crate) const RUST_COMPOUND_ASSIGNMENT_TARGET: &str =
     "#unsupported-rust-compound-assignment-target";
 pub(crate) const INLINE_CONST: &str = "#rust-inline-const";
 pub(crate) const VECTOR_ALLOCATION: &str = "#vector-with-capacity";
+/// Transient Rust declaration ownership, consumed by integer normalization.
+pub(crate) const RUST_DECL_ORIGIN: &str = "#rust-declaration-origin";
 pub(crate) const BORROW: &str = "#rust-borrow";
 pub(crate) const METHOD_PREFIX: &str = "#receiver-method:";
 /// Legacy source helpers become private operations only after lexical resolution.

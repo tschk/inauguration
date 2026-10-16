@@ -367,6 +367,9 @@ impl Pass<'_> {
             && self.checker.expr_type(expr, self.facts, env) == Some(Typ::Int)
     }
     fn contextual_integer(&self, expr: &Expr, env: &HashMap<String, Typ>) -> bool {
+        if core_ir::expr_diverges(expr) {
+            return true;
+        }
         match expr {
             Expr::Ident(name) => {
                 self.hint(expr, env).is_some()
@@ -1204,6 +1207,37 @@ impl Pass<'_> {
     }
 }
 
+fn origin_marker(stmt: &Stmt) -> bool {
+    matches!(stmt, Stmt::Expr(Expr::Unary { op, expr })
+        if op == core_ir::RUST_DECL_ORIGIN && matches!(expr.as_ref(), Expr::UnitLit))
+}
+
+/// Attach ownership only where Rust integer syntax does not already identify it.
+/// Normalization consumes this metadata before any executable body is lowered.
+pub(crate) fn mark_declaration_origins(decls: &mut [Decl]) {
+    for decl in decls {
+        let needs_origin = !decl_has_metadata(decl);
+        match decl {
+            Decl::Function { body, .. } if needs_origin && !body.is_empty() => {
+                // Preserve terminal returns for other frontend consumers.
+                let at = match body.last() {
+                    Some(Stmt::Return(_)) => body.len() - 1,
+                    _ => body.len(),
+                };
+                body.insert(
+                    at,
+                    Stmt::Expr(Expr::Unary {
+                        op: core_ir::RUST_DECL_ORIGIN.into(),
+                        expr: Box::new(Expr::UnitLit),
+                    }),
+                );
+            }
+            Decl::Class { methods, .. } => mark_declaration_origins(methods),
+            _ => {}
+        }
+    }
+}
+
 fn decl_has_metadata(value: &Decl) -> bool {
     fn typ(ty: &Typ) -> bool {
         match ty {
@@ -1213,6 +1247,10 @@ fn decl_has_metadata(value: &Decl) -> bool {
         }
     }
     fn expr(value: &Expr) -> bool {
+        if matches!(value, Expr::Unary { op, expr } if op == core_ir::RUST_DECL_ORIGIN && matches!(expr.as_ref(), Expr::UnitLit))
+        {
+            return true;
+        }
         if matches!(value,Expr::Unary{op,..} if (op.starts_with("rust-integer-literal") || op.starts_with("rust-integer-value-")))
         {
             return true;
@@ -1342,6 +1380,7 @@ pub(crate) fn normalize(
             Decl::Function {
                 params, ret, body, ..
             } => {
+                body.retain(|stmt| !origin_marker(stmt));
                 pass.return_type = Some(ret.clone());
                 let mut initial = globals.clone();
                 initial.extend(params.iter().cloned());
@@ -1402,6 +1441,81 @@ mod tests {
         normalize(&checker, &mut module, semantics);
         module
     }
+    #[test]
+    fn rust_origin_selects_void_global_shift_helper_and_is_consumed() {
+        let source = "struct Row{bits:u64} static mut ROW:Row=Row{bits:0x8000000000000000u64}; fn change(){unsafe{ROW.bits>>=\"x\".len();}} fn main()->i64{change();unsafe{if ROW.bits==0x4000000000000000u64{42}else{7}}}";
+        let mut module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        let helper = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function{name,..} if name == "change"))
+            .unwrap();
+        assert!(matches!(helper, Decl::Function{body,..} if body.iter().any(origin_marker)));
+        normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+        let helper = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function{name,..} if name == "change"))
+            .unwrap();
+        let mut logical_shift = false;
+        let mut helpers = vec![helper.clone()];
+        crate::core_opt::map_decl_exprs_mut(&mut helpers, &mut |expr| {
+            logical_shift |= matches!(expr, Expr::Binary{op,..} if op == "lshr");
+        });
+        assert!(logical_shift, "{helper:?}");
+        assert!(!has_metadata(&module), "{module:?}");
+        let once = module.clone();
+        normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+        assert_eq!(module, once);
+    }
+
+    #[test]
+    fn rust_origin_does_not_select_unmarked_mixed_language_functions() {
+        let mut module = crate::compiler::rust_front::parse_rust_source(
+            "struct Row{bits:u64} static mut ROW:Row=Row{bits:0x8000000000000000u64}; fn change(){unsafe{ROW.bits>>=\"x\".len();}}",
+        ).unwrap();
+        let foreign = Decl::Function {
+            name: "foreign_word_shift".into(),
+            params: vec![("value".into(), Typ::Int)],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::Binary {
+                op: ">>".into(),
+                lhs: Box::new(Expr::Ident("value".into())),
+                rhs: Box::new(Expr::IntLit(1)),
+            }))],
+            type_params: vec![],
+        };
+        module.decls.push(foreign.clone());
+        normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+        assert_eq!(module.decls.last(), Some(&foreign));
+        assert!(!has_metadata(&module));
+    }
+
+    #[test]
+    fn rust_origin_preserves_bodyless_foreign_declarations() {
+        let mut module = crate::compiler::rust_front::parse_rust_source(
+            "extern \"C\" { fn external(); } fn main() {}",
+        )
+        .unwrap();
+        let external = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function{name,..} if name == "external"))
+            .unwrap()
+            .clone();
+        // Mixed-source linking identifies foreign declarations before normalization.
+        assert!(matches!(&external, Decl::Function{body,..} if body.is_empty()));
+        normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+        assert_eq!(
+            module
+                .decls
+                .iter()
+                .find(|decl| matches!(decl, Decl::Function{name,..} if name == "external")),
+            Some(&external)
+        );
+        assert!(!has_metadata(&module));
+    }
+
     #[test]
     fn backward_integer_inference_and_normalization_are_idempotent() {
         for source in [

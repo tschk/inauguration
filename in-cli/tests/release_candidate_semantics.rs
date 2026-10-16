@@ -17,6 +17,9 @@ fn native_rust_assignments_preserve_values_order_and_integer_kinds() {
         "fn main()->i64{let mut bits=[0x8000000000000000u64];let divisor=2;bits[0]/=divisor;if bits[0]==0x4000000000000000u64{42}else{7}}",
         "fn main()->i64{let mut bits=[0x8000000000000000u64];bits[0]/={let divisor=2;divisor};if bits[0]==0x4000000000000000u64{42}else{7}}",
         "fn main()->i64{let mut bits=[0x8000000000000000u64];bits[0]/=match true{true=>2,false=>3};if bits[0]==0x4000000000000000u64{42}else{7}}",
+        "struct Row{bits:u64}static mut ROW:Row=Row{bits:0x8000000000000000u64};fn change(){unsafe{ROW.bits>>=\"x\".len();}}fn main()->i64{change();unsafe{if ROW.bits==0x4000000000000000u64{42}else{7}}}",
+        "fn main()->i64{let value=if true{{return 42;}}else{0};value}",
+        "fn main()->i64{let value=match 0{0=>return 42,_=>0};value}",
     ] {
         for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
             let parsed = inauguration::compiler::rust_front::parse_rust_source(source).unwrap();
