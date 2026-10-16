@@ -41,6 +41,16 @@ pub fn lower_to_mir(module: &UnifiedModule) -> Result<MirModule, String> {
         else {
             return Err("typed-mir: non-function declarations are not represented yet".into());
         };
+        if crate::core_atomic::signature(name).is_some() {
+            return Err(format!(
+                "typed-mir: canonical atomic intrinsic name is redeclared: {name}"
+            ));
+        }
+        if crate::inrt::is_inrt_builtin(name) {
+            return Err(format!(
+                "typed-mir: runtime intrinsic name is redeclared: {name}"
+            ));
+        }
         if !type_params.is_empty() {
             return Err("typed-mir: generic functions require specialization".into());
         }
@@ -723,6 +733,34 @@ pub fn lower_boot_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_mir_refuses_reserved_atomic_redeclarations() {
+        for name in crate::core_atomic::names() {
+            let source =
+                format!("fn {name}()->Int{{return 42;}}fn main()->Int{{return {name}();}}");
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let error = lower_to_mir(&module).unwrap_err();
+            assert!(
+                error.contains("canonical atomic intrinsic name is redeclared"),
+                "{name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_mir_refuses_runtime_intrinsic_redeclarations() {
+        for name in crate::inrt::INRT_BUILTINS {
+            let source =
+                format!("fn {name}()->Int{{return 42;}}fn main()->Int{{return {name}();}}");
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let error = lower_to_mir(&module).unwrap_err();
+            assert!(
+                error.contains("runtime intrinsic name is redeclared"),
+                "{name}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn x86_boot_rejects_unresolved_imports() {

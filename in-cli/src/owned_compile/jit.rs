@@ -1,3 +1,5 @@
+mod scalar_mir;
+
 use crate::core_ir::{Decl, UnifiedModule};
 use crate::crate_db;
 use crate::dep_resolver;
@@ -243,9 +245,7 @@ pub(super) fn compile_jit_with_execution_state(
         .decls
         .iter()
         .find_map(|decl| match decl {
-            crate::core_ir::Decl::Function { name, ret, .. }
-                if name == &resolved_entry || name.ends_with(&format!(".{resolved_entry}")) =>
-            {
+            crate::core_ir::Decl::Function { name, ret, .. } if name == &resolved_entry => {
                 Some(match ret.canonical() {
                     crate::core_ir::Typ::Int => EntryResultKind::Int,
                     crate::core_ir::Typ::Bool => EntryResultKind::Bool,
@@ -258,8 +258,17 @@ pub(super) fn compile_jit_with_execution_state(
         })
         .unwrap_or(EntryResultKind::None);
 
-    // Select lowering based on host architecture.
-    let lowered = if cfg!(target_arch = "x86_64") {
+    let scalar_mir = if !compile_only {
+        scalar_mir::try_lower(module, &resolved_entry)
+            .map_err(|reason| format!("jit-lowering-failed: {reason}"))?
+    } else {
+        None
+    };
+    let used_scalar_mir = scalar_mir.is_some();
+    // Preserve the native backend for sources outside the scalar MIR subset.
+    let lowered = if let Some(lowered) = scalar_mir {
+        Ok(lowered)
+    } else if cfg!(target_arch = "x86_64") {
         x86_64_lower::lower_module(module, &resolved_entry).map(|result| {
             native_emit::lower::LoweredModule {
                 code: result.code,
@@ -388,6 +397,8 @@ pub(super) fn compile_jit_with_execution_state(
     };
     let reason = if compile_only {
         "JIT-compiled without execution: Rust module uses Core IR or invocation ABI features that cannot yet be executed"
+    } else if used_scalar_mir {
+        "JIT-compiled scalar MIR function executed via in-memory MAP_JIT page"
     } else {
         "JIT-compiled native function executed via in-memory MAP_JIT page"
     };

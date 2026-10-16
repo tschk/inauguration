@@ -12,11 +12,9 @@ Status matrix: **`in languages`** / **`in languages --json`**. Roadmap: [univers
                     ▼
               UnifiedModule (Core IR)
                     │
-                    ▼
-         compiler::driver → textual SIL / MIR
-                    │
-                    ▼
-           native_emit (AArch64, x86_64) + jit_runtime
+                    ├─ hosted scalar JIT: typed MIR → machine MIR → native code
+                    │                                               → jit_runtime
+                    └─ other owned routes: native_emit → JIT / native artifacts
 ```
 
 | Layer | Location | Notes |
@@ -26,6 +24,18 @@ Status matrix: **`in languages`** / **`in languages --json`**. Roadmap: [univers
 | Lower | `lower_core`, `mir_lower` | Bounded bodies → machine code |
 | CLI | `in-cli` | `build`, `compile`, `execute`, `graph`, `test` |
 | Docs hub | `docs-site/` | `crepus web build` / `web serve` (crepuscularity) |
+
+Hosted JIT execution first tries verified scalar MIR for defined zero-argument
+entries on AArch64 and x86_64. The current subset includes signed 64-bit Int,
+Bool and Void, internal register-argument calls, branches, loops and returns.
+Unsupported types, globals, runtime intrinsics, checked division/remainder and
+other unrepresented operations retain native lowering. Reserved atomic and raw
+runtime declarations cannot become ordinary MIR functions. Once machine MIR is
+admitted, emission or entry-layout failures are reported rather than retried
+through another backend. Existing loading, result decoding and runtime error
+reporting are shared; successful MIR execution is identified in the report's
+human-readable reason. Compile-only Rust modules and native artifacts retain
+their existing routes. Textual analysis IR is separate from this execution path.
 
 The component `Compiler` API emits executables through the same owned native
 emitter used by the CLI. It reports parse errors and unsupported artifact kinds

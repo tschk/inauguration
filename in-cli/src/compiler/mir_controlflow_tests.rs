@@ -743,3 +743,17 @@ fn raw_emitters_share_scalar64_signature_policy() {
         assert!(crate::compiler::mir_emit_x86::emit_boot(&module).is_ok());
     }
 }
+
+#[test]
+fn executable_validation_refuses_valid_staged_mir() {
+    let core = crate::in_lang_parse::parse_in_source("fn main()->Int{return 42;}").unwrap();
+    let staged = crate::compiler::mir_lower::lower_to_mir(&core).unwrap();
+    staged.verify(Some("main")).unwrap();
+    let error = staged.verify_machine().unwrap_err();
+    assert!(
+        error.contains("still contains staged Typed instructions"),
+        "{error}"
+    );
+    assert!(crate::compiler::mir_emit::emit_jit(&staged).is_err());
+    assert!(crate::compiler::mir_emit_x86::emit_boot(&staged).is_err());
+}

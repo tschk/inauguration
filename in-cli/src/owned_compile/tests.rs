@@ -7687,3 +7687,271 @@ fn explicit_native_backend_failure_preserves_reason_code_and_detail() {
     }
     fs::remove_file(source).unwrap();
 }
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )
+))]
+fn jit_result_type_uses_exact_resolved_entry() {
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for (extension, source, entry, expected, exit) in [
+            (
+                "icore",
+                r#"{"icoreVersion":2,"decls":[{"kind":"function","name":"App.main","params":[],"return":"Bool","body":[{"kind":"return","value":false}]},{"kind":"function","name":"main","params":[],"return":"Int","body":[{"kind":"return","value":42}]}]}"#,
+                Some("main"),
+                EvalValue::Int(42),
+                42,
+            ),
+            (
+                "in",
+                "fn App.main()->Bool{return true;}",
+                None,
+                EvalValue::Bool(true),
+                1,
+            ),
+            (
+                "in",
+                "fn App.main()->Bool{return true;}",
+                Some("App.main"),
+                EvalValue::Bool(true),
+                1,
+            ),
+        ] {
+            let path = temp_path(&format!("entry-kind.{extension}"));
+            fs::write(&path, source).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, entry, None);
+            request.profile = profile;
+            // Preserve the complete declaration surface so the earlier suffix
+            // declaration cannot disappear under executable DCE.
+            request.linkage = NativeLinkage::StaticLib;
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(expected),
+                "{profile:?}: {report:?}"
+            );
+            assert_eq!(report.eval_exit_code, Some(exit));
+            fs::remove_file(path).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )
+))]
+fn owned_scalar_mir_executes_and_preserves_native_fallback() {
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for (source, expected, uses_mir) in [
+            (
+                "fn add(x:Int,y:Int)->Int{return x+y;}fn main()->Int{return add(20,22);}",
+                Some(EvalValue::Int(42)),
+                true,
+            ),
+            (
+                "fn f(n:Int)->Int{if n==0{return 1;}return n*f(n - 1);}fn main()->Int{return f(3)*7;}",
+                Some(EvalValue::Int(42)),
+                true,
+            ),
+            (
+                "fn yes()->Bool{return true;}fn main()->Bool{return yes();}",
+                Some(EvalValue::Bool(true)),
+                true,
+            ),
+            (
+                "fn nop()->Void{return;}fn main()->Void{nop();return;}",
+                None,
+                true,
+            ),
+            (
+                "fn main()->String{return \"hello\";}",
+                Some(EvalValue::Str("hello".into())),
+                false,
+            ),
+            (
+                "var denominator:Int=0;fn main()->Int{return 42/denominator;}",
+                Some(EvalValue::Int(1)),
+                false,
+            ),
+            (
+                "var denominator:Int=0;fn main()->Int{return 42%denominator;}",
+                Some(EvalValue::Int(1)),
+                false,
+            ),
+            // Checked arithmetic preserves its current-function failure boundary.
+            (
+                "fn inner(denominator:Int)->Int{return 42/denominator;}fn main()->Int{return 100+inner(0);}",
+                Some(EvalValue::Int(101)),
+                false,
+            ),
+            (
+                "fn inner(denominator:Int)->Int{return 42%denominator;}fn main()->Int{return 100+inner(0);}",
+                Some(EvalValue::Int(101)),
+                false,
+            ),
+            // A mutable global preserves a nonconstant checked-division fallback.
+            (
+                "var denominator:Int=2;fn main()->Int{return 84/denominator;}",
+                Some(EvalValue::Int(42)),
+                false,
+            ),
+        ] {
+            let path = temp_path("scalar-mir.in");
+            fs::write(&path, source).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?} {source}: {report:?}");
+            assert_eq!(report.eval_result, expected, "{profile:?} {source}");
+            assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+            assert_eq!(
+                report
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("scalar MIR")),
+                uses_mir,
+                "{report:?}"
+            );
+            fs::remove_file(path).unwrap();
+        }
+        let path = temp_path("scalar-mir-error.in");
+        fs::write(&path, "fn main()->Int{throw 42;return 0;}").unwrap();
+        let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(!report.success, "{report:?}");
+        assert_eq!(
+            report.error.as_deref(),
+            Some("jit-uncaught-error: entry `main` threw 42"),
+            "{report:?}"
+        );
+        assert!(report.execution_started);
+        fs::remove_file(path).unwrap();
+        let path = temp_path("scalar-mir-compile-only.rs");
+        fs::write(&path, "fn main()->(i64,i64){(20,22)}").unwrap();
+        let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(report.success, "{report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-compiled-only"));
+        assert!(report.eval_result.is_none());
+        assert!(
+            !report
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("scalar MIR"))
+        );
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )
+))]
+fn owned_scalar_mir_uses_resolved_entry_and_normalized_calls() {
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for (source, entry) in [
+            ("fn App.main()->Int{return 42;}", None),
+            ("fn App.main()->Int{return 42;}", Some("App.main")),
+            ("fn answer()->Int{return 42;}", None),
+            (
+                "fn answer-value()->Int{return 42;}fn main()->Int{return answer_value();}",
+                Some("main"),
+            ),
+        ] {
+            let path = temp_path("scalar-mir-resolved.in");
+            fs::write(&path, source).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, entry, None);
+            request.profile = profile;
+            // Existing executable DCE does not retain library-only entry names.
+            request.linkage = NativeLinkage::StaticLib;
+            let report = compile_owned(&request);
+            assert!(report.success, "{profile:?} {source}: {report:?}");
+            assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{report:?}");
+            assert_eq!(report.eval_exit_code, Some(42));
+            assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+            assert!(
+                report
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("scalar MIR")),
+                "{report:?}"
+            );
+            fs::remove_file(path).unwrap();
+        }
+    }
+}
+
+#[test]
+fn owned_scalar_mir_preserves_reserved_intrinsic_call_refusals() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for (name, diagnostic) in [
+            (
+                "__inrt_atomic_order_0",
+                "canonical atomic intrinsic name is redeclared",
+            ),
+            ("__inrt_print_int", "inrt call arity mismatch"),
+        ] {
+            let path = temp_path("scalar-mir-reserved.in");
+            // Recursion prevents inlining from erasing the reserved call.
+            fs::write(&path, format!("fn {name}(n:Int,m:Int)->Int{{if n==0{{return 42;}}return {name}(n - 1,m);}}fn main()->Int{{return {name}(3,0);}}")).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            request.linkage = NativeLinkage::StaticLib;
+            let report = compile_owned(&request);
+            assert!(!report.success, "{profile:?} {name}: {report:?}");
+            assert!(!report.execution_started, "{report:?}");
+            assert_eq!(report.eval_result, None);
+            assert!(
+                report
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(diagnostic)),
+                "{report:?}"
+            );
+            fs::remove_file(path).unwrap();
+        }
+    }
+}

@@ -264,14 +264,8 @@ impl MirModule {
 
     /// Validate executable machine MIR before any bytes can be loaded.
     pub(crate) fn verify_machine(&self) -> Result<(), String> {
-        self.verify(None).map_err(|errors| errors.join("; "))?;
-        let mut errors = Vec::new();
-        controlflow::validate(self, true, &mut errors);
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
+        self.verify_with_runtime(None, true)
+            .map_err(|errors| errors.join("; "))
     }
 
     /// Estimate total code size (for JIT page allocation).
@@ -285,6 +279,10 @@ impl MirModule {
     /// Verify the MIR module for consistency.
     /// Checks: entry function exists, call targets are resolved, types are consistent.
     pub fn verify(&self, entry: Option<&str>) -> Result<(), Vec<String>> {
+        self.verify_with_runtime(entry, false)
+    }
+
+    fn verify_with_runtime(&self, entry: Option<&str>, runtime: bool) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
         let func_names: Vec<&str> = self.functions.iter().map(|f| f.name.as_str()).collect();
         if let Some(entry_name) = entry {
@@ -349,7 +347,8 @@ impl MirModule {
                 }
             }
         }
-        controlflow::validate(self, false, &mut errors);
+        // Runtime validation adds staged-instruction refusal to the same CFG walk.
+        controlflow::validate(self, runtime, &mut errors);
         if errors.is_empty() {
             Ok(())
         } else {

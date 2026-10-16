@@ -22,7 +22,7 @@ impl ScalarTarget {
 }
 
 /// Lower only validated typed scalar definitions. No partial module escapes on
-/// refusal, and this API does not change the CLI's existing native_emit route.
+/// refusal. The hosted JIT retains native_emit for modules this pass refuses.
 pub fn lower_scalar_typed(module: &MirModule, target: ScalarTarget) -> Result<MirModule, String> {
     module.verify(None).map_err(|errors| errors.join("; "))?;
     if !module.rodata.is_empty() || !module.rodata_relocs.is_empty() {
