@@ -604,6 +604,7 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                     report.error = Some(err);
                     return finalize_report(report, started, &cwd, &frontend_hash);
                 }
+                metadata::emit_component_metadata_sidecar(&module, entry_name, out_path);
                 report.success = true;
                 report.backend_level = "owned-native-subset-freestanding".to_string();
                 report.runtime_level = "sci-component".to_string();

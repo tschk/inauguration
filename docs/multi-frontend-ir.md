@@ -290,3 +290,7 @@ Known underscore-to-kebab function references normalize before optimization and 
 Stored String arrays accept literal elements, including nested literal arrays. Element pointers use the same deferred payload relocation as scalar Strings, while nested array headers retain relative offsets. Runtime calls and stored-global references inside array initializers remain refused.
 
 Catch patterns and `for` iterator headers locate their bodies with the shared quote-aware scanner. Braces and escaped quotes in String literals survive parsing and canonical roundtrips, including multiple catch arms and function-call iterators.
+
+## Component metadata
+
+Native objects and SCI images emit the same canonical `.component-metadata.json` sidecar when the source declares a component. It preserves named capabilities and operations, imports, exports, target, and checkpoint metadata. Replacing a component artifact with a component-free module through these emission paths removes the old generated sidecar. SCI header capability bits retain their existing ordinal encoding; platform packagers apply their own policy to the named declarations.

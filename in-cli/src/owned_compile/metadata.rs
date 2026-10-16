@@ -13,7 +13,8 @@ pub fn emit_component_metadata_sidecar(
     entry: &str,
     out_path: &Path,
 ) -> Option<String> {
-    // Find the first component declaration
+    let meta_path = out_path.with_extension("component-metadata.json");
+    // Find the first component declaration.
     let component = module.decls.iter().find_map(|d| match d {
         Decl::Component {
             name,
@@ -33,7 +34,20 @@ pub fn emit_component_metadata_sidecar(
             capabilities.clone(),
         )),
         _ => None,
-    })?;
+    });
+    let Some(component) = component else {
+        // The artifact was successfully replaced: its previous generated
+        // component metadata must not describe this component-free module.
+        if let Err(error) = std::fs::remove_file(&meta_path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "[metadata] warning: failed to remove stale component metadata {}: {error}",
+                meta_path.display()
+            );
+        }
+        return None;
+    };
 
     let (name, target, deterministic, checkpoint, imports, exports, capabilities) = component;
 
@@ -137,7 +151,6 @@ pub fn emit_component_metadata_sidecar(
     };
 
     let json = emit_component_metadata(&metadata);
-    let meta_path = out_path.with_extension("component-metadata.json");
     match std::fs::write(&meta_path, &json) {
         Ok(()) => Some(meta_path.display().to_string()),
         Err(e) => {

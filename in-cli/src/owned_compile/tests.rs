@@ -7405,3 +7405,105 @@ fn owned_declared_word_io_names_preserve_function_overrides() {
     assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
     fs::remove_file(source).unwrap();
 }
+
+#[test]
+fn sci_components_preserve_canonical_metadata_and_clear_stale_sidecars() {
+    let original = r#"component Services {
+ target "x86_64-unknown-none"
+ deterministic true
+ checkpoint full
+ import reader: Reader
+ export writer: Writer
+ capability console: DebugConsole(write)
+ capability memory: PhysicalMemory(discover, map, protect)
+}
+interface Reader {
+ fn read()->Int
+}
+interface Writer {
+ fn write(value:Int)->void
+}
+fn main()->Int{return 42;}
+"#;
+    let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
+    let plain = "fn main()->Int{return 42;}";
+    for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+        for text in [original, canonical.as_str()] {
+            let source = temp_path("sci-metadata.in");
+            fs::write(&source, text).unwrap();
+            let mut baseline = None;
+            for sci in [false, true] {
+                let artifact = temp_path(if sci { "component.sci" } else { "component.o" });
+                let metadata = artifact.with_extension("component-metadata.json");
+                let mut request = default_request(
+                    source.clone(),
+                    CompileTarget::Native,
+                    Some("main"),
+                    Some(artifact.clone()),
+                );
+                request.target_triple = Some("x86_64-unknown-none".into());
+                request.linkage = NativeLinkage::StaticLib;
+                request.profile = profile;
+                request.emit = sci.then_some(OwnedEmit::Sci { base: 0x100000 });
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{profile:?}: {report:?}"
+                );
+                let bytes = fs::read(&artifact).unwrap();
+                if sci {
+                    assert!(bytes.len() > crate::native_emit::sci::SCI_MANIFEST_SIZE);
+                    assert_eq!(
+                        u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+                        crate::native_emit::sci::SCI_MAGIC
+                    );
+                    assert_eq!(
+                        u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+                        0x100040
+                    );
+                } else {
+                    assert_eq!(&bytes[..4], b"\x7fELF");
+                }
+                let value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
+                assert_eq!(value["target"], "x86_64-unknown-none");
+                assert_eq!(value["entry"], "main");
+                assert_eq!(
+                    value["imports"],
+                    serde_json::json!([{"name":"reader","interface":"Reader"}])
+                );
+                assert_eq!(
+                    value["exports"],
+                    serde_json::json!([{"name":"writer","interface":"Writer"}])
+                );
+                assert_eq!(
+                    value["capabilities_required"],
+                    serde_json::json!([
+                        {"name":"console","capability_type":"DebugConsole","args":["write"]},
+                        {"name":"memory","capability_type":"PhysicalMemory","args":["discover","map","protect"]}
+                    ])
+                );
+                if let Some(expected) = &baseline {
+                    assert_eq!(&value, expected);
+                } else {
+                    baseline = Some(value);
+                }
+
+                // Reusing the exact artifact path must remove its old generated metadata.
+                fs::write(&source, plain).unwrap();
+                let report = compile_owned(&request);
+                assert!(report.success, "{report:?}");
+                assert!(!metadata.exists(), "stale metadata: {}", metadata.display());
+                fs::remove_file(&artifact).unwrap();
+                // A fresh component-free build also produces no sidecar.
+                let report = compile_owned(&request);
+                assert!(report.success, "{report:?}");
+                assert!(!metadata.exists());
+                fs::remove_file(&artifact).unwrap();
+                let _ = fs::remove_file(artifact.with_extension("abi.json"));
+                fs::write(&source, text).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
