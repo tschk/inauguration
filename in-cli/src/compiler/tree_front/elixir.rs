@@ -32,6 +32,7 @@ const ELIXIRAST: AstShape = AstShape {
     strict_args: false,
     binary_precedence: None,
     string_decoder: None,
+    number_decoder: None,
 };
 
 pub(super) fn extract_elixir(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {

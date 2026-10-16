@@ -879,6 +879,7 @@ pub(super) struct AstShape {
     pub(super) strict_args: bool,
     pub(super) binary_precedence: Option<fn(&str) -> Option<u8>>,
     pub(super) string_decoder: Option<fn(&str) -> Option<String>>,
+    pub(super) number_decoder: Option<fn(&str) -> Option<Expr>>,
 }
 
 fn kind_in(n: Node<'_>, kinds: &[&str]) -> bool {
@@ -1003,6 +1004,23 @@ pub(super) fn ast_stmt(
     if kind_in(stmt, shape.call_kinds) {
         return ast_expr(src, stmt, shape).map(Stmt::Expr);
     }
+    if kind_in(stmt, shape.block_kinds) {
+        let mut scoped = locals.clone();
+        return Some(Stmt::Expr(Expr::Block {
+            body: ast_body_with_locals(src, stmt, shape, &mut scoped),
+            result: None,
+        }));
+    }
+    if matches!(stmt.kind(), "empty_statement" | "pass_statement") {
+        return None;
+    }
+    // An unknown statement cannot be replaced by its first expression child.
+    if stmt.kind() == "statement" || stmt.kind().ends_with("_statement") {
+        return Some(Stmt::Expr(Expr::Call {
+            callee: Box::new(Expr::Ident(crate::core_ir::UNSUPPORTED_DEFINED_BODY.into())),
+            args: vec![],
+        }));
+    }
     ast_expr(src, stmt, shape).map(Stmt::Expr)
 }
 
@@ -1050,6 +1068,55 @@ fn ast_local_decl(src: &[u8], decl: Node<'_>, shape: AstShape) -> Option<Stmt> {
             return None;
         }
     }
+    // Read the owned RHS without discarding extra bindings or effects.
+    let owned_assignment = first_named(decl, "assignment_statement")
+        .filter(|assignment| kind_in(*assignment, shape.assignment_kinds));
+    if owned_assignment.is_some()
+        || (decl.kind() == "variable_declaration" && first_named(decl, "variable_list").is_some())
+    {
+        let unsupported = || {
+            Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident(crate::core_ir::UNSUPPORTED_DEFINED_BODY.into())),
+                args: vec![],
+            })
+        };
+        fn meaningful(node: Node<'_>) -> Vec<Node<'_>> {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .filter(|child| !child.is_extra())
+                .collect::<Vec<_>>()
+        }
+        let Some(assignment) = owned_assignment else {
+            return Some(unsupported());
+        };
+        let declaration_children = meaningful(decl);
+        let assignment_children = meaningful(assignment);
+        if declaration_children.len() != 1 || assignment_children.len() != 2 {
+            return Some(unsupported());
+        }
+        let (names, values) = (assignment_children[0], assignment_children[1]);
+        let names_children = meaningful(names);
+        let values_children = meaningful(values);
+        if names.kind() != "variable_list"
+            || values.kind() != "expression_list"
+            || names_children.len() != 1
+            || values_children.len() != 1
+            || names_children[0].kind() != "identifier"
+        {
+            return Some(unsupported());
+        }
+        if !ast_scalar_rhs_is_supported(values_children[0], shape) {
+            return Some(unsupported());
+        }
+        return Some(match ast_expr(src, values_children[0], shape) {
+            Some(value) => Stmt::Let(
+                node_txt(src, names_children[0]).trim().to_string(),
+                None,
+                value,
+            ),
+            None => unsupported(),
+        });
+    }
     let var = named_descendant(decl, "variable_declarator")
         .or_else(|| named_descendant(decl, "initialized_variable_definition"))
         .unwrap_or(decl);
@@ -1069,6 +1136,53 @@ fn ast_local_decl(src: &[u8], decl: Node<'_>, shape: AstShape) -> Option<Stmt> {
         ty,
         ast_expr(src, value, shape)?,
     ))
+}
+
+// Reject unknown initializer nodes before the permissive expression fallback drops them.
+fn ast_scalar_rhs_is_supported(node: Node<'_>, shape: AstShape) -> bool {
+    if node.has_error() || node.is_missing() {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let children = node
+        .named_children(&mut cursor)
+        .filter(|child| !child.is_extra())
+        .collect::<Vec<_>>();
+    if matches!(
+        node.kind(),
+        "identifier" | "simple_identifier" | "true" | "false"
+    ) {
+        return children.is_empty();
+    }
+    if kind_in(node, shape.int_kinds) || kind_in(node, shape.string_kinds) {
+        return true;
+    }
+    if kind_in(node, shape.paren_kinds) || kind_in(node, shape.arg_wrapper_kinds) {
+        return children.len() == 1 && ast_scalar_rhs_is_supported(children[0], shape);
+    }
+    // shortcut: Lua operators need language-owned semantics before initializer admission.
+    if kind_in(node, shape.call_kinds) {
+        let Some(callee) = node.child_by_field_name("name") else {
+            return false;
+        };
+        let Some(args) = node.child_by_field_name("arguments") else {
+            return false;
+        };
+        if children.len() != 2
+            || children[0] != callee
+            || children[1] != args
+            || !matches!(callee.kind(), "identifier" | "simple_identifier")
+            || !kind_in(args, shape.arg_container_kinds)
+        {
+            return false;
+        }
+        let mut cursor = args.walk();
+        return args
+            .named_children(&mut cursor)
+            .filter(|child| !child.is_extra())
+            .all(|child| ast_scalar_rhs_is_supported(child, shape));
+    }
+    false
 }
 
 fn ast_decl_type(
@@ -1354,6 +1468,12 @@ pub(super) fn ast_expr(src: &[u8], expr: Node<'_>, shape: AstShape) -> Option<Ex
         ));
     }
     if kind_in(expr, shape.int_kinds) {
+        if let Some(decode) = shape.number_decoder {
+            return Some(
+                decode(node_txt(src, expr).trim())
+                    .unwrap_or_else(|| Expr::Ident("#unsupported-number-literal".into())),
+            );
+        }
         let raw = node_txt(src, expr);
         return java_int_literal(raw).map(Expr::IntLit).or_else(|| {
             raw.contains(['.', 'e', 'E'])
@@ -5589,5 +5709,267 @@ main()
                 .iter()
                 .any(|d| matches!(d, Decl::Function { name, .. } if name == "greet"))
         );
+    }
+    #[test]
+    fn unknown_statements_cannot_masquerade_as_their_first_expression_child() {
+        for (id, source, extractor) in [
+            (
+                ParserId::Java,
+                "class Probe { public static int main() { int x = 42; synchronized (\"lock\") { x = 7; } return x; } }",
+                extract_java_with_classes as fn(&[u8], Node<'_>) -> Result<Vec<Decl>, String>,
+            ),
+            (
+                ParserId::Python,
+                "def main() -> int:\n    assert 0\n    return 42\n",
+                extract_python_with_classes,
+            ),
+        ] {
+            let module = parse_lang(try_lang_for(id).unwrap(), source, extractor).unwrap();
+            let body = main_body(&module);
+            assert!(
+                body.iter().any(|stmt| matches!(stmt,
+                    Stmt::Expr(Expr::Call { callee, args })
+                    if args.is_empty() && matches!(callee.as_ref(), Expr::Ident(name)
+                        if name == crate::core_ir::UNSUPPORTED_DEFINED_BODY)
+                )),
+                "{source}: {body:?}"
+            );
+            assert!(
+                matches!(body.last(), Some(Stmt::Return(Some(_)))),
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn supported_statements_and_explicit_empty_statements_keep_their_bodies() {
+        for (id, source, extractor) in [
+            (
+                ParserId::Java,
+                "class Probe { public static int main() { /* comment */ ; int x = 42; if (x == 42) { x = 7; } return x; } }",
+                extract_java_with_classes as fn(&[u8], Node<'_>) -> Result<Vec<Decl>, String>,
+            ),
+            (
+                ParserId::Python,
+                "def main() -> int:\n    # comment\n    pass\n    return 7\n",
+                extract_python_with_classes,
+            ),
+        ] {
+            let module = parse_lang(try_lang_for(id).unwrap(), source, extractor).unwrap();
+            let body = main_body(&module);
+            assert!(
+                !format!("{body:?}").contains(crate::core_ir::UNSUPPORTED_DEFINED_BODY),
+                "{body:?}"
+            );
+            assert!(
+                matches!(body.last(), Some(Stmt::Return(Some(_)))),
+                "{body:?}"
+            );
+        }
+    }
+    #[test]
+    fn lua_do_and_else_preserve_all_effects_and_scope() {
+        let source = r#"
+function main()
+  local value = 42
+  do
+    local value = 7
+    print("a")
+    print("b")
+  end
+  if false then
+    print("wrong")
+  else
+    print("c")
+    print("d")
+  end
+  print(value)
+end
+"#;
+        let module = parse_lang(try_lang_for(ParserId::Lua).unwrap(), source, extract_lua).unwrap();
+        let body = main_body(&module);
+        assert!(
+            matches!(&body[0], Stmt::Let(name, _, Expr::IntLit(42)) if name == "value"),
+            "{body:?}"
+        );
+        let Stmt::Expr(Expr::Block {
+            body: inner,
+            result: None,
+        }) = &body[1]
+        else {
+            panic!("{body:?}");
+        };
+        assert!(
+            matches!(&inner[0], Stmt::Let(name, _, Expr::IntLit(7)) if name == "value"),
+            "{inner:?}"
+        );
+        fn printed(stmt: &Stmt) -> Option<&Expr> {
+            match stmt {
+                Stmt::Expr(Expr::Call { callee, args }) if matches!(callee.as_ref(), Expr::Ident(name) if name == "print") => {
+                    args.first()
+                }
+                _ => None,
+            }
+        }
+        assert_eq!(
+            inner.iter().skip(1).filter_map(printed).collect::<Vec<_>>(),
+            vec![&Expr::StringLit("a".into()), &Expr::StringLit("b".into())]
+        );
+        let Stmt::If { else_body, .. } = &body[2] else {
+            panic!("{body:?}");
+        };
+        assert_eq!(
+            else_body.iter().filter_map(printed).collect::<Vec<_>>(),
+            vec![&Expr::StringLit("c".into()), &Expr::StringLit("d".into())]
+        );
+        assert_eq!(printed(&body[3]), Some(&Expr::Ident("value".into())));
+    }
+
+    #[test]
+    fn lua_empty_do_is_empty_scope_and_unknown_statement_still_refuses() {
+        let module = parse_lang(
+            try_lang_for(ParserId::Lua).unwrap(),
+            "function main() do end; goto missing end",
+            extract_lua,
+        )
+        .unwrap();
+        let body = main_body(&module);
+        assert!(
+            matches!(&body[0], Stmt::Expr(Expr::Block { body, result: None }) if body.is_empty()),
+            "{body:?}"
+        );
+        assert!(
+            body.iter().any(|stmt| matches!(stmt,
+                Stmt::Expr(Expr::Call { callee, .. }) if matches!(callee.as_ref(), Expr::Ident(name)
+                    if name == crate::core_ir::UNSUPPORTED_DEFINED_BODY)
+            )),
+            "{body:?}"
+        );
+    }
+    #[test]
+    fn lua_local_initializer_uses_owned_rhs_and_refuses_multiple_bindings_or_values() {
+        for (declaration, expected) in [
+            ("local value = 42", Some(Expr::IntLit(42))),
+            (
+                "local value = \"outer\"",
+                Some(Expr::StringLit("outer".into())),
+            ),
+            (
+                "local value = helper()",
+                Some(Expr::Call {
+                    callee: Box::new(Expr::Ident("helper".into())),
+                    args: vec![],
+                }),
+            ),
+            ("local value, other = 1, 2", None),
+            ("local value = helper(), effect()", None),
+            ("local value, other = helper()", None),
+            ("local value", None),
+            ("local value <const> = 42", None),
+        ] {
+            let source = format!("function main() {declaration}; print(\"after\") end");
+            let module =
+                parse_lang(try_lang_for(ParserId::Lua).unwrap(), &source, extract_lua).unwrap();
+            let body = main_body(&module);
+            match expected {
+                Some(value) => assert_eq!(
+                    body[0],
+                    Stmt::Let("value".into(), None, value),
+                    "{source}: {body:?}"
+                ),
+                None => assert!(
+                    matches!(&body[0], Stmt::Expr(Expr::Call { callee, args })
+                    if args.is_empty() && matches!(callee.as_ref(), Expr::Ident(name)
+                        if name == crate::core_ir::UNSUPPORTED_DEFINED_BODY)),
+                    "{source}: {body:?}"
+                ),
+            }
+            assert_eq!(
+                body.len(),
+                2,
+                "unsupported initializer must survive before the following call: {source}: {body:?}"
+            );
+        }
+    }
+    #[test]
+    fn lua_owned_initializer_refuses_unknown_nodes_at_every_expression_depth() {
+        for rhs in [
+            "{42}",
+            "1 + {42}",
+            "helper({42})",
+            "helper(1 + {42})",
+            "helper(1, function() end, 2)",
+            "function() return 42 end",
+            "...",
+            "helper(...)",
+            "1 + 2",
+            "-42",
+            "2 ^ 3",
+            "1 / 2",
+            "-5 % 2",
+            "(-8) >> 1",
+            "\"a\" + \"b\"",
+            "0 and 42",
+            "not 0",
+            "helper(1 + 2)",
+        ] {
+            let source = format!("function main(...) local value = {rhs}; return end");
+            let module =
+                parse_lang(try_lang_for(ParserId::Lua).unwrap(), &source, extract_lua).unwrap();
+            let body = main_body(&module);
+            assert!(
+                matches!(&body[0], Stmt::Expr(Expr::Call { callee, args })
+                if args.is_empty() && matches!(callee.as_ref(), Expr::Ident(name)
+                    if name == crate::core_ir::UNSUPPORTED_DEFINED_BODY)),
+                "{source}: {body:?}"
+            );
+            assert!(matches!(body.last(), Some(Stmt::Return(None))), "{body:?}");
+        }
+        for rhs in [
+            "42",
+            "true",
+            "\"value\"",
+            "(42)",
+            "helper()",
+            "helper(1, 2)",
+            "helper((42), other(7))",
+        ] {
+            let source = format!("function main() local value = {rhs}; return end");
+            let module =
+                parse_lang(try_lang_for(ParserId::Lua).unwrap(), &source, extract_lua).unwrap();
+            let body = main_body(&module);
+            assert!(
+                matches!(&body[0], Stmt::Let(name, _, _) if name == "value"),
+                "{source}: {body:?}"
+            );
+        }
+    }
+    #[test]
+    fn lua_number_decoder_does_not_change_other_frontend_literal_policies() {
+        for (id, source, extractor, expected) in [
+            (
+                ParserId::JavaScript,
+                "function main(){return 0b10;}",
+                extract_js_with_classes as fn(&[u8], Node<'_>) -> Result<Vec<Decl>, String>,
+                Expr::IntLit(2),
+            ),
+            (
+                ParserId::Java,
+                "class Probe { public static long main(){return 1L;} }",
+                extract_java_with_classes,
+                Expr::IntLit(1),
+            ),
+        ] {
+            let module = parse_lang(try_lang_for(id).unwrap(), source, extractor).unwrap();
+            let body = module
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Function { name, body, .. } if name == "main" => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(body, &vec![Stmt::Return(Some(expected))], "{source}");
+        }
     }
 }

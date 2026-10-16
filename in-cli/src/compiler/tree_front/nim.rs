@@ -32,6 +32,7 @@ const NIM_AST: AstShape = AstShape {
     strict_args: false,
     binary_precedence: Some(nim_binary_precedence),
     string_decoder: Some(nim_string_literal),
+    number_decoder: None,
 };
 
 pub(super) fn extract_nim(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {

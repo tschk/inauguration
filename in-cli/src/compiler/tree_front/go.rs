@@ -29,6 +29,7 @@ const GO_AST: AstShape = AstShape {
     strict_args: false,
     binary_precedence: None,
     string_decoder: None,
+    number_decoder: None,
 };
 
 fn norm_go_type(raw: &str) -> Typ {

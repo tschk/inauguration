@@ -42,6 +42,7 @@ const ZIG_AST: AstShape = AstShape {
     strict_args: false,
     binary_precedence: None,
     string_decoder: None,
+    number_decoder: None,
 };
 
 #[derive(Clone)]

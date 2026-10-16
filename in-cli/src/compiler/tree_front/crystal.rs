@@ -31,6 +31,7 @@ const CRYSTAL_AST: AstShape = AstShape {
     strict_args: false,
     binary_precedence: None,
     string_decoder: Some(crystal_string_literal),
+    number_decoder: None,
 };
 
 pub(super) fn extract_crystal(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, String> {

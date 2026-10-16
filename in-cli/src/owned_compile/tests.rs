@@ -41,6 +41,72 @@ fn default_request(
 }
 
 #[test]
+fn unknown_statements_refuse_before_execution_across_profiles() {
+    let statement = crate::core_ir::UNSUPPORTED_DEFINED_BODY;
+    for (extension, text, marker) in [
+        (
+            "java",
+            "class Probe { public static int main() { int x = 42; synchronized (\"lock\") { x = 7; } return x; } }",
+            statement,
+        ),
+        (
+            "py",
+            "def main() -> int:\n    assert 0\n    return 42\n",
+            statement,
+        ),
+        (
+            "lua",
+            "function main() local value = {42}; return end",
+            statement,
+        ),
+        (
+            "lua",
+            "function main() local value = helper(1, function() end, 2); return end",
+            statement,
+        ),
+        (
+            "lua",
+            "function main() local value = 1LL; return end",
+            "#unsupported-number-literal",
+        ),
+        (
+            "lua",
+            "function main() local value = 0b10; return end",
+            "#unsupported-number-literal",
+        ),
+        (
+            "lua",
+            "function main() print(0x2LL); return end",
+            "#unsupported-number-literal",
+        ),
+    ] {
+        let source = temp_path(&format!("unknown-statement.{extension}"));
+        fs::write(&source, text).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(!report.success, "{extension} {profile:?}: {report:?}");
+            assert!(!report.execution_started, "{report:?}");
+            assert!(report.eval_result.is_none(), "{report:?}");
+            assert!(
+                report
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(marker)),
+                "{report:?}"
+            );
+        }
+        fs::remove_file(source).unwrap();
+    }
+}
+
+#[test]
 #[cfg(any(
     all(
         target_os = "macos",

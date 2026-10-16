@@ -29,6 +29,7 @@ const V_AST: AstShape = AstShape {
     strict_args: false,
     binary_precedence: None,
     string_decoder: None,
+    number_decoder: None,
 };
 
 pub(super) fn v_params(src: &[u8], func: Node<'_>) -> Vec<(String, Typ)> {
