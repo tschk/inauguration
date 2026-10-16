@@ -69,7 +69,8 @@ continuations and grouped call arguments. Groups preserve explicit precedence;
 comments inside a group do not become its value. Consumer builds compile the
 checked-in parser without a JavaScript runtime. This remains a bounded grammar,
 not full Nim syntax: tuples and indirect calls remain unsupported, and malformed
-grammar trees still refuse before execution.
+grammar trees still refuse before execution. A call opener must remain on the
+same physical line as its callee; newlines inside opened arguments remain valid.
 
 Python scalar-name augmented assignments support `+=`, `-=`, `*=`, `&=`,
 `|=` and `^=` through the existing typed native operations. They read the old

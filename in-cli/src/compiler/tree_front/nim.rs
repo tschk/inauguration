@@ -104,17 +104,16 @@ pub(super) fn extract_nim(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, Strin
             }
         }
     }
-    // The installed grammar ignores indentation and has no unary expression
-    // nodes. Never reinterpret a next-line unary statement as a binary RHS.
+    // The bundled grammar ignores indentation and has no unary expression
+    // nodes. Never reinterpret a next-line unary statement as a binary RHS
+    // or attach a later-line opening parenthesis to a preceding callee.
     for (declaration, node) in decls.iter_mut().zip(&func_nodes) {
-        if node
+        if let Some(reason) = node
             .child_by_field_name("body")
-            .is_some_and(nim_binary_starts_new_statement)
+            .and_then(|body| nim_statement_boundary(src, body))
         {
             if let Decl::Function { body, .. } = declaration {
-                *body = vec![Stmt::Expr(Expr::Ident(
-                    "#unsupported-nim-binary-statement-boundary".into(),
-                ))];
+                *body = vec![Stmt::Expr(Expr::Ident(reason.into()))];
             }
         }
     }
@@ -122,7 +121,7 @@ pub(super) fn extract_nim(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, Strin
     for (index, node) in func_nodes.iter().copied().enumerate() {
         if node
             .child_by_field_name("body")
-            .is_some_and(nim_binary_starts_new_statement)
+            .is_some_and(|body| nim_statement_boundary(src, body).is_some())
         {
             continue;
         }
@@ -137,7 +136,7 @@ pub(super) fn extract_nim(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, Strin
     for (index, node) in func_nodes.into_iter().enumerate() {
         if node
             .child_by_field_name("body")
-            .is_some_and(nim_binary_starts_new_statement)
+            .is_some_and(|body| nim_statement_boundary(src, body).is_some())
         {
             continue;
         }
@@ -165,21 +164,32 @@ pub(super) fn extract_nim(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, Strin
 
 /// Operators already on the preceding line may continue onto a later RHS.
 /// A binary operator beginning a later line is an unsupported separate unary
-/// statement in the installed Nim grammar, rather than a safe binary tree.
-fn nim_binary_starts_new_statement(node: Node<'_>) -> bool {
+/// statement in the bundled Nim grammar, rather than a safe binary tree.
+fn nim_statement_boundary(src: &[u8], node: Node<'_>) -> Option<&'static str> {
+    if node.kind() == "call"
+        && let (Some(name), Some(arguments)) = (
+            node.child_by_field_name("name"),
+            node.child_by_field_name("arguments"),
+        )
+        && src
+            .get(name.end_byte()..arguments.start_byte())
+            .is_some_and(|gap| gap.contains(&b'\n') || gap.contains(&b'\r'))
+    {
+        return Some("#unsupported-nim-call-statement-boundary");
+    }
     if node.kind() == "binary_expression" {
         if let Some(lhs) = node.child_by_field_name("left") {
             let mut cursor = node.walk();
             if node.children(&mut cursor).any(|child| {
                 !child.is_named() && child.start_position().row > lhs.end_position().row
             }) {
-                return true;
+                return Some("#unsupported-nim-binary-statement-boundary");
             }
         }
     }
     let mut cursor = node.walk();
     node.named_children(&mut cursor)
-        .any(nim_binary_starts_new_statement)
+        .find_map(|child| nim_statement_boundary(src, child))
 }
 
 fn nim_proc_decl<'a>(src: &[u8], n: Node<'a>) -> Option<Decl> {
@@ -1828,6 +1838,70 @@ mod grouping_tests {
                 &format!("proc identity(value:int):int = value\nproc main():int =\n  {call}\n"),
                 42,
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod call_boundary_tests {
+    use super::*;
+    fn parse(source: &str) -> crate::core_ir::UnifiedModule {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&crate::compiler::tree_front::nim_grammar::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        crate::core_ir::UnifiedModule::new(
+            extract_nim(source.as_bytes(), tree.root_node()).unwrap(),
+        )
+    }
+    #[test]
+    fn later_line_call_openers_refuse_before_typed_lowering() {
+        for newline in ["\n", "\r\n", "\r"] {
+            for ret in ["int", "auto"] {
+                for body in [
+                    "identity\n  (42)",
+                    "identity\n    (42)",
+                    "return identity\n  (42)",
+                    "let saved=identity\n  (42)\n  saved",
+                ] {
+                    let source = format!(
+                        "proc identity(value:int):int = value\nproc main():{ret} =\n  {body}\n"
+                    )
+                    .replace('\n', newline);
+                    let module = parse(&source);
+                    assert!(module.decls.iter().any(|decl|matches!(decl,Decl::Function{name,body,..}if name=="main" && matches!(body.as_slice(),[Stmt::Expr(Expr::Ident(reason))] if reason=="#unsupported-nim-call-statement-boundary"))),"{source:?}: {module:?}");
+                }
+            }
+        }
+    }
+    #[test]
+    fn same_line_call_opening_keeps_spaced_and_multiline_arguments() {
+        for newline in ["\n", "\r\n", "\r"] {
+            for call in ["identity(42)", "identity (42)", "identity(\n    42)"] {
+                let source =
+                    format!("proc identity(value:int):int = value\nproc main():int =\n  {call}\n")
+                        .replace('\n', newline);
+                let module = parse(&source);
+                assert!(
+                    !format!("{module:?}").contains("#unsupported"),
+                    "{source:?}: {module:?}"
+                );
+                let module = crate::typecheck::normalize_module(
+                    crate::parser_registry::ParserId::Nim,
+                    &module,
+                );
+                assert_eq!(
+                    crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
+                    42,
+                    "{source:?}"
+                );
+            }
         }
     }
 }
