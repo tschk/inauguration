@@ -245,23 +245,63 @@ fn nim_result_expr(expr: &mut Expr, shadowed: bool) {
     }
 }
 
-// The bundled grammar treats newlines as whitespace and can attach the next
-// statement to a bare return. Nim's return operand must begin on the same
-// source line; any swallowed later expression is unreachable after this exit.
+// The grammar can attach a following statement to a bare return. A later
+// line indented beyond return is a real continuation operand; a same-indent
+// child is a separate, unreachable expression that still needs type checking.
+fn nim_return_child<'a>(src: &[u8], node: Node<'a>) -> Option<(Node<'a>, bool)> {
+    if node.kind() != "return_statement" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let value = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() != "comment")?;
+    // An inline procedure body puts return after its header on the same line.
+    // Continuation indentation is relative to that physical line's leading
+    // whitespace, not the return token's potentially much larger column.
+    let physical_line_start = |at: usize| {
+        src[..at]
+            .iter()
+            .rposition(|byte| matches!(*byte, b'\n' | b'\r'))
+            .map_or(0, |at| at + 1)
+    };
+    let line_start = physical_line_start(node.start_byte());
+    let value_line_start = physical_line_start(value.start_byte());
+    let indent = src[line_start..node.start_byte()]
+        .iter()
+        .take_while(|byte| **byte == b' ' || **byte == b'\t')
+        .count();
+    let operand = value_line_start == line_start || value.start_byte() - value_line_start > indent;
+    Some((value, operand))
+}
+
+fn nim_prepare_return_tail(
+    src: &[u8],
+    node: Node<'_>,
+    facts: &crate::typecheck::Facts,
+    env: &std::collections::HashMap<String, Typ>,
+    value_result: bool,
+    result_shadowed: bool,
+) -> Option<Option<(Expr, Typ)>> {
+    let Some((value, false)) = nim_return_child(src, node) else {
+        return Some(None);
+    };
+    let mut value = nim_expr(src, value)?;
+    if value_result {
+        nim_result_expr(&mut value, result_shadowed);
+    }
+    let typ = nim_prepare_expr(&mut value, facts, env)?;
+    Some(Some((value, typ)))
+}
+
 fn nim_stmt(
     src: &[u8],
     node: Node<'_>,
     locals: &mut std::collections::HashSet<String>,
 ) -> Option<Stmt> {
     if node.kind() == "return_statement" {
-        let mut cursor = node.walk();
-        let value = node
-            .named_children(&mut cursor)
-            .find(|child| child.kind() != "comment");
-        return match value {
-            Some(value) if value.start_position().row == node.start_position().row => {
-                nim_expr(src, value).map(|value| Stmt::Return(Some(value)))
-            }
+        return match nim_return_child(src, node) {
+            Some((value, true)) => nim_expr(src, value).map(|value| Stmt::Return(Some(value))),
             _ => Some(Stmt::Return(None)),
         };
     }
@@ -336,6 +376,21 @@ fn nim_proc_body(
         .filter(|node| node.kind() != "comment")
         .collect();
     for (index, child) in children.iter().copied().enumerate() {
+        let Some(detached) =
+            nim_prepare_return_tail(src, child, facts, &env, value_result, result_shadowed)
+        else {
+            return unsupported("discarded-value");
+        };
+        if let Some((mut value, actual)) = detached {
+            if actual != Typ::Void
+                && (!(index + 1 == children.len() && value_result && !implicit_result_assigned)
+                    || nim_expected_expr(&mut value, actual, &result_type).is_none())
+            {
+                return unsupported("discarded-value");
+            }
+            // Validate the normal implicit-tail context, but do not emit a
+            // statement that is unreachable after the preceding bare return.
+        }
         if child.kind() == "echo_statement" {
             let Some(value) = child
                 .child_by_field_name("value")
@@ -1044,6 +1099,19 @@ fn nim_auto_return(
         .filter(|node| node.kind() != "comment")
         .collect();
     for (index, node) in children.iter().copied().enumerate() {
+        let detached = nim_prepare_return_tail(src, node, facts, &env, false, result_shadowed)?;
+        let detached_result = if let Some((_, actual)) = detached {
+            if actual != Typ::Void {
+                if index + 1 != children.len() || result.is_some() {
+                    return None;
+                }
+                Some(actual)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         if node.kind() == "echo_statement" {
             let value = nim_expr(src, node.child_by_field_name("value")?)?;
             if !matches!(nim_known_type(&value, facts, &env)?, Typ::Int | Typ::String) {
@@ -1090,7 +1158,9 @@ fn nim_auto_return(
             Stmt::Return(value) => {
                 let actual = match value {
                     Some(value) => nim_known_type(&value, facts, &env)?,
-                    None => result.clone().unwrap_or(Typ::Void),
+                    None => detached_result
+                        .or_else(|| result.clone())
+                        .unwrap_or(Typ::Void),
                 };
                 merge(&mut result, actual)?;
                 return result;
@@ -1271,7 +1341,7 @@ mod return_line_tests {
     }
     #[test]
     fn bare_value_return_keeps_result_while_same_line_operand_is_preserved() {
-        let decls = parse("proc main(): int =\n  result = 42\n  return\n  7\n");
+        let decls = parse("proc main(): int =\n  result = 42\n  return\n  return 7\n");
         let Decl::Function { body, .. } = &decls[0] else {
             panic!()
         };
@@ -1280,8 +1350,7 @@ mod return_line_tests {
             "{body:?}"
         );
         assert!(
-            !body
-                .iter()
+            body.iter()
                 .any(|stmt| matches!(stmt, Stmt::Return(Some(Expr::IntLit(7)))))
         );
         for ret in ["int", "auto"] {
@@ -1557,5 +1626,123 @@ mod lexical_shadow_tests {
         }
         let declarations = parse("proc work(rEs_Ult:int):int =\n  42\n");
         assert!(format!("{declarations:?}").contains("#unsupported-nim-result-shadow"));
+    }
+}
+
+#[cfg(test)]
+mod return_validation_tests {
+    use super::*;
+    fn parse(source: &str) -> Vec<Decl> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_nim::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        extract_nim(source.as_bytes(), tree.root_node()).unwrap()
+    }
+    #[test]
+    fn indented_return_operands_and_operator_line_continuations_are_values() {
+        for ret in ["int", "auto"] {
+            for value in [
+                "return\n    42",
+                "return\n    20 +\n      22",
+                "return 20 +\n    22",
+            ] {
+                let decls = parse(&format!("proc main(): {ret} =\n  {value}\n"));
+                assert!(!format!("{decls:?}").contains("#unsupported"), "{decls:?}");
+                let module = crate::core_ir::UnifiedModule::new(decls);
+                let module = crate::typecheck::normalize_module(
+                    crate::parser_registry::ParserId::Nim,
+                    &module,
+                );
+                assert_eq!(
+                    crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
+                    42
+                );
+            }
+        }
+    }
+    #[test]
+    fn inline_return_uses_physical_line_indent_and_unassigned_detached_tail_stays_unreachable() {
+        for source in [
+            "proc main(): int = return\n  42\n",
+            "proc main(): auto = return\n  42\n",
+            "proc main(): int = return 20 +\n  22\n",
+        ] {
+            let module = crate::core_ir::UnifiedModule::new(parse(source));
+            let module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Nim, &module);
+            assert_eq!(
+                crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
+                42
+            );
+        }
+        for ret in ["int", "auto"] {
+            let module = crate::core_ir::UnifiedModule::new(parse(&format!(
+                "proc main(): {ret} =\n  return\n  42\n"
+            )));
+            let module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Nim, &module);
+            assert!(
+                matches!(&module.decls[0], Decl::Function { ret: Typ::Int, .. }),
+                "{module:?}"
+            );
+            assert_eq!(
+                crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
+                0
+            );
+        }
+    }
+    #[test]
+    fn physical_newline_forms_preserve_return_operand_boundaries() {
+        for newline in ["\r\n", "\r"] {
+            let invalid =
+                "proc main(): int =\n  result = 42\n  return\n  7\n".replace('\n', newline);
+            assert!(format!("{:?}", parse(&invalid)).contains("#unsupported-nim"));
+            for source in [
+                "proc main(): int =\n  return\n    42\n",
+                "proc main(): int = return\n  42\n",
+            ] {
+                let source = source.replace('\n', newline);
+                let module = crate::core_ir::UnifiedModule::new(parse(&source));
+                let module = crate::typecheck::normalize_module(
+                    crate::parser_registry::ParserId::Nim,
+                    &module,
+                );
+                assert_eq!(
+                    crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
+                    42
+                );
+            }
+        }
+    }
+    #[test]
+    fn detached_return_children_are_validated_without_becoming_return_operands() {
+        for ret in ["int", "auto"] {
+            for value in ["7", "unknown", "value()"] {
+                let source = format!(
+                    "proc value(): int =\n  7\nproc main(): {ret} =\n  result = 42\n  return\n  {value}\n"
+                );
+                let decls = parse(&source);
+                assert!(
+                    format!("{decls:?}").contains("#unsupported-nim"),
+                    "{source}: {decls:?}"
+                );
+            }
+            let source = format!(
+                "proc side() =\n  echo \"unexpected\"\nproc main(): {ret} =\n  result = 42\n  return\n  side()\n"
+            );
+            let decls = parse(&source);
+            assert!(!format!("{decls:?}").contains("#unsupported"), "{decls:?}");
+            let Decl::Function { body, .. } = &decls[1] else {
+                panic!()
+            };
+            assert!(!format!("{body:?}").contains("side"), "{body:?}");
+        }
     }
 }
