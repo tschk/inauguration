@@ -323,6 +323,10 @@ fn register_misc_funcs<S: std::hash::BuildHasher>(
         NativePtr(crate::native_stdlib::in_print as *const u8),
     );
     c.insert(
+        "in_jit_print_bytes".to_string(),
+        NativePtr(crate::native_stdlib::in_jit_print_bytes as *const u8),
+    );
+    c.insert(
         "in_print_int".to_string(),
         NativePtr(crate::native_stdlib::in_print_int as *const u8),
     );

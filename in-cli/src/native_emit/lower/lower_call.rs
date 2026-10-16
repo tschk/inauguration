@@ -431,6 +431,17 @@ pub(crate) fn lower_inrt_call(
     }
     ctx.release_call_arg_temps();
 
+    if !TL_NATIVE_MODE.with(|mode| *mode.borrow()) {
+        let wrapper = match target {
+            crate::inrt::INRT_PRINT => Some("in_jit_print_bytes"),
+            crate::inrt::INRT_PRINT_INT => Some("in_print_int"),
+            _ => None,
+        };
+        if let Some(wrapper) = wrapper {
+            return lower_stdlib::emit_stdlib_wrapper_register_call(emitter, ctx, wrapper, rd);
+        }
+    }
+
     let call_site = emitter.len();
     emitter.emit_u32(aarch64::bl(0));
     ctx.pending_inrt_calls.push(PendingInrtCall {

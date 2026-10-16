@@ -30,7 +30,7 @@ use report::{
     module_has_function, timing_waves_for_jobs,
 };
 
-use jit::compile_jit;
+use jit::compile_jit_with_execution_state;
 pub(crate) use native::{
     compile_native, pure_entry_exit_code, pure_entry_scalar_value, set_native_artifact_permissions,
 };
@@ -136,6 +136,8 @@ pub struct OwnedCompileReport {
     pub frontend_hash: Option<String>,
     pub eval_exit_code: Option<u8>,
     pub eval_result: Option<EvalValue>,
+    /// True once hosted entry invocation starts, including runtime failures.
+    pub execution_started: bool,
     pub error: Option<String>,
 }
 
@@ -678,7 +680,12 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         },
         CompileTarget::Jit => {
             let jit_start = Instant::now();
-            let jit_outcome = compile_jit(&module, &request.module_id, request);
+            let jit_outcome = compile_jit_with_execution_state(
+                &module,
+                &request.module_id,
+                request,
+                &mut report.execution_started,
+            );
             let jit_us = jit_start.elapsed().as_micros();
             if request.debug {
                 eprintln!("[jit] compile took {jit_us} µs");

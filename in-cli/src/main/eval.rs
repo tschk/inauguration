@@ -127,7 +127,13 @@ pub(crate) fn cmd_eval(
                 execution = Some(run);
                 break;
             }
-            Err(err) => last_err = Some(err),
+            Err(failure) => {
+                if failure.execution_started {
+                    last_err = Some(failure.error);
+                    break;
+                }
+                last_err = Some(failure.error);
+            }
         }
     }
 
@@ -169,6 +175,20 @@ fn cmd_eval_daemon(
             verbose,
         )
         .map_err(|e| InError::Message(format!("daemon eval: {e}")))?;
+        if let Some(output) = response
+            .output_bytes
+            .as_deref()
+            .or_else(|| response.output.as_ref().map(|text| text.as_bytes()))
+        {
+            use std::io::Write;
+            let mut stdout = std::io::stdout().lock();
+            stdout
+                .write_all(output)
+                .map_err(|error| InError::Message(format!("write eval output: {error}")))?;
+            stdout
+                .flush()
+                .map_err(|error| InError::Message(format!("flush eval output: {error}")))?;
+        }
         if response.success {
             let value = response.eval_result.or_else(|| {
                 response
@@ -194,7 +214,12 @@ fn cmd_eval_daemon(
             return Ok(());
         }
         if let Some(err) = response.error {
+            if response.execution_started {
+                return Err(InError::Message(err));
+            }
             last_err = Some(err);
+        } else if response.execution_started {
+            return Err(InError::Message("daemon eval failed".into()));
         }
     }
     Err(InError::Message(

@@ -546,15 +546,23 @@ impl std::fmt::Display for FloatValFmt {
     }
 }
 
+pub(crate) struct JitCompileFailure {
+    pub(crate) error: InError,
+    pub(crate) execution_started: bool,
+}
+
 pub(crate) fn compile_and_run_jit_report(
     source_path: &Path,
     module_id: &str,
     parser: ParserCli,
     debug: bool,
-) -> Result<(
-    inauguration::owned_compile::OwnedCompileReport,
-    JitExecution,
-)> {
+) -> std::result::Result<
+    (
+        inauguration::owned_compile::OwnedCompileReport,
+        JitExecution,
+    ),
+    JitCompileFailure,
+> {
     use inauguration::native_emit::NativeLinkage;
     use inauguration::owned_compile::{CompileTarget, EvalValue, OwnedCompileRequest};
     let request = OwnedCompileRequest {
@@ -574,11 +582,14 @@ pub(crate) fn compile_and_run_jit_report(
     };
     let report = inauguration::owned_compile::compile_owned(&request);
     if !report.success {
-        return Err(InError::Message(
-            report
-                .error
-                .unwrap_or_else(|| "jit eval failed".to_string()),
-        ));
+        return Err(JitCompileFailure {
+            execution_started: report.execution_started,
+            error: InError::Message(
+                report
+                    .error
+                    .unwrap_or_else(|| "jit eval failed".to_string()),
+            ),
+        });
     }
     // The report carries the result in the type the entry declared, so the CLI
     // can print it as `Int(42)`, `Bool(true)`, `Float(FloatVal(6.0))`, or
@@ -621,7 +632,8 @@ pub(crate) fn cmd_execute(
     }
 
     let (report, result) =
-        compile_and_run_jit_report(&source_path, module_id, ParserCli::Auto, debug)?;
+        compile_and_run_jit_report(&source_path, module_id, ParserCli::Auto, debug)
+            .map_err(|failure| failure.error)?;
 
     if verbose {
         eprintln!("[jit] Execution completed with result: {:?}", result);

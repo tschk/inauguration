@@ -78,6 +78,7 @@ fn eval_with_fake_daemon(
                 }
                 Err(error) => panic!("accept fake daemon request: {error}"),
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
@@ -190,4 +191,105 @@ fn daemon_missing_expression_value_is_an_error_without_statement_retry() {
         1,
         "statement fallback replayed expression: {requests:?}"
     );
+}
+
+#[test]
+fn daemon_replays_source_output_before_value_and_error_without_retry() {
+    for (response, success, stdout) in [
+        (
+            serde_json::json!({"success":true,"output":"hé\0","eval_result":{"Int":42}}),
+            true,
+            "hé\x0042\n",
+        ),
+        (
+            serde_json::json!({"success":false,"output":"before","execution_started":true,"error":"program failed"}),
+            false,
+            "before",
+        ),
+    ] {
+        let (output, requests) =
+            eval_with_fake_daemon(&["eval", "--parser", "in", "1+2"], response);
+        assert_eq!(output.status.success(), success, "{output:?}");
+        assert_eq!(output.stdout, stdout.as_bytes());
+        assert_eq!(
+            requests.len(),
+            1,
+            "printed request was replayed: {requests:?}"
+        );
+        if !success {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("program failed"));
+        }
+    }
+}
+
+#[test]
+fn daemon_runtime_error_without_output_is_not_replayed() {
+    let (output, requests) = eval_with_fake_daemon(
+        &["eval", "--parser", "in", "1+2"],
+        serde_json::json!({"success":false,"execution_started":true,"error":"runtime failed"}),
+    );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        requests.len(),
+        1,
+        "runtime error was replayed: {requests:?}"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("runtime failed"));
+}
+
+#[test]
+fn daemon_preexecution_error_retains_statement_fallback() {
+    let (output, requests) = eval_with_fake_daemon(
+        &["eval", "--parser", "in", "1+2"],
+        serde_json::json!({"success":false,"execution_started":false,"error":"compile failed"}),
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        requests.len(),
+        2,
+        "compile refusal lost fallback: {requests:?}"
+    );
+}
+
+#[test]
+fn local_runtime_error_does_not_reexecute_effectful_expression() {
+    let directory = std::env::temp_dir().join(format!("in-eval-once-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let trace = directory.join("trace");
+    std::fs::write(&trace, "").unwrap();
+    let path = serde_json::to_string(trace.to_str().unwrap()).unwrap();
+    let source = format!("{{write-file({path},read-file({path})+\"x\");throw 7;0}}");
+    let output = Command::new(env!("CARGO_BIN_EXE_in"))
+        .env("IN_DAEMON_SOCKET", directory.join("absent.sock"))
+        .args(["eval", "--parser", "in", &source])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&trace).unwrap(),
+        "x",
+        "executed expression retried: {output:?}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn daemon_replays_lossless_bytes_once_before_value_or_error() {
+    for success in [true, false] {
+        let response = if success {
+            serde_json::json!({"success":true,"execution_started":true,"output_bytes":[187],"output":"must not duplicate","eval_result":{"Int":42}})
+        } else {
+            serde_json::json!({"success":false,"execution_started":true,"output_bytes":[187],"error":"runtime failed"})
+        };
+        let (output, requests) =
+            eval_with_fake_daemon(&["eval", "--parser", "in", "1+2"], response);
+        assert_eq!(output.status.success(), success);
+        let mut expected = vec![0xbb];
+        if success {
+            expected.extend_from_slice(b"42\n");
+        }
+        assert_eq!(output.stdout, expected);
+        assert_eq!(requests.len(), 1, "raw output was replayed: {requests:?}");
+    }
 }

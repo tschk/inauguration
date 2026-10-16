@@ -174,10 +174,20 @@ pub(super) fn host_supports_jit() -> bool {
 }
 
 /// JIT compile: lower to native machine code, load into JitRuntime, invoke entry.
+#[cfg(test)]
 pub fn compile_jit(
+    module: &UnifiedModule,
+    module_id: &str,
+    request: &OwnedCompileRequest,
+) -> Result<NativeCompileResult, String> {
+    compile_jit_with_execution_state(module, module_id, request, &mut false)
+}
+
+pub(super) fn compile_jit_with_execution_state(
     module: &UnifiedModule,
     _module_id: &str,
     request: &OwnedCompileRequest,
+    execution_started: &mut bool,
 ) -> Result<NativeCompileResult, String> {
     if !host_supports_jit() {
         return Err(
@@ -343,6 +353,7 @@ pub fn compile_jit(
     let (exit_code, eval_result) = if compile_only {
         (None, None)
     } else {
+        *execution_started = true;
         let raw = unsafe { rt.invoke(&resolved_entry, &[]) }.ok_or_else(|| {
             format!("jit-invocation-failed: entry `{resolved_entry}` could not be invoked")
         })?;

@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn x86_boot_rejects_unresolved_imports() {
         let module = crate::in_lang_parse::parse_in_source(
-            "fn missing() -> Int {}\nfn main() -> Int { return missing(); }",
+            "extern c fn missing() -> Int;\nfn main() -> Int { return missing(); }",
         )
         .unwrap();
         let error = lower_boot_image(&module, "main", Some("x86_64-unknown-none")).unwrap_err();

@@ -5484,7 +5484,7 @@ fn main() -> void { return }
     #[test]
     fn jit_rejects_unresolved_calls_but_native_retains_linker_imports() {
         let module = crate::in_lang_parse::parse_in_source(
-            "fn missing() -> Int {}\nfn main() -> Int { return missing(); }",
+            "extern c fn missing() -> Int;\nfn main() -> Int { return missing(); }",
         )
         .unwrap();
         let error = lower_module(&module, "main")
@@ -5521,7 +5521,7 @@ fn main() -> void { return }
     #[test]
     fn unresolved_function_addresses_never_leave_placeholders() {
         let module = crate::in_lang_parse::parse_in_source(
-            "fn missing() -> Int {}\nfn main() -> Int { return missing; }",
+            "extern c fn missing() -> Int;\nfn main() -> Int { return missing; }",
         )
         .unwrap();
         for result in [
@@ -6723,5 +6723,40 @@ fn main()->Int{let rows:[Row]=[];if read(rows,0)==1{return 42;}return 0;}"#,
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod empty_definition_export_tests {
+    use super::*;
+    #[test]
+    fn unit_definitions_export_but_bodyless_extern_stays_undefined() {
+        let module = UnifiedModule::new(vec![
+            Decl::Function {
+                name: "external".into(),
+                params: vec![],
+                ret: Typ::Void,
+                body: vec![],
+                type_params: vec![],
+            },
+            Decl::Function {
+                name: "helper".into(),
+                params: vec![],
+                ret: Typ::Void,
+                body: vec![Stmt::Return(None)],
+                type_params: vec![],
+            },
+            Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Void,
+                body: vec![Stmt::Return(None)],
+                type_params: vec![],
+            },
+        ]);
+        let lowered = lower_module(&module, "main").unwrap();
+        assert!(lowered.exports.iter().any(|(name, _)| name == "main"));
+        assert!(lowered.exports.iter().any(|(name, _)| name == "helper"));
+        assert!(!lowered.exports.iter().any(|(name, _)| name == "external"));
     }
 }

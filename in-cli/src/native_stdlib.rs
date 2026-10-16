@@ -533,6 +533,89 @@ pub unsafe extern "C" fn in_vec_join(
     }
 }
 
+// Capture only hosted language print wrappers on the invoking thread. Foreign
+// printf/write, raw syscalls and output from spawned threads remain outside this
+// contract; standalone native artifacts keep their existing process stdout.
+thread_local! {
+    static PRINT_OUTPUT: std::cell::RefCell<Vec<Vec<u8>>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+struct PrintCaptureGuard;
+impl Drop for PrintCaptureGuard {
+    fn drop(&mut self) {
+        PRINT_OUTPUT.with(|captures| {
+            captures.borrow_mut().pop();
+        });
+    }
+}
+
+pub(crate) fn capture_print_output<T>(work: impl FnOnce() -> T) -> (T, Vec<u8>) {
+    PRINT_OUTPUT.with(|captures| captures.borrow_mut().push(Vec::new()));
+    let guard = PrintCaptureGuard;
+    let result = work();
+    let output = PRINT_OUTPUT.with(|captures| {
+        std::mem::take(
+            captures
+                .borrow_mut()
+                .last_mut()
+                .expect("active print capture"),
+        )
+    });
+    drop(guard);
+    (result, output)
+}
+
+fn capture_print_bytes(bytes: &[u8]) -> bool {
+    PRINT_OUTPUT.with(|captures| {
+        if let Some(output) = captures.borrow_mut().last_mut() {
+            output.extend_from_slice(bytes);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+fn emit_print(text: &str) {
+    if !capture_print_bytes(text.as_bytes()) {
+        print!("{text}");
+    }
+}
+
+/// Hosted raw-runtime String print preserves byte slices that are not UTF-8.
+/// Ordinary `in_print` retains its existing UTF-8 policy.
+///
+/// # Safety
+/// `text_ptr` must reference a valid instring or be null.
+pub(crate) unsafe extern "C" fn in_jit_print_bytes(text_ptr: *const u8) {
+    if text_ptr.is_null() || !(text_ptr as usize).is_multiple_of(INSTRING_ALIGN) {
+        return;
+    }
+    // Unlike the ordinary wrapper, raw runtime print has no arbitrary payload
+    // cap. Its caller guarantees a valid header and readable payload region.
+    let length = unsafe { text_ptr.cast::<u64>().read() };
+    let Ok(length) = usize::try_from(length) else {
+        return;
+    };
+    if length > isize::MAX as usize
+        || (text_ptr as usize)
+            .checked_add(INSTRING_LEN_SIZE)
+            .and_then(|start| start.checked_add(length))
+            .is_none()
+    {
+        return;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(text_ptr.add(INSTRING_LEN_SIZE), length) };
+    if !capture_print_bytes(bytes) {
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(bytes);
+        let _ = stdout.flush();
+    }
+}
+
 /// `print(text)` -> void
 /// Prints the instring to stdout without a trailing newline.
 ///
@@ -543,7 +626,7 @@ pub unsafe extern "C" fn in_print(text_ptr: *const u8) {
     unsafe {
         if let Some(text) = instring_from_ptr(text_ptr) {
             if let Ok(s) = std::str::from_utf8(text) {
-                print!("{}", s);
+                emit_print(s);
             }
         }
     }
@@ -556,7 +639,7 @@ pub unsafe extern "C" fn in_print(text_ptr: *const u8) {
 /// No raw pointer arguments; safe to call from JIT with the standard C ABI.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn in_print_int(n: i64) {
-    print!("{}", n);
+    emit_print(&n.to_string());
 }
 
 /// `String::ends_with(&self, pattern)` -> `bool`
@@ -1324,5 +1407,84 @@ mod tests {
             parse_command_args("echo `whoami`"),
             vec!["echo", "`whoami`"]
         );
+    }
+}
+
+#[cfg(test)]
+mod print_capture_tests {
+    use super::*;
+    #[test]
+    fn nested_and_unwinding_captures_restore_the_enclosing_sink() {
+        let (_, outer) = capture_print_output(|| {
+            emit_print("before");
+            let (_, inner) = capture_print_output(|| emit_print("inner"));
+            assert_eq!(inner, b"inner");
+            let failed = std::panic::catch_unwind(|| {
+                capture_print_output(|| {
+                    emit_print("discarded");
+                    panic!("restore capture");
+                })
+            });
+            assert!(failed.is_err());
+            emit_print("after");
+        });
+        assert_eq!(outer, b"beforeafter");
+        PRINT_OUTPUT.with(|captures| assert!(captures.borrow().is_empty()));
+    }
+    #[test]
+    fn concurrent_captures_keep_unicode_nul_and_integer_output_separate() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = ["α\0", "β\0"]
+            .into_iter()
+            .map(|text| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let (_, output) = capture_print_output(|| {
+                        barrier.wait();
+                        unsafe {
+                            in_print(instring_from_bytes(text.as_bytes()));
+                            in_print_int(i64::MIN);
+                        }
+                    });
+                    assert_eq!(output, format!("{text}{}", i64::MIN).as_bytes());
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod raw_print_capture_tests {
+    use super::*;
+    #[test]
+    fn raw_print_preserves_invalid_utf8_while_ordinary_print_skips_it() {
+        let text = unsafe { instring_from_bytes(&[0xbb]) };
+        let (_, raw) = capture_print_output(|| unsafe { in_jit_print_bytes(text) });
+        assert_eq!(raw, [0xbb]);
+        let (_, ordinary) = capture_print_output(|| unsafe { in_print(text) });
+        assert!(ordinary.is_empty());
+    }
+    #[test]
+    fn raw_capture_preserves_payloads_above_ordinary_wrapper_limit() {
+        let length = usize::try_from(INSTRING_MAX_BYTES).unwrap() + 1;
+        // Own the valid aligned header and entire readable payload; no fake
+        // pointer or huge JSON/stdout output is involved in this boundary test.
+        let words = (INSTRING_LEN_SIZE + length).div_ceil(INSTRING_ALIGN);
+        let mut storage = vec![0_u64; words];
+        storage[0] = length as u64;
+        let pointer = storage.as_mut_ptr().cast::<u8>();
+        unsafe {
+            pointer.add(INSTRING_LEN_SIZE).write(0xbb);
+            pointer.add(INSTRING_LEN_SIZE + length - 1).write(0xa5);
+        }
+        let (_, output) = capture_print_output(|| unsafe { in_jit_print_bytes(pointer) });
+        assert_eq!(output.len(), length);
+        assert_eq!(output.first(), Some(&0xbb));
+        assert_eq!(output.last(), Some(&0xa5));
+        assert!(output[1..length - 1].iter().all(|byte| *byte == 0));
+        assert!(unsafe { instring_from_ptr(pointer) }.is_none());
     }
 }

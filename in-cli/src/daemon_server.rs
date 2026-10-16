@@ -66,10 +66,15 @@ pub struct DaemonResponse {
         skip_serializing_if = "Option::is_none"
     )]
     pub eval_result: Option<crate::owned_compile::EvalValue>,
+    #[serde(default)]
+    pub execution_started: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_json: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// Lossless fallback when hosted output is not valid UTF-8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,8 +163,10 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
                 success: false,
                 result: None,
                 eval_result: None,
+                execution_started: false,
                 report_json: None,
                 output: None,
+                output_bytes: None,
                 error: Some(format!("create eval dir: {error}")),
                 timing_us: None,
             };
@@ -175,8 +182,10 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
                     success: false,
                     result: None,
                     eval_result: None,
+                    execution_started: false,
                     report_json: None,
                     output: None,
+                    output_bytes: None,
                     error: Some(format!("unsupported eval parser `{name}`")),
                     timing_us: None,
                 };
@@ -196,8 +205,10 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
             success: false,
             result: None,
             eval_result: None,
+            execution_started: false,
             report_json: None,
             output: None,
+            output_bytes: None,
             error: Some(format!("write eval source: {e}")),
             timing_us: None,
         };
@@ -217,7 +228,15 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
         emit: None,
         base: None,
     };
-    let report = compile_owned(&request);
+    let (report, output) = crate::native_stdlib::capture_print_output(|| compile_owned(&request));
+    let (output, output_bytes) = if output.is_empty() {
+        (None, None)
+    } else {
+        match String::from_utf8(output) {
+            Ok(text) => (Some(text), None),
+            Err(error) => (None, Some(error.into_bytes())),
+        }
+    };
     let _ = std::fs::remove_dir_all(&dir);
     let timing_us = start.elapsed().as_micros();
     if report.success {
@@ -225,8 +244,10 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
             success: true,
             result: report.eval_result.as_ref().and_then(|value| value.as_int()),
             eval_result: report.eval_result.clone(),
+            execution_started: report.execution_started,
             report_json: None,
-            output: None,
+            output,
+            output_bytes,
             error: None,
             timing_us: Some(timing_us),
         }
@@ -235,8 +256,10 @@ fn handle_eval(code: &str, parser: Option<&str>, _verbose: bool) -> DaemonRespon
             success: false,
             result: None,
             eval_result: None,
+            execution_started: report.execution_started,
             report_json: None,
-            output: None,
+            output,
+            output_bytes,
             error: Some(report.error.unwrap_or_else(|| "eval failed".to_string())),
             timing_us: Some(timing_us),
         }
@@ -276,8 +299,10 @@ fn handle_compile(
         success: report.success,
         result: None,
         eval_result: None,
+        execution_started: report.execution_started,
         report_json,
         output: None,
+        output_bytes: None,
         error: report.error,
         timing_us: Some(timing_us),
     }
@@ -290,8 +315,10 @@ fn handle_request(request: DaemonRequest) -> (DaemonResponse, bool) {
                 success: true,
                 result: None,
                 eval_result: None,
+                execution_started: false,
                 report_json: None,
                 output: None,
+                output_bytes: None,
                 error: None,
                 timing_us: None,
             },
@@ -302,8 +329,10 @@ fn handle_request(request: DaemonRequest) -> (DaemonResponse, bool) {
                 success: true,
                 result: None,
                 eval_result: None,
+                execution_started: false,
                 report_json: None,
                 output: None,
+                output_bytes: None,
                 error: None,
                 timing_us: None,
             },
@@ -364,8 +393,10 @@ fn handle_client(mut stream: UnixStream) -> std::io::Result<bool> {
                 success: false,
                 result: None,
                 eval_result: None,
+                execution_started: false,
                 report_json: None,
                 output: None,
+                output_bytes: None,
                 error: Some(format!("invalid request: {e}")),
                 timing_us: None,
             },
@@ -655,6 +686,7 @@ mod typed_eval_response_tests {
             serde_json::from_str(r#"{"success":true,"result":0}"#).unwrap();
         assert_eq!(response.result, Some(0));
         assert_eq!(response.eval_result, None);
+        assert!(!response.execution_started);
     }
     #[test]
     #[cfg(any(
@@ -701,8 +733,10 @@ mod typed_eval_response_tests {
                 success: true,
                 result: None,
                 eval_result: Some(EvalValue::Float(value)),
+                execution_started: false,
                 report_json: None,
                 output: None,
+                output_bytes: None,
                 error: None,
                 timing_us: None,
             };
@@ -723,5 +757,128 @@ mod typed_eval_response_tests {
         assert!(first.is_dir() && second.is_dir());
         std::fs::remove_dir(first).unwrap();
         std::fs::remove_dir(second).unwrap();
+    }
+}
+
+#[cfg(all(
+    test,
+    any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    )
+))]
+mod eval_output_tests {
+    use super::*;
+    #[test]
+    fn hosted_print_output_is_carried_with_result_and_before_error() {
+        let response = handle_eval(
+            "fn main()->Int{print(\"hé\0\");print-int(-42);return 42;}",
+            Some("in"),
+            false,
+        );
+        assert!(response.success, "{:?}", response.error);
+        assert_eq!(response.output.as_deref(), Some("hé\0-42"));
+        assert_eq!(response.result, Some(42));
+        assert!(response.execution_started);
+        let response = handle_eval(
+            "fn main()->Int{print(\"before\");throw 7;}",
+            Some("in"),
+            false,
+        );
+        assert!(!response.success);
+        assert!(response.execution_started);
+        assert_eq!(response.output.as_deref(), Some("before"));
+        let response = handle_eval("fn main()->Int{throw 7;}", Some("in"), false);
+        assert!(!response.success);
+        assert!(response.execution_started);
+        assert_eq!(response.output, None);
+        let response = handle_eval("fn main()->Int{return unknown();}", Some("in"), false);
+        assert!(!response.success);
+        assert!(!response.execution_started);
+        let response = handle_eval(
+            "struct Pair{x:i64}fn main()->Pair{Pair{x:42}}",
+            Some("rust"),
+            false,
+        );
+        assert!(response.success, "{:?}", response.error);
+        assert!(!response.execution_started);
+        assert_eq!(response.eval_result, None);
+    }
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn hosted_reserved_runtime_print_uses_the_same_sink() {
+        let response = handle_eval(
+            "fn main()->Int{__inrt_print(\"raw\");__inrt_print_int(42);return 42;}",
+            Some("in"),
+            false,
+        );
+        assert!(response.success, "{:?}", response.error);
+        assert_eq!(response.output.as_deref(), Some("raw42"));
+    }
+    #[test]
+    fn native_artifact_creation_does_not_start_entry_execution() {
+        let directory = create_eval_dir().unwrap();
+        let path = directory.join("native.in");
+        std::fs::write(&path, "fn main()->Int{return 42;}").unwrap();
+        let report = compile_owned(&OwnedCompileRequest {
+            path,
+            module_id: "OutputState".into(),
+            parser: ParserCli::In,
+            target: CompileTarget::Native,
+            entry: Some("main".into()),
+            out: Some(directory.join("native.o")),
+            linkage: crate::native_emit::NativeLinkage::StaticLib,
+            target_triple: Some("x86_64-unknown-none".into()),
+            jobs: 1,
+            debug: false,
+            profile: crate::emit_profile::EmitProfile::Default,
+            emit: None,
+            base: None,
+        });
+        assert!(report.success, "{:?}", report.error);
+        assert!(!report.execution_started);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn hosted_reserved_print_preserves_byte_slice_before_runtime_error() {
+        for tail in ["return 42;", "throw 7;"] {
+            let source = format!("fn main()->Int{{__inrt_print(str-slice(\"λ\",1,2));{tail}}}");
+            let response = handle_eval(&source, Some("in"), false);
+            assert_eq!(
+                response.success,
+                tail == "return 42;",
+                "{:?}",
+                response.error
+            );
+            assert!(response.execution_started);
+            assert_eq!(response.output, None);
+            assert_eq!(response.output_bytes, Some(vec![0xbb]));
+            let wire = serde_json::to_string(&response).unwrap();
+            let decoded: DaemonResponse = serde_json::from_str(&wire).unwrap();
+            assert_eq!(decoded.output_bytes, Some(vec![0xbb]));
+        }
+    }
+    #[test]
+    fn compile_response_execution_state_matches_nested_report() {
+        let directory = create_eval_dir().unwrap();
+        let path = directory.join("compile.in");
+        std::fs::write(&path, "fn main()->Int{return 42;}").unwrap();
+        let response = handle_compile(
+            &path,
+            CompileTarget::Jit,
+            Some("main".into()),
+            None,
+            None,
+            None,
+            crate::native_emit::NativeLinkage::Executable,
+            1,
+        );
+        assert!(response.success, "{:?}", response.error);
+        assert!(response.execution_started);
+        let report: serde_json::Value =
+            serde_json::from_str(response.report_json.as_ref().unwrap()).unwrap();
+        assert_eq!(report["execution_started"], response.execution_started);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

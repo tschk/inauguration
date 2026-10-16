@@ -754,3 +754,28 @@ fn native_javascript_literal_float_arithmetic_uses_float_return_abi() {
     }
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn native_empty_definitions_have_callable_entry_points() {
+    use inauguration::parser_registry::ParserId;
+    let directory = std::env::temp_dir().join(format!("in-empty-entry-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    for (parser, source) in [
+        (ParserId::In, "fn main()->Void{}"),
+        (ParserId::JavaScript, "function main(){}"),
+    ] {
+        let path = directory.join(format!("main.{}", parser.default_extension()));
+        std::fs::write(&path, source).unwrap();
+        let parsed = if parser == ParserId::In {
+            parse_in_source(source).unwrap()
+        } else {
+            inauguration::compiler::tree_front::parse_polyglot_file(parser, &path).unwrap()
+        };
+        let mut module = inauguration::typecheck::normalize_module(parser, &parsed);
+        inauguration::lower_core::desugar_module(&mut module);
+        let runtime = native_runtime(&module);
+        assert!(unsafe { runtime.invoke("main", &[]) }.is_some(), "{source}");
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}

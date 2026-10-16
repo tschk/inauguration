@@ -27,8 +27,12 @@ pub fn canonicalize_in_source(source: &str) -> Result<String, String> {
                     .next()
                     .ok_or(".in: missing expanded declaration provenance")?;
             }
-            if count > 1 || text.trim_start().starts_with("extern ") {
-                // Extern metadata and struct method grouping require original source syntax.
+            if count > 1
+                || text.trim_start().starts_with("extern ")
+                || matches!(&decl, Decl::Function { body, .. } if body.is_empty())
+            {
+                // Keep external/bodyless declarations and grouped struct methods
+                // in source syntax; braces would turn a bodyless fn into a definition.
                 out.push_str(text.trim());
             } else {
                 if text.trim_start().starts_with("interrupt fn ") {
@@ -1115,6 +1119,38 @@ mod private_index_modify_canonical_tests {
                 &mut text,
             );
             assert!(text.contains(crate::core_ir::INDEX_MODIFY_PLACE_FIRST));
+        }
+    }
+}
+
+#[cfg(test)]
+mod bodyless_declaration_tests {
+    use super::*;
+    #[test]
+    fn bodyless_and_empty_defined_functions_preserve_ast_and_fixed_point() {
+        for source in [
+            "fn external()->Void\nfn main()->Int{return 42;}",
+            "extern c fn external()->Void;\nfn main()->Int{return 42;}",
+            "fn external()->Void{}\nfn main()->Int{return 42;}",
+        ] {
+            let original = crate::in_lang_parse::parse_in_source(source).unwrap();
+            let canonical = canonicalize_in_source(source).unwrap();
+            let reparsed = crate::in_lang_parse::parse_in_source(&canonical).unwrap();
+            assert_eq!(reparsed, original, "{canonical}");
+            assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+            let external = reparsed
+                .decls
+                .iter()
+                .find(|decl| matches!(decl,Decl::Function{name,..} if name=="external"))
+                .unwrap();
+            let Decl::Function { body, .. } = external else {
+                unreachable!()
+            };
+            if source.starts_with("fn external()->Void{}") {
+                assert!(matches!(body.as_slice(), [Stmt::Return(None)]));
+            } else {
+                assert!(body.is_empty());
+            }
         }
     }
 }

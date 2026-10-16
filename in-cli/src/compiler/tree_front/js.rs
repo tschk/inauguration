@@ -541,5 +541,54 @@ fn js_return_type(body: &[Stmt]) -> Typ {
 }
 
 pub(super) fn js_body(src: &[u8], body: Node<'_>) -> Vec<Stmt> {
-    ast_body(src, body, JS_AST)
+    let mut statements = ast_body(src, body, JS_AST);
+    let constructor = body.parent().is_some_and(|parent| {
+        parent.kind() == "method_definition"
+            && parent
+                .child_by_field_name("name")
+                .is_some_and(|name| node_txt(src, name).trim() == "constructor")
+    });
+    let mut cursor = body.walk();
+    let empty_block = body.kind() == "statement_block"
+        && body
+            .named_children(&mut cursor)
+            .all(|child| matches!(child.kind(), "comment" | "empty_statement"));
+    // Only a genuinely empty source block is a Unit definition. Do not turn
+    // discarded unsupported syntax into a return, or preempt constructors.
+    if empty_block && !constructor && statements.is_empty() {
+        statements.push(Stmt::Return(None));
+    }
+    statements
+}
+
+#[cfg(test)]
+mod empty_definition_tests {
+    use super::*;
+    fn parse(source: &str) -> Vec<Decl> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        extract_js_with_classes(source.as_bytes(), tree.root_node()).unwrap()
+    }
+    #[test]
+    fn empty_functions_arrows_and_methods_are_definitions_not_externs() {
+        for source in [
+            "function main(){}",
+            "const main=()=>{}",
+            "const main=function(){}",
+            "function main(){/* empty */;}",
+        ] {
+            let decls = parse(source);
+            assert!(decls.iter().any(|decl| matches!(decl, Decl::Function{name,body,..} if name=="main" && matches!(body.as_slice(),[Stmt::Return(None)]))), "{source}: {decls:?}");
+        }
+        let decls = parse("class Row{constructor(){} empty(){}}");
+        let Decl::Class { methods, .. } = &decls[0] else {
+            panic!("class")
+        };
+        assert!(methods.iter().any(|decl| matches!(decl,Decl::Function{name,body,..} if name=="constructor" && body.is_empty())));
+        assert!(methods.iter().any(|decl| matches!(decl,Decl::Function{name,body,..} if name=="empty" && matches!(body.as_slice(),[Stmt::Return(None)]))));
+    }
 }

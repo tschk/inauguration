@@ -352,8 +352,12 @@ pub(crate) fn parse_fn_block(
         let (name, params, ret) = parse_fn_header(header)?;
         let body_inner = brace_content_after_open(rest, brace_idx)
             .ok_or_else(|| format!(".in at line {fn_line}: unclosed `{{` in function body"))?;
-        let body =
+        let mut body =
             parse_function_body(body_inner).map_err(|e| format!(".in at line {fn_line}: {e}"))?;
+        // A present empty definition is not a bodyless external declaration.
+        if body.is_empty() {
+            body.push(Stmt::Return(None));
+        }
         Ok((name, params, ret, body))
     } else {
         let (name, params, ret) = parse_fn_header(rest)?;
@@ -397,4 +401,16 @@ pub(crate) fn parse_extern_fn_block(block: &str) -> Result<InExternBinding, Stri
         required_capabilities,
         ret: Some(ret),
     })
+}
+
+#[cfg(test)]
+mod empty_definition_tests {
+    use super::*;
+    #[test]
+    fn empty_definition_and_bodyless_signature_stay_distinct() {
+        let (_, _, _, body) = parse_fn_block("fn empty()->Void{}", 1).unwrap();
+        assert!(matches!(body.as_slice(), [Stmt::Return(None)]));
+        let (_, _, _, body) = parse_fn_block("fn external()->Void", 1).unwrap();
+        assert!(body.is_empty());
+    }
 }
