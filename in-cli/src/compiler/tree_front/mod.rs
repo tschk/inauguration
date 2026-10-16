@@ -28,6 +28,7 @@ mod kotlin;
 mod lolcat;
 mod lua;
 mod nim;
+mod nim_grammar;
 #[cfg(feature = "parse-extended")]
 mod ocaml;
 mod perl;

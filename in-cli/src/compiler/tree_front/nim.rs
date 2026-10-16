@@ -15,7 +15,7 @@ const NIM_AST: AstShape = AstShape {
     call_kinds: &["call"],
     arg_container_kinds: &["arguments"],
     arg_wrapper_kinds: &[],
-    paren_kinds: &[],
+    paren_kinds: &["parenthesized_expression"],
     binary_kinds: &["binary_expression"],
     unary_kinds: &[],
     int_kinds: &["int"],
@@ -151,7 +151,7 @@ pub(super) fn extract_nim(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, Strin
     }
     if root.has_error() {
         // Keep declaration identity for inspection, but never execute a partial
-        // grammar tree (including unsupported explicit grouping syntax).
+        // grammar tree (including malformed grouping syntax).
         for declaration in &mut decls {
             if let Decl::Function { body, .. } = declaration {
                 *body = vec![Stmt::Expr(Expr::Ident(
@@ -542,7 +542,7 @@ mod tests {
     fn parse(source: &str) -> Vec<Decl> {
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&tree_sitter_nim::LANGUAGE.into())
+            .set_language(&crate::compiler::tree_front::nim_grammar::LANGUAGE.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
         assert!(
@@ -786,7 +786,7 @@ mod string_tests {
             let source = format!("proc main(): string =\n  return {literal}\n");
             let mut parser = tree_sitter::Parser::new();
             parser
-                .set_language(&tree_sitter_nim::LANGUAGE.into())
+                .set_language(&crate::compiler::tree_front::nim_grammar::LANGUAGE.into())
                 .unwrap();
             let tree = parser.parse(&source, None).unwrap();
             assert!(
@@ -1024,7 +1024,7 @@ mod precedence_tests {
         let language = if javascript {
             tree_sitter_javascript::LANGUAGE.into()
         } else {
-            tree_sitter_nim::LANGUAGE.into()
+            crate::compiler::tree_front::nim_grammar::LANGUAGE.into()
         };
         parser.set_language(&language).unwrap();
         let tree = parser.parse(source, None).unwrap();
@@ -1190,7 +1190,7 @@ mod auto_tests {
     fn parse(source: &str) -> Vec<Decl> {
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&tree_sitter_nim::LANGUAGE.into())
+            .set_language(&crate::compiler::tree_front::nim_grammar::LANGUAGE.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
         assert!(
@@ -1250,7 +1250,7 @@ mod boolean_const_tests {
     fn parse(source: &str) -> Vec<Decl> {
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&tree_sitter_nim::LANGUAGE.into())
+            .set_language(&crate::compiler::tree_front::nim_grammar::LANGUAGE.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
         assert!(
@@ -1314,7 +1314,7 @@ mod return_line_tests {
     fn parse(source: &str) -> Vec<Decl> {
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&tree_sitter_nim::LANGUAGE.into())
+            .set_language(&crate::compiler::tree_front::nim_grammar::LANGUAGE.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
         assert!(
@@ -1384,7 +1384,7 @@ mod binary_boundary_tests {
     fn parse(source: &str) -> Vec<Decl> {
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&tree_sitter_nim::LANGUAGE.into())
+            .set_language(&crate::compiler::tree_front::nim_grammar::LANGUAGE.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
         assert!(
@@ -1428,7 +1428,7 @@ mod identifier_style_tests {
     fn parse(source: &str) -> Result<Vec<Decl>, String> {
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&tree_sitter_nim::LANGUAGE.into())
+            .set_language(&crate::compiler::tree_front::nim_grammar::LANGUAGE.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
         assert!(
@@ -1505,7 +1505,7 @@ mod lexical_shadow_tests {
     fn parse(source: &str) -> Vec<Decl> {
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&tree_sitter_nim::LANGUAGE.into())
+            .set_language(&crate::compiler::tree_front::nim_grammar::LANGUAGE.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
         assert!(
@@ -1635,7 +1635,7 @@ mod return_validation_tests {
     fn parse(source: &str) -> Vec<Decl> {
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&tree_sitter_nim::LANGUAGE.into())
+            .set_language(&crate::compiler::tree_front::nim_grammar::LANGUAGE.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
         assert!(
@@ -1743,6 +1743,91 @@ mod return_validation_tests {
                 panic!()
             };
             assert!(!format!("{body:?}").contains("side"), "{body:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod grouping_tests {
+    use super::*;
+    fn parse(source: &str) -> crate::core_ir::UnifiedModule {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&crate::compiler::tree_front::nim_grammar::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{source}: {}",
+            tree.root_node().to_sexp()
+        );
+        let module = crate::core_ir::UnifiedModule::new(
+            extract_nim(source.as_bytes(), tree.root_node()).unwrap(),
+        );
+        assert!(
+            !format!("{module:?}").contains("#unsupported"),
+            "{source}: {module:?}"
+        );
+        module
+    }
+    fn executes(source: &str, expected: i64) {
+        let module = crate::typecheck::normalize_module(
+            crate::parser_registry::ParserId::Nim,
+            &parse(source),
+        );
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut module = module.clone();
+            crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            assert_eq!(
+                crate::native_emit::inisa::eval_module(&module, "main").unwrap(),
+                expected,
+                "{source} {profile:?}"
+            );
+        }
+    }
+    #[test]
+    fn grouped_returns_and_explicit_binary_grouping_preserve_values() {
+        for ret in ["int", "auto"] {
+            for operand in [
+                "return (20 + 22)",
+                "return (\n    20 + 22\n  )",
+                "return\n    (20 + 22)",
+                "return ((20 + 1) * 2)",
+            ] {
+                executes(&format!("proc main():{ret} =\n  {operand}\n"), 42);
+            }
+        }
+        // Explicit grouping, not a claim about the grammar's ungrouped
+        // precedence: semantic precedence reconstruction has separate tests.
+        executes("proc main():int =\n  (20 + 1) * 2\n", 42);
+        executes("proc main():int =\n  20 + (1 * 2)\n", 22);
+        let module = parse("proc main():int =\n  (20 + 1) * 2\n");
+        assert!(module.decls.iter().any(|decl|matches!(decl,Decl::Function{name,body,..}if name=="main" && body.iter().any(|stmt|matches!(stmt,Stmt::Return(Some(Expr::Binary{op,lhs,..})) if op=="*" && matches!(lhs.as_ref(),Expr::Binary{op,..}if op=="+"))))));
+    }
+    #[test]
+    fn grouped_expression_uses_its_value_not_a_leading_comment() {
+        executes("proc main():int =\n  ( # inner comment\n    42)\n", 42);
+        executes(
+            "proc identity(value:int):int = value\nproc main():int =\n  identity(( # inner comment\n    42))\n",
+            42,
+        );
+    }
+    #[test]
+    fn call_whitespace_and_opened_call_continuation_remain_calls() {
+        for call in [
+            "identity(42)",
+            "identity (42)",
+            "identity(\n    42)",
+            "identity ((20 + 1) * 2)",
+        ] {
+            executes(
+                &format!("proc identity(value:int):int = value\nproc main():int =\n  {call}\n"),
+                42,
+            );
         }
     }
 }

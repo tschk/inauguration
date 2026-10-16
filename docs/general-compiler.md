@@ -64,6 +64,13 @@ native lowering, including Thumb `Int` and `Bool` array literals and
 `array-repeat` initializers. Empty arrays still need an explicit element type;
 Thumb array aliases and call-bearing store spills remain unsupported.
 
+The bundled Nim grammar admits parenthesized expressions, including return
+continuations and grouped call arguments. Groups preserve explicit precedence;
+comments inside a group do not become its value. Consumer builds compile the
+checked-in parser without a JavaScript runtime. This remains a bounded grammar,
+not full Nim syntax: tuples and indirect calls remain unsupported, and malformed
+grammar trees still refuse before execution.
+
 Python scalar-name augmented assignments support `+=`, `-=`, `*=`, `&=`,
 `|=` and `^=` through the existing typed native operations. They read the old
 binding before evaluating the RHS once; supported conditional branches stay lazy.

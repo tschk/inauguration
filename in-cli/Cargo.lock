@@ -532,8 +532,9 @@ dependencies = [
 
 [[package]]
 name = "inauguration"
-version = "0.9.271"
+version = "0.9.272"
 dependencies = [
+ "cc",
  "clap",
  "criterion",
  "flate2",
@@ -566,9 +567,9 @@ dependencies = [
  "tree-sitter-javascript",
  "tree-sitter-julia",
  "tree-sitter-kotlin-ng",
+ "tree-sitter-language",
  "tree-sitter-lolcode",
  "tree-sitter-lua",
- "tree-sitter-nim",
  "tree-sitter-objc",
  "tree-sitter-ocaml",
  "tree-sitter-perl",
@@ -1400,16 +1401,6 @@ name = "tree-sitter-lua"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8daaf5f4235188a58603c39760d5fa5d4b920d36a299c934adddae757f32a10c"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-nim"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f489c09ddd48f97728ca92b8e6b17a1a56e0e1c4c0c5fd1d0222f1dc494c0bb"
 dependencies = [
  "cc",
  "tree-sitter-language",

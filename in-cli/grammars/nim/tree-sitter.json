@@ -1,0 +1,26 @@
+{
+  "grammars": [
+    {
+      "name": "nim",
+      "camelcase": "nim",
+      "scope": "source.nim",
+      "path": ".",
+      "file-types": ["nim"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Tree-sitter grammar for nim",
+    "authors": [{"name": "undivisible", "email": "undivisible@example.com"}]
+  },
+  "bindings": {
+    "c": true,
+    "java": false,
+    "go": false,
+    "node": true,
+    "python": false,
+    "rust": true,
+    "wasm": false
+  }
+}

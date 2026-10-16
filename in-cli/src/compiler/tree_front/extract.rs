@@ -55,6 +55,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tree_sitter::{Language, Node, Parser};
 
+use super::nim_grammar as tree_sitter_nim;
 #[cfg(feature = "parse-extended")]
 use tree_sitter_c_sharp;
 use tree_sitter_crystal;
@@ -77,7 +78,6 @@ use tree_sitter_julia;
 use tree_sitter_kotlin_ng;
 use tree_sitter_lolcode;
 use tree_sitter_lua;
-use tree_sitter_nim;
 #[cfg(feature = "parse-extended")]
 use tree_sitter_objc;
 #[cfg(feature = "parse-extended")]
@@ -1516,8 +1516,20 @@ pub(super) fn ast_expr(src: &[u8], expr: Node<'_>, shape: AstShape) -> Option<Ex
     if kind_in(expr, shape.call_kinds) {
         return ast_call_expr(src, expr, shape);
     }
-    if kind_in(expr, shape.arg_wrapper_kinds) || kind_in(expr, shape.paren_kinds) {
-        return expr.named_child(0).and_then(|n| ast_expr(src, n, shape));
+    if kind_in(expr, shape.arg_wrapper_kinds) {
+        return expr
+            .named_child(0)
+            .and_then(|node| ast_expr(src, node, shape));
+    }
+    if kind_in(expr, shape.paren_kinds) {
+        return expr
+            .child_by_field_name("value")
+            .or_else(|| {
+                let mut cursor = expr.walk();
+                expr.named_children(&mut cursor)
+                    .find(|node| !node.is_extra())
+            })
+            .and_then(|node| ast_expr(src, node, shape));
     }
     if kind_in(expr, shape.binary_kinds) {
         return ast_binary_expr(src, expr, shape);
