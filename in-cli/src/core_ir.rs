@@ -9,6 +9,10 @@ pub(crate) const FIELD_MODIFY_VALUE_FIRST: &str = "#field-modify-value-first";
 pub(crate) const MODIFY_VALUE_FIRST: &str = "#modify-value-first";
 pub(crate) const ARRAY_REPEAT: &str = "#array-repeat";
 pub(crate) const FIELD_MODIFY_PLACE_FIRST: &str = "#field-modify-place-first";
+pub(crate) const RUST_EXPRESSION_DEPTH: &str = "#unsupported-rust-expression-depth";
+pub(crate) const RUST_ASSIGNMENT_TARGET: &str = "#unsupported-rust-assignment-target";
+pub(crate) const RUST_COMPOUND_ASSIGNMENT_TARGET: &str =
+    "#unsupported-rust-compound-assignment-target";
 pub(crate) const INLINE_CONST: &str = "#rust-inline-const";
 pub(crate) const VECTOR_ALLOCATION: &str = "#vector-with-capacity";
 pub(crate) const BORROW: &str = "#rust-borrow";
@@ -37,6 +41,9 @@ pub(crate) fn is_compiler_callee(name: &str) -> bool {
                 | MODIFY_VALUE_FIRST
                 | ARRAY_REPEAT
         )
+        || name == RUST_ASSIGNMENT_TARGET
+        || name == RUST_COMPOUND_ASSIGNMENT_TARGET
+        || name == RUST_EXPRESSION_DEPTH
         || name == FIELD_MODIFY_PLACE_FIRST
         || name == INLINE_CONST
         || name == BORROW

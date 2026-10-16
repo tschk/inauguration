@@ -356,11 +356,54 @@ impl Pass<'_> {
         let candidate = match expr {
             Expr::Ident(name) => self.opaque.contains(name) || !self.flexible.contains(name),
             Expr::Call { .. } | Expr::Field { .. } | Expr::Index { .. } => true,
+            Expr::Binary { .. }
+            | Expr::Block { .. }
+            | Expr::Conditional { .. }
+            | Expr::MatchValue { .. } => !self.contextual_integer(expr, env),
             _ => false,
         };
         candidate
             && self.hint(expr, env).is_none()
             && self.checker.expr_type(expr, self.facts, env) == Some(Typ::Int)
+    }
+    fn contextual_integer(&self, expr: &Expr, env: &HashMap<String, Typ>) -> bool {
+        match expr {
+            Expr::Ident(name) => {
+                self.hint(expr, env).is_some()
+                    || (self.flexible.contains(name) && !self.opaque.contains(name))
+            }
+            Expr::Unary { op, .. } if op == "rust-integer-literal" => true,
+            Expr::Unary { op, expr }
+                if matches!(op.as_str(), "-" | "~" | "complement" | "bitnot") =>
+            {
+                self.contextual_integer(expr, env)
+            }
+            Expr::Binary { op, lhs, rhs }
+                if matches!(
+                    op.as_str(),
+                    "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"
+                ) =>
+            {
+                self.contextual_integer(lhs, env)
+                    && (matches!(op.as_str(), "<<" | ">>") || self.contextual_integer(rhs, env))
+            }
+            Expr::Block {
+                result: Some(result),
+                ..
+            } => self.contextual_integer(result, env),
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => self.contextual_integer(then_expr, env) && self.contextual_integer(else_expr, env),
+            Expr::MatchValue { arms, .. } => {
+                !arms.is_empty()
+                    && arms
+                        .iter()
+                        .all(|arm| self.contextual_integer(&arm.value, env))
+            }
+            _ => self.hint(expr, env).is_some(),
+        }
     }
     fn hint(&self, expr: &Expr, env: &HashMap<String, Typ>) -> Option<Kind> {
         match expr {
@@ -508,6 +551,7 @@ impl Pass<'_> {
                     .or_else(|| self.inferred.get(name).copied());
                 if known.is_none()
                     && self.flexible.contains(name)
+                    && !self.opaque.contains(name)
                     && let Some(expected) = expected
                 {
                     self.inferred.insert(name.clone(), expected);
@@ -990,13 +1034,28 @@ impl Pass<'_> {
         for stmt in body {
             match stmt {
                 Stmt::Let(name, annotation, value) => {
+                    // Canonical Int is a lowering carrier, not an explicit Rust width.
+                    let carrier_kind = if *annotation == Some(Typ::Int) {
+                        let kind =
+                            self.expression(value, self.inferred.get(name).copied(), env, ret);
+                        if self.contextual_integer(value, env) {
+                            *annotation = None;
+                        } else {
+                            self.opaque.insert(name.clone());
+                        }
+                        Some(kind)
+                    } else {
+                        None
+                    };
                     if annotation.is_none() {
                         self.flexible.insert(name.clone());
                     }
                     let expected = self
                         .expected(annotation.as_ref())
                         .or_else(|| self.inferred.get(name).copied());
-                    let kind = if annotation.is_some() {
+                    let kind = if let Some(kind) = carrier_kind {
+                        kind
+                    } else if annotation.is_some() {
                         self.value(value, annotation.as_ref(), env, ret)
                     } else {
                         self.expression(value, expected, env, ret)
@@ -1232,6 +1291,8 @@ pub(crate) fn normalize(
         return;
     }
     crate::core_bindings::normalize_decls(&mut module.decls);
+    // Expose ordered updates while their destination integer kinds remain available.
+    crate::lower_core::lower_value_spills(&mut module.decls);
     let facts = checker.collect_facts(module);
     let globals: HashMap<_, _> = module
         .decls
@@ -1871,6 +1932,9 @@ mod tests {
     fn wrapping_methods_require_exact_argument_and_receiver_kinds() {
         for source in [
             "fn main()->u8{let text:String=\"hi\";1u8.wrapping_add(text.len())}",
+            "fn main()->u8{let text:String=\"hi\";let length=text.len();1u8.wrapping_add(length)}",
+            "fn main()->u8{let text:String=\"hi\";let length=text.len()+1;1u8.wrapping_add(length)}",
+            "fn main()->u8{let text:String=\"hi\";let length={text.len()};1u8.wrapping_add(length)}",
             "fn main()->i64{let text:String=\"hi\";text.len().wrapping_add(1i64)}",
         ] {
             let module = resolved(source, IntegerSemantics::Word64);

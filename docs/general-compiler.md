@@ -54,6 +54,28 @@ native lowering, including Thumb `Int` and `Bool` array literals and
 `array-repeat` initializers. Empty arrays still need an explicit element type;
 Thumb array aliases and call-bearing store spills remain unsupported.
 
+Rust assignments produce Unit in statement and value contexts. Tuple
+destructuring evaluates the RHS once, stages its leaf values, then stores
+assignees from left to right. Scalar compound assignments evaluate the RHS
+before reading the destination; computed field and indexed places retain their
+location for the final store. Rust integer widths remain available while these
+operations expand, including unsigned division and right shifts. Inferred RHS
+locals retain their contextual integer kinds; canonical native-call integer
+results do not acquire an arbitrary Rust width.
+
+Declaration origin is still inferred from retained Rust metadata. A Void
+helper accessing a global nominal field can miss numeric normalization when
+its body contains no such metadata; unsigned shifts using a canonical builtin
+count are a known remaining case.
+
+Array and struct destructuring, and dereference assignees, currently refuse
+explicitly rather than silently discarding stores. Native output can still
+contain documented degradation trap stubs for unsupported helper functions;
+inspect reachable degradations before treating an artifact as executable
+coverage. Parentheses and grouping do not consume the Rust expression-depth
+budget; expressions exceeding the structural limit refuse instead of becoming
+zero.
+
 AArch64 lowering branches `break` and `continue` to the innermost loop's exit
 and next iteration, including vector loops. `.in` range-loop expansion advances the
 binding before `continue` on both native backends. AArch64 rejects loop jumps

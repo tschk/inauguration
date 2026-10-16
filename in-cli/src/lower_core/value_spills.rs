@@ -706,6 +706,21 @@ impl Lower {
                     self.expr(&mut value, &mut prefix);
                     value = self.save(value, &mut prefix);
                 }
+                if !place_first {
+                    // Rust evaluates RHS first, then retains the original place
+                    // for both the old-field read and the final store. Saving a
+                    // Named receiver itself would instead update a value copy.
+                    let mut capture_place = !is_addressable(&base);
+                    crate::core_ir::for_each_expr_child(&base, &mut |child| {
+                        capture_place |= crate::core_opt::expr_has_effects(child);
+                    });
+                    if capture_place {
+                        self.stage_receiver_place(&mut base, &mut prefix);
+                    }
+                    if !is_addressable(&base) {
+                        base = self.save(base, &mut prefix);
+                    }
+                }
                 // Rust's value-first marker retains the original delayed read.
                 let previous = previous.unwrap_or_else(|| Expr::Field {
                     base: Box::new(base.clone()),
@@ -1137,5 +1152,70 @@ mod compound_field_place_tests {
         assert!(
             matches!(&body[1],Stmt::FieldAssign {value:Expr::Binary {lhs,..},..} if matches!(lhs.as_ref(),Expr::Field {..}))
         );
+    }
+
+    #[test]
+    fn value_first_computed_place_is_evaluated_once_after_rhs() {
+        let source = "struct Row{Int x}\nvar rows:[Row]=[Row{x:20}]\nfn get()->[Row]{return rows;}\nfn at()->Int{return 0;}\nfn rhs()->Int{return 22;}\nfn main()->Int{field-modify-value-first(get()[at()],\"x\",rhs(),\"+\");return rows[0].x;}";
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        lower_value_spills(&mut module.decls);
+        let body = main_body(&module.decls);
+        let calls: Vec<_> = body
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::Let(_, _, Expr::Call { callee, .. }) => match callee.as_ref() {
+                    Expr::Ident(name) => Some(name.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, ["rhs", "get", "at"]);
+        let (place, read) = body
+            .iter()
+            .find_map(|stmt| match stmt {
+                Stmt::FieldAssign {
+                    base,
+                    value: Expr::Binary { lhs, .. },
+                    ..
+                } => Some((base, lhs.as_ref())),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            matches!(place,Expr::Index {base,index} if matches!(base.as_ref(),Expr::Ident(_))&&matches!(index.as_ref(),Expr::Ident(_)))
+        );
+        assert!(matches!(read,Expr::Field {base,..} if base.as_ref()==place));
+        assert!(
+            !body
+                .iter()
+                .any(|stmt| matches!(stmt,Stmt::Let(_,Some(Typ::Named(name)),_) if name=="Row"))
+        );
+        let once = module.decls.clone();
+        lower_value_spills(&mut module.decls);
+        assert_eq!(module.decls, once);
+    }
+
+    #[test]
+    fn value_first_pure_index_keeps_only_existing_rhs_save() {
+        let source = "struct Row{Int x}\nvar rows:[Row]=[Row{x:20}]\nfn rhs()->Int{return 22;}\nfn main()->Int{field-modify-value-first(rows[0],\"x\",rhs(),\"+\");return rows[0].x;}";
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        lower_value_spills(&mut module.decls);
+        let body = main_body(&module.decls);
+        assert_eq!(
+            body.iter()
+                .filter(|stmt| matches!(stmt, Stmt::Let(..)))
+                .count(),
+            1
+        );
+        assert!(
+            matches!(&body[0],Stmt::Let(_,_,Expr::Call {callee,..}) if matches!(callee.as_ref(),Expr::Ident(name) if name=="rhs"))
+        );
+        assert!(
+            matches!(&body[1],Stmt::FieldAssign {base:Expr::Index {base,index},..} if matches!(base.as_ref(),Expr::Ident(name) if name=="rows")&&matches!(index.as_ref(),Expr::IntLit(0)))
+        );
+        let once = module.decls.clone();
+        lower_value_spills(&mut module.decls);
+        assert_eq!(module.decls, once);
     }
 }

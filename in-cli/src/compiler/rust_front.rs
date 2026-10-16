@@ -397,6 +397,8 @@ fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
     }
 }
 
+#[path = "rust_front/assignment.rs"]
+mod assignment;
 #[path = "rust_front/atomics.rs"]
 mod atomics;
 
@@ -2317,73 +2319,9 @@ fn lower_expr_stmt(
         syn::Expr::Match(value) => lower_match_with_types(value, false, out, local_types),
         syn::Expr::Block(value) => lower_scoped_block(&value.block, false, out, local_types),
         syn::Expr::Unsafe(value) => lower_scoped_block(&value.block, false, out, local_types),
-        syn::Expr::Assign(a) => {
-            if let syn::Expr::Index(index) = a.left.as_ref() {
-                out.push(Stmt::Expr(Expr::Call {
-                    callee: Box::new(Expr::Ident(crate::core_ir::INDEX_ASSIGN_VALUE_FIRST.into())),
-                    args: vec![
-                        lower_expr_with_types(&index.expr, local_types),
-                        lower_expr_with_types(&index.index, local_types),
-                        lower_expr_with_types(&a.right, local_types),
-                    ],
-                }));
-            } else if let Some(name) = assign_lhs_name(&a.left) {
-                out.push(Stmt::Assign(
-                    name,
-                    lower_expr_with_types(&a.right, local_types),
-                ));
-            } else if let syn::Expr::Field(f) = &*a.left {
-                out.push(Stmt::FieldAssign {
-                    base: lower_expr_with_types(&f.base, local_types),
-                    name: match &f.member {
-                        syn::Member::Unnamed(idx) => format!("_{}", idx.index),
-                        _ => f.member.to_token_stream().to_string(),
-                    },
-                    value: lower_expr_with_types(&a.right, local_types),
-                });
-            }
-        }
-        syn::Expr::Binary(b) if assign_op_from_binop(&b.op).is_some() => {
-            let op = assign_op_from_binop(&b.op).expect("checked");
-            if let syn::Expr::Index(index) = b.left.as_ref() {
-                out.push(Stmt::Expr(Expr::Call {
-                    callee: Box::new(Expr::Ident(crate::core_ir::INDEX_MODIFY_VALUE_FIRST.into())),
-                    args: vec![
-                        lower_expr_with_types(&index.expr, local_types),
-                        lower_expr_with_types(&index.index, local_types),
-                        lower_expr_with_types(&b.right, local_types),
-                        Expr::StringLit(op.into()),
-                    ],
-                }));
-            } else if let syn::Expr::Field(field) = b.left.as_ref() {
-                out.push(Stmt::Expr(Expr::Call {
-                    callee: Box::new(Expr::Ident(crate::core_ir::FIELD_MODIFY_VALUE_FIRST.into())),
-                    args: vec![
-                        lower_expr_with_types(&field.base, local_types),
-                        Expr::StringLit(match &field.member {
-                            syn::Member::Unnamed(index) => format!("_{}", index.index),
-                            syn::Member::Named(name) => name.to_string(),
-                        }),
-                        lower_expr_with_types(&b.right, local_types),
-                        Expr::StringLit(op.into()),
-                    ],
-                }));
-            } else if let Some(name) = assign_lhs_name(&b.left) {
-                out.push(Stmt::Assign(
-                    name.clone(),
-                    Expr::Binary {
-                        op: op.into(),
-                        lhs: Box::new(Expr::Ident(name)),
-                        rhs: Box::new(lower_expr_with_types(&b.right, local_types)),
-                    },
-                ));
-            } else {
-                out.push(Stmt::Expr(Expr::Binary {
-                    op: op.into(),
-                    lhs: Box::new(lower_expr_with_types(&b.left, local_types)),
-                    rhs: Box::new(lower_expr_with_types(&b.right, local_types)),
-                }));
-            }
+        syn::Expr::Assign(assign) => assignment::lower_statement(assign, out, local_types),
+        syn::Expr::Binary(assign) if assign_op_from_binop(&assign.op).is_some() => {
+            assignment::lower_compound(assign, out, local_types)
         }
         _ => out.push(Stmt::Expr(lower_expr_with_types(expr, local_types))),
     }
@@ -2502,6 +2440,15 @@ thread_local! {
 }
 
 fn lower_expr_with_types(expr: &syn::Expr, local_types: &mut HashMap<String, String>) -> Expr {
+    // Transparent syntax wrappers do not consume structural recursion budget.
+    let mut expr = expr;
+    loop {
+        expr = match expr {
+            syn::Expr::Paren(value) => &value.expr,
+            syn::Expr::Group(value) => &value.expr,
+            _ => break,
+        };
+    }
     let depth = EXPR_DEPTH.with(|d| {
         let n = d.get();
         d.set(n.saturating_add(1));
@@ -2509,7 +2456,10 @@ fn lower_expr_with_types(expr: &syn::Expr, local_types: &mut HashMap<String, Str
     });
     if depth > 64 {
         EXPR_DEPTH.with(|d| d.set(depth));
-        return Expr::IntLit(0);
+        return Expr::Call {
+            callee: Box::new(Expr::Ident(crate::core_ir::RUST_EXPRESSION_DEPTH.into())),
+            args: Vec::new(),
+        };
     }
     let out = lower_expr_with_types_inner(expr, local_types);
     EXPR_DEPTH.with(|d| d.set(depth));
@@ -2816,6 +2766,9 @@ fn lower_expr_with_types_inner(
             },
             expr: Box::new(lower_expr_with_types(&u.expr, local_types)),
         },
+        syn::Expr::Binary(b) if assign_op_from_binop(&b.op).is_some() => {
+            assignment::expression(expr, local_types)
+        }
         syn::Expr::Binary(b) => Expr::Binary {
             op: b.op.to_token_stream().to_string(),
             lhs: Box::new(lower_expr_with_types(&b.left, local_types)),
@@ -2976,7 +2929,7 @@ fn lower_expr_with_types_inner(
             .as_ref()
             .map(|inner| lower_expr_with_types(inner, local_types))
             .unwrap_or(Expr::IntLit(0)),
-        syn::Expr::Assign(a) => lower_expr_with_types(&a.right, local_types),
+        syn::Expr::Assign(_) => assignment::expression(expr, local_types),
         syn::Expr::Break(b) => b
             .expr
             .as_ref()
@@ -4289,5 +4242,125 @@ mod private_ordered_operation_tests {
             refused |= matches!(expr,Expr::Call{callee,..} if matches!(callee.as_ref(),Expr::Ident(name) if name=="__unsupported_rust_static_array_value"));
         });
         assert!(refused);
+    }
+}
+
+#[cfg(test)]
+mod expression_depth_tests {
+    use super::*;
+    // Proposed insertion in rust_front's existing test module, separate from production patch.
+    #[test]
+    fn transparent_wrappers_do_not_replace_nested_values_with_zero() {
+        for depth in [60, 65, 70, 90] {
+            let nested = format!("{}42i64{}", "(".repeat(depth), ")".repeat(depth));
+            for (deep, shallow) in [
+                (nested.clone(), "42i64".to_owned()),
+                (format!("{nested}+0"), "42i64+0".to_owned()),
+                (format!("({nested},0i64)"), "(42i64,0i64)".to_owned()),
+            ] {
+                let deep: syn::Expr = syn::parse_str(&deep).unwrap();
+                let shallow: syn::Expr = syn::parse_str(&shallow).unwrap();
+                assert_eq!(
+                    lower_expr_with_types(&deep, &mut HashMap::new()),
+                    lower_expr_with_types(&shallow, &mut HashMap::new()),
+                    "depth {depth}"
+                );
+                assert_eq!(EXPR_DEPTH.with(|value| value.get()), 0);
+            }
+        }
+        let mut grouped: syn::Expr = syn::parse_str("42i64").unwrap();
+        for _ in 0..90 {
+            grouped = syn::Expr::Group(syn::ExprGroup {
+                attrs: vec![],
+                group_token: Default::default(),
+                expr: Box::new(grouped),
+            });
+        }
+        let shallow: syn::Expr = syn::parse_str("42i64").unwrap();
+        assert_eq!(
+            lower_expr_with_types(&grouped, &mut HashMap::new()),
+            lower_expr_with_types(&shallow, &mut HashMap::new())
+        );
+        assert_eq!(EXPR_DEPTH.with(|value| value.get()), 0);
+    }
+
+    #[test]
+    fn real_structural_depth_produces_explicit_unsupported_marker_and_resets_budget() {
+        // Build syntax nodes directly: this tests frontend depth, not syn parser limits.
+        let mut deep: syn::Expr = syn::parse_str("42i64").unwrap();
+        for _ in 0..90 {
+            deep = syn::Expr::Unary(syn::ExprUnary {
+                attrs: vec![],
+                op: syn::UnOp::Neg(Default::default()),
+                expr: Box::new(deep),
+            });
+        }
+        let lowered = lower_expr_with_types(&deep, &mut HashMap::new());
+        fn contains_depth_marker(expr: &Expr) -> bool {
+            if matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(),Expr::Ident(name) if name == crate::core_ir::RUST_EXPRESSION_DEPTH))
+            {
+                return true;
+            }
+            let mut found = false;
+            crate::core_ir::for_each_expr_child(expr, &mut |child| {
+                found |= contains_depth_marker(child)
+            });
+            found
+        }
+        assert!(contains_depth_marker(&lowered));
+        assert_eq!(EXPR_DEPTH.with(|value| value.get()), 0);
+        let shallow: syn::Expr = syn::parse_str("42i64").unwrap();
+        assert!(!contains_depth_marker(&lower_expr_with_types(
+            &shallow,
+            &mut HashMap::new()
+        )));
+        assert_eq!(EXPR_DEPTH.with(|value| value.get()), 0);
+    }
+
+    #[test]
+    fn structural_depth_refusal_survives_zero_product_and_unused_binding_optimization() {
+        let mut deep: syn::Expr = syn::parse_str("42i64").unwrap();
+        for _ in 0..90 {
+            deep = syn::Expr::Unary(syn::ExprUnary {
+                attrs: vec![],
+                op: syn::UnOp::Neg(Default::default()),
+                expr: Box::new(deep),
+            });
+        }
+        let lowered = lower_expr_with_types(&deep, &mut HashMap::new());
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            for body in [
+                vec![Stmt::Return(Some(lowered.clone()))],
+                vec![Stmt::Return(Some(Expr::Binary {
+                    op: "*".into(),
+                    lhs: Box::new(lowered.clone()),
+                    rhs: Box::new(Expr::IntLit(0)),
+                }))],
+                vec![
+                    Stmt::Let("unused".into(), Some(Typ::Int), lowered.clone()),
+                    Stmt::Return(Some(Expr::IntLit(42))),
+                ],
+            ] {
+                let mut module = parse_rust_source("fn main()->i64{return 42;}").unwrap();
+                let Decl::Function { body: main, .. } = &mut module.decls[0] else {
+                    panic!("missing main")
+                };
+                *main = body;
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
+                assert!(!verified.ok, "{profile:?}");
+                assert!(
+                    verified.reason.as_deref().is_some_and(
+                        |reason| reason.contains(crate::core_ir::RUST_EXPRESSION_DEPTH)
+                    ),
+                    "{verified:?}"
+                );
+                assert_eq!(EXPR_DEPTH.with(|value| value.get()), 0);
+            }
+        }
     }
 }

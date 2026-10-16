@@ -1,6 +1,41 @@
 //! Port release-candidate evaluator regressions to the current compiler API.
 use inauguration::{core_opt, in_lang_parse::parse_in_source, native_emit::inisa};
 
+#[test]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn native_rust_assignments_preserve_values_order_and_integer_kinds() {
+    use inauguration::emit_profile::EmitProfile;
+    for source in [
+        "fn main()->i64{let mut x:i64=20;x+={x=40;2};x}",
+        "const VALUE:i64={let mut x:i64=20;x+=22;x};fn main()->i64{VALUE}",
+        "fn main()->i64{let mut a:i64=20;let mut b:i64=22;(a,b)=(b,a);if a==22&&b==20{42}else{7}}",
+        "struct Row{bits:u64}fn main()->i64{let mut row=Row{bits:0x8000000000000000u64};row.bits>>=1;if row.bits==0x4000000000000000u64&&row.bits>0{42}else{7}}",
+        "fn main()->i64{let mut bits:[u64;1]=[0x8000000000000000u64];bits[0]/=2;if bits[0]==0x4000000000000000u64{42}else{7}}",
+        "fn main()->i64{let mut bits=[0x8000000000000000u64];bits[0]/=1+1;if bits[0]==0x4000000000000000u64{42}else{7}}",
+        "fn main()->i64{let mut bits=[0x8000000000000000u64];bits[0]/={2};if bits[0]==0x4000000000000000u64{42}else{7}}",
+        "fn main()->i64{let mut bits=[0x8000000000000000u64];bits[0]/=if true{2}else{3};if bits[0]==0x4000000000000000u64{42}else{7}}",
+        "fn main()->i64{let mut bits=[0x8000000000000000u64];let divisor=2;bits[0]/=divisor;if bits[0]==0x4000000000000000u64{42}else{7}}",
+        "fn main()->i64{let mut bits=[0x8000000000000000u64];bits[0]/={let divisor=2;divisor};if bits[0]==0x4000000000000000u64{42}else{7}}",
+        "fn main()->i64{let mut bits=[0x8000000000000000u64];bits[0]/=match true{true=>2,false=>3};if bits[0]==0x4000000000000000u64{42}else{7}}",
+    ] {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let parsed = inauguration::compiler::rust_front::parse_rust_source(source).unwrap();
+            let mut module = inauguration::typecheck::normalize_module(
+                inauguration::parser_registry::ParserId::Rust,
+                &parsed,
+            );
+            inauguration::lower_core::desugar_module(&mut module);
+            core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+            let runtime = native_runtime(&module);
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]) },
+                Some(42),
+                "{source} {profile:?}"
+            );
+        }
+    }
+}
+
 fn assert_result(source: &str, expected: i64) {
     let raw = parse_in_source(source).expect("parse release-candidate regression");
     assert_eq!(inisa::eval_module(&raw, "main").unwrap(), expected);
