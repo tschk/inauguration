@@ -125,7 +125,7 @@ fn resolve(
             .ok()?;
             return items.get(index).cloned();
         }
-        Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if matches!(name.as_str(), "array-repeat" | "range-exclusive" | "range-inclusive" | "range-from" | "range-to" | "range-to-inclusive" | "range-full")) =>
+        Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if (name == crate::core_ir::ARRAY_REPEAT || matches!(name.as_str(), "range-exclusive" | "range-inclusive" | "range-from" | "range-to" | "range-to-inclusive" | "range-full"))) =>
         {
             Expr::Call {
                 callee: callee.clone(),
@@ -133,7 +133,7 @@ fn resolve(
                     .iter()
                     .enumerate()
                     .map(|(index, expr)| {
-                        if index == 1 && matches!(callee.as_ref(), Expr::Ident(name) if name == "array-repeat") {
+                        if index == 1 && matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::ARRAY_REPEAT) {
                             // A count alias must not reuse a machine-word value cached
                             // for ordinary expressions in this declaration.
                             resolve(expr, defs, active, &mut HashMap::new(), IntegerSemantics::Word64)
@@ -259,5 +259,58 @@ fn rewrite_body(body: &mut [Stmt], values: &HashMap<String, Option<Expr>>) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod private_repeat_count_tests {
+    use super::*;
+
+    #[test]
+    fn only_private_repeat_counts_bypass_machine_word_constant_cache() {
+        let definitions = HashMap::from([(
+            "COUNT".into(),
+            Some(Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(Expr::IntLit(0xFFFF_FFFF)),
+                rhs: Box::new(Expr::IntLit(1)),
+            }),
+        )]);
+        let mut cache = HashMap::new();
+        assert_eq!(
+            resolve_name(
+                "COUNT",
+                &definitions,
+                &mut HashSet::new(),
+                &mut cache,
+                IntegerSemantics::Word32
+            ),
+            Some(Expr::IntLit(0))
+        );
+        let call = |name: &str| Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args: vec![Expr::IntLit(42), Expr::Ident("COUNT".into())],
+        };
+        let value = resolve(
+            &call(crate::core_ir::ARRAY_REPEAT),
+            &definitions,
+            &mut HashSet::new(),
+            &mut cache,
+            IntegerSemantics::Word32,
+        )
+        .unwrap();
+        assert!(matches!(value,Expr::Call {callee,args}
+            if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::ARRAY_REPEAT)
+                && args==vec![Expr::IntLit(42),Expr::IntLit(0x1_0000_0000)]));
+        assert_eq!(
+            resolve(
+                &call("array-repeat"),
+                &definitions,
+                &mut HashSet::new(),
+                &mut cache,
+                IntegerSemantics::Word32
+            ),
+            None
+        );
     }
 }

@@ -2101,7 +2101,7 @@ fn assignment_scanner_respects_unicode_strings_and_nesting() {
         matches!(parse_assign_stmt("value = other == 42"), Some(Stmt::Assign(name, Expr::Binary { op, .. })) if name == "value" && op == "==")
     );
     assert!(
-        matches!(parse_assign_stmt("values[index(\"a += b\")] += 2"), Some(Stmt::Expr(Expr::Call { callee, .. })) if matches!(callee.as_ref(), Expr::Ident(name) if name == "index-modify-place-first"))
+        matches!(parse_assign_stmt("values[index(\"a += b\")] += 2"), Some(Stmt::Expr(Expr::Call { callee, .. })) if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::INDEX_MODIFY_PLACE_FIRST))
     );
 }
 

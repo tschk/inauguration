@@ -2,13 +2,41 @@
 
 pub(crate) mod tuples;
 
+pub(crate) const INDEX_ASSIGN_VALUE_FIRST: &str = "#index-assign-value-first";
+pub(crate) const INDEX_MODIFY_VALUE_FIRST: &str = "#index-modify-value-first";
+pub(crate) const INDEX_MODIFY_PLACE_FIRST: &str = "#index-modify-place-first";
+pub(crate) const FIELD_MODIFY_VALUE_FIRST: &str = "#field-modify-value-first";
+pub(crate) const MODIFY_VALUE_FIRST: &str = "#modify-value-first";
+pub(crate) const ARRAY_REPEAT: &str = "#array-repeat";
 pub(crate) const FIELD_MODIFY_PLACE_FIRST: &str = "#field-modify-place-first";
 pub(crate) const INLINE_CONST: &str = "#rust-inline-const";
 pub(crate) const VECTOR_ALLOCATION: &str = "#vector-with-capacity";
 pub(crate) const BORROW: &str = "#rust-borrow";
 pub(crate) const METHOD_PREFIX: &str = "#receiver-method:";
+/// Legacy source helpers become private operations only after lexical resolution.
+pub(crate) fn legacy_compiler_callee(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "index-assign-value-first" => INDEX_ASSIGN_VALUE_FIRST,
+        "index-modify-value-first" => INDEX_MODIFY_VALUE_FIRST,
+        "index-modify-place-first" => INDEX_MODIFY_PLACE_FIRST,
+        "field-modify-value-first" => FIELD_MODIFY_VALUE_FIRST,
+        "modify-value-first" => MODIFY_VALUE_FIRST,
+        "array-repeat" => ARRAY_REPEAT,
+        _ => return None,
+    })
+}
+
 pub(crate) fn is_compiler_callee(name: &str) -> bool {
     tuples::is_marker(name)
+        || matches!(
+            name,
+            INDEX_ASSIGN_VALUE_FIRST
+                | INDEX_MODIFY_VALUE_FIRST
+                | INDEX_MODIFY_PLACE_FIRST
+                | FIELD_MODIFY_VALUE_FIRST
+                | MODIFY_VALUE_FIRST
+                | ARRAY_REPEAT
+        )
         || name == FIELD_MODIFY_PLACE_FIRST
         || name == INLINE_CONST
         || name == BORROW
@@ -2260,5 +2288,48 @@ mod private_field_modify_marker_tests {
             report.reason_code.as_deref(),
             Some("reserved-intrinsic-name")
         );
+    }
+}
+
+#[cfg(test)]
+mod private_ordered_operation_tests {
+    use super::*;
+
+    #[test]
+    fn operation_aliases_are_public_but_their_internal_identities_are_reserved() {
+        for (public, private) in [
+            ("index-assign-value-first", INDEX_ASSIGN_VALUE_FIRST),
+            ("index-modify-value-first", INDEX_MODIFY_VALUE_FIRST),
+            ("index-modify-place-first", INDEX_MODIFY_PLACE_FIRST),
+            ("field-modify-value-first", FIELD_MODIFY_VALUE_FIRST),
+            ("modify-value-first", MODIFY_VALUE_FIRST),
+            ("array-repeat", ARRAY_REPEAT),
+        ] {
+            assert_eq!(legacy_compiler_callee(public), Some(private));
+            assert!(!is_compiler_callee(public));
+            assert!(is_compiler_callee(private));
+            let module = UnifiedModule::new(vec![Decl::Function {
+                name: private.into(),
+                params: vec![],
+                ret: Typ::Void,
+                body: vec![Stmt::Return(None)],
+                type_params: vec![],
+            }]);
+            let report = crate::core_ir_verifier::verify_module(
+                &module,
+                &crate::core_ir_verifier::VerifyOptions {
+                    entry: None,
+                    require_entry: false,
+                },
+            );
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("reserved-intrinsic-name"),
+                "{private}"
+            );
+        }
+        assert_eq!(legacy_compiler_callee("field-modify-place-first"), None);
+        assert_eq!(legacy_compiler_callee("array_repeat"), None);
+        assert_eq!(legacy_compiler_callee(ARRAY_REPEAT), None);
     }
 }

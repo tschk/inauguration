@@ -49,8 +49,11 @@ pub(crate) fn function_references(decls: &[Decl]) -> HashMap<String, String> {
                 return None;
             }
             let canonical = spelling.replace('_', "-");
-            (canonical != spelling && functions.contains(&canonical))
-                .then_some((spelling, canonical))
+            if canonical != spelling && functions.contains(&canonical) {
+                return Some((spelling, canonical));
+            }
+            crate::core_ir::legacy_compiler_callee(&spelling)
+                .map(|private| (spelling, private.into()))
         })
         .collect()
 }
@@ -373,7 +376,11 @@ impl Bindings<'_> {
                 self.expr(rhs, scope);
             }
             Expr::Call { callee, args } => {
-                self.expr(callee, scope);
+                // Compiler operations cannot be captured by a same-spelled local.
+                if !matches!(callee.as_ref(), Expr::Ident(name) if crate::core_ir::is_compiler_callee(name))
+                {
+                    self.expr(callee, scope);
+                }
                 for arg in args {
                     self.expr(arg, scope);
                 }
@@ -814,5 +821,289 @@ mod function_alias_tests {
         assert!(!function_references(&decls).contains_key(alias));
         normalize_decls(&mut decls);
         assert_eq!(returned_name(decls.last().unwrap()), alias);
+    }
+
+    fn operation_call(name: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args,
+        }
+    }
+
+    fn assert_operation_callee(expr: &Expr, expected: &str) {
+        assert!(
+            matches!(expr, Expr::Call {callee,..} if matches!(callee.as_ref(),Expr::Ident(name) if name==expected)),
+            "{expr:?}: expected {expected}"
+        );
+    }
+
+    #[test]
+    fn legacy_operations_honor_module_functions_globals_and_declared_underscore_aliases() {
+        for public in [
+            "index-assign-value-first",
+            "index-modify-value-first",
+            "index-modify-place-first",
+            "field-modify-value-first",
+            "modify-value-first",
+            "array-repeat",
+        ] {
+            let private = crate::core_ir::legacy_compiler_callee(public).unwrap();
+            let main = || {
+                function(
+                    "main",
+                    vec![],
+                    vec![Stmt::Return(Some(operation_call(public, vec![])))],
+                )
+            };
+            let mut unbound = vec![main()];
+            normalize_decls(&mut unbound);
+            let Decl::Function { body, .. } = &unbound[0] else {
+                panic!()
+            };
+            let Stmt::Return(Some(value)) = &body[0] else {
+                panic!()
+            };
+            assert_operation_callee(value, private);
+            let once = unbound.clone();
+            normalize_decls(&mut unbound);
+            assert_eq!(unbound, once);
+
+            for binding in [
+                function(public, vec![], vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+                Decl::Global {
+                    name: public.into(),
+                    typ: Typ::Int,
+                    init: Some(Box::new(Expr::IntLit(42))),
+                    mutable: true,
+                    constant_value: false,
+                },
+            ] {
+                let mut decls = vec![binding, main()];
+                assert!(!function_references(&decls).contains_key(public));
+                normalize_decls(&mut decls);
+                let Decl::Function { body, .. } = &decls[1] else {
+                    panic!()
+                };
+                let Stmt::Return(Some(value)) = &body[0] else {
+                    panic!()
+                };
+                assert_operation_callee(value, public);
+            }
+            let alias = public.replace('-', "_");
+            let mut decls = vec![
+                function(public, vec![], vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+                function(
+                    "main",
+                    vec![],
+                    vec![Stmt::Return(Some(operation_call(&alias, vec![])))],
+                ),
+            ];
+            assert_eq!(
+                function_references(&decls).get(&alias),
+                Some(&public.to_string())
+            );
+            normalize_decls(&mut decls);
+            let Decl::Function { body, .. } = &decls[1] else {
+                panic!()
+            };
+            let Stmt::Return(Some(value)) = &body[0] else {
+                panic!()
+            };
+            assert_operation_callee(value, public);
+        }
+    }
+
+    #[test]
+    fn legacy_operations_honor_local_closures_parameters_and_initializer_scope() {
+        for public in [
+            "index-assign-value-first",
+            "index-modify-value-first",
+            "index-modify-place-first",
+            "field-modify-value-first",
+            "modify-value-first",
+            "array-repeat",
+        ] {
+            let private = crate::core_ir::legacy_compiler_callee(public).unwrap();
+            let mut decls = vec![
+                function(
+                    "main",
+                    vec![],
+                    vec![
+                        Stmt::Let(
+                            public.into(),
+                            None,
+                            Expr::Block {
+                                body: vec![Stmt::Expr(operation_call(public, vec![]))],
+                                result: Some(Box::new(Expr::Closure {
+                                    params: vec![],
+                                    ret: Typ::Int,
+                                    captures: vec![],
+                                    body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                                })),
+                            },
+                        ),
+                        Stmt::Return(Some(operation_call(public, vec![]))),
+                    ],
+                ),
+                function(
+                    "parameter",
+                    vec![(public.into(), Typ::Generic("_".into()))],
+                    vec![Stmt::Return(Some(operation_call(public, vec![])))],
+                ),
+            ];
+            normalize_decls(&mut decls);
+            let Decl::Function { body, .. } = &decls[0] else {
+                panic!()
+            };
+            let Stmt::Let(local, _, Expr::Block { body: initial, .. }) = &body[0] else {
+                panic!()
+            };
+            let Stmt::Expr(initial) = &initial[0] else {
+                panic!()
+            };
+            assert_operation_callee(initial, private);
+            let Stmt::Return(Some(value)) = &body[1] else {
+                panic!()
+            };
+            assert_operation_callee(value, local);
+            let Decl::Function { params, body, .. } = &decls[1] else {
+                panic!()
+            };
+            let Stmt::Return(Some(value)) = &body[0] else {
+                panic!()
+            };
+            assert_operation_callee(value, &params[0].0);
+            let once = decls.clone();
+            normalize_decls(&mut decls);
+            assert_eq!(decls, once);
+        }
+    }
+
+    #[test]
+    fn operation_aliases_honor_pattern_and_catch_scopes_without_leaking() {
+        let public = "array-repeat";
+        let mut decls = vec![function(
+            "main",
+            vec![],
+            vec![
+                Stmt::Match {
+                    scrutinee: Expr::IntLit(42),
+                    arms: vec![crate::core_ir::MatchArm {
+                        pattern: public.into(),
+                        guard: Some(operation_call(public, vec![])),
+                        body: vec![Stmt::Expr(operation_call(public, vec![]))],
+                    }],
+                },
+                Stmt::Try {
+                    body: vec![],
+                    catches: vec![crate::core_ir::CatchArm {
+                        pattern: public.into(),
+                        body: vec![Stmt::Expr(operation_call(public, vec![]))],
+                    }],
+                },
+                Stmt::Return(Some(operation_call(public, vec![]))),
+            ],
+        )];
+        normalize_decls(&mut decls);
+        let Decl::Function { body, .. } = &decls[0] else {
+            panic!()
+        };
+        let Stmt::Match { arms, .. } = &body[0] else {
+            panic!()
+        };
+        assert_operation_callee(arms[0].guard.as_ref().unwrap(), &arms[0].pattern);
+        let Stmt::Expr(value) = &arms[0].body[0] else {
+            panic!()
+        };
+        assert_operation_callee(value, &arms[0].pattern);
+        let Stmt::Try { catches, .. } = &body[1] else {
+            panic!()
+        };
+        let Stmt::Expr(value) = &catches[0].body[0] else {
+            panic!()
+        };
+        assert_operation_callee(value, &catches[0].pattern);
+        let Stmt::Return(Some(value)) = &body[2] else {
+            panic!()
+        };
+        assert_operation_callee(value, crate::core_ir::ARRAY_REPEAT);
+        let once = decls.clone();
+        normalize_decls(&mut decls);
+        assert_eq!(decls, once);
+    }
+
+    #[test]
+    fn reserved_callees_keep_identity_while_their_operands_follow_lexical_bindings() {
+        let private = crate::core_ir::ARRAY_REPEAT;
+        let mut decls = vec![function(
+            "main",
+            vec![(private.into(), Typ::Int)],
+            vec![
+                Stmt::Let(private.into(), Some(Typ::Int), Expr::IntLit(42)),
+                Stmt::Return(Some(operation_call(
+                    private,
+                    vec![Expr::Ident(private.into())],
+                ))),
+            ],
+        )];
+        normalize_decls(&mut decls);
+        let Decl::Function { body, .. } = &decls[0] else {
+            panic!()
+        };
+        let Stmt::Let(local, _, _) = &body[0] else {
+            panic!()
+        };
+        assert_ne!(local, private);
+        let Stmt::Return(Some(value)) = &body[1] else {
+            panic!()
+        };
+        assert_operation_callee(value, private);
+        let Expr::Call { args, .. } = value else {
+            panic!()
+        };
+        assert_eq!(args, &vec![Expr::Ident(local.clone())]);
+        let once = decls.clone();
+        normalize_decls(&mut decls);
+        assert_eq!(decls, once);
+    }
+    #[test]
+    fn global_initializer_operations_use_the_same_scoped_resolution() {
+        let public = "array-repeat";
+        let mut decls = vec![Decl::Global {
+            name: "values".into(),
+            typ: Typ::Array(Box::new(Typ::Int)),
+            init: Some(Box::new(operation_call(
+                public,
+                vec![Expr::IntLit(42), Expr::IntLit(1)],
+            ))),
+            mutable: true,
+            constant_value: false,
+        }];
+        normalize_decls(&mut decls);
+        let Decl::Global {
+            init: Some(value), ..
+        } = &decls[0]
+        else {
+            panic!()
+        };
+        assert_operation_callee(value, crate::core_ir::ARRAY_REPEAT);
+        let mut declared = vec![
+            function(public, vec![], vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+            Decl::Global {
+                name: "ordinary".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(operation_call(public, vec![]))),
+                mutable: true,
+                constant_value: false,
+            },
+        ];
+        normalize_decls(&mut declared);
+        let Decl::Global {
+            init: Some(value), ..
+        } = &declared[1]
+        else {
+            panic!()
+        };
+        assert_operation_callee(value, public);
     }
 }

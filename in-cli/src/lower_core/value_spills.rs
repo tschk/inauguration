@@ -9,19 +9,19 @@ use std::collections::{HashMap, HashSet};
 const MAX_EXPANDED_ITEMS: usize = 4096;
 
 fn is_repeat(expr: &Expr) -> bool {
-    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "array-repeat"))
+    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::ARRAY_REPEAT))
 }
 
 fn is_index_store(expr: &Expr) -> bool {
-    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "index-assign-value-first" || name == "index-modify-value-first" || name == "index-modify-place-first"))
+    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::INDEX_ASSIGN_VALUE_FIRST || name == crate::core_ir::INDEX_MODIFY_VALUE_FIRST || name == crate::core_ir::INDEX_MODIFY_PLACE_FIRST))
 }
 
 fn is_field_modify(expr: &Expr) -> bool {
-    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "field-modify-value-first" || name == crate::core_ir::FIELD_MODIFY_PLACE_FIRST))
+    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::FIELD_MODIFY_VALUE_FIRST || name == crate::core_ir::FIELD_MODIFY_PLACE_FIRST))
 }
 
 fn is_variable_modify(expr: &Expr) -> bool {
-    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == "modify-value-first"))
+    matches!(expr, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::MODIFY_VALUE_FIRST))
 }
 
 fn is_addressable(expr: &Expr) -> bool {
@@ -127,6 +127,12 @@ fn stmt_needs_spills(stmt: &Stmt, facts: &crate::typecheck::Facts) -> bool {
 }
 
 pub(super) fn has_value_spills(decls: &[Decl]) -> bool {
+    if crate::core_bindings::function_references(decls)
+        .values()
+        .any(|name| crate::core_ir::is_compiler_callee(name))
+    {
+        return true;
+    }
     let facts = crate::typecheck::TypeChecker::new().collect_decl_facts(decls);
     has_value_spills_with_facts(decls, &facts)
 }
@@ -143,6 +149,7 @@ fn has_value_spills_with_facts(decls: &[Decl], facts: &crate::typecheck::Facts) 
 }
 
 pub(crate) fn lower_value_spills(decls: &mut [Decl]) {
+    crate::core_bindings::normalize_decls(decls);
     let facts = crate::typecheck::TypeChecker::new().collect_decl_facts(decls);
     if !has_value_spills_with_facts(decls, &facts) {
         return;
@@ -383,8 +390,7 @@ impl Lower {
         let Expr::Call { callee, args } = expr else {
             return false;
         };
-        if !matches!(callee.as_ref(), Expr::Ident(name) if name == "array-repeat")
-            || self.facts.function_signature("array-repeat").is_some()
+        if !matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::ARRAY_REPEAT)
             || args.len() != 2
         {
             return false;
@@ -614,13 +620,13 @@ impl Lower {
             if let Stmt::Expr(expr) = &stmt
                 && is_index_store(expr)
                 && let Expr::Call { callee, args } = expr
-                && ((matches!(callee.as_ref(), Expr::Ident(name) if name == "index-assign-value-first")
+                && ((matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::INDEX_ASSIGN_VALUE_FIRST)
                     && args.len() == 3)
-                    || (matches!(callee.as_ref(), Expr::Ident(name) if name == "index-modify-value-first" || name == "index-modify-place-first")
+                    || (matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::INDEX_MODIFY_VALUE_FIRST || name == crate::core_ir::INDEX_MODIFY_PLACE_FIRST)
                         && args.len() == 4
                         && matches!(&args[3], Expr::StringLit(op) if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"))))
             {
-                let place_first = matches!(callee.as_ref(), Expr::Ident(name) if name == "index-modify-place-first");
+                let place_first = matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::INDEX_MODIFY_PLACE_FIRST);
                 let mut value = args[2].clone();
                 if !place_first {
                     self.expr(&mut value, &mut prefix);
@@ -954,7 +960,8 @@ mod tests {
                     args,
                 }),
             );
-            let original = module.decls.clone();
+            let mut original = module.decls.clone();
+            crate::core_bindings::normalize_decls(&mut original);
             lower_value_spills(&mut module.decls);
             assert_eq!(module.decls, original);
             let report = crate::core_ir_verifier::verify_for_entry(&module, "main");

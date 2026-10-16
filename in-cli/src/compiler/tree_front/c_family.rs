@@ -627,7 +627,7 @@ fn c_assignment(src: &[u8], expr: Node<'_>) -> Option<Stmt> {
             return None;
         }
         return Some(Stmt::Expr(Expr::Call {
-            callee: Box::new(Expr::Ident("modify-value-first".into())),
+            callee: Box::new(Expr::Ident(crate::core_ir::MODIFY_VALUE_FIRST.into())),
             args: vec![Expr::Ident(name), value, Expr::StringLit(op.into())],
         }));
     };
@@ -1646,5 +1646,17 @@ mod definition_parameter_tests {
                 .iter()
                 .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "answer"))
         );
+    }
+    #[test]
+    fn generated_c_compound_uses_private_value_first_operation() {
+        for cpp in [false, true] {
+            let mut decls =
+                parse("int main(void){int value=20;value+=22;return value;}", cpp).unwrap();
+            let mut found = false;
+            crate::core_opt::map_decl_exprs_mut(&mut decls, &mut |expr| {
+                found |= matches!(expr,Expr::Call{callee,..} if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::MODIFY_VALUE_FIRST));
+            });
+            assert!(found);
+        }
     }
 }

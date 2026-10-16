@@ -112,7 +112,7 @@ fn const_syntax(
             if name == crate::core_ir::INLINE_CONST {
                 return args.len() == 1 && visit(&args[0], &HashSet::new(), fuel);
             }
-            name == "array-repeat"
+            name == crate::core_ir::ARRAY_REPEAT
                 && !locals.contains(name)
                 && !globals.contains_key(name)
                 && !functions.contains(name)
@@ -175,7 +175,7 @@ fn const_body_syntax(
             Stmt::IndexAssign { base, index, value } => [base, index, value]
                 .into_iter()
                 .all(|value| visit(value, locals, fuel)),
-            Stmt::Expr(Expr::Call { callee, args }) if matches!(callee.as_ref(),Expr::Ident(name) if name=="index-assign-value-first" && !locals.contains(name) && !globals.contains_key(name) && !functions.contains(name)) => {
+            Stmt::Expr(Expr::Call { callee, args }) if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::INDEX_ASSIGN_VALUE_FIRST && !locals.contains(name) && !globals.contains_key(name) && !functions.contains(name)) => {
                 matches!(args.as_slice(),[Expr::Ident(name),_,_] if locals.contains(name))
                     && args.iter().all(|arg| visit(arg, locals, fuel))
             }
@@ -480,7 +480,7 @@ impl Eval<'_> {
                     }
                     return self.expr(value, &mut HashMap::new());
                 }
-                if matches!(callee.as_ref(), Expr::Ident(name) if name == "array-repeat" && !self.functions.contains(name) && !self.globals.contains_key(name))
+                if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::ARRAY_REPEAT && !self.functions.contains(name) && !self.globals.contains_key(name))
                     && args.len() == 2
                 {
                     let value = self.expr(&args[0], env)?;
@@ -616,7 +616,7 @@ impl Eval<'_> {
                     return Some(Some(self.expr(expr, env)?));
                 }
                 Stmt::Expr(Expr::Call { callee, args })
-                    if matches!(callee.as_ref(), Expr::Ident(name) if name == "index-assign-value-first" && !self.functions.contains(name) && !self.globals.contains_key(name))
+                    if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::INDEX_ASSIGN_VALUE_FIRST && !self.functions.contains(name) && !self.globals.contains_key(name))
                         && args.len() == 3 =>
                 {
                     let value = self.expr(&args[2], env)?;
@@ -775,16 +775,13 @@ pub(super) fn fold_static_initializers_with_semantics(
     semantics: IntegerSemantics,
 ) {
     let names = crate::core_bindings::module_names(decls);
+    let references = crate::core_bindings::function_references(decls);
     for decl in decls.iter_mut() {
         if let Decl::Global {
             init: Some(init), ..
         } = decl
         {
-            crate::core_bindings::normalize_initializer_with_references(
-                init,
-                &names,
-                &HashMap::new(),
-            );
+            crate::core_bindings::normalize_initializer_with_references(init, &names, &references);
         }
     }
     let functions = decls
@@ -923,7 +920,7 @@ mod tests {
                 semantics: IntegerSemantics::Word32,
             };
             let repeat = |count| Expr::Call {
-                callee: Box::new(Expr::Ident("array-repeat".into())),
+                callee: Box::new(Expr::Ident(crate::core_ir::ARRAY_REPEAT.into())),
                 args: vec![Expr::IntLit(42), count],
             };
             let huge = Expr::Binary {
@@ -1040,7 +1037,9 @@ mod tests {
                         Expr::ArrayLit(vec![Expr::IntLit(20), Expr::IntLit(0)]),
                     ),
                     Stmt::Expr(Expr::Call {
-                        callee: Box::new(Expr::Ident("index-assign-value-first".into())),
+                        callee: Box::new(Expr::Ident(
+                            crate::core_ir::INDEX_ASSIGN_VALUE_FIRST.into(),
+                        )),
                         args: vec![Expr::Ident("a".into()), Expr::IntLit(1), stored],
                     }),
                 ],
@@ -1078,7 +1077,7 @@ mod tests {
                 ),
                 Stmt::Let("index".into(), Some(Typ::Int), Expr::IntLit(0)),
                 Stmt::Expr(Expr::Call {
-                    callee: Box::new(Expr::Ident("index-assign-value-first".into())),
+                    callee: Box::new(Expr::Ident(crate::core_ir::INDEX_ASSIGN_VALUE_FIRST.into())),
                     args: vec![
                         Expr::Ident("a".into()),
                         Expr::Ident("index".into()),
@@ -1419,6 +1418,48 @@ mod tests {
             panic!()
         };
         assert!(matches!(&body[0], Stmt::Return(Some(Expr::Call { .. }))));
+    }
+
+    #[test]
+    fn direct_global_repeat_folding_uses_scoped_legacy_resolution() {
+        let mut module = crate::in_lang_parse::parse_in_source(
+            "var values:[Int]=array-repeat(21,2);fn main()->Int{return 42;}",
+        )
+        .unwrap();
+        fold_static_initializers(&mut module.decls);
+        assert!(module.decls.iter().any(|decl| matches!(decl,
+            Decl::Global {name,init:Some(value),..} if name=="values"
+                && value.as_ref()==&Expr::ArrayLit(vec![Expr::IntLit(21),Expr::IntLit(21)]))));
+
+        let mut module=crate::in_lang_parse::parse_in_source(
+            "var values:[Int]={let array-repeat=fn(value:Int,count:Int)->[Int]{return [42];};array-repeat(21,2)};fn main()->Int{return 42;}"
+        ).unwrap();
+        fold_static_initializers(&mut module.decls);
+        let init = module
+            .decls
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Global {
+                    name,
+                    init: Some(value),
+                    ..
+                } if name == "values" => Some(value),
+                _ => None,
+            })
+            .unwrap();
+        let Expr::Block {
+            body,
+            result: Some(result),
+        } = init.as_ref()
+        else {
+            panic!("{init:?}")
+        };
+        let Stmt::Let(local, _, _) = &body[0] else {
+            panic!("{body:?}")
+        };
+        assert!(matches!(result.as_ref(),Expr::Call {callee,..}
+            if matches!(callee.as_ref(),Expr::Ident(name) if name==local)));
+        assert_ne!(local, crate::core_ir::ARRAY_REPEAT);
     }
 
     #[test]

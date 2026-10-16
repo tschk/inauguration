@@ -1735,7 +1735,7 @@ impl TypeChecker {
         errors: &mut Vec<TypeError>,
     ) {
         if let Expr::Call { callee, args } = expr {
-            if matches!(callee.as_ref(),Expr::Ident(name) if name=="index-assign-value-first" && !facts.functions.contains_key(name) && !env.contains_key(name))
+            if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::INDEX_ASSIGN_VALUE_FIRST || (name=="index-assign-value-first" && !facts.functions.contains_key(name) && !env.contains_key(name)))
             {
                 let [base, index, value] = args.as_slice() else {
                     errors.push(TypeError::ArityMismatch {

@@ -110,7 +110,7 @@ fn parse_assign_stmt_with_context(s: &str, context: &mut LoopParseContext<'_>) -
         let rhs = parse_expr_with_context(trim(&s[op_idx + op.len()..]), context);
         return match parse_expr_with_context(target, context) {
             Expr::Index { base, index } => Some(Stmt::Expr(Expr::Call {
-                callee: Box::new(Expr::Ident("index-modify-place-first".into())),
+                callee: Box::new(Expr::Ident(crate::core_ir::INDEX_MODIFY_PLACE_FIRST.into())),
                 args: vec![
                     *base,
                     *index,
@@ -625,6 +625,17 @@ mod compound_field_marker_tests {
         );
         assert!(
             matches!(args.as_slice(),[Expr::Index {..},Expr::StringLit(field),Expr::Call {..},Expr::StringLit(op)] if field=="value" && op=="+")
+        );
+    }
+}
+
+#[cfg(test)]
+mod private_index_modify_marker_tests {
+    use super::*;
+    #[test]
+    fn generated_indexed_compounds_have_one_private_place_marker() {
+        assert!(
+            matches!(parse_assign_stmt("values[at()] += next()"),Some(Stmt::Expr(Expr::Call{callee,args})) if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::INDEX_MODIFY_PLACE_FIRST) && args.len()==4)
         );
     }
 }

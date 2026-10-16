@@ -590,3 +590,95 @@ fn native_wide_harden_dispatch_preserves_effect_order() {
     let runtime = native_runtime(&module);
     assert_eq!(unsafe { runtime.invoke("main", &[]) }, Some(42));
 }
+
+#[test]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn native_legacy_operation_names_respect_functions_and_local_closures() {
+    use inauguration::emit_profile::EmitProfile;
+    let generated = "let generated:[Int]=[20];generated[0]+=2;if generated[0]!=22{return 7;}generated[0]=40;generated[0]+=2;if generated[0]!=42{return 8;}let row=GeneratedRow{value:40};row.value+=2;if row.value!=42{return 9;}";
+    for (name, params, setup, args, ret, body, result) in [
+        (
+            "index-assign-value-first",
+            "items:[Int],index:Int,value:Int",
+            "let items:[Int]=[1];",
+            "items,0,2",
+            "Void",
+            "called=42;",
+            "called",
+        ),
+        (
+            "index-modify-value-first",
+            "items:[Int],index:Int,value:Int,op:String",
+            "let items:[Int]=[1];",
+            "items,0,2,\"+\"",
+            "Void",
+            "called=42;",
+            "called",
+        ),
+        (
+            "index-modify-place-first",
+            "items:[Int],index:Int,value:Int,op:String",
+            "let items:[Int]=[1];",
+            "items,0,2,\"+\"",
+            "Void",
+            "called=42;",
+            "called",
+        ),
+        (
+            "field-modify-value-first",
+            "row:GeneratedRow,field:String,value:Int,op:String",
+            "let target=GeneratedRow{value:1};",
+            "target,\"value\",2,\"+\"",
+            "Void",
+            "called=42;",
+            "called",
+        ),
+        (
+            "modify-value-first",
+            "target:Int,value:Int,op:String",
+            "let target=1;",
+            "target,2,\"+\"",
+            "Void",
+            "called=42;",
+            "called",
+        ),
+        (
+            "array-repeat",
+            "value:Int,count:Int",
+            "",
+            "7,2",
+            "[Int]",
+            "return [42];",
+            "items[0]",
+        ),
+    ] {
+        for local in [false, true] {
+            let declaration = format!("fn {name}({params})->{ret}{{{body}}}");
+            let binding = format!("let {name}=fn({params})->{ret}{{{body}}};");
+            let call = if ret == "Void" {
+                format!("{name}({args});")
+            } else {
+                format!("let items={name}({args});")
+            };
+            let source = format!(
+                "struct GeneratedRow{{Int value}}var called:Int=0;{}fn main()->Int{{{}{setup}{call}{generated}return {result};}}",
+                if local { "" } else { &declaration },
+                if local { &binding } else { "" }
+            );
+            let canonical = inauguration::in_canonical::canonicalize_in_source(&source).unwrap();
+            for source in [source.as_str(), canonical.as_str()] {
+                for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                    let mut module = parse_in_source(source).unwrap();
+                    inauguration::lower_core::desugar_module(&mut module);
+                    core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                    let runtime = native_runtime(&module);
+                    assert_eq!(
+                        unsafe { runtime.invoke("main", &[]) },
+                        Some(42),
+                        "{name} local={local} {profile:?}"
+                    );
+                }
+            }
+        }
+    }
+}

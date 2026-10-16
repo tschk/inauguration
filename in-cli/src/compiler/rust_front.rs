@@ -292,7 +292,12 @@ fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
                             | "#receiver-method:len"
                             | "#receiver-method:is_empty"
                     ) || name.ends_with("::is_empty"));
-                let store = name.starts_with("index-assign-") || name.starts_with("index-modify-");
+                let store = matches!(
+                    name,
+                    crate::core_ir::INDEX_ASSIGN_VALUE_FIRST
+                        | crate::core_ir::INDEX_MODIFY_VALUE_FIRST
+                        | crate::core_ir::INDEX_MODIFY_PLACE_FIRST
+                );
                 if store
                     && matches!(args.first(), Some(Expr::Ident(name)) if arrays.get(name).is_some_and(|(mutable, _)| !mutable))
                 {
@@ -2315,7 +2320,7 @@ fn lower_expr_stmt(
         syn::Expr::Assign(a) => {
             if let syn::Expr::Index(index) = a.left.as_ref() {
                 out.push(Stmt::Expr(Expr::Call {
-                    callee: Box::new(Expr::Ident("index-assign-value-first".into())),
+                    callee: Box::new(Expr::Ident(crate::core_ir::INDEX_ASSIGN_VALUE_FIRST.into())),
                     args: vec![
                         lower_expr_with_types(&index.expr, local_types),
                         lower_expr_with_types(&index.index, local_types),
@@ -2342,7 +2347,7 @@ fn lower_expr_stmt(
             let op = assign_op_from_binop(&b.op).expect("checked");
             if let syn::Expr::Index(index) = b.left.as_ref() {
                 out.push(Stmt::Expr(Expr::Call {
-                    callee: Box::new(Expr::Ident("index-modify-value-first".into())),
+                    callee: Box::new(Expr::Ident(crate::core_ir::INDEX_MODIFY_VALUE_FIRST.into())),
                     args: vec![
                         lower_expr_with_types(&index.expr, local_types),
                         lower_expr_with_types(&index.index, local_types),
@@ -2352,7 +2357,7 @@ fn lower_expr_stmt(
                 }));
             } else if let syn::Expr::Field(field) = b.left.as_ref() {
                 out.push(Stmt::Expr(Expr::Call {
-                    callee: Box::new(Expr::Ident("field-modify-value-first".into())),
+                    callee: Box::new(Expr::Ident(crate::core_ir::FIELD_MODIFY_VALUE_FIRST.into())),
                     args: vec![
                         lower_expr_with_types(&field.base, local_types),
                         Expr::StringLit(match &field.member {
@@ -2911,7 +2916,7 @@ fn lower_expr_with_types_inner(
         syn::Expr::Block(value) => lower_block_value(&value.block, local_types),
         syn::Expr::Unsafe(value) => lower_block_value(&value.block, local_types),
         syn::Expr::Repeat(repeat) => Expr::Call {
-            callee: Box::new(Expr::Ident("array-repeat".into())),
+            callee: Box::new(Expr::Ident(crate::core_ir::ARRAY_REPEAT.into())),
             args: vec![
                 lower_expr_with_types(&repeat.expr, local_types),
                 lower_expr_with_types(&repeat.len, local_types),
@@ -4245,5 +4250,44 @@ mod integer_metadata_tests {
                 matches!(lower_expr_with_types(&expr, &mut HashMap::new()), Expr::Ident(name) if name.starts_with("#unsupported-rust-"))
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod private_ordered_operation_tests {
+    use super::*;
+    #[test]
+    fn generated_rust_operations_have_compiler_owned_names() {
+        let mut module = parse_rust_source("struct Row{x:i64} fn main()->i64{let mut values=[20i64;2];values[0]=21;values[0]+=1;let mut row=Row{x:20};row.x+=2;values[0]+row.x}").unwrap();
+        let mut callees = HashSet::new();
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            if let Expr::Call { callee, .. } = expr
+                && let Expr::Ident(name) = callee.as_ref()
+            {
+                callees.insert(name.clone());
+            }
+        });
+        for expected in [
+            crate::core_ir::ARRAY_REPEAT,
+            crate::core_ir::INDEX_ASSIGN_VALUE_FIRST,
+            crate::core_ir::INDEX_MODIFY_VALUE_FIRST,
+            crate::core_ir::FIELD_MODIFY_VALUE_FIRST,
+        ] {
+            assert!(
+                callees.contains(expected),
+                "missing {expected}: {callees:?}"
+            );
+        }
+    }
+    #[test]
+    fn private_indexed_store_keeps_static_array_mutation_refused() {
+        let mut module =
+            parse_rust_source("static VALUES:[i64;1]=[42]; fn main()->i64{VALUES[0]=0;VALUES[0]}")
+                .unwrap();
+        let mut refused = false;
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            refused |= matches!(expr,Expr::Call{callee,..} if matches!(callee.as_ref(),Expr::Ident(name) if name=="__unsupported_rust_static_array_value"));
+        });
+        assert!(refused);
     }
 }

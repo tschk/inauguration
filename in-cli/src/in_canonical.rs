@@ -270,6 +270,23 @@ fn format_stmt(stmt: &Stmt, depth: usize, out: &mut String) {
             out.push('\n');
         }
         Stmt::Expr(Expr::Call { callee, args })
+            if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::INDEX_MODIFY_PLACE_FIRST)
+                && matches!(args.as_slice(),[_,_,_,Expr::StringLit(op)] if matches!(op.as_str(),"+"|"-"|"*"|"/"|"%"|"&"|"|"|"^"|"<<"|">>")) =>
+        {
+            let [base, index, rhs, Expr::StringLit(op)] = args.as_slice() else {
+                unreachable!()
+            };
+            out.push_str(&indent);
+            out.push_str(&format_expr(base));
+            out.push('[');
+            out.push_str(&format_expr(index));
+            out.push_str("] ");
+            out.push_str(op);
+            out.push_str("= ");
+            out.push_str(&format_expr(rhs));
+            out.push('\n');
+        }
+        Stmt::Expr(Expr::Call { callee, args })
             if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::FIELD_MODIFY_PLACE_FIRST)
                 && matches!(args.as_slice(), [_, Expr::StringLit(field), _, Expr::StringLit(op)]
                     if !field.is_empty() && field.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || (!ch.is_ascii() && !ch.is_whitespace() && !ch.is_control()))
@@ -1027,6 +1044,77 @@ mod private_field_modify_canonical_tests {
             let mut text = String::new();
             format_stmt(&stmt, 0, &mut text);
             assert!(text.contains(crate::core_ir::FIELD_MODIFY_PLACE_FIRST));
+        }
+    }
+}
+
+#[cfg(test)]
+mod private_index_modify_canonical_tests {
+    use super::*;
+    #[test]
+    fn indexed_compounds_roundtrip_nested_effectful_places_and_all_operators() {
+        for op in ["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>"] {
+            let source = format!(
+                "fn get()->[Int]{{return [40];}}fn at()->Int{{return 0;}}fn rhs()->Int{{return 2;}}fn main()->Int{{get()[at()]{op}=rhs();return 42;}}"
+            );
+            let before = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let canonical = canonicalize_in_source(&source).unwrap();
+            assert!(!canonical.contains(crate::core_ir::INDEX_MODIFY_PLACE_FIRST));
+            assert_eq!(
+                crate::in_lang_parse::parse_in_source(&canonical).unwrap(),
+                before
+            );
+            assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+        }
+        let source = "fn main()->Int{let rows:[[Int]]=[[40]];rows[0][0]+=2;return rows[0][0];}";
+        let canonical = canonicalize_in_source(source).unwrap();
+        assert_eq!(
+            crate::in_lang_parse::parse_in_source(&canonical).unwrap(),
+            crate::in_lang_parse::parse_in_source(source).unwrap()
+        );
+        assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+    }
+    #[test]
+    fn private_value_first_calls_preserve_explicit_identity_and_order_contract() {
+        for (name, args) in [
+            (crate::core_ir::INDEX_ASSIGN_VALUE_FIRST, "values,0,42"),
+            (crate::core_ir::INDEX_MODIFY_VALUE_FIRST, "values,0,2,\"+\""),
+            (
+                crate::core_ir::FIELD_MODIFY_VALUE_FIRST,
+                "row,\"x\",2,\"+\"",
+            ),
+            (crate::core_ir::MODIFY_VALUE_FIRST, "value,2,\"+\""),
+            (crate::core_ir::ARRAY_REPEAT, "42,1"),
+        ] {
+            let source = format!(
+                "struct Row{{Int x}}fn main()->Int{{let values:[Int]=[40];let row=Row{{x:40}};let value:Int=40;{name}({args});return 42;}}"
+            );
+            let canonical = canonicalize_in_source(&source).unwrap();
+            assert!(canonical.contains(name), "{name}: {canonical}");
+            assert_eq!(canonicalize_in_source(&canonical).unwrap(), canonical);
+        }
+    }
+    #[test]
+    fn malformed_index_compound_stays_private_for_refusal() {
+        for args in [
+            vec![Expr::IntLit(0)],
+            vec![
+                Expr::Ident("values".into()),
+                Expr::IntLit(0),
+                Expr::IntLit(1),
+                Expr::StringLit("invalid".into()),
+            ],
+        ] {
+            let mut text = String::new();
+            format_stmt(
+                &Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident(crate::core_ir::INDEX_MODIFY_PLACE_FIRST.into())),
+                    args,
+                }),
+                0,
+                &mut text,
+            );
+            assert!(text.contains(crate::core_ir::INDEX_MODIFY_PLACE_FIRST));
         }
     }
 }
