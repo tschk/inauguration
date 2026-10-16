@@ -2373,6 +2373,140 @@ mod tests {
     }
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn compiler_private_print_keeps_output_order_and_source_overrides() {
+        let source = r#"
+fn print(value:String)->Int{return 42;}
+fn argument()->String{#print("once");return "hi";}
+fn main()->Int{#print(argument());#print_int(7);#print("\n");return print("ignored");}
+"#;
+        let parsed = crate::in_lang_parse::parse_in_source(source).unwrap();
+        let canonical = crate::in_canonical::canonicalize_in_source(source).unwrap();
+        let reparsed = crate::in_lang_parse::parse_in_source(&canonical).unwrap();
+        assert_eq!(parsed, reparsed);
+        assert_eq!(
+            crate::in_canonical::canonicalize_in_source(&canonical).unwrap(),
+            canonical
+        );
+        for parsed in [parsed, reparsed] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let mut module = crate::typecheck::normalize_module(
+                    crate::parser_registry::ParserId::In,
+                    &parsed,
+                );
+                assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+                crate::lower_core::desugar_module(&mut module);
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                let runtime = runtime_for_module(&module, profile);
+                let (value, output) = crate::native_stdlib::capture_print_output(|| unsafe {
+                    runtime.invoke("main", &[])
+                });
+                assert_eq!(value, Some(42), "{profile:?}");
+                assert_eq!(output, b"oncehi7\n", "{profile:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn nim_result_storage_and_numeric_tails_execute_across_profiles() {
+        use crate::emit_profile::EmitProfile;
+        use crate::parser_registry::ParserId;
+        let directory =
+            std::env::temp_dir().join(format!("in-nim-native-flows-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("main.nim");
+        for (source, expected, output) in [
+            ("proc main(): int =\n  1 + 2", 3, ""),
+            ("proc main(): int =\n  return", 0, ""),
+            (
+                "proc side() =\n  echo \"unexpected\"\nproc helper() =\n  return\n  side()\nproc main(): int =\n  helper()\n  42",
+                42,
+                "",
+            ),
+            ("proc main(): int =\n  result = 42\n  return\n  7", 42, ""),
+            (
+                "proc main(): int =\n  result = 3\n  echo \"side\"",
+                3,
+                "side\n",
+            ),
+            (
+                "proc helper(): int =\n  result = 5\n  return\nproc main(): int =\n  result = 3\n  helper() + result",
+                8,
+                "",
+            ),
+            ("proc main(): auto =\n  1 < 2", 1, ""),
+            ("proc main(): auto =\n  true", 1, ""),
+            ("proc main(): auto =\n  false", 0, ""),
+            ("proc main(): auto =\n  let true = 42\n  true", 42, ""),
+            (
+                "proc main(): int =\n  const value = 1 + 2 * 3\n  value",
+                7,
+                "",
+            ),
+            ("proc main(): int =\n  1 + 2 * 3", 7, ""),
+            (
+                "proc main(): int =\n  let a = 10\n  let b = 42 -\n  a\n  b",
+                32,
+                "",
+            ),
+            (
+                "proc main(): int =\n  let a = 10\n  let b = 42 -\n    a\n  b",
+                32,
+                "",
+            ),
+        ] {
+            std::fs::write(&path, source).unwrap();
+            let parsed =
+                crate::compiler::tree_front::parse_polyglot_file(ParserId::Nim, &path).unwrap();
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let mut module = crate::typecheck::normalize_module(ParserId::Nim, &parsed);
+                assert!(
+                    crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                    "{source}"
+                );
+                crate::lower_core::desugar_module(&mut module);
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                let runtime = runtime_for_module(&module, profile);
+                let (value, bytes) = crate::native_stdlib::capture_print_output(|| unsafe {
+                    runtime.invoke("main", &[])
+                });
+                assert_eq!(value, Some(expected), "{source} {profile:?}");
+                assert_eq!(bytes, output.as_bytes(), "{source} {profile:?}");
+            }
+        }
+        for source in [
+            "proc main(): auto =\n  1 / 2",
+            "proc main(): auto =\n  1 + 1 / 2",
+        ] {
+            std::fs::write(&path, source).unwrap();
+            let parsed =
+                crate::compiler::tree_front::parse_polyglot_file(ParserId::Nim, &path).unwrap();
+            let expected = if source.contains("1 +") { 1.5 } else { 0.5 };
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let mut module = crate::typecheck::normalize_module(ParserId::Nim, &parsed);
+                assert!(
+                    crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
+                    "{source}"
+                );
+                crate::lower_core::desugar_module(&mut module);
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                let runtime = runtime_for_module(&module, profile);
+                assert_eq!(
+                    unsafe { runtime.invoke_float("main") },
+                    Some(expected),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     fn runtime_for_module(
         module: &crate::core_ir::UnifiedModule,
         profile: crate::emit_profile::EmitProfile,

@@ -43,6 +43,7 @@ const JAVA_AST: AstShape = AstShape {
     match_kinds: &[],
     first_assignment_is_let: false,
     strict_args: true,
+    binary_precedence: None,
     string_decoder: None,
 };
 

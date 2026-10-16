@@ -726,7 +726,7 @@ pub(crate) fn wrap_eval_expression(
         parser_registry::ParserId::Haskell => {
             Some(format!("main = {}", render_haskell_eval_expr(code)))
         }
-        parser_registry::ParserId::Nim => Some(format!("proc main(): {ret} =\n  {code}")),
+        parser_registry::ParserId::Nim => Some(format!("proc main(): auto =\n  {code}")),
         parser_registry::ParserId::FSharp => Some(format!("let main _ : {ret} = {code}")),
         parser_registry::ParserId::Odin => Some(format!(
             "package main\n\nmain :: proc() -> {ret} {{\n\treturn {code}\n}}\n"
@@ -947,7 +947,12 @@ pub(crate) fn eval_plans(parser_id: parser_registry::ParserId, code: &str) -> Ve
         }];
     }
 
-    if trimmed.starts_with("print(") {
+    if trimmed.starts_with("print(")
+        || (parser_id == parser_registry::ParserId::Nim
+            && trimmed
+                .strip_prefix("echo")
+                .is_some_and(|tail| tail.starts_with(char::is_whitespace) || tail.starts_with('"')))
+    {
         return wrap_eval_statement(parser_id, &normalized)
             .into_iter()
             .map(|wrapped| EvalPlan {

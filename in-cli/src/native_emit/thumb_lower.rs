@@ -684,3 +684,18 @@ fn main() -> void { return }
         assert!(result.entry_offset < result.code.len() as u32);
     }
 }
+
+#[cfg(test)]
+mod private_print_tests {
+    #[test]
+    fn private_print_is_not_an_external_or_source_call() {
+        let module =
+            crate::in_lang_parse::parse_in_source("fn main()->Int{#print_int(7);return 0;}")
+                .unwrap();
+        let error = super::lower_module(&module, "main").unwrap_err();
+        assert!(
+            error.contains("private print requires a hosted runtime"),
+            "{error}"
+        );
+    }
+}

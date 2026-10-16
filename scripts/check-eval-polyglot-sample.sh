@@ -21,7 +21,11 @@ run_eval_ok() {
     return 1
   }
   local print_out
-  print_out="$("${IN_CMD[@]}" eval --parser "$parser" 'print("hi")')"
+  local print_code='print("hi")'
+  if [[ "$parser" == nim ]]; then
+    print_code='echo "hi"'
+  fi
+  print_out="$("${IN_CMD[@]}" eval --parser "$parser" "$print_code")"
   [[ "$print_out" == "hi" ]] || {
     echo "expected $parser print eval to be hi, got: $print_out"
     return 1
@@ -36,5 +40,9 @@ parsers=(
 )
 
 for parser in "${parsers[@]}"; do
-  run_eval_ok "$parser" || echo "[warn] eval: $parser failed (pre-existing)"
+  if [[ "$parser" == nim ]]; then
+    run_eval_ok "$parser"
+  else
+    run_eval_ok "$parser" || echo "[warn] eval: $parser failed (pre-existing)"
+  fi
 done

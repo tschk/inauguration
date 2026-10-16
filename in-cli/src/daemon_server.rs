@@ -694,8 +694,17 @@ mod typed_eval_response_tests {
         all(target_os = "linux", target_arch = "x86_64")
     ))]
     fn errors_and_missing_results_do_not_invent_zero() {
-        let missing = handle_eval("proc main(): int =\n  1 + 2", Some("nim"), false);
+        let missing = handle_eval(
+            "struct Pair{x:i64}fn main()->Pair{Pair{x:42}}",
+            Some("rust"),
+            false,
+        );
         assert!(missing.success);
+        assert_eq!(missing.execution_started, Some(false));
+        let tail = handle_eval("proc main(): int =\n  1 + 2", Some("nim"), false);
+        assert!(tail.success, "{:?}", tail.error);
+        assert_eq!(tail.eval_result, Some(EvalValue::Int(3)));
+        assert_eq!(tail.execution_started, Some(true));
         assert_eq!(missing.eval_result, None);
         assert_eq!(missing.result, None);
         let error = handle_eval("fn main()->Int{return unknown();}", Some("in"), false);

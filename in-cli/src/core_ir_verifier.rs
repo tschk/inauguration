@@ -205,6 +205,8 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("invoke_native", IntrinsicRet::Int),
     ("invoke_native1", IntrinsicRet::Int),
     ("invoke_native2", IntrinsicRet::Int),
+    (crate::core_ir::COMPILER_PRINT, IntrinsicRet::Void),
+    (crate::core_ir::COMPILER_PRINT_INT, IntrinsicRet::Void),
     ("print", IntrinsicRet::Void),
     ("print-int", IntrinsicRet::Void),
     ("display", IntrinsicRet::String),
@@ -268,6 +270,9 @@ pub fn is_intrinsic(name: &str) -> bool {
 /// lowering emits directly (`__inrt_str_eq` and friends): the lowering accepts
 /// those by name, so verification has to accept them too.
 fn intrinsic_ret(name: &str) -> Option<IntrinsicRet> {
+    if crate::core_ir::compiler_print_callee(name).is_some() {
+        return Some(IntrinsicRet::Void);
+    }
     if crate::core_atomic::signature(name).is_some() {
         return Some(IntrinsicRet::Int);
     }
@@ -368,6 +373,9 @@ pub(crate) fn invoke_signature_error(
 }
 
 pub(crate) fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
+    if let Some(public) = crate::core_ir::compiler_print_callee(name) {
+        return intrinsic_param_types(public);
+    }
     match name {
         "__inrt_array_len" => return Some(&[Typ::Int]),
         crate::inrt::INRT_VECTOR_CLONE => return Some(&[Typ::Int, Typ::Int, Typ::Int]),
@@ -1700,6 +1708,54 @@ fn canonical_type(typ: &Typ) -> Typ {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn private_print_identity_keeps_source_print_override_and_exact_signature() {
+        use crate::core_ir::{COMPILER_PRINT, COMPILER_PRINT_INT};
+        let source_print = function_with_params(
+            "print",
+            vec![("value".into(), Typ::String)],
+            Typ::Int,
+            vec![Stmt::Return(Some(Expr::IntLit(42)))],
+        );
+        let call = |name: &str, args| Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args,
+        };
+        let main = function(
+            "main",
+            vec![
+                Stmt::Expr(call(COMPILER_PRINT, vec![Expr::StringLit("hi".into())])),
+                Stmt::Expr(call(COMPILER_PRINT_INT, vec![Expr::IntLit(42)])),
+                Stmt::Return(None),
+            ],
+        );
+        assert!(verify_for_entry(&module(vec![source_print, main]), "main").ok);
+        for (name, args) in [
+            (COMPILER_PRINT, vec![Expr::IntLit(42)]),
+            (COMPILER_PRINT_INT, vec![Expr::StringLit("hi".into())]),
+            (COMPILER_PRINT, vec![]),
+        ] {
+            let main = function(
+                "main",
+                vec![Stmt::Expr(call(name, args)), Stmt::Return(None)],
+            );
+            assert!(!verify_for_entry(&module(vec![main]), "main").ok);
+        }
+        for name in [COMPILER_PRINT, COMPILER_PRINT_INT] {
+            let report = verify_for_entry(
+                &module(vec![
+                    function(name, vec![Stmt::Return(None)]),
+                    function("main", vec![Stmt::Return(None)]),
+                ]),
+                "main",
+            );
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("reserved-intrinsic-name")
+            );
+        }
+    }
+
     use crate::core_ir::{Decl, UnifiedModule};
     use crate::core_ir::{Expr, Stmt};
 

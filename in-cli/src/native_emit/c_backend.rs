@@ -875,6 +875,10 @@ impl Ctx {
     }
 
     fn intrinsic_or_call(&mut self, name: &str, args: &[Expr]) -> String {
+        if crate::core_ir::compiler_print_callee(name).is_some() {
+            self.fail("c-backend: private print requires a hosted runtime".into());
+            return "0".into();
+        }
         if crate::core_ir_verifier::is_native_invoke(name) && !self.is_func(name) {
             return self.raw_native_invoke(name, args);
         }

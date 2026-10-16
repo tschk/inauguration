@@ -29,6 +29,7 @@ const PYTHON_AST: AstShape = AstShape {
     match_kinds: &[],
     first_assignment_is_let: true,
     strict_args: false,
+    binary_precedence: None,
     string_decoder: None,
 };
 

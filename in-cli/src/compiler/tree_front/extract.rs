@@ -877,6 +877,7 @@ pub(super) struct AstShape {
     pub(super) match_kinds: &'static [&'static str],
     pub(super) first_assignment_is_let: bool,
     pub(super) strict_args: bool,
+    pub(super) binary_precedence: Option<fn(&str) -> Option<u8>>,
     pub(super) string_decoder: Option<fn(&str) -> Option<String>>,
 }
 
@@ -1455,6 +1456,21 @@ fn ast_new_expr(src: &[u8], expr: Node<'_>, shape: AstShape) -> Option<Expr> {
 }
 
 fn ast_binary_expr(src: &[u8], expr: Node<'_>, shape: AstShape) -> Option<Expr> {
+    if let Some(precedence) = shape.binary_precedence {
+        return Some(
+            ast_precedence_binary(src, expr, shape, precedence)
+                .unwrap_or_else(|| Expr::Ident("#unsupported-binary-expression".into())),
+        );
+    }
+    let (lhs, op, rhs) = ast_binary_parts(src, expr)?;
+    Some(Expr::Binary {
+        op,
+        lhs: Box::new(ast_expr(src, lhs, shape)?),
+        rhs: Box::new(ast_expr(src, rhs, shape)?),
+    })
+}
+
+fn ast_binary_parts<'a>(src: &[u8], expr: Node<'a>) -> Option<(Node<'a>, String, Node<'a>)> {
     let lhs = expr
         .child_by_field_name("left")
         .or_else(|| expr.child_by_field_name("lhs"))
@@ -1470,11 +1486,66 @@ fn ast_binary_expr(src: &[u8], expr: Node<'_>, shape: AstShape) -> Option<Expr> 
     if op.len() > 5 || op.contains('\n') {
         return None;
     }
-    Some(Expr::Binary {
-        op,
-        lhs: Box::new(ast_expr(src, lhs, shape)?),
-        rhs: Box::new(ast_expr(src, rhs, shape)?),
-    })
+    Some((lhs, op, rhs))
+}
+
+/// Rebuild only a contiguous binary AST chain. Explicit grouping is opaque
+/// until its operand is lowered, so parentheses can never be flattened away.
+fn ast_precedence_binary(
+    src: &[u8],
+    node: Node<'_>,
+    shape: AstShape,
+    precedence: fn(&str) -> Option<u8>,
+) -> Option<Expr> {
+    fn collect<'a>(
+        src: &[u8],
+        node: Node<'a>,
+        shape: AstShape,
+        values: &mut Vec<Node<'a>>,
+        ops: &mut Vec<String>,
+    ) -> Option<()> {
+        if kind_in(node, shape.binary_kinds) {
+            let (lhs, op, rhs) = ast_binary_parts(src, node)?;
+            collect(src, lhs, shape, values, ops)?;
+            ops.push(op);
+            collect(src, rhs, shape, values, ops)?;
+        } else {
+            values.push(node);
+        }
+        Some(())
+    }
+    fn reduce(values: &mut Vec<Expr>, operators: &mut Vec<String>) -> Option<()> {
+        let rhs = values.pop()?;
+        let lhs = values.pop()?;
+        let op = operators.pop()?;
+        values.push(Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        });
+        Some(())
+    }
+    let mut nodes = Vec::new();
+    let mut ops = Vec::new();
+    collect(src, node, shape, &mut nodes, &mut ops)?;
+    let mut nodes = nodes.into_iter();
+    let mut values = vec![ast_expr(src, nodes.next()?, shape)?];
+    let mut stack = Vec::<String>::new();
+    for (op, node) in ops.into_iter().zip(nodes) {
+        let rank = precedence(&op)?;
+        while stack
+            .last()
+            .is_some_and(|previous| precedence(previous).is_some_and(|previous| previous >= rank))
+        {
+            reduce(&mut values, &mut stack)?;
+        }
+        stack.push(op);
+        values.push(ast_expr(src, node, shape)?);
+    }
+    while !stack.is_empty() {
+        reduce(&mut values, &mut stack)?;
+    }
+    (values.len() == 1).then(|| values.pop()).flatten()
 }
 
 fn ast_unary_expr(src: &[u8], expr: Node<'_>, shape: AstShape) -> Option<Expr> {
@@ -5226,7 +5297,6 @@ KTHXBYE
             ),
             (ParserId::Nim, "proc main(): Custom =\n  return 3", "Custom"),
             (ParserId::Nim, "proc main(): string =\n  return 3", "string"),
-            (ParserId::Nim, "proc main() =\n  return 3", "dynamic"),
             (
                 ParserId::Crystal,
                 "def main : Int32\n  return 3\nend",
@@ -5261,6 +5331,20 @@ KTHXBYE
                 "{source}: {module:?}"
             );
         }
+    }
+
+    #[test]
+    fn nim_unannotated_procedure_has_void_return() {
+        let module = parse_lang(
+            try_lang_for(ParserId::Nim).unwrap(),
+            "proc main() =\n  echo \"hi\"",
+            extract_nim,
+        )
+        .unwrap();
+        assert!(matches!(
+            &module.decls[0],
+            Decl::Function { ret: Typ::Void, .. }
+        ));
     }
 
     #[test]

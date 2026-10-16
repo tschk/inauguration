@@ -17,7 +17,7 @@ use crate::native_emit::aarch64::{self, CodeEmitter, REG_SP, REG_XZR};
 ///
 /// For native binaries this emits a BL placeholder that is resolved by the
 /// system linker; for JIT it looks up the wrapper address and calls via BLR.
-fn emit_stdlib_wrapper_call(
+pub(super) fn emit_stdlib_wrapper_call(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
     wrapper: &str,

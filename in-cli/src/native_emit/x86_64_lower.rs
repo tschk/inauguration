@@ -3738,6 +3738,39 @@ fn lower_call_expr(
         }
     };
 
+    if let Some(public) = crate::core_ir::compiler_print_callee(&target_name) {
+        if ctx.functions.contains_key(&target_name) {
+            return Err("x86_64-lower: private print operation cannot be declared".into());
+        }
+        if !ctx.runtime_error_slot || x86_64::is_32bit() {
+            return Err("x86_64-lower: private print requires hosted 64-bit wrappers".into());
+        }
+        crate::native_emit::stdlib_wrappers::validate_intrinsic_call(
+            &target_name,
+            None,
+            args.iter().map(|arg| scalar_expr_type(arg, ctx)),
+        )
+        .map_err(|error| {
+            format!(
+                "x86_64-lower: incompatible private print {}",
+                error.category()
+            )
+        })?;
+        let wrapper = jit_stdlib_wrapper(public).ok_or("missing private print wrapper")?;
+        let pointer = crate::native_emit::native_link::resolve_native_fn(wrapper)
+            .or_else(|| {
+                crate::native_emit::native_link::bootstrap_jit_native();
+                crate::native_emit::native_link::resolve_native_fn(wrapper)
+            })
+            .ok_or("x86_64-lower: private print wrapper unavailable")?;
+        lower_call_args(emitter, ctx, args, &target_name, pending_calls)?;
+        emit_aligned_host_call(emitter, pointer);
+        emit_stack_cleanup(emitter, args.len());
+        if target_reg != RAX {
+            emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+        }
+        return Ok(());
+    }
     if crate::core_ir::is_compiler_callee(&target_name) {
         return Err(format!(
             "x86_64-lower: unresolved private compiler operation `{target_name}`"

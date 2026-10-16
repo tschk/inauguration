@@ -40,6 +40,7 @@ const SCALAAST: AstShape = AstShape {
     match_kinds: &["match_expression"],
     first_assignment_is_let: false,
     strict_args: false,
+    binary_precedence: None,
     string_decoder: None,
 };
 

@@ -17,6 +17,16 @@ pub(crate) const INLINE_CONST: &str = "#rust-inline-const";
 pub(crate) const VECTOR_ALLOCATION: &str = "#vector-with-capacity";
 /// Transient Rust declaration ownership, consumed by integer normalization.
 pub(crate) const RUST_DECL_ORIGIN: &str = "#rust-declaration-origin";
+/// Compiler-generated output never resolves through source-language bindings.
+pub(crate) const COMPILER_PRINT: &str = "#print";
+pub(crate) const COMPILER_PRINT_INT: &str = "#print_int";
+pub(crate) fn compiler_print_callee(name: &str) -> Option<&'static str> {
+    match name {
+        COMPILER_PRINT => Some("print"),
+        COMPILER_PRINT_INT => Some("print-int"),
+        _ => None,
+    }
+}
 pub(crate) const BORROW: &str = "#rust-borrow";
 pub(crate) const METHOD_PREFIX: &str = "#receiver-method:";
 /// Legacy source helpers become private operations only after lexical resolution.
@@ -33,7 +43,8 @@ pub(crate) fn legacy_compiler_callee(name: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn is_compiler_callee(name: &str) -> bool {
-    tuples::is_marker(name)
+    compiler_print_callee(name).is_some()
+        || tuples::is_marker(name)
         || matches!(
             name,
             INDEX_ASSIGN_VALUE_FIRST

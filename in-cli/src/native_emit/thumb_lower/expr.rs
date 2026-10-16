@@ -139,6 +139,9 @@ pub(crate) fn lower_expr_into(
                     ctx.fn_name
                 ));
             };
+            if crate::core_ir::compiler_print_callee(name).is_some() {
+                return Err("thumb-lower: private print requires a hosted runtime".into());
+            }
             // A lexical callee binding cannot fall through to a global intrinsic.
             if ctx.local_types.contains_key(name) || ctx.locals.contains_key(name) {
                 return Err(

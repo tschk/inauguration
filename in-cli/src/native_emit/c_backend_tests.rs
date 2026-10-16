@@ -1583,3 +1583,16 @@ fn checked_unsigned_c_operations_refuse_unsupported_failure_return_abis() {
         }
     }
 }
+
+#[test]
+fn private_print_cannot_be_sanitized_into_a_source_override() {
+    let module = crate::in_lang_parse::parse_in_source(
+        "fn _print_int(value:Int)->Int{return 42;}fn main()->Int{#print_int(7);return 0;}",
+    )
+    .unwrap();
+    let error = emit_c_module(&module).unwrap_err();
+    assert!(
+        error.contains("private print requires a hosted runtime"),
+        "{error}"
+    );
+}

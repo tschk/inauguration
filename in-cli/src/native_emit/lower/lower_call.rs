@@ -28,6 +28,24 @@ pub(crate) fn lower_call(
             "native-lower: dynamic call target unsupported in `{fn_name}`"
         ));
     };
+    if let Some(public) = crate::core_ir::compiler_print_callee(target) {
+        if functions.contains_key(target) {
+            return Err("native-lower: private print operation cannot be declared".into());
+        }
+        let wrapper = crate::native_emit::stdlib_wrappers::wrapper(public)
+            .ok_or("native-lower: missing private print wrapper")?;
+        return lower_stdlib::emit_stdlib_wrapper_call(
+            emitter,
+            ctx,
+            wrapper,
+            target,
+            args,
+            rd,
+            functions,
+            pending_calls,
+            fn_name,
+        );
+    }
     if crate::core_ir::is_compiler_callee(target) {
         return Err(format!(
             "native-lower: unresolved private compiler operation `{target}`"

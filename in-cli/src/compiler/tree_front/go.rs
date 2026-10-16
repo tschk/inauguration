@@ -27,6 +27,7 @@ const GO_AST: AstShape = AstShape {
     match_kinds: &["expression_switch_statement", "type_switch_statement"],
     first_assignment_is_let: false,
     strict_args: false,
+    binary_precedence: None,
     string_decoder: None,
 };
 

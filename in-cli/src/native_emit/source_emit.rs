@@ -16,7 +16,7 @@ pub fn emit_source_module(module: &UnifiedModule, lang: SourceLang) -> String {
     // Soft DoS guard: truncate emission rather than hang (lossy printers).
     if !module_within_limits(module, lang) {
         return format!(
-            "// emit aborted: Core IR exceeds size/depth limits or uses unsupported value control flow\n// lang={lang:?}\n"
+            "// emit aborted: Core IR exceeds size/depth limits or uses unsupported operations\n// lang={lang:?}\n"
         );
     }
     let mut out = String::with_capacity(4096);
@@ -759,6 +759,9 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool
         Expr::Index { base, index } => {
             count_expr(base, depth + 1, nodes, lang) && count_expr(index, depth + 1, nodes, lang)
         }
+        Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if crate::core_ir::compiler_print_callee(name).is_some()) => {
+            false
+        }
         Expr::Call { callee, args } => {
             count_expr(callee, depth + 1, nodes, lang)
                 && args.iter().all(|a| count_expr(a, depth + 1, nodes, lang))
@@ -930,6 +933,22 @@ mod unsigned_projection_tests {
                 assert!(source.starts_with("// emit aborted:"), "{lang:?}: {source}");
                 assert!(!source.contains("fn main") && !source.contains("func main"));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod private_print_tests {
+    #[test]
+    fn private_print_does_not_become_a_sanitized_source_call() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "fn _print_int(value:Int)->Int{return 42;}fn main()->Int{#print_int(7);return 0;}",
+        )
+        .unwrap();
+        for lang in [super::SourceLang::Rust, super::SourceLang::Go] {
+            let source = super::emit_source_module(&module, lang);
+            assert!(source.starts_with("// emit aborted:"), "{source}");
+            assert!(!source.contains("_print_int("), "{source}");
         }
     }
 }
