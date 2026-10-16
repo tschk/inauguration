@@ -445,7 +445,7 @@ fn compile_expr(
                 "*" | "mul" | "*=" => OP_MUL,
                 "/" | "div" | "/=" => OP_DIV,
                 "%" | "mod" => OP_MOD,
-                "^" => OP_XOR,
+                "^" | "xor" => OP_XOR,
                 "&" => OP_AND,
                 "|" => OP_OR,
                 "<<" => OP_SHL,

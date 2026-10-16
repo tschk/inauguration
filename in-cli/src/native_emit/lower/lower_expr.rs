@@ -1199,7 +1199,7 @@ pub(crate) fn lower_binary(
         }
         "&" | "&=" => aarch64::and_reg64(rd, lhs_reg, rhs_reg),
         "|" | "|=" => aarch64::orr_reg64(rd, lhs_reg, rhs_reg),
-        "^" | "^=" => aarch64::eor_reg64(rd, lhs_reg, rhs_reg),
+        "^" | "xor" | "^=" => aarch64::eor_reg64(rd, lhs_reg, rhs_reg),
         "<<" | "<<=" => aarch64::lsl_reg64(rd, lhs_reg, rhs_reg),
         ">>" | ">>=" => aarch64::asr_reg64(rd, lhs_reg, rhs_reg),
         "++" => {
@@ -1409,7 +1409,7 @@ fn native_expr_type_with_bindings(
         {
             Some(Typ::Float)
         }
-        Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&" | "|" | "^") => {
+        Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&" | "|" | "^" | "xor") => {
             crate::core_ir::bitwise_result_type(
                 native_expr_type_with_bindings(lhs, ctx, functions, bindings),
                 native_expr_type_with_bindings(rhs, ctx, functions, bindings),

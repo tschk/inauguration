@@ -8063,12 +8063,63 @@ fn python_augmented_rhs_preserves_lazy_branches_and_old_binding_order() {
 }
 
 #[test]
+fn canonical_xor_alias_executes_parameterized_integer_and_boolean_helpers() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("canonical-xor.icore");
+    for source in [
+        r#"{"icoreVersion":2,"decls":[{"kind":"function","name":"mix","params":[{"name":"left","type":"Int"},{"name":"right","type":"Int"}],"return":"Int","body":[{"kind":"return","value":{"kind":"binary","op":"xor","lhs":{"kind":"ident","name":"left"},"rhs":{"kind":"ident","name":"right"}}}]},{"kind":"function","name":"main","params":[],"return":"Int","body":[{"kind":"return","value":{"kind":"call","callee":"mix","args":[63,21]}}]}]}"#,
+        r#"{"icoreVersion":2,"decls":[{"kind":"function","name":"mix","params":[{"name":"left","type":"Bool"},{"name":"right","type":"Bool"}],"return":"Bool","body":[{"kind":"return","value":{"kind":"binary","op":"xor","lhs":{"kind":"ident","name":"left"},"rhs":{"kind":"ident","name":"right"}}}]},{"kind":"function","name":"main","params":[],"return":"Int","body":[{"kind":"if","cond":{"kind":"call","callee":"mix","args":[true,false]},"then_body":[{"kind":"return","value":42}],"else_body":[{"kind":"return","value":7}]}]}]}"#,
+    ] {
+        fs::write(&path, source).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.execution_started,
+                "{profile:?}: {report:?}"
+            );
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{profile:?}: {report:?}"
+            );
+        }
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn lua_return_inference_refuses_unowned_operator_semantics_before_execution() {
     if !super::jit::host_supports_jit() {
         return;
     }
     let path = temp_path("lua-return-proof.lua");
     for (body, expected) in [
+        (
+            "if 63 ~ 21 == 42 then return 42 else return 7 end",
+            Some(42),
+        ),
+        (
+            "local value=63; if value ~ 21 == 42 then return 42 else return 7 end",
+            Some(42),
+        ),
+        (
+            "if bitvalue() ~ 21 == 42 then return 42 else return 7 end",
+            Some(42),
+        ),
+        ("if true ~ false then return 42 else return 7 end", None),
+        (
+            "if 63.0 ~ 21.0 == 42 then return 42 else return 7 end",
+            None,
+        ),
+        ("if 63.5 ~ 21 == 42 then return 42 else return 7 end", None),
         ("if 20 ~= 22 then return 42 else return 7 end", Some(42)),
         (
             "if flag() ~= false then return 42 else return 7 end",
@@ -8189,7 +8240,7 @@ fn lua_return_inference_refuses_unowned_operator_semantics_before_execution() {
     ] {
         fs::write(
             &path,
-            format!("function flag() return true end\nfunction main()\n{body}\nend\n"),
+            format!("function flag() return true end\nfunction bitvalue() return 63 end\nfunction main()\n{body}\nend\n"),
         )
         .unwrap();
         for profile in [

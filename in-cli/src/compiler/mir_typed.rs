@@ -26,7 +26,7 @@ pub(crate) fn scalar_type(typ: &Typ) -> Result<Typ, String> {
 pub(crate) fn scalar_binary_type(op: &str, typ: &Typ) -> Result<Typ, String> {
     match op {
         "+" | "add" | "-" | "sub" | "*" | "mul" | "/" | "div" | "%" | "rem" | "udiv" | "urem"
-        | "&" | "bitand" | "|" | "bitor" | "^" | "bitxor" | "<<" | "shl" | ">>" | "shr"
+        | "&" | "bitand" | "|" | "bitor" | "^" | "xor" | "bitxor" | "<<" | "shl" | ">>" | "shr"
         | "lshr"
             if *typ == Typ::Int =>
         {

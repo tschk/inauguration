@@ -114,7 +114,7 @@ pub fn lower_scalar_typed(module: &MirModule, target: ScalarTarget) -> Result<Mi
                             "*" | "mul" => Some(MirOp::Mul),
                             "&" | "bitand" => Some(MirOp::And),
                             "|" | "bitor" => Some(MirOp::Or),
-                            "^" | "bitxor" => Some(MirOp::Xor),
+                            "^" | "xor" | "bitxor" => Some(MirOp::Xor),
                             "==" | "eq" | "!=" | "neq" | "<" | "<=" | ">" | ">=" => None,
                             _ => {
                                 return Err(format!(

@@ -1729,7 +1729,7 @@ fn check_expr_with_array_borrow(
                 "-" | "*" | "/" | "<" | ">" | "<=" | ">=" => {
                     check_numeric_binop_operands(fn_name, lhs, rhs, facts, env)
                 }
-                "&" | "|" | "^" => {
+                "&" | "|" | "^" | "xor" => {
                     if crate::core_ir::bitwise_result_type(
                         expr_type(lhs, facts, env),
                         expr_type(rhs, facts, env),
@@ -2254,7 +2254,7 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
                 {
                     Some(Typ::Float)
                 }
-                "&" | "|" | "^" => crate::core_ir::bitwise_result_type(lhs_typ, rhs_typ),
+                "&" | "|" | "^" | "xor" => crate::core_ir::bitwise_result_type(lhs_typ, rhs_typ),
                 "+" | "-" | "*" | "/" | "%" | "<<" | ">>" | "udiv" | "urem" | "lshr" => {
                     Some(Typ::Int)
                 }

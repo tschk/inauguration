@@ -847,7 +847,7 @@ pub(crate) fn lower_binary(
             emitter.emit_u16(thumb::mov_low(R0, R1));
             emitter.emit_u16(thumb::orrs(R0, R2));
         }
-        "^" => {
+        "^" | "xor" => {
             emitter.emit_u16(thumb::mov_low(R0, R1));
             emitter.emit_u16(thumb::eors(R0, R2));
         }

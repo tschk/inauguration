@@ -2589,7 +2589,7 @@ fn scalar_expr_type_with_bindings(
         {
             Some(Typ::Float)
         }
-        Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&" | "|" | "^") => {
+        Expr::Binary { op, lhs, rhs } if matches!(op.as_str(), "&" | "|" | "^" | "xor") => {
             crate::core_ir::bitwise_result_type(
                 scalar_expr_type_with_bindings(lhs, ctx, bindings),
                 scalar_expr_type_with_bindings(rhs, ctx, bindings),
@@ -2840,7 +2840,7 @@ fn lower_binary_expr(
             emitter.emit_insns(&x86_64::setcc(0x95, RAX)); // setne al
             emitter.emit_insns(&x86_64::movzx_r8(RAX, RAX));
         }
-        "^" => {
+        "^" | "xor" => {
             emitter.emit_insns(&x86_64::mov_rr(RCX, RAX));
             emitter.emit_insns(&x86_64::mov_rr(RAX, RDX));
             emitter.emit_insns(&x86_64::xor_rr(RAX, RCX));

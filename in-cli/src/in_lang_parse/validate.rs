@@ -666,7 +666,7 @@ fn infer_in_expr_type_scoped(
             _ => infer_in_expr_type_scoped(expr, env, structs, fn_rets, shadowed),
         },
         Expr::Binary { op, lhs, rhs } => match op.as_str() {
-            "&" | "|" | "^" => crate::core_ir::bitwise_result_type(
+            "&" | "|" | "^" | "xor" => crate::core_ir::bitwise_result_type(
                 infer_in_expr_type_scoped(lhs, env, structs, fn_rets, shadowed),
                 infer_in_expr_type_scoped(rhs, env, structs, fn_rets, shadowed),
             ),

@@ -94,6 +94,9 @@ Lua `&` and `|` require proven integer operands; Boolean bitwise operations
 refuse, and integral Float coercion remains unsupported.
 Lua `~=` uses the existing typed inequality path for same-kind scalar operands;
 mixed-type comparisons retain their existing refusal boundary.
+Core IR `xor` shares the native and typed MIR integer XOR implementation with
+`^`. Lua binary `~` uses this canonical operator with proven integer operands;
+Lua `^` retains its power refusal and is never interpreted as XOR.
 
 Python scalar-name augmented assignments support `+=`, `-=`, `*=`, `&=`,
 `|=` and `^=` through the existing typed native operations. They read the old

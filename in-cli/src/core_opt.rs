@@ -2215,7 +2215,7 @@ fn harden_mba_arithmetic(decls: &mut [Decl]) {
                                 bin_expr("*", Expr::IntLit(2), bin_expr("&", l, r)),
                             );
                         }
-                        "^" => {
+                        "^" | "xor" => {
                             *e = bin_expr(
                                 "-",
                                 bin_expr("|", l.clone(), r.clone()),
@@ -4700,6 +4700,28 @@ mod tests {
             harden_mba_arithmetic(&mut decls);
             assert_eq!(decls, before);
         }
+    }
+
+    #[test]
+    fn harden_mba_xor_alias_matches_caret() {
+        let mut caret = crate::in_lang_parse::parse_in_source(
+            "fn mix(left:Int,right:Int)->Int{return left^right;}fn main()->Int{return mix(63,21);}",
+        )
+        .unwrap()
+        .decls;
+        let original = caret.clone();
+        let mut alias = caret.clone();
+        map_decl_exprs_mut(&mut alias, &mut |expr| {
+            if let Expr::Binary { op, .. } = expr
+                && op == "^"
+            {
+                *op = "xor".into();
+            }
+        });
+        harden_mba_arithmetic(&mut caret);
+        harden_mba_arithmetic(&mut alias);
+        assert_ne!(caret, original);
+        assert_eq!(alias, caret);
     }
 
     #[test]

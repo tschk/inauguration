@@ -695,14 +695,19 @@ impl TypeChecker {
         } else if let Expr::Binary { op, lhs, rhs } = expr {
             c_operands[0] = self.resolve_typed_expr(lhs, facts, env, promote_c_bool, return_type);
             c_operands[1] = self.resolve_typed_expr(rhs, facts, env, promote_c_bool, return_type);
-            if matches!(op.as_str(), "lua-bitand" | "lua-bitor") {
+            if matches!(op.as_str(), "lua-bitand" | "lua-bitor" | "lua-bitxor") {
                 if self.expr_type(lhs, facts, env) != Some(Typ::Int)
                     || self.expr_type(rhs, facts, env) != Some(Typ::Int)
                 {
                     *expr = Expr::Ident("#unsupported-lua-bitwise-operands".into());
                     return None;
                 }
-                *op = if op == "lua-bitand" { "&" } else { "|" }.into();
+                *op = match op.as_str() {
+                    "lua-bitand" => "&",
+                    "lua-bitor" => "|",
+                    _ => "xor",
+                }
+                .into();
             }
             if op == "lua-add" {
                 let left = self.expr_type(lhs, facts, env);
@@ -1112,6 +1117,7 @@ impl TypeChecker {
                             | "&"
                             | "|"
                             | "^"
+                            | "xor"
                             | "<<"
                             | ">>"
                             | "=="
@@ -2086,7 +2092,7 @@ impl TypeChecker {
                                 }
                             }
                         }
-                        "&" | "|" | "^" => {
+                        "&" | "|" | "^" | "xor" => {
                             if is_concrete(&l)
                                 && is_concrete(&r)
                                 && crate::core_ir::bitwise_result_type(
@@ -2542,7 +2548,7 @@ impl TypeChecker {
                 let right = self.expr_type(rhs, facts, env);
                 if matches!(
                     op.as_str(),
-                    "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"
+                    "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "xor" | "<<" | ">>"
                 ) {
                     let rust_kind = |typ: &Option<Typ>| matches!(typ, Some(Typ::Named(name)) if crate::core_ir::rust_integer_type_name(name).is_some());
                     if rust_kind(&left) {
@@ -2552,7 +2558,7 @@ impl TypeChecker {
                         return right;
                     }
                 }
-                if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>")
+                if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "xor" | "<<" | ">>")
                     && [left.as_ref(), right.as_ref()].iter().any(|typ| matches!(typ, Some(Typ::Named(name)) if crate::core_ir::integer_type_name(name).is_some()))
                 {
                     let l = c_expression_leaf_kind(lhs, left.as_ref());
@@ -2567,7 +2573,7 @@ impl TypeChecker {
                         (Some(Typ::Float), _) | (_, Some(Typ::Float)) => Some(Typ::Float),
                         _ => Some(Typ::Int),
                     },
-                    "&" | "|" | "^" => crate::core_ir::bitwise_result_type(left, right),
+                    "&" | "|" | "^" | "xor" => crate::core_ir::bitwise_result_type(left, right),
                     "-" | "*" | "/" | "%" | "<<" | ">>" => {
                         if left == Some(Typ::Float) || right == Some(Typ::Float) {
                             Some(Typ::Float)
@@ -2991,6 +2997,7 @@ pub fn normalize_module_with_semantics(
                 {
                     *expr = Expr::Ident("#unsupported-lua-operator-semantics".into());
                 }
+                Expr::Binary { op, .. } if op == "~" => *op = "lua-bitxor".into(),
                 Expr::Binary { op, .. } if op == "&" => *op = "lua-bitand".into(),
                 Expr::Binary { op, .. } if op == "|" => *op = "lua-bitor".into(),
                 Expr::Binary { op, .. } if op == "+" => *op = "lua-add".into(),
@@ -3381,7 +3388,7 @@ fn resolve_c_unsigned_expression(
     let compare = matches!(op.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=");
     let numeric = matches!(
         op.as_str(),
-        "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"
+        "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "xor" | "<<" | ">>"
     ) || compare;
     let common = CIntegerKind::common(operands[0], operands[1]);
     // Source long widths and literal ranks beyond int/unsigned int are not inferred.

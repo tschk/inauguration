@@ -248,7 +248,7 @@ fn fold_integer(
                 }
                 "&" => left & right,
                 "|" => left | right,
-                "^" => left ^ right,
+                "^" | "xor" => left ^ right,
                 _ => return None,
             }
         } else if op == "-" {
@@ -273,7 +273,7 @@ fn fold_integer(
         "%" | "urem" => left.checked_rem(right)?,
         "&" => left & right,
         "|" => left | right,
-        "^" => left ^ right,
+        "^" | "xor" => left ^ right,
         _ => return None,
     };
     if value > mask {
@@ -384,7 +384,7 @@ impl Pass<'_> {
             Expr::Binary { op, lhs, rhs }
                 if matches!(
                     op.as_str(),
-                    "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"
+                    "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "xor" | "<<" | ">>"
                 ) =>
             {
                 self.contextual_integer(lhs, env)

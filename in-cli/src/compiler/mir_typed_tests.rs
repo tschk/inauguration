@@ -80,7 +80,7 @@ fn run(module: &MirModule, entry: &str) -> (Option<i64>, Vec<String>) {
                         "urem" => ((a as u64) % (b as u64)) as i64,
                         "&" | "bitand" => a & b,
                         "|" | "bitor" => a | b,
-                        "^" | "bitxor" => a ^ b,
+                        "^" | "xor" | "bitxor" => a ^ b,
                         "<<" | "shl" => a.wrapping_shl(b as u32),
                         ">>" | "shr" => a.wrapping_shr(b as u32),
                         "lshr" => (a as u64).wrapping_shr(b as u32) as i64,
@@ -401,4 +401,50 @@ fn harden_private_unreachable_is_a_verified_typed_terminator() {
     assert!(only_trap.verify(Some("main")).is_err());
     only_trap.functions[0].instructions = vec![mir(MirOp::Label("entry".into()), vec![])];
     assert!(only_trap.verify(Some("main")).is_err());
+}
+
+#[test]
+fn canonical_xor_alias_survives_lua_normalization_and_typed_mir() {
+    let mut source = inauguration_source(
+        "fn mix(left:Int,right:Int)->Int{return left^right;}fn main()->Int{return mix(63,21);}",
+    );
+    let mut rewritten = 0;
+    crate::core_opt::map_decl_exprs_mut(&mut source.decls, &mut |expr| {
+        if let crate::core_ir::Expr::Binary { op, .. } = expr
+            && op == "^"
+        {
+            *op = "~".into();
+            rewritten += 1;
+        }
+    });
+    assert_eq!(rewritten, 1);
+    let normalized =
+        crate::typecheck::normalize_module(crate::parser_registry::ParserId::Lua, &source);
+    let repeated =
+        crate::typecheck::normalize_module(crate::parser_registry::ParserId::Lua, &normalized);
+    assert_eq!(normalized.decls, repeated.decls);
+    let module = lower_to_mir(&normalized).unwrap();
+    assert!(module.verify(Some("main")).is_ok());
+    assert!(
+        module
+            .functions
+            .iter()
+            .any(|function| function.instructions.iter().any(|inst| {
+                matches!(&inst.op, MirOp::Typed(TypedOp::Binary { op, .. }) if op == "xor")
+            }))
+    );
+    assert_eq!(run(&module, "main"), (Some(42), vec![]));
+    for target in [
+        crate::compiler::mir_scalar_lower::ScalarTarget::Aarch64,
+        crate::compiler::mir_scalar_lower::ScalarTarget::X86_64,
+    ] {
+        let machine =
+            crate::compiler::mir_scalar_lower::lower_scalar_typed(&module, target).unwrap();
+        assert!(machine.functions.iter().any(|function| {
+            function
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst.op, MirOp::Xor))
+        }));
+    }
 }

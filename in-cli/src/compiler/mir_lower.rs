@@ -618,6 +618,7 @@ fn validate_expression(expression: &Expr) -> Result<(), String> {
                     | "|"
                     | "bitor"
                     | "^"
+                    | "xor"
                     | "bitxor"
                     | "<<"
                     | "shl"
