@@ -6,6 +6,12 @@ use inauguration::{core_opt, in_lang_parse::parse_in_source, native_emit::inisa}
 fn native_rust_assignments_preserve_values_order_and_integer_kinds() {
     use inauguration::emit_profile::EmitProfile;
     for source in [
+        "fn main()->i64{u8::wrapping_add(255,43) as i64}",
+        "fn main()->i64{core::primitive::u16::wrapping_sub(0,65494) as i64}",
+        "fn main()->i64{std::primitive::u64::wrapping_mul(u64::MAX,18446744073709551574u64) as i64}",
+        "struct Row;trait Build{type Actual;type Output;fn make()->Self::Output;}impl Build for Row{type Actual=u8;type Output=Self::Actual;fn make()->Self::Output{Self::Output::wrapping_add(255,43)}}fn main()->i64{<Row as Build>::make() as i64}",
+        "static mut TRACE:i64=0;fn left()->u8{unsafe{TRACE=TRACE*10+1;}255}fn right()->u8{unsafe{TRACE=TRACE*10+2;}43}fn main()->i64{let value=u8::wrapping_add(left(),right());if value==42 && unsafe{TRACE}==12{42}else{7}}",
+        "static mut TRACE:i64=0;fn next()->u8{unsafe{TRACE=1;}255}fn main()->i64{if false && u8::wrapping_add(next(),43)==42{return 7;}if unsafe{TRACE}==0{42}else{7}}",
         "fn main()->i64{if u8::BITS==8u32 && i16::BITS==16u32 && u64::BITS==64u32{42}else{7}}",
         "struct Row;trait Build{type Output;fn bits()->u32;}impl Build for Row{type Output=u64;fn bits()->u32{Self::Output::BITS}}fn main()->i64{if <Row as Build>::bits()==64u32{42}else{7}}",
         "fn main()->i64{if i8::MIN == -128i8 && i16::MAX == 32767i16{42}else{7}}",

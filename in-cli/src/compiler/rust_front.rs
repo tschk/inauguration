@@ -1762,7 +1762,9 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
             return Some(match resolved {
                 Ok(Typ::Named(owner))
                     if crate::core_ir::rust_integer_type_name(&owner).is_some()
-                        && matches!(member, "MIN" | "MAX" | "BITS") =>
+                        && (matches!(member, "MIN" | "MAX" | "BITS")
+                            || crate::typecheck::rust_integers::wrapping_operator(member)
+                                .is_some()) =>
                 {
                     format!("{owner}::{member}")
                 }
@@ -2019,9 +2021,6 @@ fn rust_integer_constant(path: &syn::Path, call_target: bool) -> Option<String> 
             .symbol(),
         );
     }
-    if call_target && !known_constant {
-        return None;
-    }
     if owner.leading_colon.is_some() && owner.segments.len() == 1 {
         return Some(
             crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
@@ -2039,7 +2038,10 @@ fn rust_integer_constant(path: &syn::Path, call_target: bool) -> Option<String> 
             .symbol(),
         );
     }
-    if !known_constant {
+    let known_wrapping = call_target
+        && matches!(member.arguments, syn::PathArguments::None)
+        && crate::typecheck::rust_integers::wrapping_operator(&member.ident.to_string()).is_some();
+    if !known_constant && !known_wrapping {
         return Some(
             crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
                 "unresolved primitive associated value `{}`",
@@ -5446,7 +5448,7 @@ mod primitive_constant_tests {
     }
 
     #[test]
-    fn unknown_primitive_values_refuse_without_reclassifying_method_callees() {
+    fn primitive_method_calls_keep_exact_owners_and_unknown_calls_refuse() {
         for path in [
             "u64::NOT_A_CONSTANT",
             "u64::wrapping_add",
@@ -5463,7 +5465,7 @@ mod primitive_constant_tests {
                 let expression: syn::Expr = syn::parse_str(&source).unwrap();
                 let call = lower_expr_with_types(&expression, &mut HashMap::new());
                 assert!(
-                    matches!(call, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name==path)),
+                    matches!(call, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if if path=="u64::wrapping_add" { name=="#rust-integer-u64::wrapping_add" } else { matches!(crate::core_ir::type_proofs::decode(name), Some(crate::core_ir::type_proofs::ResolutionFailure::Unsupported(_))) })),
                     "{source}"
                 );
             }

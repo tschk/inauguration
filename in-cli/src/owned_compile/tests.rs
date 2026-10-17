@@ -9426,8 +9426,17 @@ fn rust_associated_cycles_cannot_disappear_through_zero_argument_inlining() {
 }
 
 #[test]
-fn rust_integer_constant_errors_refuse_all_profiles_without_artifacts() {
+fn rust_integer_source_errors_refuse_all_profiles_without_artifacts() {
     for source in [
+        "fn main()->i64{u8::wrapping_add(true,1);42}",
+        "fn main()->i64{u8::wrapping_add(1,1.0);42}",
+        "fn main(args:Vec<String>)->i64{u8::wrapping_add(\"x\",1);42}",
+        "fn main()->i64{let value=u8::wrapping_sub(1u8);42}",
+        "fn main()->i64{if false{u8::wrapping_mul(1u8,2u8,3u8);}42}",
+        "fn main()->i64{let value=true || u8::wrapping_add()==0u8;42}",
+        "fn main()->i64{let value=u8::wrapping_mul(2u16,3u8);42}",
+        "fn main()->i64{if false{u8::wrapping_sub(2u8,1u16);}42}",
+        "fn main()->i64{let value=false && {let result:u16=u8::wrapping_add(1u8,2u8);true};42}",
         "fn main()->i64{if false{let value=u8::MAX+1u16;}42}",
         "fn main()->i64{if false{let value=u8::MAX==1u16;}42}",
         "fn main()->i64{if false{let value:i64=u8::MAX;}42}",
@@ -9437,23 +9446,25 @@ fn rust_integer_constant_errors_refuse_all_profiles_without_artifacts() {
     ] {
         let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
         assert!(crate::native_emit::c_backend::emit_c_module(&parsed).is_err());
-        let path = temp_path("integer-constant-invalid.rs");
+        let path = temp_path("integer-source-invalid.rs");
         fs::write(&path, source).unwrap();
         for target in [CompileTarget::Jit, CompileTarget::Native] {
-            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
-                let out = temp_path("integer-constant-invalid.artifact");
-                let mut request =
-                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
-                request.profile = profile;
-                let report = compile_owned(&request);
-                assert!(
-                    !report.success,
-                    "{source} {target:?} {profile:?}: {report:?}"
-                );
-                assert!(!report.execution_started);
-                assert_eq!(report.eval_result, None);
-                assert_eq!(report.artifact_path, None);
-                assert!(!out.exists());
+            for entry in [None, Some("main")] {
+                for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                    let out = temp_path("integer-source-invalid.artifact");
+                    let mut request =
+                        default_request(path.clone(), target, entry, Some(out.clone()));
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(
+                        !report.success,
+                        "{source} {target:?} {profile:?}: {report:?}"
+                    );
+                    assert!(!report.execution_started);
+                    assert_eq!(report.eval_result, None);
+                    assert_eq!(report.artifact_path, None);
+                    assert!(!out.exists());
+                }
             }
         }
         fs::remove_file(path).unwrap();

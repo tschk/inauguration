@@ -108,10 +108,35 @@ fn kind_mismatch(actual: Kind, expected: Kind) -> core_ir::type_proofs::Resoluti
     }
 }
 
+pub(crate) fn wrapping_operator(member: &str) -> Option<&'static str> {
+    match member {
+        "wrapping_add" => Some("+"),
+        "wrapping_sub" => Some("-"),
+        "wrapping_mul" => Some("*"),
+        _ => None,
+    }
+}
+fn primitive_member(name: &str, semantics: IntegerSemantics) -> Option<(Kind, &str)> {
+    let (owner, member) = name.rsplit_once("::")?;
+    Some((
+        Kind::parse(core_ir::rust_integer_type_name(owner)?, semantics)?,
+        member,
+    ))
+}
+fn wrapping_target(
+    name: &str,
+    semantics: IntegerSemantics,
+) -> Option<(Option<Kind>, &'static str)> {
+    if let Some(member) = name.strip_prefix(core_ir::METHOD_PREFIX) {
+        return Some((None, wrapping_operator(member)?));
+    }
+    let (kind, member) = primitive_member(name, semantics)?;
+    Some((Some(kind), wrapping_operator(member)?))
+}
+
 /// Only private, already-resolved primitive owners carry integer constants.
 fn primitive_constant(name: &str, semantics: IntegerSemantics) -> Option<(Kind, i64)> {
-    let (owner, member) = name.rsplit_once("::")?;
-    let kind = Kind::parse(core_ir::rust_integer_type_name(owner)?, semantics)?;
+    let (kind, member) = primitive_member(name, semantics)?;
     let value = match member {
         "BITS" => {
             return Some((
@@ -494,6 +519,16 @@ impl Pass<'_> {
     }
     fn hint(&self, expr: &Expr, env: &HashMap<String, Typ>) -> Option<Kind> {
         match expr {
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident(name) = callee.as_ref()
+                    && let Some((Some(kind), _)) = wrapping_target(name, self.semantics)
+                {
+                    return Some(kind);
+                }
+                self.checker
+                    .expr_type(expr, self.facts, env)
+                    .and_then(|typ| typ_kind(&typ, self.semantics))
+            }
             Expr::Unary { op, expr } if op == "rust-integer-literal" => {
                 let _ = expr;
                 None
@@ -622,6 +657,19 @@ impl Pass<'_> {
         }
         self.expression(expr, self.expected(expected), env, ret)
     }
+    fn known_noninteger(&self, value: &Expr, env: &HashMap<String, Typ>) -> bool {
+        if core_ir::expr_diverges(value) {
+            return false;
+        }
+        match self.checker.expr_type(value, self.facts, env) {
+            Some(
+                Typ::Bool | Typ::Float | Typ::String | Typ::Array(_) | Typ::Vector(_) | Typ::Void,
+            ) => true,
+            Some(Typ::Named(name)) => self.facts.structs.contains_key(&name),
+            _ => false,
+        }
+    }
+
     fn opaque_callee(&self, value: &Expr) -> bool {
         match value {
             Expr::Ident(name) => self.opaque.contains(name),
@@ -654,6 +702,16 @@ impl Pass<'_> {
                         *expr = kind.cast(Expr::IntLit(value));
                     }
                     Some(kind)
+                } else if primitive_member(name, self.semantics).is_some() {
+                    if self.rewrite {
+                        *expr = Expr::Ident(
+                            core_ir::type_proofs::ResolutionFailure::Unsupported(
+                                "primitive method values require callable-value typing".into(),
+                            )
+                            .symbol(),
+                        );
+                    }
+                    None
                 } else {
                     let known =
                         self.inferred.get(name).copied().or_else(|| {
@@ -880,20 +938,31 @@ impl Pass<'_> {
                     None
                 }
             }
-            Expr::Call { callee, args } if matches!(callee.as_ref(),Expr::Ident(name) if matches!(name.strip_prefix(core_ir::METHOD_PREFIX),Some("wrapping_add"|"wrapping_sub"|"wrapping_mul"))) =>
+            Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if wrapping_target(name, self.semantics).is_some()) =>
             {
-                let operator = match callee.as_ref() {
-                    Expr::Ident(name) => match name.strip_prefix(core_ir::METHOD_PREFIX) {
-                        Some("wrapping_add") => "+",
-                        Some("wrapping_sub") => "-",
-                        _ => "*",
-                    },
-                    _ => unreachable!(),
+                let target = if let Expr::Ident(name) = callee.as_ref() {
+                    wrapping_target(name, self.semantics)
+                } else {
+                    None
+                };
+                let Some((owner, operator)) = target else {
+                    if self.rewrite {
+                        *expr = Expr::Ident(
+                            core_ir::type_proofs::ResolutionFailure::Unsupported(
+                                "unresolved wrapping call target".into(),
+                            )
+                            .symbol(),
+                        );
+                    }
+                    return None;
                 };
                 if let [receiver, argument] = args.as_mut_slice() {
+                    let noninteger = owner.is_some()
+                        && (self.known_noninteger(receiver, env)
+                            || self.known_noninteger(argument, env));
                     let contextual = matches!(receiver,Expr::Unary{op,..} if op=="rust-integer-literal")
                         || matches!(receiver,Expr::Ident(name) if self.flexible.contains(name)&&!self.opaque.contains(name)&&env.get(name)==Some(&Typ::Int));
-                    let target = self.hint(receiver, env).or_else(|| {
+                    let target = owner.or_else(|| self.hint(receiver, env)).or_else(|| {
                         if contextual {
                             expected.or_else(|| self.hint(argument, env))
                         } else {
@@ -901,18 +970,62 @@ impl Pass<'_> {
                         }
                     });
                     let receiver_kind = self.expression(receiver, target, env, ret);
-                    let argument_kind =
-                        self.expression(argument, receiver_kind.or(target), env, ret);
-                    let kind = receiver_kind.or(target);
-                    // Wrapping methods do not implicitly coerce an opaque
-                    // canonical-Int argument into a Rust primitive width.
-                    bad |= !same_kinds(argument_kind, kind);
-                    if !same_kinds(argument_kind, kind) {
-                        mismatch = argument_kind
-                            .zip(kind)
-                            .map(|(actual, expected)| kind_mismatch(actual, expected));
+                    let kind = owner.or(receiver_kind).or(target);
+                    let argument_kind = self.expression(argument, kind, env, ret);
+                    for actual in [receiver_kind, argument_kind] {
+                        if !same_kinds(actual, kind) {
+                            bad = true;
+                            if let Some(proof) = actual
+                                .zip(kind)
+                                .map(|(actual, expected)| kind_mismatch(actual, expected))
+                                && (!mismatch.as_ref().is_some_and(
+                                    core_ir::type_proofs::ResolutionFailure::is_invalid,
+                                ) || proof.is_invalid())
+                            {
+                                mismatch = Some(proof);
+                            }
+                        }
+                    }
+                    if owner.is_some()
+                        && [receiver_kind, argument_kind]
+                            .into_iter()
+                            .flatten()
+                            .any(|kind| !kind.source)
+                    {
+                        bad = true;
+                        if !mismatch
+                            .as_ref()
+                            .is_some_and(core_ir::type_proofs::ResolutionFailure::is_invalid)
+                        {
+                            mismatch = Some(core_ir::type_proofs::ResolutionFailure::Unsupported(
+                                "opaque canonical wrapping operands require source integer types"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    if kind.is_some_and(|kind| !kind.supported(self.semantics)) {
+                        bad = true;
+                        if !mismatch
+                            .as_ref()
+                            .is_some_and(core_ir::type_proofs::ResolutionFailure::is_invalid)
+                        {
+                            mismatch = Some(core_ir::type_proofs::ResolutionFailure::Unsupported(
+                                "wrapping integer owner exceeds target word width".into(),
+                            ));
+                        }
+                    } else if bad && mismatch.is_none() {
+                        mismatch = Some(core_ir::type_proofs::ResolutionFailure::Unsupported(
+                            "wrapping operands have no proven compatible Rust integer kind".into(),
+                        ));
+                    }
+                    if noninteger {
+                        bad = true;
+                        mismatch = Some(core_ir::type_proofs::ResolutionFailure::Invalid(
+                            "primitive wrapping operand is not an integer".into(),
+                        ));
                     }
                     if self.rewrite
+                        && !bad
                         && let Some(kind) = kind
                     {
                         let name = format!("{}{}", if kind.signed { "i" } else { "u" }, kind.bits);
@@ -943,8 +1056,25 @@ impl Pass<'_> {
                     }
                     kind
                 } else {
+                    let proven = owner.is_some()
+                        || args
+                            .first()
+                            .and_then(|value| self.hint(value, env))
+                            .is_some_and(|kind| kind.source);
+                    for value in args.iter_mut() {
+                        self.expression(value, None, env, ret);
+                    }
                     bad = true;
-                    None
+                    mismatch = Some(if proven {
+                        core_ir::type_proofs::ResolutionFailure::Invalid(
+                            "wrapping operation requires exactly two operands".into(),
+                        )
+                    } else {
+                        core_ir::type_proofs::ResolutionFailure::Unsupported(
+                            "unresolved wrapping receiver and arity".into(),
+                        )
+                    });
+                    owner
                 }
             }
             Expr::Call { callee, args } => {
@@ -1171,7 +1301,14 @@ impl Pass<'_> {
             .zip(expected)
             .filter(|(actual, expected)| !actual.same_width(*expected))
         {
-            mismatch = Some(kind_mismatch(actual, expected));
+            let proof = kind_mismatch(actual, expected);
+            if !mismatch
+                .as_ref()
+                .is_some_and(core_ir::type_proofs::ResolutionFailure::is_invalid)
+                || proof.is_invalid()
+            {
+                mismatch = Some(proof);
+            }
         }
         if self.rewrite
             && let Some(proof) = mismatch
@@ -1441,7 +1578,7 @@ fn decl_has_metadata(value: &Decl) -> bool {
         }
     }
     fn expr(value: &Expr) -> bool {
-        if matches!(value, Expr::Ident(name) if primitive_constant(name, IntegerSemantics::Word64).is_some())
+        if matches!(value, Expr::Ident(name) if primitive_member(name, IntegerSemantics::Word64).is_some())
         {
             return true;
         }
@@ -1640,6 +1777,143 @@ mod tests {
         normalize(&checker, &mut module, semantics);
         module
     }
+    #[test]
+    fn direct_primitive_wrapping_uses_owner_width_and_normalizes_once() {
+        for source in [
+            "fn main()->u8{u8::wrapping_add(255,43)}",
+            "fn main()->u8{u8::wrapping_sub(0,214)}",
+            "fn main()->i8{i8::wrapping_add(-128i8,-86i8)}",
+            "fn main()->i8{i8::wrapping_mul(-7i8,-6i8)}",
+            "fn main()->u64{u64::wrapping_mul(u64::MAX,18446744073709551574u64)}",
+            "fn main()->u64{u64::wrapping_sub(0u64,18446744073709551574u64)}",
+            "fn main()->u16{core::primitive::u16::wrapping_add(65535u16,43u16)}",
+            "fn main()->u32{::std::primitive::u32::wrapping_add(u32::MAX,43u32)}",
+            "fn main()->usize{usize::wrapping_add(usize::MAX,43usize)}",
+        ] {
+            let mut module = resolved(source, IntegerSemantics::Word64);
+            let value = crate::core_opt::map_expr(
+                return_value(&module).clone(),
+                &mut crate::core_opt::fold_expr,
+            );
+            assert_eq!(value, Expr::IntLit(42), "{source}");
+            assert!(
+                TypeChecker::new()
+                    .typed_proof_nodes(&module.decls)
+                    .is_empty(),
+                "{source}"
+            );
+            let once = module.clone();
+            normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+            assert_eq!(module, once);
+        }
+        for semantics in [IntegerSemantics::Word32, IntegerSemantics::Word64] {
+            let module = resolved(
+                "fn main()->usize{usize::wrapping_add(usize::MAX,43usize)}",
+                semantics,
+            );
+            let value = crate::core_opt::map_expr(return_value(&module).clone(), &mut |value| {
+                crate::core_opt::fold_expr_with_semantics(value, semantics)
+            });
+            assert_eq!(value, Expr::IntLit(42));
+        }
+        let module = resolved(
+            "fn main()->i32{u64::wrapping_add(1u64,2u64) as i32}",
+            IntegerSemantics::Word32,
+        );
+        let proofs = TypeChecker::new().typed_proof_nodes(&module.decls);
+        assert!(!proofs.is_empty());
+        assert!(
+            proofs.values().all(|proof| !proof.is_invalid()),
+            "{proofs:?}"
+        );
+    }
+
+    #[test]
+    fn direct_primitive_wrapping_retains_source_errors_and_unproven_refusals() {
+        for source in [
+            "fn main()->i64{if false{u8::wrapping_add(1u16,2u8);}42}",
+            "fn main()->i64{if false{u8::wrapping_sub(1u8,2u16);}42}",
+            "fn main()->i64{if false{u8::wrapping_mul(1u8);}42}",
+            "fn main()->i64{if false{let value:u64=u8::wrapping_add(1u8,2u8);}42}",
+            r#"fn main(args:Vec<String>)->i64{u8::wrapping_add("x",1);42}"#,
+            "fn main()->i64{if false{u8::wrapping_add(true,1);}42}",
+            "fn main()->i64{if false{u8::wrapping_add(1,1.0);}42}",
+        ] {
+            let module = resolved(source, IntegerSemantics::Word64);
+            assert!(
+                TypeChecker::new()
+                    .typed_proof_nodes(&module.decls)
+                    .values()
+                    .any(|proof| proof.is_invalid()),
+                "{source}: {module:?}"
+            );
+        }
+        for source in [
+            "fn main()->i64{if false{u64::NO_SUCH_MEMBER();}42}",
+            "fn main()->i64{let method=u8::wrapping_add;42}",
+            "struct Row;trait Build{type Output;fn make();}impl Build for Row{type Output=u8;fn make(){let method=Self::Output::wrapping_add;}}fn main()->i64{<Row as Build>::make();42}",
+        ] {
+            let module = resolved(source, IntegerSemantics::Word64);
+            let proofs = TypeChecker::new().typed_proof_nodes(&module.decls);
+            assert!(!proofs.is_empty(), "{source}");
+            assert!(
+                proofs.values().all(|proof| !proof.is_invalid()),
+                "{source}: {proofs:?}"
+            );
+        }
+        let mut raw = constant_module(
+            Expr::Call {
+                callee: Box::new(Expr::Ident("#rust-integer-u8::wrapping_add".into())),
+                args: vec![Expr::IntLit(1), Expr::IntLit(2)],
+            },
+            Typ::Int,
+        );
+        assert!(has_metadata(&raw));
+        normalize(&TypeChecker::new(), &mut raw, IntegerSemantics::Word64);
+        let proofs = TypeChecker::new().typed_proof_nodes(&raw.decls);
+        assert!(!proofs.is_empty());
+        assert!(proofs.values().all(|proof| !proof.is_invalid()));
+    }
+
+    #[test]
+    fn direct_wrapping_keeps_effect_order_and_scoped_associated_owners() {
+        let module = resolved(
+            "fn left()->u8{255}fn right()->u8{43}fn main()->u8{u8::wrapping_add(left(),right())}",
+            IntegerSemantics::Word64,
+        );
+        let mut main = module
+            .decls
+            .iter()
+            .filter(|decl| matches!(decl,Decl::Function { name, .. } if name=="main"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut calls = vec![];
+        crate::core_opt::map_decl_exprs_mut(&mut main, &mut |value| {
+            if let Expr::Call { callee, .. } = value
+                && let Expr::Ident(name) = callee.as_ref()
+            {
+                calls.push(name.clone());
+            }
+        });
+        assert_eq!(calls, ["left", "right"]);
+        let module = resolved(
+            "struct Row;trait Build{type Actual;type Output;fn make()->Self::Output;}impl Build for Row{type Actual=u8;type Output=Self::Actual;fn make()->Self::Output{Self::Output::wrapping_add(255,43)}}fn main()->u8{<Row as Build>::make()}",
+            IntegerSemantics::Word64,
+        );
+        assert!(
+            TypeChecker::new()
+                .typed_proof_nodes(&module.decls)
+                .is_empty(),
+            "{module:?}"
+        );
+        let mut view = module.decls.clone();
+        crate::core_opt::map_decl_exprs_mut(&mut view, &mut |value| {
+            assert!(
+                !matches!(value,Expr::Ident(name) if wrapping_target(name, IntegerSemantics::Word64).is_some())
+            );
+        });
+    }
+
     #[test]
     fn canonical_width_constraints_do_not_become_source_errors() {
         let source = include_str!("../../tests/fixtures/rust_integer_inference_selfhost.rs");
