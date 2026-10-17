@@ -91,6 +91,9 @@ pub(crate) struct Facts {
     functions: HashMap<String, (Vec<(String, Typ)>, Typ)>,
     structs: HashMap<String, Vec<(String, Typ)>>,
     closures: HashMap<String, String>,
+    unary_methods: Option<crate::boundary_ir::UnaryMethodBindings>,
+    unary_method_errors: std::cell::RefCell<Vec<String>>,
+    require_resolved_inline_values: bool,
 }
 
 impl Facts {
@@ -120,7 +123,7 @@ impl Facts {
             .0
             .iter()
             .position(|(name, typ)| {
-                name == "self" && matches!(typ, Typ::Named(name) if self.structs.contains_key(name))
+                name == "self" && matches!(typ.canonical(), Typ::Named(name) if self.structs.contains_key(&name))
             })
     }
 }
@@ -172,13 +175,47 @@ impl TypeChecker {
         }
     }
 
+    /// Eligibility only for the new effectful-argument inline path. Reuse the
+    /// checker scoped walk; unrelated unsupported functions keep their old path.
+    pub(crate) fn checked_inline_functions(&self, decls: &[Decl]) -> HashSet<String> {
+        let mut facts = self.collect_decl_facts(decls);
+        facts.require_resolved_inline_values = true;
+        let globals: HashMap<_, _> = decls
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::Global { name, typ, .. } => Some((name.clone(), typ.clone())),
+                _ => None,
+            })
+            .collect();
+        decls
+            .iter()
+            .filter_map(|decl| {
+                let Decl::Function {
+                    name,
+                    params,
+                    ret,
+                    body,
+                    ..
+                } = decl
+                else {
+                    return None;
+                };
+                let mut env = globals.clone();
+                env.extend(params.iter().cloned());
+                let mut errors = Vec::new();
+                self.check_stmts(name, ret, body, &facts, &mut env, &mut errors);
+                errors.is_empty().then(|| name.clone())
+            })
+            .collect()
+    }
+
     /// Resolve type-dependent complement into the canonical boolean or integer operator.
     pub(crate) fn resolve_complements(&self, module: &mut UnifiedModule) {
-        self.resolve_typed_operators(module, false, None);
+        let _ = self.resolve_typed_operators(module, false, None, None);
     }
 
     fn resolve_c_value_promotions(&self, module: &mut UnifiedModule) {
-        self.resolve_typed_operators(module, true, None);
+        let _ = self.resolve_typed_operators(module, true, None, None);
     }
 
     pub(crate) fn resolve_closure_calls(
@@ -198,7 +235,7 @@ impl TypeChecker {
                     _ => None,
                 })
                 .collect();
-            self.resolve_typed_operators(module, false, Some(closures));
+            let _ = self.resolve_typed_operators(module, false, Some(closures), None);
             let parameters_changed = closure_inference::infer(self, module, closures);
             let returns_changed = module.decls.iter().any(|decl| match decl {
                 Decl::Function { name, ret, .. } => {
@@ -212,15 +249,39 @@ impl TypeChecker {
         }
     }
 
+    /// Resolve only frontend-proven operator bindings. Other normalization
+    /// entrypoints never infer a trait from a method basename.
+    pub(crate) fn resolve_unary_methods(
+        &self,
+        module: &mut UnifiedModule,
+        bindings: &crate::boundary_ir::UnaryMethodBindings,
+    ) -> Result<(), String> {
+        let mut has_origin = false;
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            has_origin |= matches!(expr, Expr::Unary { op, .. } if op == crate::core_ir::rust_references::NEGATE_VALUE);
+        });
+        if !has_origin {
+            return Ok(());
+        }
+        let errors = self.resolve_typed_operators(module, false, None, Some(bindings));
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
     fn resolve_typed_operators(
         &self,
         module: &mut UnifiedModule,
         promote_c_bool: bool,
         closures: Option<&HashMap<String, String>>,
-    ) {
+        unary_methods: Option<&crate::boundary_ir::UnaryMethodBindings>,
+    ) -> Vec<String> {
         crate::core_bindings::normalize_decls(&mut module.decls);
         crate::core_ir::tuples::register(module);
         let mut facts = self.collect_facts(module);
+        facts.unary_methods = unary_methods.cloned();
         if let Some(closures) = closures {
             facts.closures = closures.clone();
         }
@@ -280,9 +341,16 @@ impl TypeChecker {
         }
         let old_len = module.decls.len();
         crate::core_ir::tuples::register(module);
+        let mut errors = facts.unary_method_errors.into_inner();
         if module.decls.len() != old_len {
-            self.resolve_typed_operators(module, promote_c_bool, closures);
+            errors.extend(self.resolve_typed_operators(
+                module,
+                promote_c_bool,
+                closures,
+                unary_methods,
+            ));
         }
+        errors
     }
 
     fn pattern_environment(
@@ -812,7 +880,60 @@ impl TypeChecker {
                 };
             }
         }
+        if let Expr::Unary { op, expr: operand } = expr
+            && op == crate::core_ir::rust_references::NEGATE_VALUE
+            && let Some(bindings) = &facts.unary_methods
+            && let Some(receiver) = self
+                .expr_type(operand, facts, env)
+                .as_ref()
+                .and_then(crate::core_ir::rust_references::receiver_identity)
+        {
+            let binding = bindings.get(&(receiver.clone(), "-".into()));
+            let resolution = match binding {
+                Some(Ok(target)) => match facts.functions.get(target) {
+                    Some((params, _))
+                        if params.len() == 1
+                            && params[0].0 == "self"
+                            && crate::core_ir::rust_references::receiver_identity(&params[0].1)
+                                .as_deref()
+                                == Some(receiver.as_str()) =>
+                    {
+                        Ok(Some(target.clone()))
+                    }
+                    _ => Err(format!(
+                        "Rust unary method `{target}` lacks the exact receiver signature `{receiver}`"
+                    )),
+                },
+                Some(Err(reason)) => Err(reason.clone()),
+                None if facts.structs.contains_key(&receiver) => Err(format!(
+                    "Rust unary `-` has no authoritative Neg binding for `{receiver}`"
+                )),
+                // Unknown/generic provenance remains deferred until specialization.
+                None => Ok(None),
+            };
+            match resolution {
+                Ok(Some(target)) => {
+                    *expr = Expr::Call {
+                        callee: Box::new(Expr::Ident(target)),
+                        args: vec![operand.as_ref().clone()],
+                    };
+                }
+                Err(reason) => {
+                    facts.unary_method_errors.borrow_mut().push(reason);
+                }
+                _ => {}
+            }
+        }
+        if let Expr::Unary { op, expr: operand } = expr
+            && op == crate::core_ir::rust_references::NEGATE_VALUE
+            && self
+                .expr_type(operand, facts, env)
+                .is_some_and(|typ| matches!(typ.canonical(), Typ::Int | Typ::Float | Typ::Bool))
+        {
+            *op = "-".into();
+        }
         if let Expr::Call { callee, args } = expr
+            && facts.unary_methods.is_none()
             && matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW)
             && let [value] = args.as_slice()
             && let Some(typ) = closure_inference::argument_type(self, value, facts, env)
@@ -822,6 +943,7 @@ impl TypeChecker {
             *expr = value.clone();
         }
         if let Expr::Call { callee, args } = expr
+            && facts.unary_methods.is_none()
             && let Expr::Ident(name) = callee.as_ref()
             && let Some(method) = name.strip_prefix(crate::core_ir::METHOD_PREFIX)
             && let Some(receiver) = args.first().and_then(|arg| self.expr_type(arg, facts, env))
@@ -1481,6 +1603,9 @@ impl TypeChecker {
             functions,
             structs,
             closures: HashMap::new(),
+            unary_methods: None,
+            unary_method_errors: std::cell::RefCell::new(Vec::new()),
+            require_resolved_inline_values: false,
         }
     }
 
@@ -1613,6 +1738,16 @@ impl TypeChecker {
         env: &mut HashMap<String, Typ>,
         errors: &mut Vec<TypeError>,
     ) {
+        if facts.require_resolved_inline_values
+            && matches!(stmt, Stmt::Throw(_) | Stmt::Try { .. } | Stmt::Propagate)
+        {
+            errors.push(TypeError::TypeMismatch {
+                context: format!("unchecked exception statement in inline proof for `{fn_name}`"),
+                expected: Typ::Named("checked statement".into()),
+                got: Typ::Named("exception statement".into()),
+            });
+            return;
+        }
         match stmt {
             Stmt::Let(name, annot, expr) => {
                 self.check_expr(fn_name, expr, facts, env, errors);
@@ -1837,6 +1972,36 @@ impl TypeChecker {
         env: &HashMap<String, Typ>,
         errors: &mut Vec<TypeError>,
     ) {
+        // Ordinary checking preserves deferred frontend behavior. Inline
+        // eligibility is stricter: a missing fact is not proof, and closures
+        // must first be lifted and checked as their own functions.
+        if facts.require_resolved_inline_values {
+            if let Expr::Call { callee, .. } = expr
+                && matches!(callee.as_ref(), Expr::Ident(name) if env.contains_key(name))
+            {
+                errors.push(TypeError::TypeMismatch {
+                    context: format!("shadowed direct callee in inline proof for `{fn_name}`"),
+                    expected: Typ::Named("unshadowed function target".into()),
+                    got: Typ::Generic("callable value".into()),
+                });
+                return;
+            }
+            if matches!(expr, Expr::Closure { .. }) {
+                errors.push(TypeError::TypeMismatch {
+                    context: format!("unlifted closure in inline proof for `{fn_name}`"),
+                    expected: Typ::Named("checked lifted function".into()),
+                    got: Typ::Generic("closure".into()),
+                });
+                return;
+            }
+            if self.expr_type(expr, facts, env).is_none() {
+                errors.push(TypeError::TypeMismatch {
+                    context: format!("unresolved expression in inline proof for `{fn_name}`"),
+                    expected: Typ::Named("resolved expression type".into()),
+                    got: Typ::Generic("_".into()),
+                });
+            }
+        }
         if let Expr::Call { callee, args } = expr {
             if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::INDEX_ASSIGN_VALUE_FIRST || (name=="index-assign-value-first" && !facts.functions.contains_key(name) && !env.contains_key(name)))
             {
@@ -1975,8 +2140,27 @@ impl TypeChecker {
             }
             Expr::Unary { op, expr: inner } => {
                 self.check_expr(fn_name, inner, facts, env, errors);
-                if matches!(op.as_str(), "-" | "neg" | "!" | "not")
-                    && self.expr_type(inner, facts, env) == Some(Typ::Void)
+                if matches!(
+                    op.as_str(),
+                    "-" | crate::core_ir::rust_references::NEGATE_VALUE
+                ) && self.expr_type(inner, facts, env) != Some(Typ::Void)
+                {
+                    let operand = self.expr_type(inner, facts, env);
+                    let known_nominal = matches!(&operand, Some(Typ::Named(name)) if facts.structs.contains_key(name));
+                    if crate::core_ir::numeric_negation_domain(operand.as_ref(), known_nominal)
+                        == crate::core_ir::NumericNegationDomain::Rejected
+                    {
+                        errors.push(TypeError::TypeMismatch {
+                            context: format!("numeric negation in `{fn_name}`"),
+                            expected: Typ::Named("numeric-or-Bool".into()),
+                            got: operand.unwrap_or(Typ::Void),
+                        });
+                    }
+                }
+                if matches!(
+                    op.as_str(),
+                    "-" | crate::core_ir::rust_references::NEGATE_VALUE | "neg" | "!" | "not"
+                ) && self.expr_type(inner, facts, env) == Some(Typ::Void)
                 {
                     errors.push(TypeError::TypeMismatch {
                         context: format!("unary `{op}` in `{fn_name}`"),
@@ -2263,7 +2447,7 @@ impl TypeChecker {
                     });
                     return;
                 }
-                if let Some(base_typ) = self.expr_type(base, facts, env)
+                if let Some(base_typ) = self.expr_type(base, facts, env).map(|typ| typ.canonical())
                     && let Typ::Named(struct_name) = &base_typ
                     && let Some(schema) = facts.structs.get(struct_name)
                     && !schema.iter().any(|(f, _)| f == name)
@@ -2517,7 +2701,7 @@ impl TypeChecker {
                 {
                     return Some(Typ::Int);
                 }
-                if let Some(base_typ) = self.expr_type(base, facts, env)
+                if let Some(base_typ) = self.expr_type(base, facts, env).map(|typ| typ.canonical())
                     && let Typ::Named(struct_name) = &base_typ
                     && let Some(schema) = facts.structs.get(struct_name)
                 {
@@ -2549,6 +2733,11 @@ impl TypeChecker {
                     None
                 }
             }
+            Expr::Unary { op, expr, .. }
+                if crate::core_ir::rust_references::value_kind(op).is_some() =>
+            {
+                crate::core_ir::rust_references::value_type(op, self.expr_type(expr, facts, env)?)
+            }
             Expr::Unary { op, expr, .. } => match op.as_str() {
                 op if op
                     .strip_prefix("rust-integer-literal-")
@@ -2574,9 +2763,13 @@ impl TypeChecker {
                 {
                     Some(Typ::Int)
                 }
-                "-" | "~" | "+" => {
+                "-" | crate::core_ir::rust_references::NEGATE_VALUE | "~" | "+" => {
                     let typ = self.expr_type(expr, facts, env);
-                    if op == "-" && typ.as_ref().is_some_and(|typ| typ.canonical() == Typ::Bool) {
+                    if matches!(
+                        op.as_str(),
+                        "-" | crate::core_ir::rust_references::NEGATE_VALUE
+                    ) && typ.as_ref().is_some_and(|typ| typ.canonical() == Typ::Bool)
+                    {
                         return Some(Typ::Int);
                     }
                     if matches!(&typ, Some(Typ::Named(name)) if crate::core_ir::integer_type_name(name).is_some())
@@ -2682,6 +2875,11 @@ impl TypeChecker {
                             .collect::<Option<Vec<_>>>()?;
                         return Some(crate::core_ir::tuples::typ(&types));
                     }
+                    if name == crate::core_ir::BORROW
+                        && let [value] = args.as_slice()
+                    {
+                        return self.expr_type(value, facts, env);
+                    }
                     facts
                         .functions
                         .get(name)
@@ -2759,6 +2957,12 @@ fn is_numeric(typ: &Typ) -> bool {
 
 fn is_compatible(expected: &Typ, actual: &Typ) -> bool {
     if matches!(expected, Typ::Generic(_)) || matches!(actual, Typ::Generic(_)) {
+        return true;
+    }
+    if crate::core_ir::rust_references::has_reference_proof(expected)
+        && crate::core_ir::rust_references::has_reference_proof(actual)
+        && crate::core_ir::rust_references::same_source_type(expected, actual)
+    {
         return true;
     }
     expected.compatible_with(actual)
@@ -5858,5 +6062,445 @@ mod boolean_negation_inference_tests {
             };
             assert_eq!(checker.expr_type(&neg, &facts, &env), Some(typ));
         }
+    }
+}
+
+#[cfg(test)]
+mod rust_unary_binding_tests {
+    use super::*;
+    use crate::boundary_ir::UnaryMethodBindings;
+    use crate::core_ir::rust_references::{self, ReferenceType};
+
+    fn reference(mutable: bool, referent: Typ, runtime: Typ) -> Typ {
+        rust_references::typ(ReferenceType {
+            mutable,
+            referent,
+            runtime,
+        })
+    }
+    fn function(name: &str, params: Vec<(String, Typ)>, value: Expr) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params,
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(value))],
+            type_params: vec![],
+        }
+    }
+    fn neg(value: Expr) -> Expr {
+        Expr::Unary {
+            op: rust_references::NEGATE_VALUE.into(),
+            expr: Box::new(value),
+        }
+    }
+    fn returned(module: &UnifiedModule, name: &str) -> Expr {
+        let Decl::Function { body, .. } = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl,Decl::Function{name:found,..}if found==name))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let Stmt::Return(Some(value)) = &body[0] else {
+            panic!("expected return")
+        };
+        value.clone()
+    }
+    #[test]
+    fn exact_owned_shared_and_mutable_proofs_select_only_their_ufcs_targets() {
+        let owned = Typ::Named("Row".into());
+        let shared = reference(false, owned.clone(), Typ::Named("&Row".into()));
+        let mutable = reference(true, owned.clone(), Typ::Named("&mutRow".into()));
+        let mut bindings = UnaryMethodBindings::new();
+        let mut declarations = vec![Decl::Struct {
+            name: "Row".into(),
+            fields: vec![("x".into(), Typ::Int)],
+            type_params: vec![],
+        }];
+        for (key, typ, target, result) in [
+            ("Row", owned, "Row::std::ops::Neg::neg", 77),
+            ("&Row", shared, "&Row::std::ops::Neg::neg", 88),
+            ("&mut Row", mutable, "&mutRow::std::ops::Neg::neg", 99),
+        ] {
+            bindings.insert((key.into(), "-".into()), Ok(target.into()));
+            declarations.push(function(
+                target,
+                vec![("self".into(), typ.clone())],
+                Expr::IntLit(result),
+            ));
+            declarations.push(function(
+                key,
+                vec![("value".into(), typ)],
+                neg(Expr::Ident("value".into())),
+            ));
+        }
+        let mut module = UnifiedModule::new(declarations);
+        TypeChecker::new()
+            .resolve_unary_methods(&mut module, &bindings)
+            .unwrap();
+        for (key, target) in [
+            ("Row", "Row::std::ops::Neg::neg"),
+            ("&Row", "&Row::std::ops::Neg::neg"),
+            ("&mut Row", "&mutRow::std::ops::Neg::neg"),
+        ] {
+            assert_eq!(
+                returned(&module, key),
+                Expr::Call {
+                    callee: Box::new(Expr::Ident(target.into())),
+                    args: vec![Expr::Ident("value".into())]
+                }
+            );
+        }
+    }
+    #[test]
+    fn borrowed_holder_field_retains_its_raw_reference_proof() {
+        let row = Typ::Named("Row".into());
+        let field = reference(false, row.clone(), row);
+        let holder = reference(
+            false,
+            Typ::Named("Holder".into()),
+            Typ::Named("Holder".into()),
+        );
+        let operand = Expr::Field {
+            base: Box::new(Expr::Ident("holder".into())),
+            name: "value".into(),
+        };
+        let mut module = UnifiedModule::new(vec![
+            Decl::Struct {
+                name: "Row".into(),
+                fields: vec![("x".into(), Typ::Int)],
+                type_params: vec![],
+            },
+            Decl::Struct {
+                name: "Holder".into(),
+                fields: vec![("value".into(), field.clone())],
+                type_params: vec![],
+            },
+            function(
+                "borrowed_neg",
+                vec![("self".into(), field)],
+                Expr::IntLit(88),
+            ),
+            function(
+                "apply",
+                vec![("holder".into(), holder)],
+                neg(operand.clone()),
+            ),
+        ]);
+        let bindings =
+            UnaryMethodBindings::from([(("&Row".into(), "-".into()), Ok("borrowed_neg".into()))]);
+        TypeChecker::new()
+            .resolve_unary_methods(&mut module, &bindings)
+            .unwrap();
+        assert_eq!(
+            returned(&module, "apply"),
+            Expr::Call {
+                callee: Box::new(Expr::Ident("borrowed_neg".into())),
+                args: vec![operand]
+            }
+        );
+    }
+    #[test]
+    fn ambiguous_binding_preserves_original_expression_and_generic_proof_defers() {
+        let original = neg(Expr::Ident("value".into()));
+        let mut module = UnifiedModule::new(vec![function(
+            "bad",
+            vec![("value".into(), Typ::Named("Row".into()))],
+            original.clone(),
+        )]);
+        let bindings = UnaryMethodBindings::from([(
+            ("Row".into(), "-".into()),
+            Err("ambiguous exact receiver".into()),
+        )]);
+        assert!(
+            TypeChecker::new()
+                .resolve_unary_methods(&mut module, &bindings)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        assert_eq!(returned(&module, "bad"), original);
+        let mut module = UnifiedModule::new(vec![function(
+            "generic",
+            vec![("value".into(), Typ::Generic("T".into()))],
+            original.clone(),
+        )]);
+        TypeChecker::new()
+            .resolve_unary_methods(&mut module, &bindings)
+            .unwrap();
+        assert_eq!(returned(&module, "generic"), original);
+    }
+    #[test]
+    fn canonical_minus_from_another_front_never_uses_rust_trait_bindings() {
+        let original = Expr::Unary {
+            op: "-".into(),
+            expr: Box::new(Expr::Ident("value".into())),
+        };
+        let mut module = UnifiedModule::new(vec![
+            function(
+                "neg_impl",
+                vec![("self".into(), Typ::Named("Row".into()))],
+                Expr::IntLit(77),
+            ),
+            function(
+                "in_front",
+                vec![("value".into(), Typ::Named("Row".into()))],
+                original.clone(),
+            ),
+        ]);
+        let bindings =
+            UnaryMethodBindings::from([(("Row".into(), "-".into()), Ok("neg_impl".into()))]);
+        TypeChecker::new()
+            .resolve_unary_methods(&mut module, &bindings)
+            .unwrap();
+        assert_eq!(returned(&module, "in_front"), original);
+    }
+}
+
+#[cfg(test)]
+mod numeric_negation_checked_domain_tests {
+    use super::*;
+    #[test]
+    fn checked_negation_rejects_domains_for_both_source_origins() {
+        let checker = TypeChecker::new();
+        let facts = checker.collect_decl_facts(&[]);
+        for op in ["-", crate::core_ir::rust_references::NEGATE_VALUE] {
+            for typ in [
+                Typ::String,
+                Typ::Array(Box::new(Typ::Int)),
+                Typ::Vector(Box::new(Typ::Int)),
+            ] {
+                let env = HashMap::from([("value".into(), typ.clone())]);
+                let expression = Expr::Unary {
+                    op: op.into(),
+                    expr: Box::new(Expr::Ident("value".into())),
+                };
+                assert_eq!(
+                    checker.checked_expr_type(&expression, &facts, &env),
+                    None,
+                    "{op} {typ:?}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod inline_function_proof_tests {
+    use super::*;
+    fn function(name: &str, params: Vec<(String, Typ)>, ret: Typ, body: Vec<Stmt>) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params,
+            ret,
+            body,
+            type_params: vec![],
+        }
+    }
+    fn call(name: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args,
+        }
+    }
+    #[test]
+    fn scoped_proof_is_per_function_and_retains_generic_deferral() {
+        let array = Typ::Array(Box::new(Typ::Int));
+        let declarations = vec![
+            function(
+                "ignore",
+                vec![("value".into(), array.clone())],
+                Typ::Int,
+                vec![Stmt::Return(Some(Expr::IntLit(42)))],
+            ),
+            function(
+                "bad",
+                vec![],
+                Typ::Int,
+                vec![Stmt::Return(Some(call(
+                    "ignore",
+                    vec![Expr::StringLit("bad".into())],
+                )))],
+            ),
+            function(
+                "scoped",
+                vec![("value".into(), Typ::String)],
+                Typ::Int,
+                vec![Stmt::Return(Some(Expr::Block {
+                    body: vec![Stmt::Let(
+                        "value".into(),
+                        Some(array),
+                        Expr::ArrayLit(vec![Expr::IntLit(42)]),
+                    )],
+                    result: Some(Box::new(call("ignore", vec![Expr::Ident("value".into())]))),
+                }))],
+            ),
+            function(
+                "generic",
+                vec![("value".into(), Typ::Generic("T".into()))],
+                Typ::Generic("T".into()),
+                vec![Stmt::Return(Some(Expr::Ident("value".into())))],
+            ),
+            function(
+                "bad_callee",
+                vec![("value".into(), Typ::Int)],
+                Typ::Int,
+                vec![
+                    Stmt::Let(
+                        "wrong".into(),
+                        Some(Typ::String),
+                        Expr::Ident("value".into()),
+                    ),
+                    Stmt::Return(Some(Expr::IntLit(42))),
+                ],
+            ),
+        ];
+        let mut declarations = declarations;
+        declarations.push(function(
+            "bad_return",
+            vec![("value".into(), Typ::Int)],
+            Typ::Int,
+            vec![Stmt::Return(Some(Expr::StringLit("wrong".into())))],
+        ));
+        let checked = TypeChecker::new().checked_inline_functions(&declarations);
+        assert!(!checked.contains("bad_return"));
+        assert!(checked.contains("ignore"));
+        assert!(checked.contains("scoped"));
+        assert!(checked.contains("generic"));
+        assert!(!checked.contains("bad"));
+        assert!(!checked.contains("bad_callee"));
+    }
+    #[test]
+    fn inline_proof_rejects_unresolved_values_closures_and_skipped_exceptions_only_in_proof_mode() {
+        let closure = Expr::Closure {
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+            captures: vec![],
+        };
+        let unresolved = Expr::Conditional {
+            cond: Box::new(Expr::BoolLit(true)),
+            then_expr: Box::new(Expr::IntLit(42)),
+            else_expr: Box::new(Expr::StringLit("bad".into())),
+        };
+        let declarations = vec![
+            function(
+                "unresolved",
+                vec![],
+                Typ::Int,
+                vec![Stmt::Return(Some(unresolved))],
+            ),
+            function(
+                "closure",
+                vec![],
+                Typ::Int,
+                vec![Stmt::Expr(closure), Stmt::Return(Some(Expr::IntLit(42)))],
+            ),
+            function(
+                "exception",
+                vec![],
+                Typ::Int,
+                vec![
+                    Stmt::Throw(Expr::IntLit(1)),
+                    Stmt::Return(Some(Expr::IntLit(42))),
+                ],
+            ),
+            function(
+                "propagate",
+                vec![],
+                Typ::Int,
+                vec![Stmt::Propagate, Stmt::Return(Some(Expr::IntLit(42)))],
+            ),
+            function(
+                "try",
+                vec![],
+                Typ::Int,
+                vec![
+                    Stmt::Try {
+                        body: vec![Stmt::Expr(Expr::IntLit(1))],
+                        catches: vec![],
+                    },
+                    Stmt::Return(Some(Expr::IntLit(42))),
+                ],
+            ),
+        ];
+        assert!(
+            TypeChecker::new()
+                .checked_inline_functions(&declarations)
+                .is_empty()
+        );
+        assert!(
+            TypeChecker::new()
+                .check_module(&UnifiedModule::new(vec![
+                    declarations[2].clone(),
+                    declarations[3].clone()
+                ]))
+                .is_ok(),
+            "ordinary deferred exception policy is unchanged"
+        );
+    }
+    #[test]
+    fn identical_reference_source_proof_accepts_contextual_runtime_only_for_two_refs() {
+        use crate::core_ir::rust_references::{self, ReferenceType};
+        let proof = Typ::Named("Row".into());
+        let formal = rust_references::typ(ReferenceType {
+            mutable: false,
+            referent: proof.clone(),
+            runtime: Typ::Named("&Row".into()),
+        });
+        let actual = rust_references::typ(ReferenceType {
+            mutable: false,
+            referent: proof.clone(),
+            runtime: proof.clone(),
+        });
+        assert!(is_compatible(&formal, &actual));
+        assert!(!is_compatible(&formal, &proof));
+        let declarations = vec![
+            Decl::Struct {
+                name: "Row".into(),
+                fields: vec![("x".into(), Typ::Int)],
+                type_params: vec![],
+            },
+            function(
+                "borrowed_neg",
+                vec![("self".into(), formal)],
+                Typ::Int,
+                vec![Stmt::Return(Some(Expr::IntLit(88)))],
+            ),
+            function(
+                "caller",
+                vec![("value".into(), actual)],
+                Typ::Int,
+                vec![Stmt::Return(Some(call(
+                    "borrowed_neg",
+                    vec![Expr::Ident("value".into())],
+                )))],
+            ),
+        ];
+        assert!(
+            TypeChecker::new()
+                .checked_inline_functions(&declarations)
+                .contains("caller")
+        );
+    }
+    #[test]
+    fn scoped_proof_does_not_certify_a_shadowed_direct_callee() {
+        let declarations = vec![
+            function(
+                "target",
+                vec![("value".into(), Typ::Int)],
+                Typ::Int,
+                vec![Stmt::Return(Some(Expr::IntLit(42)))],
+            ),
+            function(
+                "shadowed",
+                vec![("target".into(), Typ::Int)],
+                Typ::Int,
+                vec![Stmt::Return(Some(call("target", vec![Expr::IntLit(1)])))],
+            ),
+        ];
+        let checked = TypeChecker::new().checked_inline_functions(&declarations);
+        assert!(checked.contains("target"));
+        assert!(!checked.contains("shadowed"));
     }
 }

@@ -194,6 +194,25 @@ pub fn resolved_frontend_hash(
     format!("{:016x}", hash.finish())
 }
 
+/// Frontend binding proofs are semantic inputs even when method names/bodies
+/// remain identical (for example a trait alias resolves to a different owner).
+pub fn resolved_artifact_hash(
+    source_fingerprint: &str,
+    module: &crate::core_ir::UnifiedModule,
+    unary_methods: &crate::boundary_ir::UnaryMethodBindings,
+) -> String {
+    if unary_methods.is_empty() {
+        return resolved_frontend_hash(source_fingerprint, module);
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    "resolved-artifact-unary-v1".hash(&mut hash);
+    source_fingerprint.hash(&mut hash);
+    module.hash(&mut hash);
+    unary_methods.hash(&mut hash);
+    format!("{:016x}", hash.finish())
+}
+
 fn output_fingerprints(report: &OwnedCompileReport) -> Result<Vec<(String, u64)>, String> {
     [
         &report.artifact_path,
@@ -467,5 +486,41 @@ mod tests {
         write_cached_report(&cwd, "directory-output", &report).unwrap();
         assert!(read_cached_report(&cwd, "directory-output").is_none());
         let _ = fs::remove_dir_all(cwd);
+    }
+}
+
+#[cfg(test)]
+mod unary_binding_fingerprint_tests {
+    use super::*;
+    use crate::boundary_ir::UnaryMethodBindings;
+
+    #[test]
+    fn empty_bindings_keep_existing_hash_and_proofs_are_order_independent() {
+        let module = crate::core_ir::UnifiedModule::new(vec![]);
+        let mut bindings = UnaryMethodBindings::new();
+        assert_eq!(
+            resolved_artifact_hash("source", &module, &bindings),
+            resolved_frontend_hash("source", &module)
+        );
+        bindings.insert(
+            ("Row".into(), "-".into()),
+            Ok("Row::std::ops::Neg::neg".into()),
+        );
+        bindings.insert(
+            ("Other".into(), "-".into()),
+            Err("unresolved trait alias".into()),
+        );
+        let reverse = bindings
+            .iter()
+            .rev()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let hash = resolved_artifact_hash("source", &module, &bindings);
+        assert_eq!(hash, resolved_artifact_hash("source", &module, &reverse));
+        bindings.insert(
+            ("Row".into(), "-".into()),
+            Err("shadowed standard trait".into()),
+        );
+        assert_ne!(hash, resolved_artifact_hash("source", &module, &bindings));
     }
 }

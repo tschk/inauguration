@@ -4436,7 +4436,13 @@ fn lower_unary_expr(
             }
         }
         "-" => {
-            if scalar_expr_type(expr, ctx) == Some(Typ::Float) {
+            let operand = scalar_expr_type(expr, ctx);
+            if crate::core_ir::numeric_negation_domain(operand.as_ref(), false)
+                != crate::core_ir::NumericNegationDomain::Numeric
+            {
+                return Err("x86_64-lower: numeric negation requires a resolved Int, Bool, or Float operand".into());
+            }
+            if operand == Some(Typ::Float) {
                 emitter.emit_insns(&x86_64::load_i64(RDX, i64::MIN));
                 emitter.emit_insns(&x86_64::xor_rr(RAX, RDX));
             } else {

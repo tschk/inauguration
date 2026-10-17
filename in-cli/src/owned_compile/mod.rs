@@ -211,8 +211,12 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         &request.path
     };
     let resolved = parser_registry::resolve_parser_id(primary_path, request.parser);
-    let mut module = match parser_registry::parse_with_resolved(resolved, primary_path) {
-        Ok(Some(module)) => module,
+    let mut unary_methods = crate::boundary_ir::UnaryMethodBindings::new();
+    let mut module = match parser_registry::parse_artifact_with_resolved(resolved, primary_path) {
+        Ok(Some(artifact)) => {
+            unary_methods = artifact.unary_methods;
+            artifact.semantic
+        }
         Ok(None) => {
             let reason = "owned compile requires a Core IR frontend. All languages now route through Core IR via Tree-sitter.".to_string();
             report.reason_code = Some("frontend-parse-failed".to_string());
@@ -315,7 +319,7 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                 .stack_size(64 * 1024 * 1024)
                 .spawn({
                     let project_dir = project_dir.clone();
-                    move || crate::cargo_linker::compile_cargo_dependencies(&project_dir)
+                    move || crate::cargo_linker::compile_cargo_dependency_artifacts(&project_dir)
                 })
                 .ok()
                 .and_then(|h| h.join().ok())
@@ -325,21 +329,39 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
             eprintln!("[cargo-link] {} dependency crates", deps.len());
         }
         if !deps.is_empty() {
-            crate::cargo_linker::merge_dependency_modules(&mut module, deps);
+            if let Err(error) =
+                merge_retained_dependency_artifacts(&mut module, &mut unary_methods, deps)
+            {
+                report.reason_code = Some("dependency-resolution-failed".into());
+                report.reason = Some(error.clone());
+                report.error = Some(error);
+                return finalize_report(report, started, &cwd, &frontend_hash);
+            }
         }
         // Also compile the crate's library root (lib.rs) to make crate-local
         // functions available (e.g. inauguration::agent_mode::analyze_path)
         let crate_root = crate::cargo_linker::find_crate_root(&project_dir);
         if let Ok(ref root) = crate_root {
-            if root != &request.path && request.debug {
+            // Directory inputs already schedule each listed source for its normal
+            // parse stage. Do not reload the exact same crate root as a dependency.
+            let canonical_root = root.canonicalize().ok();
+            let root_in_inputs = std::iter::once(primary_path)
+                .chain(multi_sources.iter().map(|(path, _)| Path::new(path)))
+                .any(|source| {
+                    source == root
+                        || canonical_root
+                            .as_ref()
+                            .is_some_and(|root| source.canonicalize().ok().as_ref() == Some(root))
+                });
+            if !root_in_inputs && request.debug {
                 eprintln!("[cargo-link] crate root {}", root.display());
             }
-            if root != &request.path {
+            if !root_in_inputs {
                 let root_path = root.clone();
                 let parsed = std::thread::Builder::new()
                     .name("in-crate-root".into())
                     .stack_size(32 * 1024 * 1024)
-                    .spawn(move || crate::compiler::rust_front::parse_rust_file(&root_path))
+                    .spawn(move || crate::compiler::rust_front::parse_rust_artifact(&root_path))
                     .and_then(|h| h.join().map_err(|_| std::io::Error::other("join")))
                     .ok();
                 match parsed {
@@ -351,10 +373,16 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                                     .map(|s| s.to_string_lossy().into_owned())
                             })
                             .unwrap_or_default();
-                        crate::cargo_linker::merge_dependency_modules(
+                        if let Err(error) = merge_retained_dependency_artifacts(
                             &mut module,
+                            &mut unary_methods,
                             vec![(crate_name, crate_module)],
-                        );
+                        ) {
+                            report.reason_code = Some("dependency-resolution-failed".into());
+                            report.reason = Some(error.clone());
+                            report.error = Some(error);
+                            return finalize_report(report, started, &cwd, &frontend_hash);
+                        }
                     }
                     Some(Err(err)) => {
                         if request.debug {
@@ -379,8 +407,29 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         for (source_path, _source_content) in &multi_sources[1..] {
             let path = std::path::Path::new(source_path);
             let resolved = parser_registry::resolve_parser_id(path, request.parser);
-            if let Ok(Some(mut extra)) = parser_registry::parse_with_resolved(resolved, path) {
-                module.decls.append(&mut extra.decls);
+            if let Some(extra) = match parser_registry::parse_artifact_with_resolved(resolved, path)
+            {
+                Ok(artifact) => artifact,
+                Err(error) => {
+                    let error = error.to_string();
+                    report.reason_code = Some("dependency-resolution-failed".into());
+                    report.reason = Some(error.clone());
+                    report.error = Some(error);
+                    return finalize_report(report, started, &cwd, &frontend_hash);
+                }
+            } {
+                // Empty crate name preserves direct-append naming, while keeping
+                // the same receiver/callable-origin proof checks as Cargo merges.
+                if let Err(error) = merge_retained_dependency_artifacts(
+                    &mut module,
+                    &mut unary_methods,
+                    vec![(String::new(), extra)],
+                ) {
+                    report.reason_code = Some("dependency-resolution-failed".into());
+                    report.reason = Some(error.clone());
+                    report.error = Some(error);
+                    return finalize_report(report, started, &cwd, &frontend_hash);
+                }
             }
         }
         // When C/C++ sources are present: strip empty externs and
@@ -428,8 +477,16 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                     && module_has_function(&module, "main"))
                 .then_some("main")
             });
-        match jit::resolve_module_dependencies(&module, dependency_entry, request.target) {
-            Ok(expanded) => module = expanded,
+        match jit::resolve_module_dependencies_with_bindings(
+            &module,
+            &unary_methods,
+            dependency_entry,
+            request.target,
+        ) {
+            Ok(expanded) => {
+                module = expanded.semantic;
+                unary_methods = expanded.unary_methods;
+            }
             Err(error) => {
                 report.reason_code = Some("dependency-resolution-failed".into());
                 report.reason = Some(error.clone());
@@ -456,12 +513,21 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         );
     }
 
+    if let Err(error) =
+        crate::typecheck::TypeChecker::new().resolve_unary_methods(&mut module, &unary_methods)
+    {
+        report.reason_code = Some("rust-unary-resolution-failed".into());
+        report.reason = Some(error.clone());
+        report.error = Some(error);
+        return finalize_report(report, started, &cwd, &frontend_hash);
+    }
+
     if request.target != CompileTarget::Jit {
         let context = format!(
             "{frontend_hash}:{:?}:{:?}:{:?}",
             request.profile, request.emit, request.base
         );
-        frontend_hash = compile_cache::resolved_frontend_hash(&context, &module);
+        frontend_hash = compile_cache::resolved_artifact_hash(&context, &module, &unary_methods);
         report.frontend_hash = Some(frontend_hash.clone());
     }
 
@@ -570,13 +636,19 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         let keep_all = request.linkage == crate::native_emit::NativeLinkage::StaticLib
             || matches!(request.emit, Some(OwnedEmit::Sci { .. }))
             || (matches!(request.target, CompileTarget::Jit) && entry.is_none());
-        crate::core_opt::optimize_with_linkage_and_semantics(
-            &mut module.decls,
+        if let Err(error) = optimize_retained_module(
+            &mut module,
+            &unary_methods,
             entry.as_deref(),
             request.profile,
             keep_all,
             integer_semantics,
-        );
+        ) {
+            report.reason_code = Some("rust-unary-resolution-failed".into());
+            report.reason = Some(error.clone());
+            report.error = Some(error);
+            return finalize_report(report, started, &cwd, &frontend_hash);
+        }
         report.typed_function_count = count_functions(&module);
         report.call_edge_count = count_call_edges(&module, &request.module_id);
     }
@@ -770,4 +842,99 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     }
 
     finalize_report(report, started, &cwd, &frontend_hash)
+}
+
+fn merge_retained_dependency_artifacts(
+    module: &mut crate::core_ir::UnifiedModule,
+    bindings: &mut crate::boundary_ir::UnaryMethodBindings,
+    dependencies: Vec<(String, crate::boundary_ir::CompileArtifact)>,
+) -> Result<(), String> {
+    let mut artifact = crate::boundary_ir::CompileArtifact::from_semantic(std::mem::replace(
+        module,
+        crate::core_ir::UnifiedModule::new(Vec::new()),
+    ));
+    artifact.unary_methods = std::mem::take(bindings);
+    let result = crate::cargo_linker::merge_dependency_artifacts(&mut artifact, dependencies);
+    *module = artifact.semantic;
+    *bindings = artifact.unary_methods;
+    result
+}
+
+/// Shared owned/coverage lifecycle: source proof survives substitution, resolves
+/// before folding/DCE, then erases to the preexisting native representation.
+pub(crate) fn optimize_retained_module(
+    module: &mut crate::core_ir::UnifiedModule,
+    bindings: &crate::boundary_ir::UnaryMethodBindings,
+    entry: Option<&str>,
+    profile: crate::emit_profile::EmitProfile,
+    keep_all: bool,
+    semantics: crate::integer_semantics::IntegerSemantics,
+) -> Result<(), String> {
+    fn count_tags(decls: &mut [Decl]) -> (usize, bool) {
+        let mut tags = 0;
+        let mut reference_values = false;
+        crate::core_opt::map_decl_exprs_mut(decls, &mut |expr| {
+            if let crate::core_ir::Expr::Unary { op, .. } = expr {
+                tags += usize::from(op == crate::core_ir::rust_references::NEGATE_VALUE);
+                reference_values |= crate::core_ir::rust_references::value_kind(op).is_some();
+            }
+        });
+        (tags, reference_values)
+    }
+    let (initial_tags, reference_values) = count_tags(&mut module.decls);
+    // The existing BORROW place preparation has already desugared. Remove its
+    // value-level Call before the inliner classifies pure borrowed arguments;
+    // the outer producer still retains exact shared/mutable proof.
+    if initial_tags != 0 || reference_values {
+        crate::typecheck::TypeChecker::new().resolve_complements(module);
+        crate::typecheck::TypeChecker::new().resolve_unary_methods(module, bindings)?;
+    }
+    let has_tags = count_tags(&mut module.decls).0 != 0;
+    let identity = module.identity.clone();
+    let mut normalization_error = None;
+    let mut normalize = |decls: &mut Vec<Decl>| {
+        // Continue only on real resolution or structural inline progress.
+        // Counting straddles resolution, not inlining (which may clone tags).
+        for round in 0..=crate::core_opt::frontend_inline_round_limit(profile) {
+            let before = count_tags(decls).0;
+            let mut view = crate::core_ir::UnifiedModule::with_identity(
+                std::mem::take(decls),
+                identity.clone(),
+            );
+            let result =
+                crate::typecheck::TypeChecker::new().resolve_unary_methods(&mut view, bindings);
+            *decls = view.decls;
+            if let Err(error) = result {
+                normalization_error = Some(error);
+                break;
+            }
+            let after = count_tags(decls).0;
+            if round == crate::core_opt::frontend_inline_round_limit(profile) {
+                break;
+            }
+            // Forwarding wrappers can become inlinable before they expose a
+            // concrete operator. Structural inline progress must also continue
+            // resolution; effectful/unmodified generic calls stop immediately.
+            let inline_progress =
+                crate::core_opt::inline_for_frontend_normalization(decls, profile);
+            if after >= before && !inline_progress {
+                break;
+            }
+        }
+    };
+    crate::core_opt::optimize_with_linkage_and_semantics_and_normalizer(
+        &mut module.decls,
+        entry,
+        profile,
+        keep_all,
+        semantics,
+        if has_tags { Some(&mut normalize) } else { None },
+    );
+    if let Some(error) = normalization_error {
+        return Err(error);
+    }
+    // Deferred generic functions retain the established compile-only policy:
+    // native scalar-domain validation refuses their unsupported execution.
+    crate::core_ir::rust_references::erase_declarations(&mut module.decls);
+    Ok(())
 }

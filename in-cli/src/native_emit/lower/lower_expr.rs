@@ -981,7 +981,13 @@ pub(crate) fn lower_unary(
             Ok(())
         }
         "-" => {
-            if matches!(native_expr_type(expr, ctx, functions), Some(Typ::Float)) {
+            let operand = native_expr_type(expr, ctx, functions);
+            if crate::core_ir::numeric_negation_domain(operand.as_ref(), false)
+                != crate::core_ir::NumericNegationDomain::Numeric
+            {
+                return Err("native-lower: numeric negation requires a resolved Int, Bool, or Float operand".into());
+            }
+            if matches!(operand, Some(Typ::Float)) {
                 emitter.emit_u32(aarch64::fmov_from_gp(rd, rd));
                 emitter.emit_u32(aarch64::fneg_d(rd, rd));
                 emitter.emit_u32(aarch64::fmov_to_gp(rd, rd));

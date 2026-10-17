@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::boundary_ir::{UnaryMethodBindings, merge_unary_method_bindings};
 use crate::core_ir::{Decl, Expr, MatchPattern, Stmt, Typ, UnifiedModule};
 use crate::crate_db::CrateDb;
 
@@ -13,6 +14,7 @@ use crate::crate_db::CrateDb;
 pub struct ResolveResult {
     /// Expanded module with all resolved dependencies merged in.
     pub module: UnifiedModule,
+    pub unary_methods: UnaryMethodBindings,
     pub files_parsed: usize,
     pub functions_added: usize,
 }
@@ -303,6 +305,20 @@ pub fn resolve_deps_for_entry(
     crate_db: &CrateDb,
     entry: Option<&str>,
 ) -> Result<ResolveResult, String> {
+    let mut resolved =
+        resolve_deps_for_entry_with_bindings(module, &UnaryMethodBindings::new(), crate_db, entry)?;
+    crate::core_ir::rust_references::erase_declarations(&mut resolved.module.decls);
+    resolved.unary_methods.clear();
+    Ok(resolved)
+}
+
+pub fn resolve_deps_for_entry_with_bindings(
+    module: &UnifiedModule,
+    bindings: &UnaryMethodBindings,
+    crate_db: &CrateDb,
+    entry: Option<&str>,
+) -> Result<ResolveResult, String> {
+    let mut unary_methods = bindings.clone();
     let mut expanded = module.clone();
     let mut files_parsed = 0;
     let mut functions_added = 0;
@@ -341,10 +357,13 @@ pub fn resolve_deps_for_entry(
         if !attempted.insert(target.clone()) {
             continue;
         }
-        let Ok((crate_name, module_path, dep_mod)) = crate_db.resolve(&target) else {
-            continue;
+        let (crate_name, module_path, dep_mod) = match crate_db.resolve_artifact_detailed(&target) {
+            Ok(artifact) => artifact,
+            Err(crate::crate_db::ArtifactResolveError::Unavailable(_)) => continue,
+            Err(crate::crate_db::ArtifactResolveError::Invalid(error)) => return Err(error),
         };
         if !dep_mod
+            .semantic
             .decls
             .iter()
             .any(|decl| declaration_name(decl) == target)
@@ -354,7 +373,8 @@ pub fn resolve_deps_for_entry(
         if !loaded_modules.insert((crate_name, module_path)) {
             continue;
         }
-        for decl in &dep_mod.decls {
+        merge_unary_method_bindings(&mut unary_methods, dep_mod.unary_methods.clone())?;
+        for decl in &dep_mod.semantic.decls {
             let name = declaration_name(decl);
             if let Some(index) = declarations.get(name) {
                 if &expanded.decls[*index] != decl {
@@ -377,6 +397,7 @@ pub fn resolve_deps_for_entry(
 
     Ok(ResolveResult {
         module: expanded,
+        unary_methods,
         files_parsed,
         functions_added,
     })
@@ -804,5 +825,49 @@ mod tests {
         assert_eq!(res.functions_added, 3);
         assert_eq!(res.files_parsed, 3);
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+}
+
+#[cfg(test)]
+mod retained_binding_tests {
+    use super::*;
+    #[test]
+    fn missing_dependency_is_optional_but_loaded_invalid_source_is_not() {
+        let root = std::env::temp_dir().join(format!("retained_dep_error_{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "this is not Rust").unwrap();
+        let mut db = CrateDb::new();
+        db.search_roots.clear();
+        db.register_crate("broken", root.clone());
+        let module = |target: &str| {
+            UnifiedModule::new(vec![Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![Stmt::Return(Some(Expr::Call {
+                    callee: Box::new(Expr::Ident(target.into())),
+                    args: vec![],
+                }))],
+            }])
+        };
+        assert!(resolve_deps_for_entry(&module("missing::answer"), &db, Some("main")).is_ok());
+        assert!(resolve_deps_for_entry(&module("broken::answer"), &db, Some("main")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn entry_resolution_preserves_metadata_even_without_added_declarations() {
+        let mut db = CrateDb::new();
+        db.search_roots.clear();
+        let module = UnifiedModule::new(vec![]);
+        let bindings = [(("&Row".into(), "-".into()), Err("unresolved".into()))]
+            .into_iter()
+            .collect();
+        let result = resolve_deps_for_entry_with_bindings(&module, &bindings, &db, None).unwrap();
+        assert_eq!(result.module, module);
+        assert_eq!(result.unary_methods, bindings);
+        assert_eq!(result.functions_added, 0);
+        assert_eq!(result.files_parsed, 0);
     }
 }

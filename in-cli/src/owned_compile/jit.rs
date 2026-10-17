@@ -44,11 +44,22 @@ pub fn resolve_jit_entry(module: &UnifiedModule, entry: &str) -> String {
         .unwrap_or_else(|| entry.to_string())
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_module_dependencies(
     module: &UnifiedModule,
     entry: Option<&str>,
     target: super::CompileTarget,
 ) -> Result<UnifiedModule, String> {
+    resolve_module_dependencies_with_bindings(module, &Default::default(), entry, target)
+        .map(crate::boundary_ir::CompileArtifact::into_semantic)
+}
+
+pub(crate) fn resolve_module_dependencies_with_bindings(
+    module: &UnifiedModule,
+    bindings: &crate::boundary_ir::UnaryMethodBindings,
+    entry: Option<&str>,
+    target: super::CompileTarget,
+) -> Result<crate::boundary_ir::CompileArtifact, String> {
     let selected_entry = entry.map(|entry| {
         if target == super::CompileTarget::Jit {
             resolve_jit_entry(module, entry)
@@ -85,12 +96,15 @@ pub(crate) fn resolve_module_dependencies(
         });
     });
 
-    let resolved_module = dep_resolver::resolve_deps_for_entry(module, &crate_db, entry)?;
+    let resolved_module =
+        dep_resolver::resolve_deps_for_entry_with_bindings(module, bindings, &crate_db, entry)?;
 
     // Existing caller modules retain their frontend's validation/compile-only policy.
     // This Rust validation view is needed only when lazy resolution adds source declarations.
     if resolved_module.module.decls.len() == module.decls.len() {
-        return Ok(module.clone());
+        let mut artifact = crate::boundary_ir::CompileArtifact::from_semantic(module.clone());
+        artifact.unary_methods = resolved_module.unary_methods;
+        return Ok(artifact);
     }
 
     // Debug log how many deps were resolved
@@ -106,6 +120,8 @@ pub(crate) fn resolve_module_dependencies(
         crate::parser_registry::ParserId::Rust,
         &resolved_module.module,
     );
+    crate::typecheck::TypeChecker::new()
+        .resolve_unary_methods(&mut normalized, &resolved_module.unary_methods)?;
     let mut caller_shapes = module.clone();
     crate::lower_core::desugar_module(&mut caller_shapes);
     let caller_functions: std::collections::HashSet<_> = caller_shapes
@@ -168,7 +184,9 @@ pub(crate) fn resolve_module_dependencies(
     let imports = normalized.decls.split_off(original_count);
     let mut expanded = module.clone();
     expanded.decls.extend(imports);
-    Ok(expanded)
+    let mut artifact = crate::boundary_ir::CompileArtifact::from_semantic(expanded);
+    artifact.unary_methods = resolved_module.unary_methods;
+    Ok(artifact)
 }
 
 pub(super) fn host_supports_jit() -> bool {

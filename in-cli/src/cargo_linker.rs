@@ -1,3 +1,4 @@
+use crate::boundary_ir::{CompileArtifact, merge_unary_method_bindings};
 use crate::compiler::rust_front;
 use crate::core_ir::{Decl, Expr, Stmt, UnifiedModule};
 use std::collections::HashMap;
@@ -98,6 +99,13 @@ fn get_cargo_metadata(project_dir: &Path) -> Option<Arc<serde_json::Value>> {
 /// Collects ALL transitive dependencies from the resolve graph.
 /// Returns a Vec of (crate_name, UnifiedModule) for all successfully-compiled dependencies.
 pub fn compile_cargo_dependencies(project_dir: &Path) -> Vec<(String, UnifiedModule)> {
+    compile_cargo_dependency_artifacts(project_dir)
+        .into_iter()
+        .map(|(name, artifact)| (name, artifact.into_semantic()))
+        .collect()
+}
+
+pub fn compile_cargo_dependency_artifacts(project_dir: &Path) -> Vec<(String, CompileArtifact)> {
     let mut modules = Vec::new();
 
     let metadata = match get_cargo_metadata(project_dir) {
@@ -187,7 +195,7 @@ fn compile_resolved_dependencies(
     all_dep_ids: &[&str],
     pkg_manifest: &HashMap<&str, PathBuf>,
     pkg_by_id: &HashMap<&str, &serde_json::Value>,
-    modules: &mut Vec<(String, UnifiedModule)>,
+    modules: &mut Vec<(String, CompileArtifact)>,
 ) {
     let mut already_compiled: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut manifest_cache: HashMap<String, bool> = HashMap::new();
@@ -256,7 +264,7 @@ fn compile_resolved_dependencies(
                     }
                     if let Ok(Ok(module)) =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            rust_front::parse_rust_file(&lib_rs)
+                            rust_front::parse_rust_artifact(&lib_rs)
                         }))
                     {
                         modules.push((crate_name.to_string(), module));
@@ -311,36 +319,39 @@ pub fn find_crate_root(project_dir: &Path) -> Result<PathBuf, String> {
     Err("no crate root found".to_string())
 }
 
-pub fn merge_dependency_modules(main: &mut UnifiedModule, deps: Vec<(String, UnifiedModule)>) {
-    for (crate_name, mut dep_module) in deps {
-        if crate_name.is_empty() || crate_name.starts_with("in-") {
-            main.decls.append(&mut dep_module.decls);
+// Keep original callable names and create the same crate-qualified forwarding aliases.
+// Alias production is shared between semantic merge and proof-origin preflight.
+fn dependency_function_aliases(
+    crate_name: &str,
+    dep_module: &UnifiedModule,
+) -> Vec<(String, Decl)> {
+    if crate_name.is_empty() || crate_name.starts_with("in-") {
+        return vec![];
+    }
+    let mut aliases = Vec::new();
+    for decl in &dep_module.decls {
+        let Decl::Function {
+            name, params, ret, ..
+        } = decl
+        else {
+            continue;
+        };
+        let qualified = if name.starts_with(&format!("{crate_name}::")) {
+            continue;
+        } else {
+            format!("{crate_name}::{name}")
+        };
+        if dep_module
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name: n, .. } if n == &qualified))
+        {
             continue;
         }
-        // Keep original names (`cli::run`, `run`) and add crate-qualified
-        // forwarding aliases (`telekinesis::cli::run`, `telekinesis::run`).
-        let mut aliases = Vec::new();
-        for decl in &dep_module.decls {
-            let Decl::Function {
-                name, params, ret, ..
-            } = decl
-            else {
-                continue;
-            };
-            let qualified = if name.starts_with(&format!("{crate_name}::")) {
-                continue;
-            } else {
-                format!("{crate_name}::{name}")
-            };
-            if dep_module
-                .decls
-                .iter()
-                .any(|d| matches!(d, Decl::Function { name: n, .. } if n == &qualified))
-            {
-                continue;
-            }
-            let args: Vec<Expr> = params.iter().map(|(n, _)| Expr::Ident(n.clone())).collect();
-            aliases.push(Decl::Function {
+        let args: Vec<Expr> = params.iter().map(|(n, _)| Expr::Ident(n.clone())).collect();
+        aliases.push((
+            name.clone(),
+            Decl::Function {
                 name: qualified,
                 params: params.clone(),
                 ret: ret.clone(),
@@ -349,11 +360,160 @@ pub fn merge_dependency_modules(main: &mut UnifiedModule, deps: Vec<(String, Uni
                     args,
                 }))],
                 type_params: vec![],
-            });
+            },
+        ));
+    }
+    aliases
+}
+
+pub fn merge_dependency_modules(main: &mut UnifiedModule, deps: Vec<(String, UnifiedModule)>) {
+    for (crate_name, mut dep_module) in deps {
+        if crate_name.is_empty() || crate_name.starts_with("in-") {
+            main.decls.append(&mut dep_module.decls);
+            continue;
         }
-        dep_module.decls.extend(aliases);
+        let aliases = dependency_function_aliases(&crate_name, &dep_module);
+        dep_module
+            .decls
+            .extend(aliases.into_iter().map(|(_, alias)| alias));
         main.decls.append(&mut dep_module.decls);
     }
+}
+
+/// Validate only callables selected by retained proofs (and their generated aliases).
+/// Unrelated legacy duplicate symbols keep the existing semantic merge policy.
+fn validate_unary_callable_origins(
+    main: &CompileArtifact,
+    deps: &[(String, CompileArtifact)],
+) -> Result<(), String> {
+    if !main.unary_methods.values().any(Result::is_ok)
+        && !deps
+            .iter()
+            .any(|(_, artifact)| artifact.unary_methods.values().any(Result::is_ok))
+    {
+        return Ok(());
+    }
+    let artifacts: Vec<(&str, &CompileArtifact)> = std::iter::once(("", main))
+        .chain(
+            deps.iter()
+                .map(|(name, artifact)| (name.as_str(), artifact)),
+        )
+        .collect();
+    let mut callables: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+    let mut selected = Vec::new();
+    for (owner, (crate_name, artifact)) in artifacts.iter().enumerate() {
+        for decl in &artifact.semantic.decls {
+            if let Decl::Function { name, .. } = decl {
+                callables
+                    .entry(name.clone())
+                    .or_default()
+                    .push((owner, name.clone()));
+            }
+        }
+        for proof in artifact.unary_methods.values() {
+            let Ok(target) = proof else {
+                continue;
+            };
+            let mut definitions = artifact
+                .semantic
+                .decls
+                .iter()
+                .filter(|decl| matches!(decl, Decl::Function { name, .. } if name == target));
+            let first = definitions.next().ok_or_else(|| {
+                format!("missing dependency unary callable `{target}` in its proof origin")
+            })?;
+            if definitions.any(|definition| definition != first) {
+                return Err(format!("ambiguous dependency unary callable `{target}`"));
+            }
+            selected.push((owner, target.clone(), target.clone()));
+        }
+        for (target, alias) in dependency_function_aliases(crate_name, &artifact.semantic) {
+            let Decl::Function { name, .. } = alias else {
+                return Err("invalid generated dependency function alias".into());
+            };
+            callables
+                .entry(name.clone())
+                .or_default()
+                .push((owner, target.clone()));
+            if artifact
+                .unary_methods
+                .values()
+                .any(|proof| proof.as_ref().ok() == Some(&target))
+            {
+                selected.push((owner, name, target));
+            }
+        }
+    }
+    for (owner, name, target) in selected {
+        if callables.get(&name).is_none_or(|origins| {
+            origins
+                .iter()
+                .any(|(origin, source)| *origin != owner || source != &target)
+        }) {
+            return Err(format!("ambiguous dependency unary callable `{name}`"));
+        }
+    }
+    Ok(())
+}
+
+/// Cargo preserves nominal names; do not attach a proof to a different crate's
+/// same-spelled schema. Perform all checks before changing either semantic IR or metadata.
+pub fn merge_dependency_artifacts(
+    main: &mut CompileArtifact,
+    deps: Vec<(String, CompileArtifact)>,
+) -> Result<(), String> {
+    validate_unary_callable_origins(main, &deps)?;
+    let mut bindings = main.unary_methods.clone();
+    let mut nominal_owners: HashMap<String, usize> = HashMap::new();
+    let mut binding_owners: HashMap<String, usize> = HashMap::new();
+    for (owner, artifact) in std::iter::once(main as &CompileArtifact)
+        .chain(deps.iter().map(|(_, artifact)| artifact))
+        .enumerate()
+    {
+        for decl in &artifact.semantic.decls {
+            if let Decl::Struct { name, .. }
+            | Decl::Class { name, .. }
+            | Decl::Interface { name, .. } = decl
+            {
+                if binding_owners
+                    .get(name)
+                    .is_some_and(|previous| *previous != owner)
+                {
+                    return Err(format!("ambiguous dependency unary receiver `{name}`"));
+                }
+                if let Some(previous) = nominal_owners.insert(name.clone(), owner)
+                    && previous != owner
+                    && (binding_owners.contains_key(name)
+                        || artifact.unary_methods.keys().any(|(receiver, _)| {
+                            crate::core_ir::rust_references::receiver_nominal_identity(receiver)
+                                == Some(name.as_str())
+                        }))
+                {
+                    return Err(format!("ambiguous dependency unary receiver `{name}`"));
+                }
+            }
+        }
+        for (receiver, _) in artifact.unary_methods.keys() {
+            let nominal = crate::core_ir::rust_references::receiver_nominal_identity(receiver)
+                .ok_or_else(|| format!("invalid dependency unary receiver `{receiver}`"))?;
+            if nominal_owners
+                .get(nominal)
+                .is_some_and(|previous| *previous != owner)
+            {
+                return Err(format!("ambiguous dependency unary receiver `{receiver}`"));
+            }
+            binding_owners.insert(nominal.to_string(), owner);
+        }
+        merge_unary_method_bindings(&mut bindings, artifact.unary_methods.clone())?;
+    }
+    merge_dependency_modules(
+        &mut main.semantic,
+        deps.into_iter()
+            .map(|(name, artifact)| (name, artifact.semantic))
+            .collect(),
+    );
+    main.unary_methods = bindings;
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -777,5 +937,178 @@ direct_dep = { path = "direct_dep" }
         );
         assert_eq!(find_crate_root(&temp.path), Ok(second));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod retained_artifact_tests {
+    use super::*;
+    fn record() -> Decl {
+        Decl::Struct {
+            name: "Row".into(),
+            fields: vec![("value".into(), crate::core_ir::Typ::Int)],
+            type_params: vec![],
+        }
+    }
+    #[test]
+    fn metadata_only_dependency_is_retained_without_new_declarations() {
+        let mut main = CompileArtifact::from_semantic(UnifiedModule::new(vec![]));
+        let mut dep = CompileArtifact::from_semantic(UnifiedModule::new(vec![]));
+        dep.unary_methods
+            .insert(("Row".into(), "-".into()), Err("unresolved trait".into()));
+        merge_dependency_artifacts(&mut main, vec![("dep".into(), dep.clone())]).unwrap();
+        assert!(main.semantic.decls.is_empty());
+        assert_eq!(main.unary_methods, dep.unary_methods);
+    }
+    #[test]
+    fn metadata_only_binding_cannot_attach_to_another_origin_schema_in_either_order() {
+        for receiver in ["Row", "&Row", "&mut Row"] {
+            for proof in [Ok("Row::neg".into()), Err("unresolved".into())] {
+                let mut binding = CompileArtifact::from_semantic(UnifiedModule::new(vec![]));
+                binding
+                    .unary_methods
+                    .insert((receiver.into(), "-".into()), proof);
+                let schema = CompileArtifact::from_semantic(UnifiedModule::new(vec![record()]));
+                for (first, second) in [
+                    (binding.clone(), schema.clone()),
+                    (schema.clone(), binding.clone()),
+                ] {
+                    let mut main = first.clone();
+                    assert!(
+                        merge_dependency_artifacts(&mut main, vec![("dep".into(), second)])
+                            .is_err()
+                    );
+                    assert_eq!(main, first);
+                }
+            }
+        }
+    }
+
+    fn callable(name: &str, value: i64) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params: vec![],
+            ret: crate::core_ir::Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::IntLit(value)))],
+            type_params: vec![],
+        }
+    }
+    fn proof_artifact() -> CompileArtifact {
+        let mut artifact = CompileArtifact::from_semantic(UnifiedModule::new(vec![
+            record(),
+            callable("Row::neg", 77),
+        ]));
+        artifact
+            .unary_methods
+            .insert(("Row".into(), "-".into()), Ok("Row::neg".into()));
+        artifact
+    }
+    #[test]
+    fn proof_callable_cannot_collide_with_another_origins_exact_symbol() {
+        for conflicting in ["Row::neg", "dep::Row::neg"] {
+            let mut main =
+                CompileArtifact::from_semantic(UnifiedModule::new(vec![callable(conflicting, 42)]));
+            let before = main.clone();
+            assert!(
+                merge_dependency_artifacts(&mut main, vec![("dep".into(), proof_artifact())])
+                    .is_err(),
+                "{conflicting}"
+            );
+            assert_eq!(main, before);
+        }
+    }
+    #[test]
+    fn metadata_only_ok_proof_cannot_borrow_an_unrelated_callable() {
+        let mut main =
+            CompileArtifact::from_semantic(UnifiedModule::new(vec![callable("Row::neg", 42)]));
+        let before = main.clone();
+        let mut dep = CompileArtifact::from_semantic(UnifiedModule::new(vec![]));
+        dep.unary_methods
+            .insert(("Row".into(), "-".into()), Ok("Row::neg".into()));
+        assert!(merge_dependency_artifacts(&mut main, vec![("dep".into(), dep)]).is_err());
+        assert_eq!(main, before);
+    }
+    #[test]
+    fn generated_alias_cannot_replace_a_proof_target_from_another_origin() {
+        let mut main = CompileArtifact::from_semantic(UnifiedModule::new(vec![]));
+        let mut proof = proof_artifact();
+        proof.semantic.decls.push(callable("dep::Row::neg", 77));
+        proof
+            .unary_methods
+            .insert(("Row".into(), "-".into()), Ok("dep::Row::neg".into()));
+        let foreign =
+            CompileArtifact::from_semantic(UnifiedModule::new(vec![callable("Row::neg", 42)]));
+        assert!(
+            merge_dependency_artifacts(
+                &mut main,
+                vec![("owner".into(), proof), ("dep".into(), foreign)]
+            )
+            .is_err()
+        );
+        assert!(main.semantic.decls.is_empty());
+    }
+    #[test]
+    fn repeated_same_origin_metadata_and_unrelated_duplicates_keep_existing_policy() {
+        let mut main = proof_artifact();
+        let before = main.clone();
+        merge_dependency_artifacts(&mut main, vec![]).unwrap();
+        assert_eq!(main, before);
+        let same_metadata = main.unary_methods.clone();
+        merge_unary_method_bindings(&mut main.unary_methods, same_metadata).unwrap();
+        let unrelated = CompileArtifact::from_semantic(UnifiedModule::new(vec![
+            callable("other", 1),
+            callable("other", 2),
+        ]));
+        merge_dependency_artifacts(&mut main, vec![("dep".into(), unrelated)]).unwrap();
+        assert_eq!(main.unary_methods, before.unary_methods);
+    }
+
+    #[test]
+    fn cargo_function_alias_does_not_change_nominal_proof_target() {
+        let mut main = CompileArtifact::from_semantic(UnifiedModule::new(vec![]));
+        let mut dep = CompileArtifact::from_semantic(UnifiedModule::new(vec![
+            record(),
+            Decl::Function {
+                name: "Row::neg".into(),
+                params: vec![],
+                ret: crate::core_ir::Typ::Int,
+                body: vec![Stmt::Return(Some(Expr::IntLit(77)))],
+                type_params: vec![],
+            },
+        ]));
+        dep.unary_methods
+            .insert(("Row".into(), "-".into()), Ok("Row::neg".into()));
+        merge_dependency_artifacts(&mut main, vec![("dep".into(), dep)]).unwrap();
+        assert_eq!(
+            main.unary_methods.get(&("Row".into(), "-".into())),
+            Some(&Ok("Row::neg".into()))
+        );
+        assert!(
+            main.semantic
+                .decls
+                .iter()
+                .any(|decl| matches!(decl, Decl::Function {name, ..} if name == "dep::Row::neg"))
+        );
+        assert!(
+            !main
+                .unary_methods
+                .contains_key(&("dep::Row".into(), "-".into()))
+        );
+    }
+
+    #[test]
+    fn same_named_nominals_from_different_dependencies_refuse_atomically() {
+        for receiver in ["Row", "&Row", "&mut Row"] {
+            let mut main = CompileArtifact::from_semantic(UnifiedModule::new(vec![record()]));
+            let previous = main.clone();
+            let mut dep = CompileArtifact::from_semantic(UnifiedModule::new(vec![record()]));
+            dep.unary_methods
+                .insert((receiver.into(), "-".into()), Ok("Row::neg".into()));
+            assert!(
+                merge_dependency_artifacts(&mut main, vec![("dep".into(), dep)]).is_err(),
+                "{receiver}"
+            );
+            assert_eq!(main, previous);
+        }
     }
 }

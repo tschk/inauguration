@@ -8,8 +8,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+use crate::boundary_ir::CompileArtifact;
 use crate::core_ir::{Decl, UnifiedModule};
 use crate::parser_registry::{ParserId, ResolvedBuildParser};
+
+/// Lookup misses remain optional; loaded-source proof failures must reach callers.
+pub(crate) enum ArtifactResolveError {
+    Unavailable(String),
+    Invalid(String),
+}
 
 /// Location of a symbol definition within a crate.
 #[derive(Clone, Debug)]
@@ -21,7 +28,7 @@ pub struct SymbolLocation {
 
 /// A parsed module's cached data.
 struct ParsedModule {
-    module: UnifiedModule,
+    artifact: CompileArtifact,
 }
 
 /// Per-crate info.
@@ -77,24 +84,54 @@ impl CrateDb {
     /// Resolve a fully-qualified name like "std::fs::read_to_string".
     /// Returns (crate, module_path, parsed_module).
     pub fn resolve(&self, fq_name: &str) -> Result<(String, String, Arc<UnifiedModule>), String> {
+        self.resolve_artifact(fq_name)
+            .map(|(name, path, artifact)| {
+                (
+                    name,
+                    path,
+                    Arc::new(artifact.as_ref().clone().into_semantic()),
+                )
+            })
+    }
+
+    /// Resolve and cache frontend proof metadata alongside the semantic declarations.
+    pub fn resolve_artifact(
+        &self,
+        fq_name: &str,
+    ) -> Result<(String, String, Arc<CompileArtifact>), String> {
+        self.resolve_artifact_detailed(fq_name)
+            .map_err(|error| match error {
+                ArtifactResolveError::Unavailable(message)
+                | ArtifactResolveError::Invalid(message) => message,
+            })
+    }
+
+    pub(crate) fn resolve_artifact_detailed(
+        &self,
+        fq_name: &str,
+    ) -> Result<(String, String, Arc<CompileArtifact>), ArtifactResolveError> {
         if !fq_name
             .split("::")
             .all(|part| syn::parse_str::<syn::Ident>(part).is_ok())
         {
-            return Err(format!("invalid qualified dependency name `{fq_name}`"));
+            return Err(ArtifactResolveError::Unavailable(format!(
+                "invalid qualified dependency name `{fq_name}`"
+            )));
         }
         // Check cache
         {
             let idx = self.symbol_index.read().unwrap();
             if let Some(loc) = idx.get(fq_name) {
-                return self.get_module(&loc.crate_name, &loc.module_path);
+                return self.get_artifact(&loc.crate_name, &loc.module_path);
             }
         }
 
         // Parse name to find owning crate and module
         let parts: Vec<&str> = fq_name.split("::").collect();
         if parts.len() < 2 {
-            return Err(format!("not qualified: `{fq_name}`"));
+            return Err(ArtifactResolveError::Unavailable(format!(
+                "not qualified: `{fq_name}`"
+            )));
         }
         let crate_name = parts[0].to_string();
         // Module path = all but last segment
@@ -106,9 +143,11 @@ impl CrateDb {
 
         // Find source file
         let rel = module_path.replace("::", "/");
-        let source_file = self
-            .find_source(&crate_name, &rel)
-            .ok_or_else(|| format!("no source for `{fq_name}` (crate={crate_name}, path={rel})"))?;
+        let source_file = self.find_source(&crate_name, &rel).ok_or_else(|| {
+            ArtifactResolveError::Unavailable(format!(
+                "no source for `{fq_name}` (crate={crate_name}, path={rel})"
+            ))
+        })?;
 
         // Cache the lookup
         self.symbol_index.write().unwrap().insert(
@@ -120,14 +159,14 @@ impl CrateDb {
             },
         );
 
-        self.get_module(&crate_name, &module_path)
+        self.get_artifact(&crate_name, &module_path)
     }
 
-    fn get_module(
+    fn get_artifact(
         &self,
         crate_name: &str,
         module_path: &str,
-    ) -> Result<(String, String, Arc<UnifiedModule>), String> {
+    ) -> Result<(String, String, Arc<CompileArtifact>), ArtifactResolveError> {
         // Check already-loaded
         {
             let crates = self.crates.read().unwrap();
@@ -136,7 +175,7 @@ impl CrateDb {
                     return Ok((
                         crate_name.to_string(),
                         module_path.to_string(),
-                        Arc::new(pm.module.clone()),
+                        Arc::new(pm.artifact.clone()),
                     ));
                 }
             }
@@ -144,18 +183,27 @@ impl CrateDb {
 
         // Find and parse source file
         let rel = module_path.replace("::", "/");
-        let source_file = self
-            .find_source(crate_name, &rel)
-            .ok_or_else(|| format!("source not found for `{crate_name}::{module_path}`"))?;
+        let source_file = self.find_source(crate_name, &rel).ok_or_else(|| {
+            ArtifactResolveError::Unavailable(format!(
+                "source not found for `{crate_name}::{module_path}`"
+            ))
+        })?;
 
         // Parse via standard pipeline
         let resolved = ResolvedBuildParser::CoreIr(ParserId::Rust);
-        let mut parsed = crate::parser_registry::parse_with_resolved(resolved, &source_file)
-            .map_err(|e| format!("parse error {source_file:?}: {e}"))?
-            .ok_or_else(|| format!("no module from {source_file:?}"))?;
-        crate::core_bindings::qualify_module_decls(&mut parsed.decls, module_path);
+        let mut parsed =
+            crate::parser_registry::parse_artifact_with_resolved(resolved, &source_file)
+                .map_err(|e| {
+                    ArtifactResolveError::Invalid(format!("parse error {source_file:?}: {e}"))
+                })?
+                .ok_or_else(|| {
+                    ArtifactResolveError::Invalid(format!("no module from {source_file:?}"))
+                })?;
+        crate::core_bindings::qualify_module_artifact(&mut parsed, module_path)
+            .map_err(ArtifactResolveError::Invalid)?;
 
         let exports: Vec<String> = parsed
+            .semantic
             .decls
             .iter()
             .map(|d| match d {
@@ -187,7 +235,7 @@ impl CrateDb {
                 ci.modules.write().unwrap().insert(
                     module_path.to_string(),
                     ParsedModule {
-                        module: parsed.clone(),
+                        artifact: parsed.clone(),
                     },
                 );
             }
@@ -313,6 +361,54 @@ mod tests {
                 path
             );
             assert!(path.is_dir(), "Search root must be a directory: {:?}", path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod artifact_cache_tests {
+    use super::*;
+    #[test]
+    fn repeated_artifact_lookups_keep_proofs_and_semantic_wrapper() {
+        let mut db = CrateDb::new();
+        db.search_roots.clear();
+        db.register_crate("sample", PathBuf::from("unused"));
+        let mut artifact = CompileArtifact::from_semantic(UnifiedModule::new(vec![]));
+        artifact.unary_methods.insert(
+            ("sample::Row".into(), "-".into()),
+            Ok("sample::Row::neg".into()),
+        );
+        db.crates
+            .read()
+            .unwrap()
+            .get("sample")
+            .unwrap()
+            .modules
+            .write()
+            .unwrap()
+            .insert(
+                "sample".into(),
+                ParsedModule {
+                    artifact: artifact.clone(),
+                },
+            );
+        db.symbol_index.write().unwrap().insert(
+            "sample::answer".into(),
+            SymbolLocation {
+                crate_name: "sample".into(),
+                module_path: "sample".into(),
+                source_file: "unused".into(),
+            },
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                db.resolve_artifact("sample::answer").unwrap().2.as_ref(),
+                &artifact
+            );
+            assert_eq!(
+                db.resolve("sample::answer").unwrap().2.as_ref(),
+                &artifact.semantic
+            );
         }
     }
 }

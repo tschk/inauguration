@@ -1624,8 +1624,26 @@ fn check_expr_with_array_borrow(
         }
         Expr::Unary { op, expr } => {
             check_expr_in_loop(fn_name, expr, facts, env, call_edges, loop_depth)?;
-            if matches!(op.as_str(), "-" | "neg" | "!" | "not")
-                && expr_type(expr, facts, env) == Some(Typ::Void)
+            if matches!(
+                op.as_str(),
+                "-" | crate::core_ir::rust_references::NEGATE_VALUE
+            ) && expr_type(expr, facts, env) != Some(Typ::Void)
+            {
+                let operand = expr_type(expr, facts, env);
+                let known_nominal = matches!(&operand, Some(Typ::Named(name)) if facts.structs.contains_key(name.as_str()));
+                if crate::core_ir::numeric_negation_domain(operand.as_ref(), known_nominal)
+                    == crate::core_ir::NumericNegationDomain::Rejected
+                {
+                    return Err((
+                        "type-mismatch".into(),
+                        "numeric negation requires an Int, Bool, or Float operand".into(),
+                    ));
+                }
+            }
+            if matches!(
+                op.as_str(),
+                "-" | crate::core_ir::rust_references::NEGATE_VALUE | "neg" | "!" | "not"
+            ) && expr_type(expr, facts, env) == Some(Typ::Void)
             {
                 return Err((
                     "type-mismatch".into(),
@@ -2207,7 +2225,8 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
             }),
         Expr::StructInit { name, .. } => Some(Typ::Named(name.clone())),
         Expr::Field { base, name, .. } => {
-            if let Some(Typ::Named(struct_name)) = expr_type(base, facts, env)
+            if let Some(Typ::Named(struct_name)) =
+                expr_type(base, facts, env).map(|typ| typ.canonical())
                 && let Some(schema) = facts.structs.get(struct_name.as_str())
                 && let Some((_, typ)) = schema.iter().find(|(field, _)| field == name)
             {
@@ -2233,6 +2252,11 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
                 None
             }
         }
+        Expr::Unary { op, expr, .. }
+            if crate::core_ir::rust_references::value_kind(op).is_some() =>
+        {
+            crate::core_ir::rust_references::value_type(op, expr_type(expr, facts, env)?)
+        }
         Expr::Unary { op, expr, .. } => match op.as_str() {
             "!" => Some(Typ::Bool),
             "bool-to-int" | "float-to-int" => Some(Typ::Int),
@@ -2242,7 +2266,7 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
             {
                 Some(Typ::Int)
             }
-            "-" => {
+            "-" | crate::core_ir::rust_references::NEGATE_VALUE => {
                 if expr_type(expr, facts, env) == Some(Typ::Float) {
                     Some(Typ::Float)
                 } else {
@@ -2271,7 +2295,13 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
                 _ => None,
             }
         }
-        Expr::Call { callee, .. } => {
+        Expr::Call { callee, args } => {
+            if let Expr::Ident(name) = callee.as_ref()
+                && name == crate::core_ir::BORROW
+                && let [value] = args.as_slice()
+            {
+                return expr_type(value, facts, env);
+            }
             if let Expr::Ident(name) = callee.as_ref()
                 && let Some(sig) = function_sig(facts, name)
             {
@@ -4837,6 +4867,37 @@ mod invoke_value_tests {
                 report.ok, valid,
                 "verifier {source}: {report:?}; {module:?}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod numeric_negation_domain_regressions {
+    use super::*;
+    #[test]
+    fn whole_module_rejects_known_non_numeric_but_defers_declared_generic() {
+        for source in [
+            r#"fn main()->Int{return -"hello";}"#,
+            "fn main()->Int{let values=[1];return -values;}",
+            "struct Row{Int x}fn main()->Int{let value=Row{x:42};return -value;}",
+        ] {
+            let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            let report = verify_for_entry(&module, "main");
+            assert!(!report.ok, "{source}: {report:?}");
+            assert_eq!(report.reason_code.as_deref(), Some("type-mismatch"));
+        }
+        for typ in [Typ::Int, Typ::Bool, Typ::Float, Typ::Generic("T".into())] {
+            let mut module =
+                crate::in_lang_parse::parse_in_source("fn main(value:Int)->Int{return -value;}")
+                    .unwrap();
+            if let Decl::Function { params, ret, .. } = &mut module.decls[0] {
+                params[0].1 = typ.clone();
+                if typ == Typ::Float {
+                    *ret = Typ::Float;
+                }
+            }
+            let report = verify_for_entry(&module, "main");
+            assert!(report.ok, "{typ:?}: {report:?}");
         }
     }
 }

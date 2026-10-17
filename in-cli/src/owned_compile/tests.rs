@@ -8846,3 +8846,275 @@ fn scalar_array_values_reject_unmaterializable_layouts() {
         }
     }
 }
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn rust_retained_neg_dispatch_executes_generic_owned_shared_mutable_and_field_proofs() {
+    for (name, source, expected) in [
+        (
+            "three-receivers",
+            r#"
+            struct Row{x:i64}
+            impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}
+            impl std::ops::Neg for &Row{type Output=i64;fn neg(self)->i64{88}}
+            impl std::ops::Neg for &mut Row{type Output=i64;fn neg(self)->i64{99}}
+            fn negate<T:std::ops::Neg<Output=i64>>(value:T)->i64{-value}
+            fn main()->i64{let mut row=Row{x:42};negate(Row{x:42})+negate(&row)+negate(&mut row)}
+        "#,
+            264,
+        ),
+        (
+            "borrowed-field",
+            r#"
+            struct Row{x:i64}struct Holder<'a>{value:&'a Row}
+            impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}
+            impl std::ops::Neg for &Row{type Output=i64;fn neg(self)->i64{88}}
+            fn apply(holder:&Holder)->i64{-holder.value}
+            fn main()->i64{let row=Row{x:42};let holder=Holder{value:&row};apply(&holder)}
+        "#,
+            88,
+        ),
+        (
+            "two-forwarding-aliases",
+            r#"
+            struct Row{x:i64}
+            impl std::ops::Neg for &Row{type Output=i64;fn neg(self)->i64{88}}
+            mod child {
+                mod nested {pub fn negate<T:std::ops::Neg<Output=i64>>(value:T)->i64{-value}}
+                pub use nested::negate as relay;
+            }
+            use child::relay as run;
+            fn main()->i64{let row=Row{x:42};run(&row)}
+        "#,
+            88,
+        ),
+        (
+            "primitive-generic",
+            r#"fn negate<T:std::ops::Neg<Output=T>>(value:T)->T{-value}fn main()->i64{negate(42i64)}"#,
+            -42,
+        ),
+    ] {
+        let path = temp_path(&format!("retained-neg-{name}.rs"));
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{name} {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(expected)),
+                "{name} {profile:?}: {report:?}"
+            );
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn retained_neg_post_inline_failure_aborts_before_execution() {
+    let path = temp_path("ambiguous-post-inline-neg.rs");
+    fs::write(
+        &path,
+        r#"
+        struct Row{x:i64}
+        impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}
+        impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{99}}
+        fn negate<T:std::ops::Neg<Output=i64>>(value:T)->i64{-value}
+        fn main()->i64{negate(Row{x:42})}
+    "#,
+    )
+    .unwrap();
+    for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+        let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(!report.success, "{profile:?}: {report:?}");
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("rust-unary-resolution-failed"),
+            "{profile:?}: {report:?}"
+        );
+        assert!(report.reason.as_deref().unwrap_or("").contains("ambiguous"));
+        assert!(report.eval_result.is_none());
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn directory_rust_crate_root_is_parsed_once_and_retains_neg_binding() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let root = temp_path("retained-root-project");
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(root.join("Cargo.toml"), "[package]\nname=\"retained-root-control\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[lib]\npath=\"src/lib.rs\"\n").unwrap();
+    fs::write(src.join("lib.rs"), "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}fn main()->i64{-Row{x:42}}").unwrap();
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        let mut request = default_request(src.clone(), CompileTarget::Jit, Some("main"), None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(
+            report.success && report.execution_started,
+            "{profile:?}: {report:?}"
+        );
+        assert_eq!(
+            report.eval_result,
+            Some(EvalValue::Int(77)),
+            "{profile:?}: {report:?}"
+        );
+    }
+    #[cfg(unix)]
+    {
+        let alias = src.join("alias.rs");
+        std::os::unix::fs::symlink(src.join("lib.rs"), &alias).unwrap();
+        let report = compile_owned(&default_request(
+            alias,
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        assert!(
+            report.success && report.execution_started,
+            "canonical source identity: {report:?}"
+        );
+        assert_eq!(report.eval_result, Some(EvalValue::Int(77)));
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn distinct_rust_extra_sources_cannot_share_a_neg_proof_target_origin() {
+    let root = temp_path("retained-extra-conflict");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("a.rs"), "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}fn main()->i64{-Row{x:42}}").unwrap();
+    fs::write(root.join("b.rs"), "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{88}}fn unrelated()->i64{42}").unwrap();
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        let artifact = root.join(format!("{profile:?}.artifact"));
+        let mut request = default_request(
+            root.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            Some(artifact.clone()),
+        );
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(
+            !report.success && !report.execution_started,
+            "{profile:?}: {report:?}"
+        );
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("dependency-resolution-failed"),
+            "{report:?}"
+        );
+        assert_eq!(report.eval_result, None);
+        assert!(!artifact.exists());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn inline_argument_snapshots_preserve_order_once_lazy_and_nonlocal_exit() {
+    for (name, source) in [
+        (
+            "duplicated-unused-lazy",
+            "var trace:Int=0;fn touch(value:Int)->Int{trace=trace*10+value;return value;}fn duplicate(value:Int)->Int{return value+value;}fn ignore(value:Int)->Int{return 42;}fn positive(value:Int)->Bool{return value>0;}fn main()->Int{let first=duplicate(touch(1));let second=ignore(touch(2));if false&&positive(touch(3)){return 7;}if true||positive(touch(4)){if first==2&&second==42&&trace==12{return 42;}}return 7;}",
+        ),
+        (
+            "global-before-write",
+            "var state:Int=20;fn mutate()->Int{state=22;return 22;}fn combine(left:Int,right:Int)->Int{return left+right;}fn main()->Int{let result=combine(state,mutate());if result==42&&state==22{return 42;}return 7;}",
+        ),
+        (
+            "argument-order",
+            "var trace:Int=0;fn touch(value:Int)->Int{trace=trace*10+value;return value;}fn reverse(left:Int,right:Int)->Int{return right*10+left;}fn main()->Int{let value=reverse(touch(1),touch(2));if value==21&&trace==12{return 42;}return 7;}",
+        ),
+        (
+            "nonlocal-exit",
+            "fn ignore(value:Int)->Int{return 7;}fn main()->Int{return ignore({if true{return 42;}7});}",
+        ),
+    ] {
+        let path = temp_path(&format!("inline-snapshot-{name}.in"));
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{name} {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{name} {profile:?}: {report:?}"
+            );
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn inline_snapshots_preserve_unused_argument_type_validation() {
+    let path = temp_path("inline-snapshot-invalid-argument.in");
+    fs::write(&path, "fn text()->String{return \"wrong\";}fn ignore(value:Int)->Int{return 42;}fn main()->Int{return ignore(text());}").unwrap();
+    for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+        let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(!report.success, "{profile:?}: {report:?}");
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("verify-type-mismatch"),
+            "{profile:?}: {report:?}"
+        );
+        assert!(!report.execution_started, "{profile:?}: {report:?}");
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn effectful_snapshot_inlining_preserves_array_formal_refusals_across_profiles() {
+    for (name, source) in [
+        (
+            "effectful-wrong-array",
+            r#"fn ignore(value:[i64;2])->i64{42}fn producer(flag:bool)->&'static str{if flag{return "left";}return "right";}fn main()->i64{ignore(producer(true))}"#,
+        ),
+        (
+            "pure-wrong-array-with-effect",
+            r#"fn ignore(value:[i64;2],side:i64)->i64{42}fn producer(flag:bool)->i64{if flag{return 1;}return 2;}fn main()->i64{ignore("wrong",producer(true))}"#,
+        ),
+    ] {
+        let path = temp_path(&format!("snapshot-proof-{name}.rs"));
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(!report.success, "{name} {profile:?}: {report:?}");
+            assert!(
+                report.eval_result.is_none(),
+                "{name} {profile:?}: {report:?}"
+            );
+            assert!(!report.execution_started, "{name} {profile:?}: {report:?}");
+        }
+        fs::remove_file(path).unwrap();
+    }
+}

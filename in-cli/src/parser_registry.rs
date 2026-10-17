@@ -467,6 +467,21 @@ impl fmt::Display for ParserRegistryError {
 
 impl std::error::Error for ParserRegistryError {}
 
+/// Preserve frontend-owned metadata for compilation/optimization consumers.
+/// Semantic-only callers retain `parse_with_resolved` and its existing behavior.
+pub fn parse_artifact_with_resolved(
+    resolved: ResolvedBuildParser,
+    path: &Path,
+) -> Result<Option<crate::boundary_ir::CompileArtifact>, ParserRegistryError> {
+    if matches!(resolved, ResolvedBuildParser::CoreIr(ParserId::Rust)) {
+        return crate::compiler::rust_front::parse_rust_artifact(path)
+            .map(Some)
+            .map_err(ParserRegistryError::Msg);
+    }
+    parse_with_resolved(resolved, path)
+        .map(|module| module.map(crate::boundary_ir::CompileArtifact::from_semantic))
+}
+
 /// Dispatch by [`ResolvedBuildParser`].
 pub fn parse_with_resolved(
     resolved: ResolvedBuildParser,
@@ -808,5 +823,57 @@ mod tests {
             .expect("module");
         let _ = std::fs::remove_file(&path);
         assert!(!m.decls.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod artifact_route_tests {
+    use super::*;
+
+    #[test]
+    fn rust_artifact_and_semantic_file_routes_preserve_external_module_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "inauguration-artifact-parent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.join("root.rs");
+        std::fs::write(&root, "mod child;fn main()->i64{child::value()}").unwrap();
+        std::fs::write(dir.join("child.rs"), "pub fn value()->i64{42}").unwrap();
+        let resolved = ResolvedBuildParser::CoreIr(ParserId::Rust);
+        let artifact = parse_artifact_with_resolved(resolved, &root)
+            .unwrap()
+            .unwrap();
+        let semantic = parse_with_resolved(resolved, &root).unwrap().unwrap();
+        assert_eq!(artifact.semantic, semantic);
+        assert!(artifact.semantic.decls.iter().any(|decl| matches!(decl,
+            crate::core_ir::Decl::Function { name, .. } if name == "child::value")));
+        let direct = crate::compiler::rust_front::parse_rust_artifact(&root).unwrap();
+        assert_eq!(direct.semantic, artifact.semantic);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn other_front_artifacts_default_empty_and_swift_remains_none() {
+        let path = std::env::temp_dir().join(format!(
+            "inauguration-artifact-empty-{}.in",
+            std::process::id()
+        ));
+        std::fs::write(&path, "fn main()->Int{return 42;}").unwrap();
+        let artifact =
+            parse_artifact_with_resolved(ResolvedBuildParser::CoreIr(ParserId::In), &path)
+                .unwrap()
+                .unwrap();
+        assert!(artifact.unary_methods.is_empty());
+        assert!(
+            parse_artifact_with_resolved(ResolvedBuildParser::Swift, &path)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_file(path).unwrap();
     }
 }

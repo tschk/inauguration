@@ -115,8 +115,12 @@ impl CoverageReport {
 /// typecheck, profile optimize) so the numbers match what a build would produce.
 pub fn coverage_for_path(path: &Path, parser: ParserCli, entry: Option<&str>) -> CoverageReport {
     let resolved = parser_registry::resolve_parser_id(path, parser);
-    let mut module = match parser_registry::parse_with_resolved(resolved, path) {
-        Ok(Some(module)) => module,
+    let mut unary_methods = crate::boundary_ir::UnaryMethodBindings::new();
+    let mut module = match parser_registry::parse_artifact_with_resolved(resolved, path) {
+        Ok(Some(artifact)) => {
+            unary_methods = artifact.unary_methods;
+            artifact.semantic
+        }
         Ok(None) => {
             return CoverageReport::rejected(
                 path,
@@ -178,11 +182,16 @@ pub fn coverage_for_path(path: &Path, parser: ParserCli, entry: Option<&str>) ->
         resolve_jit_entry(&module, &requested)
     };
 
-    crate::core_opt::optimize_with_profile(
-        &mut module.decls,
+    if let Err(error) = crate::owned_compile::optimize_retained_module(
+        &mut module,
+        &unary_methods,
         Some(&effective_entry),
         crate::emit_profile::EmitProfile::Default,
-    );
+        false,
+        crate::integer_semantics::IntegerSemantics::Word64,
+    ) {
+        return CoverageReport::rejected(path, "coverage-unary-resolution-failed", error);
+    }
     let functions_analyzed = count_functions(&module);
     if functions_analyzed == 0 {
         return CoverageReport::rejected(

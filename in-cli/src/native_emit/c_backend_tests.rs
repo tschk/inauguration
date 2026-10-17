@@ -2592,3 +2592,35 @@ fn complement_projection_evaluates_once_and_preserves_scalar_logical_not() {
         );
     }
 }
+
+#[test]
+fn numeric_negation_requires_recursively_checked_scalar_operands() {
+    for op in ["-", "neg"] {
+        for typ in [
+            Typ::String,
+            Typ::Array(Box::new(Typ::Int)),
+            Typ::Vector(Box::new(Typ::Int)),
+            Typ::Named("Unknown".into()),
+            Typ::Generic("T".into()),
+        ] {
+            let module = UnifiedModule::new(vec![Decl::Function {
+                name: "main".into(),
+                params: vec![("value".into(), typ.clone())],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![Stmt::Return(Some(Expr::Unary {
+                    op: op.into(),
+                    expr: Box::new(Expr::Ident("value".into())),
+                }))],
+            }]);
+            assert!(emit_c_module(&module).is_err(), "{op} {typ:?}");
+        }
+    }
+    for source in [
+        r#"fn main()->Int{return -("hello"+1);}"#,
+        "fn main()->Int{return -(true+1);}",
+    ] {
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        assert!(emit_c_module(&module).is_err(), "{source}");
+    }
+}

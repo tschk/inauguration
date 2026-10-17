@@ -100,6 +100,51 @@ pub(crate) fn qualify_module_decls(decls: &mut [Decl], module: &str) {
     }
 }
 
+/// Apply the exact declaration name projection to retained receiver and target proofs.
+pub(crate) fn qualify_module_artifact(
+    artifact: &mut crate::boundary_ir::CompileArtifact,
+    module: &str,
+) -> Result<(), String> {
+    let module = module.trim_matches(':');
+    if module.is_empty() {
+        return Ok(());
+    }
+    let root = module.split("::").next().unwrap();
+    let mut names = HashMap::new();
+    for decl in &artifact.semantic.decls {
+        if let Decl::Function { name, .. }
+        | Decl::Global { name, .. }
+        | Decl::Struct { name, .. }
+        | Decl::Class { name, .. }
+        | Decl::Interface { name, .. } = decl
+        {
+            names.insert(name.clone(), qualified(name, module, root));
+        }
+    }
+    let mut bindings = crate::boundary_ir::UnaryMethodBindings::new();
+    for ((receiver, op), proof) in &artifact.unary_methods {
+        let receiver =
+            crate::core_ir::rust_references::qualify_receiver_identity(receiver, |name| {
+                names.get(name).cloned().unwrap_or_else(|| name.into())
+            })
+            .ok_or_else(|| format!("invalid dependency unary receiver `{receiver}`"))?;
+        let proof = match proof {
+            Ok(target) => Ok(names
+                .get(target)
+                .cloned()
+                .ok_or_else(|| format!("missing dependency unary target `{target}`"))?),
+            Err(reason) => Err(reason.clone()),
+        };
+        crate::boundary_ir::merge_unary_method_bindings(
+            &mut bindings,
+            [((receiver, op.clone()), proof)].into_iter().collect(),
+        )?;
+    }
+    qualify_module_decls(&mut artifact.semantic.decls, module);
+    artifact.unary_methods = bindings;
+    Ok(())
+}
+
 fn qualified(name: &str, module: &str, root: &str) -> String {
     if crate::core_ir::tuples::fields(name).is_some() || name.starts_with(&format!("{root}::")) {
         name.into()
@@ -188,6 +233,16 @@ pub(crate) fn rewrite_named_types(decls: &mut [Decl], resolve_type: &impl Fn(&st
 fn typ(value: &mut Typ, names: &NominalNames<'_>, generics: &HashSet<String>) {
     match value {
         Typ::Named(name) if !generics.contains(name) => {
+            if let Some(mut reference) = crate::core_ir::rust_references::decode(name) {
+                if let Some(target) = (names.type_name)(name) {
+                    *value = target;
+                    return;
+                }
+                typ(&mut reference.referent, names, generics);
+                typ(&mut reference.runtime, names, generics);
+                *value = crate::core_ir::rust_references::typ(reference);
+                return;
+            }
             if let Some(fields) = crate::core_ir::tuples::fields(name) {
                 let mut items: Vec<_> = fields.into_iter().map(|(_, typ)| typ).collect();
                 for item in &mut items {
@@ -956,5 +1011,111 @@ mod tests {
         let original = class.clone();
         rewrite_named_types(std::slice::from_mut(class), &|_| Some(Typ::Bool));
         assert_eq!(*class, original);
+    }
+}
+
+#[cfg(test)]
+mod reference_metadata_namespace_tests {
+    use super::*;
+    use crate::core_ir::rust_references::{self, ReferenceType};
+    #[test]
+    fn reference_proof_and_old_runtime_projection_follow_existing_qualification() {
+        let row = Typ::Named("Row".into());
+        let ordinary = rust_references::typ(ReferenceType {
+            mutable: false,
+            referent: row.clone(),
+            runtime: row.clone(),
+        });
+        let contextual = rust_references::typ(ReferenceType {
+            mutable: true,
+            referent: row,
+            runtime: Typ::Named("&mutRow".into()),
+        });
+        let mut decls = vec![
+            Decl::Struct {
+                name: "Row".into(),
+                fields: vec![("value".into(), Typ::Int)],
+                type_params: vec![],
+            },
+            Decl::Function {
+                name: "read".into(),
+                params: vec![("one".into(), ordinary), ("two".into(), contextual)],
+                ret: Typ::Int,
+                body: vec![],
+                type_params: vec![],
+            },
+        ];
+        qualify_module_decls(&mut decls, "module");
+        let Decl::Function { params, .. } = &decls[1] else {
+            unreachable!()
+        };
+        assert_eq!(
+            rust_references::receiver_identity(&params[0].1).as_deref(),
+            Some("&module::Row")
+        );
+        assert_eq!(
+            rust_references::receiver_identity(&params[1].1).as_deref(),
+            Some("&mut module::Row")
+        );
+        assert_eq!(params[0].1.canonical(), Typ::Named("module::Row".into()));
+        // Existing nominal qualification does not rewrite an opaque '&mutRow'.
+        assert_eq!(params[1].1.canonical(), Typ::Named("&mutRow".into()));
+        rust_references::erase_declarations(&mut decls);
+        let Decl::Function { params, .. } = &decls[1] else {
+            unreachable!()
+        };
+        assert_eq!(params[0].1, Typ::Named("module::Row".into()));
+        assert_eq!(params[1].1, Typ::Named("&mutRow".into()));
+    }
+}
+
+#[cfg(test)]
+mod retained_qualification_tests {
+    use super::*;
+    #[test]
+    fn missing_target_proof_refuses_before_changing_semantic_names() {
+        let mut artifact = crate::boundary_ir::CompileArtifact::from_semantic(
+            crate::core_ir::UnifiedModule::new(vec![]),
+        );
+        artifact
+            .unary_methods
+            .insert(("Row".into(), "-".into()), Ok("missing".into()));
+        let before = artifact.clone();
+        assert!(qualify_module_artifact(&mut artifact, "dep").is_err());
+        assert_eq!(artifact, before);
+    }
+
+    #[test]
+    fn borrowed_receiver_and_exact_method_symbol_follow_declaration_projection() {
+        let target = "&mutRow::std::ops::Neg::neg";
+        let mut artifact = crate::boundary_ir::CompileArtifact::from_semantic(
+            crate::core_ir::UnifiedModule::new(vec![
+                Decl::Struct {
+                    name: "Row".into(),
+                    fields: vec![("value".into(), Typ::Int)],
+                    type_params: vec![],
+                },
+                Decl::Function {
+                    name: target.into(),
+                    params: vec![],
+                    ret: Typ::Int,
+                    body: vec![Stmt::Return(Some(Expr::IntLit(77)))],
+                    type_params: vec![],
+                },
+            ]),
+        );
+        artifact
+            .unary_methods
+            .insert(("&mut Row".into(), "-".into()), Ok(target.into()));
+        qualify_module_artifact(&mut artifact, "dep::nested").unwrap();
+        assert_eq!(
+            artifact
+                .unary_methods
+                .get(&("&mut dep::nested::Row".into(), "-".into())),
+            Some(&Ok(format!("dep::nested::{target}")))
+        );
+        let once = artifact.clone();
+        qualify_module_artifact(&mut artifact, "dep::nested").unwrap();
+        assert_eq!(artifact, once);
     }
 }

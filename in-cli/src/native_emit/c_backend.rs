@@ -778,6 +778,16 @@ impl Ctx {
                     let value = crate::core_ir::integer_cast_expr(operand, op).unwrap();
                     return format!("((int64_t)({}))", self.expr_str(&value));
                 }
+                if matches!(op.as_str(), "neg" | "-") {
+                    let operand =
+                        TypeChecker::new().checked_expr_type(expr, &self.facts, &self.types);
+                    if crate::core_ir::numeric_negation_domain(operand.as_ref(), false)
+                        != crate::core_ir::NumericNegationDomain::Numeric
+                    {
+                        self.fail("c-backend: numeric negation requires a resolved Int, Bool, or Float operand".into());
+                        return "0".into();
+                    }
+                }
                 if matches!(op.as_str(), "neg" | "-")
                     && TypeChecker::new()
                         .checked_expr_type(expr, &self.facts, &self.types)

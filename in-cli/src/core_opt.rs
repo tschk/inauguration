@@ -49,6 +49,26 @@ pub fn optimize_with_linkage_and_semantics(
     keep_all_functions: bool,
     semantics: IntegerSemantics,
 ) {
+    optimize_with_linkage_and_semantics_and_normalizer(
+        decls,
+        entry,
+        profile,
+        keep_all_functions,
+        semantics,
+        None,
+    );
+}
+
+/// Normalize frontend-owned operations after substitution and before folding or
+/// reachability removes their potential method targets. Ordinary callers use None.
+pub fn optimize_with_linkage_and_semantics_and_normalizer(
+    decls: &mut Vec<Decl>,
+    entry: Option<&str>,
+    profile: EmitProfile,
+    keep_all_functions: bool,
+    semantics: IntegerSemantics,
+    mut normalize_after_inline: Option<&mut dyn FnMut(&mut Vec<Decl>)>,
+) {
     crate::lower_core::lower_guarded_decls(decls);
     crate::lower_core::lower_named_constants_with_semantics(decls, semantics);
     crate::lower_core::lower_value_spills(decls);
@@ -58,6 +78,9 @@ pub fn optimize_with_linkage_and_semantics(
             // Fast owned path: more inlining than a textbook compiler, then fold/DCE.
             inline_small_functions_with(decls, INLINE_THRESHOLD, DEFAULT_INLINE_DEPTH);
             inline_small_functions_with(decls, INLINE_THRESHOLD, DEFAULT_INLINE_DEPTH);
+            if let Some(normalize) = normalize_after_inline.as_mut() {
+                normalize(decls);
+            }
             algebraic_simplify(decls, semantics);
             fold_constants_in_decls(decls, semantics);
             propagate_constants(decls);
@@ -71,6 +94,9 @@ pub fn optimize_with_linkage_and_semantics(
             // Aggressive inlining + deeper recursion, then standard cleanup.
             inline_small_functions_with(decls, LEAN_INLINE_THRESHOLD, LEAN_INLINE_DEPTH);
             inline_small_functions_with(decls, LEAN_INLINE_THRESHOLD, LEAN_INLINE_DEPTH);
+            if let Some(normalize) = normalize_after_inline.as_mut() {
+                normalize(decls);
+            }
             algebraic_simplify(decls, semantics);
             fold_constants_in_decls(decls, semantics);
             propagate_constants(decls);
@@ -83,6 +109,9 @@ pub fn optimize_with_linkage_and_semantics(
         EmitProfile::Harden => {
             // Normal opts first so harden noise is not immediately folded away.
             inline_small_functions_with(decls, INLINE_THRESHOLD, DEFAULT_INLINE_DEPTH);
+            if let Some(normalize) = normalize_after_inline.as_mut() {
+                normalize(decls);
+            }
             algebraic_simplify(decls, semantics);
             fold_constants_in_decls(decls, semantics);
             propagate_constants(decls);
@@ -319,7 +348,7 @@ fn map_stmt_mut<F: FnMut(&mut Expr)>(s: &mut Stmt, f: &mut F) {
     }
 }
 
-pub(crate) fn map_expr<F: FnMut(Expr) -> Expr + Copy>(e: Expr, f: &mut F) -> Expr {
+pub(crate) fn map_expr<F: FnMut(Expr) -> Expr>(e: Expr, f: &mut F) -> Expr {
     let mapped = match e {
         Expr::MatchValue { scrutinee, arms } => Expr::MatchValue {
             scrutinee: Box::new(map_expr(*scrutinee, f)),
@@ -390,7 +419,7 @@ pub(crate) fn map_expr<F: FnMut(Expr) -> Expr + Copy>(e: Expr, f: &mut F) -> Exp
     f(mapped)
 }
 
-fn map_stmt<F: FnMut(Expr) -> Expr + Copy>(s: Stmt, f: &mut F) -> Stmt {
+fn map_stmt<F: FnMut(Expr) -> Expr>(s: Stmt, f: &mut F) -> Stmt {
     match s {
         Stmt::Let(n, t, e) => Stmt::Let(n, t, map_expr(e, f)),
         Stmt::Assign(n, e) => Stmt::Assign(n, map_expr(e, f)),
@@ -465,6 +494,31 @@ fn inline_small_functions(decls: &mut [Decl]) {
     inline_small_functions_with(decls, INLINE_THRESHOLD, DEFAULT_INLINE_DEPTH);
 }
 
+/// A bounded extra pass for frontend operations exposed by substitution.
+/// Ordinary optimizer callers never use this path.
+pub(crate) fn inline_for_frontend_normalization(decls: &mut [Decl], profile: EmitProfile) -> bool {
+    use std::hash::{Hash, Hasher};
+    fn fingerprint(decls: &[Decl]) -> u64 {
+        let mut state = std::collections::hash_map::DefaultHasher::new();
+        decls.hash(&mut state);
+        state.finish()
+    }
+    let before = fingerprint(decls);
+    let (threshold, depth) = match profile {
+        EmitProfile::Lean => (LEAN_INLINE_THRESHOLD, LEAN_INLINE_DEPTH),
+        EmitProfile::Default | EmitProfile::Harden => (INLINE_THRESHOLD, DEFAULT_INLINE_DEPTH),
+    };
+    inline_small_functions_with(decls, threshold, depth);
+    fingerprint(decls) != before
+}
+
+pub(crate) fn frontend_inline_round_limit(profile: EmitProfile) -> u32 {
+    match profile {
+        EmitProfile::Lean => LEAN_INLINE_DEPTH,
+        EmitProfile::Default | EmitProfile::Harden => DEFAULT_INLINE_DEPTH,
+    }
+}
+
 fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: u32) {
     let mut functions: HashMap<String, Decl> = HashMap::new();
     let mut ptr_refs: Vec<String> = Vec::new();
@@ -499,10 +553,34 @@ fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: 
         return;
     }
 
+    let mut names = InlineArgumentNames::new(decls);
+    // Compute scoped caller/callee eligibility once per inline pass, only when
+    // this pass can use the new effectful argument path.
+    let mut may_snapshot = false;
+    map_decl_exprs_mut(decls, &mut |expr| {
+        if !may_snapshot
+            && let Expr::Call { callee, args } = expr
+            && matches!(callee.as_ref(), Expr::Ident(name) if candidates.contains(&name))
+            && args.iter().any(expr_has_effects)
+        {
+            may_snapshot = true;
+        }
+    });
+    if may_snapshot {
+        names.checked_functions =
+            crate::typecheck::TypeChecker::new().checked_inline_functions(decls);
+    }
     for decl in decls.iter_mut() {
-        if let Decl::Function { body, .. } = decl {
-            *body =
-                inline_body_limited(std::mem::take(body), &candidates, &functions, 0, max_depth);
+        if let Decl::Function { name, body, .. } = decl {
+            names.caller_checked = names.checked_functions.contains(name);
+            *body = inline_body_limited(
+                std::mem::take(body),
+                &candidates,
+                &functions,
+                0,
+                max_depth,
+                &mut names,
+            );
         }
     }
 }
@@ -539,12 +617,129 @@ fn fold_body_to_expr(body: &[Stmt], params: &[(String, Typ)]) -> Option<Expr> {
     }
 }
 
+/// Reserve all source binders and references, including globals, before
+/// introducing block-local argument snapshots. Names are unique across this pass.
+struct InlineArgumentNames {
+    reserved: HashSet<String>,
+    next: usize,
+    checked_functions: HashSet<String>,
+    caller_checked: bool,
+}
+
+impl InlineArgumentNames {
+    fn new(decls: &[Decl]) -> Self {
+        let mut reserved = crate::core_bindings::module_names(decls);
+        for decl in decls {
+            match decl {
+                Decl::Function { params, body, .. } => {
+                    reserved.extend(params.iter().map(|(name, _)| name.clone()));
+                    crate::core_bindings::reserve_body(body, &mut reserved);
+                }
+                Decl::Global {
+                    init: Some(value), ..
+                } => crate::core_bindings::reserve_expr(value, &mut reserved),
+                _ => {}
+            }
+        }
+        Self {
+            reserved,
+            next: 0,
+            checked_functions: HashSet::new(),
+            caller_checked: false,
+        }
+    }
+    fn fresh(&mut self) -> String {
+        loop {
+            let name = format!("__in_inline_arg_{}", self.next);
+            self.next += 1;
+            if self.reserved.insert(name.clone()) {
+                return name;
+            }
+        }
+    }
+}
+
+/// Only fold already-proven pure, straight-line callees. Effectful arguments
+/// still execute exactly once, in source order, even when the callee ignores or
+/// duplicates a parameter. Snapshot every argument when any one is effectful:
+/// an earlier global read must precede a later argument's global write.
+fn inline_call_expression(
+    expression: &Expr,
+    candidates: &[&String],
+    functions: &HashMap<String, Decl>,
+    names: &mut InlineArgumentNames,
+) -> Option<Expr> {
+    let Expr::Call { callee, args } = expression else {
+        return None;
+    };
+    let Expr::Ident(name) = callee.as_ref() else {
+        return None;
+    };
+    if !candidates.contains(&name) {
+        return None;
+    }
+    let Decl::Function { params, body, .. } = functions.get(name)? else {
+        return None;
+    };
+    if params.len() != args.len() {
+        return None;
+    }
+    let result = fold_body_to_expr(body, params)?;
+    if !args.iter().any(expr_has_effects) {
+        let substitution = params
+            .iter()
+            .zip(args)
+            .map(|((name, _), value)| (name.as_str(), value))
+            .collect();
+        return Some(substitute_expr(&result, &substitution));
+    }
+    if !names.caller_checked || !names.checked_functions.contains(name) {
+        return None;
+    }
+    let snapshots: Vec<_> = args.iter().map(|_| names.fresh()).collect();
+    let values: Vec<_> = snapshots.iter().cloned().map(Expr::Ident).collect();
+    let substitution = params
+        .iter()
+        .zip(&values)
+        .map(|((name, _), value)| (name.as_str(), value))
+        .collect();
+    Some(Expr::Block {
+        body: snapshots
+            .into_iter()
+            .zip(args)
+            .zip(params)
+            .map(|((name, value), (_, formal))| {
+                // Preserve concrete context (for example empty array literals).
+                // A reference snapshot uses the ordinary erased value runtime,
+                // not the contextual receiver ABI of the now-inlined callee.
+                let annotation = match formal {
+                    Typ::Generic(_) => None,
+                    Typ::Named(name) => {
+                        if let Some(mut reference) = crate::core_ir::rust_references::decode(name) {
+                            reference.runtime = crate::core_ir::rust_references::erase_type(
+                                reference.referent.clone(),
+                            );
+                            Some(crate::core_ir::rust_references::typ(reference))
+                        } else {
+                            Some(formal.clone())
+                        }
+                    }
+                    formal => Some(formal.clone()),
+                };
+                Stmt::Let(name, annotation, value.clone())
+            })
+            .collect(),
+        result: Some(Box::new(substitute_expr(&result, &substitution))),
+    })
+}
+
 fn inline_body_limited(
     stmts: Vec<Stmt>,
     cand: &[&String],
     fns: &HashMap<String, Decl>,
     depth: u32,
     max_depth: u32,
+    names: &mut InlineArgumentNames,
 ) -> Vec<Stmt> {
     if depth > max_depth {
         return stmts;
@@ -554,27 +749,29 @@ fn inline_body_limited(
         match stmt {
             Stmt::Let(n, t, e) => {
                 let e = fold_call_ret(
-                    inline_in_expr_limited(e, cand, fns, depth + 1, max_depth),
+                    inline_in_expr_limited(e, cand, fns, depth + 1, max_depth, names),
                     cand,
                     fns,
+                    names,
                 );
                 r.push(Stmt::Let(n, t, e));
             }
             Stmt::Return(Some(e)) => {
                 let e = fold_call_ret(
-                    inline_in_expr_limited(e, cand, fns, depth + 1, max_depth),
+                    inline_in_expr_limited(e, cand, fns, depth + 1, max_depth, names),
                     cand,
                     fns,
+                    names,
                 );
                 r.push(Stmt::Return(Some(e)));
             }
             Stmt::Expr(e) => {
-                let e = inline_in_expr_limited(e, cand, fns, depth + 1, max_depth);
+                let e = inline_in_expr_limited(e, cand, fns, depth + 1, max_depth, names);
                 // ponytail: void-body splicing needs hygienic bindings and argument snapshots.
                 r.push(Stmt::Expr(e));
             }
             s => r.push(map_stmt(s, &mut |e| {
-                inline_in_expr_limited(e, cand, fns, depth + 1, max_depth)
+                inline_in_expr_limited(e, cand, fns, depth + 1, max_depth, names)
             })),
         }
     }
@@ -582,71 +779,30 @@ fn inline_body_limited(
 }
 
 fn inline_in_expr_limited(
-    e: Expr,
-    cand: &[&String],
-    fns: &HashMap<String, Decl>,
+    expression: Expr,
+    candidates: &[&String],
+    functions: &HashMap<String, Decl>,
     depth: u32,
     max_depth: u32,
+    names: &mut InlineArgumentNames,
 ) -> Expr {
-    map_expr(e, &mut |e| match e {
-        // Substitution must not duplicate or discard argument calls.
-        Expr::Call { callee, args, .. }
-            if depth < max_depth && !args.iter().any(expr_has_effects) =>
-        {
-            let name = match *callee {
-                Expr::Ident(ref n) => n.clone(),
-                other => {
-                    return Expr::Call {
-                        callee: Box::new(other),
-                        args,
-                    };
-                }
-            };
-            if cand.contains(&&name) {
-                if let Some(Decl::Function { body, params, .. }) = fns.get(&name) {
-                    if let Some(ret) = fold_body_to_expr(body, params) {
-                        let mut sub = HashMap::new();
-                        for (i, (p, _)) in params.iter().enumerate() {
-                            if i < args.len() {
-                                sub.insert(p.as_str(), &args[i]);
-                            }
-                        }
-                        return substitute_expr(&ret, &sub);
-                    }
-                }
-            }
-            Expr::Call {
-                callee: Box::new(Expr::Ident(name)),
-                args,
-            }
+    map_expr(expression, &mut |expression| {
+        if depth < max_depth {
+            inline_call_expression(&expression, candidates, functions, names).unwrap_or(expression)
+        } else {
+            expression
         }
-        other => other,
     })
 }
 
 /// Replace a call-to-small-fn with its return value (for let-bindings).
-fn fold_call_ret(e: Expr, cand: &[&String], fns: &HashMap<String, Decl>) -> Expr {
-    if let Expr::Call { callee, args, .. } = &e {
-        if args.iter().any(expr_has_effects) {
-            return e;
-        }
-        if let Expr::Ident(name) = callee.as_ref() {
-            if cand.contains(&name) {
-                if let Some(Decl::Function { body, params, .. }) = fns.get(name) {
-                    if let Some(ret) = fold_body_to_expr(body, params) {
-                        let mut sub = HashMap::new();
-                        for (i, (p, _)) in params.iter().enumerate() {
-                            if i < args.len() {
-                                sub.insert(p.as_str(), &args[i]);
-                            }
-                        }
-                        return substitute_expr(&ret, &sub);
-                    }
-                }
-            }
-        }
-    }
-    e
+fn fold_call_ret(
+    expression: Expr,
+    candidates: &[&String],
+    functions: &HashMap<String, Decl>,
+    names: &mut InlineArgumentNames,
+) -> Expr {
+    inline_call_expression(&expression, candidates, functions, names).unwrap_or(expression)
 }
 
 fn substitute_expr(e: &Expr, sub: &HashMap<&str, &Expr>) -> Expr {
@@ -5137,5 +5293,374 @@ mod balanced_dispatch_tests {
             states,
             if_depth(dispatch)
         );
+    }
+}
+
+#[cfg(test)]
+mod post_inline_normalizer_tests {
+    use super::*;
+
+    #[test]
+    fn normalization_can_create_real_method_edges_before_reachability_dce() {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut module = crate::in_lang_parse::parse_in_source(
+                "fn target(value:Int)->Int{return 77;}fn main(value:Int)->Int{return -value;}",
+            )
+            .unwrap();
+            let mut called = false;
+            let mut normalize = |decls: &mut Vec<Decl>| {
+                assert!(
+                    decls.iter().any(
+                        |decl| matches!(decl, Decl::Function { name, .. } if name == "target")
+                    )
+                );
+                for decl in decls {
+                    if let Decl::Function { name, body, .. } = decl
+                        && name == "main"
+                    {
+                        let Some(Stmt::Return(Some(Expr::Unary { op, expr }))) = body.last() else {
+                            panic!("normalizer must run before folding");
+                        };
+                        assert_eq!(op, "-");
+                        let argument = expr.as_ref().clone();
+                        *body.last_mut().unwrap() = Stmt::Return(Some(Expr::Call {
+                            callee: Box::new(Expr::Ident("target".into())),
+                            args: vec![argument],
+                        }));
+                        called = true;
+                    }
+                }
+            };
+            optimize_with_linkage_and_semantics_and_normalizer(
+                &mut module.decls,
+                Some("main"),
+                profile,
+                false,
+                IntegerSemantics::Word64,
+                Some(&mut normalize),
+            );
+            assert!(called);
+            assert_eq!(
+                module
+                    .decls
+                    .iter()
+                    .filter(|decl| matches!(decl, Decl::Function { .. }))
+                    .count(),
+                2,
+                "{profile:?}: actual method target must survive DCE"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_normalizer_preserves_existing_profile_output() {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut original =
+                crate::in_lang_parse::parse_in_source("fn main(value:Int)->Int{return value+42;}")
+                    .unwrap();
+            let mut hooked = original.clone();
+            optimize_with_linkage_and_semantics(
+                &mut original.decls,
+                Some("main"),
+                profile,
+                false,
+                IntegerSemantics::Word64,
+            );
+            optimize_with_linkage_and_semantics_and_normalizer(
+                &mut hooked.decls,
+                Some("main"),
+                profile,
+                false,
+                IntegerSemantics::Word64,
+                None,
+            );
+            assert_eq!(original, hooked);
+        }
+    }
+}
+
+#[cfg(test)]
+mod inline_argument_snapshot_tests {
+    use super::*;
+    fn function(name: &str, params: Vec<(String, Typ)>, value: Expr) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params,
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(value))],
+            type_params: vec![],
+        }
+    }
+    fn call(name: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args,
+        }
+    }
+    fn pure() -> Decl {
+        function(
+            "pure",
+            vec![("left".into(), Typ::Int), ("right".into(), Typ::Int)],
+            Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(Expr::Ident("left".into())),
+                rhs: Box::new(Expr::Ident("left".into())),
+            },
+        )
+    }
+    #[test]
+    fn effectful_call_snapshots_all_arguments_in_order_and_uses_unique_locals() {
+        let declaration = pure();
+        let functions = HashMap::from([("pure".into(), declaration.clone())]);
+        let key = "pure".to_string();
+        let arguments = vec![
+            Expr::Ident("__in_inline_arg_0".into()),
+            call("write_global", vec![]),
+        ];
+        let invocation = call("pure", arguments.clone());
+        let context = function(
+            "caller",
+            vec![("__in_inline_arg_1".into(), Typ::Int)],
+            invocation.clone(),
+        );
+        let mut names = InlineArgumentNames::new(&[declaration, context]);
+        names.caller_checked = true;
+        names.checked_functions.insert(key.clone());
+        let inlined = inline_call_expression(&invocation, &[&key], &functions, &mut names).unwrap();
+        let Expr::Block { body, result } = inlined else {
+            panic!("expected snapshots")
+        };
+        assert_eq!(body.len(), 2);
+        let Stmt::Let(first, Some(Typ::Int), left) = &body[0] else {
+            panic!("preserve concrete argument context")
+        };
+        let Stmt::Let(second, Some(Typ::Int), right) = &body[1] else {
+            panic!("preserve concrete argument context")
+        };
+        assert_eq!(left, &arguments[0]);
+        assert_eq!(right, &arguments[1]);
+        assert_ne!(first, second);
+        assert!(!["__in_inline_arg_0", "__in_inline_arg_1"].contains(&first.as_str()));
+        assert!(!["__in_inline_arg_0", "__in_inline_arg_1"].contains(&second.as_str()));
+        assert_eq!(
+            *result.unwrap(),
+            Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(Expr::Ident(first.clone())),
+                rhs: Box::new(Expr::Ident(first.clone()))
+            }
+        );
+    }
+    #[test]
+    fn unused_arguments_and_nonlocal_exit_remain_at_the_call_position() {
+        let declaration = function(
+            "constant",
+            vec![("ignored".into(), Typ::Int)],
+            Expr::IntLit(7),
+        );
+        let functions = HashMap::from([("constant".into(), declaration.clone())]);
+        let key = "constant".to_string();
+        let exit = Expr::Block {
+            body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+            result: None,
+        };
+        let invocation = call("constant", vec![exit.clone()]);
+        let mut names = InlineArgumentNames::new(&[declaration]);
+        names.caller_checked = true;
+        names.checked_functions.insert(key.clone());
+        let inlined = inline_call_expression(&invocation, &[&key], &functions, &mut names).unwrap();
+        let Expr::Block { body, result } = inlined else {
+            panic!()
+        };
+        assert!(matches!(&body[..],[Stmt::Let(_,Some(Typ::Int),argument)]if argument==&exit));
+        assert_eq!(*result.unwrap(), Expr::IntLit(7));
+    }
+    #[test]
+    fn exact_arity_zero_args_and_pure_callee_boundary_are_preserved() {
+        let declaration = pure();
+        let functions = HashMap::from([("pure".into(), declaration.clone())]);
+        let key = "pure".to_string();
+        let mut names = InlineArgumentNames::new(&[declaration]);
+        for args in [
+            vec![Expr::IntLit(1)],
+            vec![Expr::IntLit(1), Expr::IntLit(2), call("effect", vec![])],
+        ] {
+            assert!(
+                inline_call_expression(&call("pure", args), &[&key], &functions, &mut names)
+                    .is_none()
+            );
+        }
+        let zero = function("zero", vec![], Expr::IntLit(42));
+        let impure = function("impure", vec![], call("effect", vec![]));
+        let functions = HashMap::from([("zero".into(), zero), ("impure".into(), impure)]);
+        let zero = "zero".to_string();
+        let impure = "impure".to_string();
+        assert_eq!(
+            inline_call_expression(&call("zero", vec![]), &[&zero], &functions, &mut names),
+            Some(Expr::IntLit(42))
+        );
+        assert!(
+            inline_call_expression(&call("impure", vec![]), &[&impure], &functions, &mut names)
+                .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_reference_context_tests {
+    use super::*;
+    #[test]
+    fn borrowed_snapshot_retains_source_proof_with_ordinary_value_runtime() {
+        use crate::core_ir::rust_references::{self, ReferenceType};
+        let formal = rust_references::typ(ReferenceType {
+            mutable: false,
+            referent: Typ::Named("Row".into()),
+            runtime: Typ::Named("&Row".into()),
+        });
+        let declaration = Decl::Function {
+            name: "borrowed_neg".into(),
+            params: vec![("self".into(), formal)],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::IntLit(88)))],
+            type_params: vec![],
+        };
+        let key = "borrowed_neg".to_string();
+        let functions = HashMap::from([(key.clone(), declaration.clone())]);
+        let mut names = InlineArgumentNames::new(&[declaration]);
+        names.caller_checked = true;
+        names.checked_functions.insert(key.clone());
+        let argument = Expr::Call {
+            callee: Box::new(Expr::Ident("conditional_reference".into())),
+            args: vec![Expr::BoolLit(true)],
+        };
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident(key.clone())),
+            args: vec![argument.clone()],
+        };
+        let inlined = inline_call_expression(&call, &[&key], &functions, &mut names).unwrap();
+        let Expr::Block { body, result } = inlined else {
+            panic!()
+        };
+        let [Stmt::Let(_, Some(Typ::Named(annotation)), actual)] = body.as_slice() else {
+            panic!()
+        };
+        let proof = rust_references::decode(annotation).unwrap();
+        assert_eq!(proof.referent, Typ::Named("Row".into()));
+        assert_eq!(proof.runtime, Typ::Named("Row".into()));
+        assert!(!proof.mutable);
+        assert_eq!(actual, &argument);
+        assert_eq!(*result.unwrap(), Expr::IntLit(88));
+    }
+}
+
+#[cfg(test)]
+mod checked_snapshot_driver_tests {
+    use super::*;
+    fn function(name: &str, params: Vec<(String, Typ)>, body: Vec<Stmt>) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params,
+            ret: Typ::Int,
+            body,
+            type_params: vec![],
+        }
+    }
+    fn call(name: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args,
+        }
+    }
+    fn contains_call(declaration: &mut Decl, target: &str) -> bool {
+        let mut found = false;
+        map_decl_exprs_mut(std::slice::from_mut(declaration), &mut |value| {
+            found |= matches!(value,Expr::Call{callee,..}if matches!(callee.as_ref(),Expr::Ident(name)if name==target));
+        });
+        found
+    }
+    #[test]
+    fn unchecked_caller_or_callee_keeps_original_effectful_call() {
+        let producer = function(
+            "produce",
+            vec![],
+            vec![Stmt::If {
+                cond: Expr::BoolLit(true),
+                then_body: vec![Stmt::Return(Some(Expr::IntLit(1)))],
+                else_body: vec![Stmt::Return(Some(Expr::IntLit(2)))],
+            }],
+        );
+        for bad_callee in 0..3 {
+            let formal = if bad_callee != 0 {
+                Typ::Int
+            } else {
+                Typ::Array(Box::new(Typ::Int))
+            };
+            let mut body = vec![];
+            if bad_callee == 1 {
+                body.push(Stmt::Let(
+                    "wrong".into(),
+                    Some(Typ::String),
+                    Expr::Ident("value".into()),
+                ));
+            }
+            body.push(Stmt::Return(Some(if bad_callee == 2 {
+                Expr::StringLit("wrong return".into())
+            } else {
+                Expr::IntLit(42)
+            })));
+            let mut declarations = vec![
+                function("ignore", vec![("value".into(), formal)], body),
+                producer.clone(),
+                function(
+                    "main",
+                    vec![],
+                    vec![Stmt::Return(Some(call(
+                        "ignore",
+                        vec![call("produce", vec![])],
+                    )))],
+                ),
+            ];
+            inline_small_functions(&mut declarations);
+            assert!(
+                contains_call(&mut declarations[2], "ignore"),
+                "bad callee={bad_callee}"
+            );
+        }
+    }
+    #[test]
+    fn surviving_closure_does_not_inherit_parent_snapshot_permission() {
+        let producer = function(
+            "produce",
+            vec![],
+            vec![Stmt::If {
+                cond: Expr::BoolLit(true),
+                then_body: vec![Stmt::Return(Some(Expr::IntLit(1)))],
+                else_body: vec![],
+            }],
+        );
+        let closure = Expr::Closure {
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(call(
+                "ignore",
+                vec![call("produce", vec![])],
+            )))],
+            captures: vec![],
+        };
+        let mut declarations = vec![
+            function(
+                "ignore",
+                vec![("value".into(), Typ::Int)],
+                vec![Stmt::Return(Some(Expr::IntLit(42)))],
+            ),
+            producer,
+            function(
+                "main",
+                vec![],
+                vec![Stmt::Expr(closure), Stmt::Return(Some(Expr::IntLit(42)))],
+            ),
+        ];
+        inline_small_functions(&mut declarations);
+        assert!(contains_call(&mut declarations[2], "ignore"));
     }
 }

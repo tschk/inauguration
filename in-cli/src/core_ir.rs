@@ -1,5 +1,6 @@
 //! Cross-frontend core AST (v0). Bodies may be empty until a frontend fills statements.
 
+pub(crate) mod rust_references;
 pub(crate) mod tuples;
 
 pub(crate) const INDEX_ASSIGN_VALUE_FIRST: &str = "#index-assign-value-first";
@@ -166,9 +167,35 @@ pub(crate) fn rust_integer_type_name(name: &str) -> Option<&str> {
     (integer_spec(kind).is_some() || matches!(kind, "isize" | "usize")).then_some(kind)
 }
 
+/// Operand-domain proof only: keep width-bearing result facts at their callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NumericNegationDomain {
+    Numeric,
+    Deferred,
+    Rejected,
+}
+
+pub(crate) fn numeric_negation_domain(
+    operand: Option<&Typ>,
+    known_nominal: bool,
+) -> NumericNegationDomain {
+    use NumericNegationDomain::*;
+    match operand.map(Typ::canonical) {
+        Some(Typ::Int | Typ::Bool | Typ::Float) => Numeric,
+        Some(Typ::Generic(_)) | None => Deferred,
+        Some(Typ::Named(_)) if !known_nominal => Deferred,
+        _ => Rejected,
+    }
+}
+
 impl Typ {
     /// Normalize language-specific named types to canonical Core IR primitives.
     pub fn canonical(&self) -> Typ {
+        if let Typ::Named(name) = self
+            && let Some(reference) = rust_references::decode(name)
+        {
+            return reference.runtime.canonical();
+        }
         match self {
             Typ::Named(name)
                 if integer_type_name(name).is_some() || rust_integer_type_name(name).is_some() =>
@@ -193,7 +220,12 @@ impl Typ {
 
     pub(crate) fn inference_type(&self) -> Typ {
         match self {
-            Typ::Named(name) if rust_integer_type_name(name).is_some() => self.clone(),
+            Typ::Named(name)
+                if rust_integer_type_name(name).is_some()
+                    || rust_references::decode(name).is_some() =>
+            {
+                self.clone()
+            }
             Typ::Array(item) => Typ::Array(Box::new(item.inference_type())),
             Typ::Vector(item) => Typ::Vector(Box::new(item.inference_type())),
             _ => self.canonical(),
@@ -311,12 +343,26 @@ pub(crate) fn comparison_operand_mismatch(
     rhs_diverges: bool,
 ) -> Option<ComparisonOperandMismatch> {
     if matches!(op, "==" | "!=") {
-        return match (lhs, rhs) {
-            (Some(left), Some(right)) if left != right => Some(ComparisonOperandMismatch {
-                side: None,
-                expected: left.clone(),
-                actual: right.clone(),
+        // Rust &str keeps its existing String-view representation while unary
+        // dispatch retains a separate source reference identity. Compare view
+        // contents without weakening equality for nominal or width-bearing types.
+        let string_view = |typ: &Typ| match typ {
+            Typ::String => true,
+            Typ::Named(name) => rust_references::decode(name).is_some_and(|reference| {
+                reference.referent == Typ::String && reference.runtime == Typ::String
             }),
+            _ => false,
+        };
+        return match (lhs, rhs) {
+            (Some(left), Some(right))
+                if left != right && !(string_view(left) && string_view(right)) =>
+            {
+                Some(ComparisonOperandMismatch {
+                    side: None,
+                    expected: left.clone(),
+                    actual: right.clone(),
+                })
+            }
             _ => None,
         };
     }
@@ -425,6 +471,11 @@ pub(crate) fn conditional_type(
         return then_type;
     }
     let (then_type, else_type) = (then_type?, else_type?);
+    if rust_references::has_reference_proof(&then_type)
+        || rust_references::has_reference_proof(&else_type)
+    {
+        return rust_references::same_source_type(&then_type, &else_type).then_some(then_type);
+    }
     if then_type.canonical() == else_type.canonical() {
         return Some(then_type.canonical());
     }
@@ -458,7 +509,17 @@ pub(crate) fn match_value_type(
             ),
         });
     }
-    Some(result.map(|(_, typ)| typ.canonical()).unwrap_or(Typ::Void))
+    Some(
+        result
+            .map(|(_, typ)| {
+                if rust_references::has_reference_proof(&typ) {
+                    typ
+                } else {
+                    typ.canonical()
+                }
+            })
+            .unwrap_or(Typ::Void),
+    )
 }
 
 pub(crate) fn match_value_exhaustive<'a>(
@@ -2437,5 +2498,181 @@ mod comparison_operand_contract_tests {
         assert!(check("<", Some(&Typ::Void), Some(&Typ::Int), true, false).is_none());
         assert!(check("<", Some(&Typ::Int), Some(&Typ::Void), false, true).is_none());
         assert!(check("<", Some(&Typ::Void), Some(&Typ::Int), false, false).is_some());
+    }
+}
+
+#[cfg(test)]
+mod rust_reference_join_tests {
+    use super::*;
+    fn borrow(mutable: bool, runtime: &str) -> Typ {
+        rust_references::typ(rust_references::ReferenceType {
+            mutable,
+            referent: Typ::Named("Row".into()),
+            runtime: Typ::Named(runtime.into()),
+        })
+    }
+    #[test]
+    fn conditional_and_match_keep_exact_reference_proof_across_runtime_contexts() {
+        let value = Expr::IntLit(1);
+        let shared = borrow(false, "Row");
+        let contextual = borrow(false, "&Row");
+        assert_eq!(
+            conditional_type(
+                &value,
+                Some(shared.clone()),
+                &value,
+                Some(contextual.clone())
+            ),
+            Some(shared.clone())
+        );
+        assert_eq!(
+            conditional_type(
+                &value,
+                Some(shared.clone()),
+                &value,
+                Some(borrow(true, "Row"))
+            ),
+            None
+        );
+        assert_eq!(
+            conditional_type(
+                &value,
+                Some(shared.clone()),
+                &value,
+                Some(Typ::Named("Row".into()))
+            ),
+            None
+        );
+        let arms = vec![
+            MatchValueArm {
+                pattern: "true".into(),
+                guard: None,
+                value: value.clone(),
+            },
+            MatchValueArm {
+                pattern: "false".into(),
+                guard: None,
+                value,
+            },
+        ];
+        assert_eq!(
+            match_value_type(&arms, [Some(shared.clone()), Some(contextual)]),
+            Some(shared)
+        );
+        assert_eq!(
+            match_value_type(&arms, [Some(Typ::Int), Some(Typ::Int)]),
+            Some(Typ::Int)
+        );
+    }
+}
+
+#[cfg(test)]
+mod numeric_negation_domain_tests {
+    use super::*;
+    #[test]
+    fn separates_domain_proof_from_width_and_generic_identity() {
+        use NumericNegationDomain::*;
+        for typ in [
+            Typ::Int,
+            Typ::Bool,
+            Typ::Float,
+            Typ::Named("#integer-u32".into()),
+            Typ::Named("#rust-integer-i32".into()),
+            Typ::Named("Float".into()),
+        ] {
+            assert_eq!(
+                numeric_negation_domain(Some(&typ), true),
+                Numeric,
+                "{typ:?}"
+            );
+        }
+        for typ in [
+            Typ::String,
+            Typ::Void,
+            Typ::Array(Box::new(Typ::Int)),
+            Typ::Vector(Box::new(Typ::Bool)),
+        ] {
+            assert_eq!(
+                numeric_negation_domain(Some(&typ), false),
+                Rejected,
+                "{typ:?}"
+            );
+        }
+        assert_eq!(
+            numeric_negation_domain(Some(&Typ::Named("Row".into())), true),
+            Rejected
+        );
+        assert_eq!(
+            numeric_negation_domain(Some(&Typ::Named("Alias".into())), false),
+            Deferred
+        );
+        assert_eq!(
+            numeric_negation_domain(Some(&Typ::Generic("T".into())), true),
+            Deferred
+        );
+        assert_eq!(numeric_negation_domain(None, false), Deferred);
+    }
+}
+
+#[cfg(test)]
+mod retained_string_comparison_tests {
+    use super::*;
+    fn reference(referent: Typ, runtime: Typ) -> Typ {
+        rust_references::typ(rust_references::ReferenceType {
+            mutable: false,
+            referent,
+            runtime,
+        })
+    }
+    #[test]
+    fn string_view_comparisons_preserve_reference_metadata_and_raw_type_checks() {
+        let view = reference(Typ::String, Typ::String);
+        let before = view.clone();
+        for op in ["==", "!="] {
+            assert!(
+                comparison_operand_mismatch(op, Some(&view), Some(&Typ::String), false, false)
+                    .is_none()
+            );
+            assert!(
+                comparison_operand_mismatch(op, Some(&Typ::String), Some(&view), false, false)
+                    .is_none()
+            );
+            for invalid in [
+                reference(Typ::String, Typ::Int),
+                reference(view.clone(), Typ::String),
+                reference(Typ::Named("Row".into()), Typ::String),
+                reference(Typ::Named("Row".into()), Typ::Named("Row".into())),
+                reference(Typ::Int, Typ::Int),
+                Typ::Named("i32".into()),
+            ] {
+                assert!(
+                    comparison_operand_mismatch(
+                        op,
+                        Some(&invalid),
+                        Some(&Typ::String),
+                        false,
+                        false
+                    )
+                    .is_some(),
+                    "{invalid:?}"
+                );
+            }
+            assert!(
+                comparison_operand_mismatch(
+                    op,
+                    Some(&Typ::Named("i32".into())),
+                    Some(&Typ::Int),
+                    false,
+                    false
+                )
+                .is_some()
+            );
+        }
+        assert_eq!(view, before);
+        assert!(rust_references::has_reference_proof(&view));
+        assert_eq!(
+            rust_references::receiver_identity(&view),
+            rust_references::receiver_identity(&before)
+        );
     }
 }

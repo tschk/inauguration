@@ -120,18 +120,51 @@ impl BoundaryModule {
     }
 }
 
+/// Frontend-owned proof for unary method dispatch. Keys are exact receiver
+/// identities and canonical operators; values are exact callable targets or
+/// explicit unresolved/unsupported reasons. Ordered storage also supports
+/// deterministic resolved-artifact cache fingerprints.
+pub type UnaryMethodBindings = std::collections::BTreeMap<(String, String), Result<String, String>>;
+
+/// Merge retained proofs without silently replacing an unsupported or conflicting proof.
+pub(crate) fn merge_unary_method_bindings(
+    destination: &mut UnaryMethodBindings,
+    incoming: UnaryMethodBindings,
+) -> Result<(), String> {
+    for (key, value) in &incoming {
+        if let Some(previous) = destination.get(key)
+            && previous != value
+        {
+            return Err(format!(
+                "dependency unary-method binding conflict for `{}` `{}`",
+                key.0, key.1
+            ));
+        }
+    }
+    destination.extend(incoming);
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileArtifact {
     pub semantic: UnifiedModule,
     pub boundary: Option<BoundaryModule>,
+    pub unary_methods: UnaryMethodBindings,
 }
 
 impl CompileArtifact {
+    /// Restore semantic-only callers' runtime representations and discard private frontend proof.
+    pub fn into_semantic(mut self) -> UnifiedModule {
+        crate::core_ir::rust_references::erase_declarations(&mut self.semantic.decls);
+        self.semantic
+    }
+
     #[must_use]
     pub fn from_semantic(semantic: UnifiedModule) -> Self {
         Self {
             semantic,
             boundary: None,
+            unary_methods: UnaryMethodBindings::new(),
         }
     }
 
@@ -140,6 +173,7 @@ impl CompileArtifact {
         Self {
             semantic,
             boundary: Some(boundary),
+            unary_methods: UnaryMethodBindings::new(),
         }
     }
 }
@@ -384,6 +418,7 @@ mod tests {
         let module = crate::core_ir::UnifiedModule::new(vec![]);
         let a = CompileArtifact::from_semantic(module.clone());
         assert!(a.boundary.is_none());
+        assert!(a.unary_methods.is_empty());
         assert_eq!(a.semantic, module);
     }
 
@@ -393,6 +428,7 @@ mod tests {
         let bm = BoundaryModule::default();
         let a = CompileArtifact::with_boundary(module.clone(), bm.clone());
         assert!(a.boundary.is_some());
+        assert!(a.unary_methods.is_empty());
         assert_eq!(a.boundary.unwrap(), bm);
     }
 
@@ -446,5 +482,35 @@ mod tests {
     #[test]
     fn abi_version_constant() {
         assert_eq!(IN_ABI_VERSION, 1);
+    }
+}
+
+#[cfg(test)]
+mod unary_binding_merge_tests {
+    use super::*;
+    #[test]
+    fn unsupported_and_conflicting_proofs_are_not_overwritten() {
+        let key = ("Row".into(), "-".into());
+        let mut bindings: UnaryMethodBindings = [(key.clone(), Err("ambiguous".into()))]
+            .into_iter()
+            .collect();
+        assert!(
+            merge_unary_method_bindings(
+                &mut bindings,
+                [(key.clone(), Err("ambiguous".into()))]
+                    .into_iter()
+                    .collect()
+            )
+            .is_ok()
+        );
+        let previous = bindings.clone();
+        assert!(
+            merge_unary_method_bindings(
+                &mut bindings,
+                [(key, Ok("Row::neg".into()))].into_iter().collect()
+            )
+            .is_err()
+        );
+        assert_eq!(bindings, previous);
     }
 }

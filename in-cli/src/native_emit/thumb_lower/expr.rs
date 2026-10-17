@@ -100,6 +100,18 @@ pub(crate) fn lower_expr_into(
                 let value = crate::core_ir::integer_cast_expr((**expr).clone(), op).unwrap();
                 return lower_expr_into(emitter, ctx, &value, dest, pending);
             }
+            if matches!(op.as_str(), "-" | "neg") {
+                let operand = crate::typecheck::TypeChecker::new().checked_expr_type(
+                    expr,
+                    &ctx.facts,
+                    &ctx.local_types,
+                );
+                if crate::core_ir::numeric_negation_domain(operand.as_ref(), false)
+                    != crate::core_ir::NumericNegationDomain::Numeric
+                {
+                    return Err("thumb-lower: numeric negation requires a resolved Int, Bool, or Float operand".into());
+                }
+            }
             lower_expr_into(emitter, ctx, expr, R0, pending)?;
             match op.as_str() {
                 "-" | "neg" => {
@@ -1780,6 +1792,47 @@ mod integer_cast_tests {
                     .is_empty(),
                 "{source}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod numeric_negation_domain_tests {
+    use super::*;
+    #[test]
+    fn numeric_negation_checks_operand_domain_before_emission() {
+        for op in ["-", "neg"] {
+            for (typ, valid) in [
+                (Typ::Int, true),
+                (Typ::Bool, true),
+                (Typ::String, false),
+                (Typ::Array(Box::new(Typ::Int)), false),
+                (Typ::Vector(Box::new(Typ::Int)), false),
+                (Typ::Generic("T".into()), false),
+                (Typ::Named("Unknown".into()), false),
+            ] {
+                let functions = HashMap::new();
+                let structs = HashMap::new();
+                let mut ctx = LowerCtx::new("negation", &[], &functions, &structs);
+                let offset = ctx.alloc_slot();
+                ctx.locals.insert("value".into(), LocalSlot::Scalar(offset));
+                ctx.local_types.insert("value".into(), typ.clone());
+                let mut emitter = CodeEmitter::new();
+                let mut pending = Vec::new();
+                let expression = Expr::Unary {
+                    op: op.into(),
+                    expr: Box::new(Expr::Ident("value".into())),
+                };
+                let result = lower_expr_into(&mut emitter, &mut ctx, &expression, R4, &mut pending);
+                assert_eq!(result.is_ok(), valid, "{op} {typ:?}: {result:?}");
+                if valid {
+                    assert_eq!(&emitter.bytes[2..4], &thumb::rsbs0(R0, R0).to_le_bytes());
+                    assert_eq!(&emitter.bytes[4..], &thumb::mov_low(R4, R0).to_le_bytes());
+                } else {
+                    assert!(emitter.bytes.is_empty());
+                }
+                assert!(pending.is_empty());
+            }
         }
     }
 }

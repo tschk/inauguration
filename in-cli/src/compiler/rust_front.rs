@@ -15,17 +15,12 @@ use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use syn::parse::Parser;
 
+mod unary_methods;
+
 type RustLayoutSpecs = HashMap<String, (BoundaryRepr, Vec<(String, syn::Type)>)>;
 
 pub fn parse_rust_file(path: &Path) -> Result<UnifiedModule, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let module_id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("rust")
-        .to_string();
-    parse_rust_artifact_source_with_dir(&src, &module_id, path.parent().unwrap_or(Path::new(".")))
-        .map(|artifact| artifact.semantic)
+    parse_rust_artifact(path).map(CompileArtifact::into_semantic)
 }
 
 pub fn parse_rust_artifact(path: &Path) -> Result<CompileArtifact, String> {
@@ -35,11 +30,11 @@ pub fn parse_rust_artifact(path: &Path) -> Result<CompileArtifact, String> {
         .and_then(|s| s.to_str())
         .unwrap_or("rust")
         .to_string();
-    parse_rust_artifact_source(&src, &module_id)
+    parse_rust_artifact_source_with_dir(&src, &module_id, path.parent().unwrap_or(Path::new(".")))
 }
 
 pub fn parse_rust_source(src: &str) -> Result<UnifiedModule, String> {
-    parse_rust_artifact_source(src, "rust").map(|artifact| artifact.semantic)
+    parse_rust_artifact_source(src, "rust").map(CompileArtifact::into_semantic)
 }
 
 pub fn parse_rust_artifact_source(src: &str, module_id: &str) -> Result<CompileArtifact, String> {
@@ -52,16 +47,14 @@ pub fn parse_rust_artifact_source_with_dir(
     base_dir: &Path,
 ) -> Result<CompileArtifact, String> {
     let file = syn::parse_file(src).map_err(|e| format!("rust parse failed: {e}"))?;
-    let semantic = lower_file_items_at(&file, base_dir)?;
-    let boundary = extract_boundary_module(&file, module_id);
-    Ok(match boundary {
-        Some(boundary) => CompileArtifact::with_boundary(semantic, boundary),
-        None => CompileArtifact::from_semantic(semantic),
-    })
+    let mut artifact = lower_file_items_at(&file, base_dir)?;
+    artifact.boundary = extract_boundary_module(&file, module_id);
+    Ok(artifact)
 }
 
-fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<UnifiedModule, String> {
-    let mut module = lower_file_items_at_visited(file, base_dir, &mut HashSet::new(), 0)?;
+fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<CompileArtifact, String> {
+    let mut artifact = lower_file_items_at_visited(file, base_dir, &mut HashSet::new(), 0)?;
+    let module = &mut artifact.semantic;
     let references = module
         .decls
         .iter()
@@ -86,10 +79,11 @@ fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<UnifiedModul
         })
         .collect();
     rewrite_global_references(&mut module.decls, &references, file);
-    register_explicit_vector_constructors(&mut module);
-    refuse_static_array_value_uses(&mut module);
+    register_explicit_vector_constructors(module);
+    refuse_static_array_value_uses(module);
     crate::typecheck::rust_integers::mark_declaration_origins(&mut module.decls);
-    Ok(module)
+    crate::typecheck::TypeChecker::new().resolve_unary_methods(module, &artifact.unary_methods)?;
+    Ok(artifact)
 }
 
 fn register_explicit_vector_constructors(module: &mut UnifiedModule) {
@@ -556,23 +550,26 @@ fn lower_file_items_at_visited(
     base_dir: &Path,
     visited: &mut HashSet<PathBuf>,
     depth: u32,
-) -> Result<UnifiedModule, String> {
+) -> Result<CompileArtifact, String> {
     if depth > 8 {
         return Err("rust front: module nest limit".into());
     }
     reject_integer_primitive_shadowing(&file.items)?;
     let mut decls = Vec::new();
+    let mut unary_methods = unary_methods::collect(file);
     let mut external_modules: Vec<String> = Vec::new();
     let mut uses: Vec<syn::ItemUse> = Vec::new();
 
     for item in &file.items {
         match item {
             syn::Item::Struct(s) => {
-                decls.push(Decl::Struct {
+                let mut declaration = Decl::Struct {
                     name: s.ident.to_string(),
                     fields: rust_struct_fields(&s.fields),
                     type_params: vec![],
-                });
+                };
+                retain_generic_scope(&mut declaration, declared_type_parameters(&s.generics));
+                decls.push(declaration);
             }
             syn::Item::Fn(f) => decls.push(lower_fn(f.clone())),
             syn::Item::Impl(i) => {
@@ -690,15 +687,15 @@ fn lower_file_items_at_visited(
                             attrs: vec![],
                             items: items.clone(),
                         };
-                        if let Ok(inner) =
-                            lower_file_items_at_visited(&inner_file, base_dir, visited, depth + 1)
-                        {
-                            decls.extend(prefix_module_decls(
-                                inner.decls,
-                                &m.ident.to_string(),
-                                &inner_file,
-                            ));
-                        }
+                        let inner =
+                            lower_file_items_at_visited(&inner_file, base_dir, visited, depth + 1)?;
+                        let inner =
+                            unary_methods::prefix(inner, &m.ident.to_string(), &inner_file)?;
+                        crate::boundary_ir::merge_unary_method_bindings(
+                            &mut unary_methods,
+                            inner.unary_methods,
+                        )?;
+                        decls.extend(inner.semantic.decls);
                     }
                 } else {
                     // External module: record candidate path for parallel parsing
@@ -709,88 +706,77 @@ fn lower_file_items_at_visited(
         }
     }
 
-    // Parse external modules in parallel; they are independent subtrees.
+    // Missing optional discovery remains optional; a loaded malformed source
+    // must not discard authoritative operator proof or its refusal reason.
     if external_modules.len() > 1 {
-        std::thread::scope(|s| {
-            let mut handles = Vec::with_capacity(external_modules.len());
-            for mod_name in external_modules {
-                let base = base_dir.to_path_buf();
-                handles.push(s.spawn(move || {
-                    let candidate_rs = base.join(format!("{mod_name}.rs"));
-                    let candidate_mod = base.join(format!("{mod_name}/mod.rs"));
-                    let candidate_nested = base.join(&mod_name).join("mod.rs");
-
-                    let candidate = if candidate_rs.exists() {
-                        candidate_rs
-                    } else if candidate_mod.exists() {
-                        candidate_mod
-                    } else if candidate_nested.exists() {
-                        candidate_nested
-                    } else {
-                        return None;
-                    };
-
-                    std::fs::read_to_string(&candidate)
-                        .ok()
-                        .and_then(|src| syn::parse_file(&src).ok())
-                        .and_then(|sub_file| {
-                            let sub_dir = candidate.parent().unwrap_or(&base);
-                            let mut v = HashSet::new();
-                            lower_file_items_at_visited(&sub_file, sub_dir, &mut v, 1)
-                                .ok()
-                                .map(|m| {
-                                    UnifiedModule::new(prefix_module_decls(
-                                        m.decls, &mod_name, &sub_file,
-                                    ))
-                                })
-                        })
-                }));
-            }
+        std::thread::scope(|scope| -> Result<(), String> {
+            let handles: Vec<_> = external_modules
+                .into_iter()
+                .map(|name| {
+                    let mut ancestors = visited.clone();
+                    scope.spawn(move || {
+                        load_external_module(base_dir, &name, &mut ancestors, depth + 1)
+                    })
+                })
+                .collect();
             for handle in handles {
-                if let Ok(Some(inner)) = handle.join() {
-                    decls.extend(inner.decls);
+                let parsed = handle
+                    .join()
+                    .map_err(|_| "Rust external module parser panicked".to_string())??;
+                if let Some(inner) = parsed {
+                    crate::boundary_ir::merge_unary_method_bindings(
+                        &mut unary_methods,
+                        inner.unary_methods,
+                    )?;
+                    decls.extend(inner.semantic.decls);
                 }
             }
-        });
-    } else if let Some(mod_name) = external_modules.first() {
-        let candidate_rs = base_dir.join(format!("{mod_name}.rs"));
-        let candidate_mod = base_dir.join(format!("{mod_name}/mod.rs"));
-        let candidate_nested = base_dir.join(mod_name).join("mod.rs");
-
-        let candidate = if candidate_rs.exists() {
-            Some(candidate_rs)
-        } else if candidate_mod.exists() {
-            Some(candidate_mod)
-        } else if candidate_nested.exists() {
-            Some(candidate_nested)
-        } else {
-            None
-        };
-
-        if let Some(candidate) = candidate {
-            if let Ok(src) = std::fs::read_to_string(&candidate) {
-                if let Ok(sub_file) = syn::parse_file(&src) {
-                    let sub_dir = candidate.parent().unwrap_or(base_dir);
-                    let canon = candidate.canonicalize().unwrap_or(candidate.clone());
-                    if visited.insert(canon)
-                        && let Ok(inner) =
-                            lower_file_items_at_visited(&sub_file, sub_dir, visited, depth + 1)
-                    {
-                        decls.extend(prefix_module_decls(inner.decls, mod_name, &sub_file));
-                    }
-                }
-            }
-        }
+            Ok(())
+        })?;
+    } else if let Some(name) = external_modules.first()
+        && let Some(inner) = load_external_module(base_dir, name, visited, depth + 1)?
+    {
+        crate::boundary_ir::merge_unary_method_bindings(&mut unary_methods, inner.unary_methods)?;
+        decls.extend(inner.semantic.decls);
     }
 
     for u in &uses {
         apply_use_tree(&mut decls, &u.tree, "", file, depth == 0);
     }
-    if decls.is_empty() {
+    if decls.is_empty() && depth == 0 {
         return Err("rust front parsed file but found no top-level structs/functions".to_string());
     }
     atomics::normalize(&mut decls, file);
-    Ok(UnifiedModule::new(decls))
+    let mut artifact = CompileArtifact::from_semantic(UnifiedModule::new(decls));
+    artifact.unary_methods = unary_methods;
+    Ok(artifact)
+}
+
+fn load_external_module(
+    base_dir: &Path,
+    name: &str,
+    visited: &mut HashSet<PathBuf>,
+    depth: u32,
+) -> Result<Option<CompileArtifact>, String> {
+    let Some(path) = [
+        base_dir.join(format!("{name}.rs")),
+        base_dir.join(name).join("mod.rs"),
+    ]
+    .into_iter()
+    .find(|path| path.exists()) else {
+        return Ok(None);
+    };
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+    if !visited.insert(canonical) {
+        return Ok(None);
+    }
+    let source = std::fs::read_to_string(&path)
+        .map_err(|error| format!("read Rust module {}: {error}", path.display()))?;
+    let file = syn::parse_file(&source)
+        .map_err(|error| format!("parse Rust module {}: {error}", path.display()))?;
+    let artifact =
+        lower_file_items_at_visited(&file, path.parent().unwrap_or(base_dir), visited, depth)?;
+    unary_methods::prefix(artifact, name, &file).map(Some)
 }
 
 fn prefix_module_decls(mut decls: Vec<Decl>, module: &str, file: &syn::File) -> Vec<Decl> {
@@ -1453,8 +1439,27 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
                         let pname = pattern_name(&pat_ty.pat).unwrap_or_else(|| format!("arg"));
                         (pname, map_type(&pat_ty.ty))
                     }
-                    syn::FnArg::Receiver(_recv) => {
-                        ("self".to_string(), Typ::Named(self_type.clone()))
+                    syn::FnArg::Receiver(recv) => {
+                        let proof = map_type(&i.self_ty);
+                        let runtime = Typ::Named(self_type.clone());
+                        let typ = if recv.reference.is_some() {
+                            crate::core_ir::rust_references::typ(
+                                crate::core_ir::rust_references::ReferenceType {
+                                    mutable: recv.mutability.is_some(),
+                                    referent: proof,
+                                    runtime,
+                                },
+                            )
+                        } else if let Typ::Named(name) = &proof
+                            && let Some(mut reference) =
+                                crate::core_ir::rust_references::decode(name)
+                        {
+                            reference.runtime = runtime;
+                            crate::core_ir::rust_references::typ(reference)
+                        } else {
+                            runtime
+                        };
+                        ("self".to_string(), typ)
                     }
                 })
                 .collect();
@@ -1468,15 +1473,29 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
                 local_types.insert(pname.clone(), type_to_string(pty));
             }
             let body = lower_block_with_types(&f.block, &mut local_types);
-            decls.push(Decl::Function {
+            let mut declaration = Decl::Function {
                 name: method_name,
                 params,
                 ret,
                 body,
                 type_params: vec![],
-            });
+            };
+            let mut parameters = declared_type_parameters(&i.generics);
+            parameters.extend(declared_type_parameters(&f.sig.generics));
+            retain_generic_scope(&mut declaration, parameters);
+            decls.push(declaration);
         }
     }
+    let mut self_proof = map_type(&i.self_ty);
+    if let Typ::Named(name) = &self_proof
+        && let Some(mut reference) = crate::core_ir::rust_references::decode(name)
+    {
+        reference.runtime = Typ::Named(self_type.clone());
+        self_proof = crate::core_ir::rust_references::typ(reference);
+    }
+    crate::core_bindings::rewrite_named_types(&mut decls, &|name| {
+        (name == "Self").then(|| self_proof.clone())
+    });
     let resolve_self = |name: &str| {
         if name == "Self" {
             Some(self_type.clone())
@@ -1523,6 +1542,11 @@ fn lower_enum(e: &syn::ItemEnum) -> Option<Decl> {
 }
 
 fn type_to_string(ty: &Typ) -> String {
+    if let Typ::Named(name) = ty
+        && let Some(reference) = crate::core_ir::rust_references::decode(name)
+    {
+        return type_to_string(&reference.runtime);
+    }
     match ty {
         Typ::Int => "i64".to_string(),
         Typ::Bool => "bool".to_string(),
@@ -1538,6 +1562,31 @@ fn type_to_string(ty: &Typ) -> String {
 
 fn lower_fn(f: syn::ItemFn) -> Decl {
     lower_fn_with_types(f, &mut HashMap::new())
+}
+
+fn declared_type_parameters(generics: &syn::Generics) -> Vec<String> {
+    generics
+        .type_params()
+        .map(|parameter| parameter.ident.to_string())
+        .collect()
+}
+
+fn retain_generic_scope(decl: &mut Decl, parameters: Vec<String>) {
+    if parameters.is_empty() {
+        return;
+    }
+    let names: HashSet<_> = parameters.iter().cloned().collect();
+    // Reuse the existing scoped type-position walker before setting the
+    // declaration's generic-name guard. Values and nominal member names stay intact.
+    crate::core_bindings::rewrite_named_types(std::slice::from_mut(decl), &|name| {
+        names.contains(name).then(|| Typ::Generic(name.into()))
+    });
+    match decl {
+        Decl::Function { type_params, .. } | Decl::Struct { type_params, .. } => {
+            *type_params = parameters;
+        }
+        _ => {}
+    }
 }
 
 fn lower_fn_with_types(f: syn::ItemFn, local_types: &mut HashMap<String, String>) -> Decl {
@@ -1563,13 +1612,15 @@ fn lower_fn_with_types(f: syn::ItemFn, local_types: &mut HashMap<String, String>
         syn::ReturnType::Type(_, ty) => map_type(ty),
     };
     let body = lower_block_with_types(&f.block, local_types);
-    Decl::Function {
+    let mut declaration = Decl::Function {
         name,
         params,
         ret,
         body,
         type_params: vec![],
-    }
+    };
+    retain_generic_scope(&mut declaration, declared_type_parameters(&f.sig.generics));
+    declaration
 }
 
 fn params_fallback_idx(pat: &syn::Pat) -> usize {
@@ -1745,7 +1796,14 @@ fn map_type(ty: &syn::Type) -> Typ {
                 // shortcut: tuple borrows need reference types and an address ABI before native execution.
                 Typ::Named("#unsupported-borrowed-tuple".into())
             } else {
-                typ
+                let runtime = crate::core_ir::rust_references::erase_type(typ.clone());
+                crate::core_ir::rust_references::typ(
+                    crate::core_ir::rust_references::ReferenceType {
+                        mutable: r.mutability.is_some(),
+                        referent: typ,
+                        runtime,
+                    },
+                )
             }
         }
         syn::Type::Array(array) => Typ::Array(Box::new(map_type(&array.elem))),
@@ -2548,9 +2606,19 @@ fn lower_expr_with_types_inner(
                 path
             })
         }
-        syn::Expr::Reference(r) => Expr::Call {
-            callee: Box::new(Expr::Ident(crate::core_ir::BORROW.into())),
-            args: vec![lower_expr_with_types(&r.expr, local_types)],
+        syn::Expr::Reference(r) => Expr::Unary {
+            op: if r.mutability.is_some() {
+                crate::core_ir::rust_references::MUTABLE_VALUE
+            } else {
+                crate::core_ir::rust_references::SHARED_VALUE
+            }
+            .into(),
+            // Preserve the existing place/spill preparation, independently of
+            // the source proof which must survive argument substitution.
+            expr: Box::new(Expr::Call {
+                callee: Box::new(Expr::Ident(crate::core_ir::BORROW.into())),
+                args: vec![lower_expr_with_types(&r.expr, local_types)],
+            }),
         },
         syn::Expr::Paren(p) => lower_expr_with_types(&p.expr, local_types),
         syn::Expr::Tuple(tuple) if tuple.elems.is_empty() => Expr::UnitLit,
@@ -2755,7 +2823,7 @@ fn lower_expr_with_types_inner(
                     })
             } else {
                 Expr::Unary {
-                    op: "-".into(),
+                    op: crate::core_ir::rust_references::NEGATE_VALUE.into(),
                     expr: Box::new(lower_expr_with_types(&u.expr, local_types)),
                 }
             }
@@ -2763,6 +2831,7 @@ fn lower_expr_with_types_inner(
         syn::Expr::Unary(u) => Expr::Unary {
             op: match u.op {
                 syn::UnOp::Not(_) => "complement".into(),
+                syn::UnOp::Neg(_) => crate::core_ir::rust_references::NEGATE_VALUE.into(),
                 _ => u.op.to_token_stream().to_string(),
             },
             expr: Box::new(lower_expr_with_types(&u.expr, local_types)),
@@ -4070,7 +4139,7 @@ fn main() {
                 .decls
                 .iter()
                 .any(|decl| matches!(decl, Decl::Struct{name,fields,..}
-            if name=="shapes::Slice" && fields[0].1 == map_type(&syn::parse_str::<syn::Type>("&[i64]").unwrap())))
+            if name=="shapes::Slice" && fields[0].1 == crate::core_ir::rust_references::erase_type(map_type(&syn::parse_str::<syn::Type>("&[i64]").unwrap()))))
         );
         module =
             crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &module);
@@ -4363,5 +4432,202 @@ mod expression_depth_tests {
                 assert_eq!(EXPR_DEPTH.with(|value| value.get()), 0);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod generic_provenance_tests {
+    use super::*;
+
+    #[test]
+    fn declared_generics_are_distinct_from_same_named_nominals_and_nested_containers() {
+        let module = parse_rust_source(
+            "struct T{x:i64}fn nominal(value:T)->T{value}fn generic<T>(value:T,values:Vec<T>,array:[T;2],tuple:(T,i64))->T{let local:T=value;local}"
+        ).unwrap();
+        let generic = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function{name,..}if name=="generic"))
+            .unwrap();
+        let Decl::Function {
+            params,
+            ret,
+            body,
+            type_params,
+            ..
+        } = generic
+        else {
+            unreachable!()
+        };
+        assert_eq!(type_params, &["T"]);
+        assert_eq!(params[0].1, Typ::Generic("T".into()));
+        assert_eq!(params[1].1, Typ::Vector(Box::new(Typ::Generic("T".into()))));
+        assert_eq!(params[2].1, Typ::Array(Box::new(Typ::Generic("T".into()))));
+        assert_eq!(
+            crate::core_ir::tuples::fields(match &params[3].1 {
+                Typ::Named(name) => name,
+                _ => panic!(),
+            })
+            .unwrap()[0]
+                .1,
+            Typ::Generic("T".into())
+        );
+        assert_eq!(*ret, Typ::Generic("T".into()));
+        assert!(body.iter().any(
+            |statement| matches!(statement,Stmt::Let(_,Some(Typ::Generic(name)),_)if name=="T")
+        ));
+        let Decl::Function {
+            params,
+            ret,
+            type_params,
+            ..
+        } = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl,Decl::Function{name,..}if name=="nominal"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(params[0].1, Typ::Named("T".into()));
+        assert_eq!(*ret, Typ::Named("T".into()));
+        assert!(type_params.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod retained_unary_artifact_tests {
+    use super::*;
+    use crate::core_ir::rust_references;
+    #[test]
+    fn artifact_keeps_exact_owned_shared_mutable_bindings_and_reference_producers() {
+        let artifact = parse_rust_artifact_source(
+            r#"
+            struct Row{x:i64}
+            impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}
+            impl std::ops::Neg for &Row{type Output=i64;fn neg(self)->i64{88}}
+            impl std::ops::Neg for &mut Row{type Output=i64;fn neg(self)->i64{99}}
+            fn negate<T:std::ops::Neg<Output=i64>>(value:T)->i64{-value}
+            fn main()->i64{let mut row=Row{x:42};negate(Row{x:42})+negate(&row)+negate(&mut row)}
+        "#,
+            "proof",
+        )
+        .unwrap();
+        for (receiver, target) in [
+            ("Row", "Row::std::ops::Neg::neg"),
+            ("&Row", "&Row::std::ops::Neg::neg"),
+            ("&mut Row", "&mutRow::std::ops::Neg::neg"),
+        ] {
+            assert_eq!(
+                artifact.unary_methods.get(&(receiver.into(), "-".into())),
+                Some(&Ok(target.into()))
+            );
+        }
+        let mut semantic = artifact.semantic.clone();
+        let mut producers = Vec::new();
+        let mut generic_minus = 0;
+        crate::core_opt::map_decl_exprs_mut(&mut semantic.decls, &mut |expression| {
+            if let Expr::Unary { op, .. } = expression {
+                if let Some(mutable) = rust_references::value_kind(op) {
+                    producers.push(mutable);
+                }
+                if op == rust_references::NEGATE_VALUE {
+                    generic_minus += 1;
+                }
+            }
+        });
+        assert_eq!(producers, [false, true]);
+        assert_eq!(generic_minus, 1);
+        crate::lower_core::desugar_module(&mut semantic);
+        crate::typecheck::TypeChecker::new().resolve_complements(&mut semantic);
+        let mut borrow_calls = 0;
+        crate::core_opt::map_decl_exprs_mut(&mut semantic.decls, &mut |expression| {
+            if matches!(expression,Expr::Call{callee,..}if matches!(callee.as_ref(),Expr::Ident(name)if name==crate::core_ir::BORROW))
+            {
+                borrow_calls += 1;
+            }
+        });
+        assert_eq!(
+            borrow_calls, 0,
+            "old BORROW preparation completes before inlining while producer proof remains"
+        );
+    }
+    #[test]
+    fn concrete_semantic_api_resolves_neg_and_restores_reference_representations() {
+        let semantic=parse_rust_source("struct Row{x:i64}impl std::ops::Neg for &Row{type Output=i64;fn neg(self)->i64{88}}fn apply(row:&Row)->i64{-row}").unwrap();
+        let Decl::Function { params, body, .. } = semantic
+            .decls
+            .iter()
+            .find(|declaration| matches!(declaration,Decl::Function{name,..}if name=="apply"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(params[0].1, Typ::Named("Row".into()));
+        assert!(
+            matches!(&body[0],Stmt::Return(Some(Expr::Call{callee,..}))if matches!(callee.as_ref(),Expr::Ident(name)if name=="&Row::std::ops::Neg::neg"))
+        );
+    }
+    #[test]
+    fn inline_child_keeps_exact_target_and_loaded_external_errors_propagate() {
+        let artifact=parse_rust_artifact_source("mod child{struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}pub fn entry()->i64{-Row{x:42}}}fn main()->i64{child::entry()}","proof").unwrap();
+        assert_eq!(
+            artifact
+                .unary_methods
+                .get(&("child::Row".into(), "-".into())),
+            Some(&Ok("child::Row::std::ops::Neg::neg".into()))
+        );
+        let directory = std::env::temp_dir().join(format!("in-neg-proof-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("broken.rs"), "fn broken( {").unwrap();
+        let error = parse_rust_artifact_source_with_dir(
+            "mod broken;fn main()->i64{42}",
+            "proof",
+            &directory,
+        )
+        .unwrap_err();
+        assert!(error.contains("parse Rust module"));
+        std::fs::remove_file(directory.join("broken.rs")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod nested_module_proof_boundaries {
+    use super::*;
+    #[test]
+    fn empty_shadow_module_does_not_hide_absolute_standard_trait_proof() {
+        let artifact = parse_rust_artifact_source(
+            "mod std{}struct Row{x:i64}impl ::std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}fn main()->i64{-Row{x:42}}", "absolute"
+        ).unwrap();
+        assert_eq!(
+            artifact.unary_methods.get(&("Row".into(), "-".into())),
+            Some(&Ok("Row::::std::ops::Neg::neg".into()))
+        );
+        assert!(parse_rust_source("").is_err());
+    }
+    #[test]
+    fn parallel_external_modules_keep_ancestor_depth_limit() {
+        let directory = std::env::temp_dir().join(format!("in-neg-depth-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut level = directory.clone();
+        for _ in 0..10 {
+            std::fs::create_dir_all(level.join("next")).unwrap();
+            std::fs::write(
+                level.join("next/mod.rs"),
+                "mod next;mod empty;pub fn value()->i64{42}",
+            )
+            .unwrap();
+            std::fs::write(level.join("empty.rs"), "").unwrap();
+            level = level.join("next");
+        }
+        let error = parse_rust_artifact_source_with_dir(
+            "mod next;mod empty;fn main()->i64{42}",
+            "depth",
+            &directory,
+        )
+        .unwrap_err();
+        assert!(error.contains("module nest limit"), "{error}");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
