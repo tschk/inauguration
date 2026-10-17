@@ -668,9 +668,8 @@ fn infer_in_expr_type_scoped(
                     typ
                 })
             }
-            "!" => (infer_in_expr_type_scoped(expr, env, structs, fn_rets, shadowed)?.canonical()
-                == Typ::Bool)
-                .then_some(Typ::Bool),
+            // Operand validity is checked after parsing; negation always yields Bool.
+            "!" => Some(Typ::Bool),
             _ => infer_in_expr_type_scoped(expr, env, structs, fn_rets, shadowed),
         },
         Expr::Binary { op, lhs, rhs } => match op.as_str() {

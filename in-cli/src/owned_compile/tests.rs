@@ -8676,3 +8676,81 @@ fn boolean_negation_structured_consumers_keep_integer_results() {
         }
     }
 }
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn logical_not_conditions_preserve_integer_receiver_methods_and_validation() {
+    for (operand, truth) in [
+        ("!42", false),
+        ("!2.5", false),
+        ("!\"hello\"", false),
+        ("!(-0.0)", true),
+        ("!true", false),
+    ] {
+        let conditional = format!(
+            "(if({operand}){{{}}}else{{{}}})",
+            if truth { 42 } else { 0 },
+            if truth { 0 } else { 42 }
+        );
+        for body in [
+            format!("return {conditional}.toStr();"),
+            format!("let result={conditional};return result.toStr();"),
+            format!("let result=[{conditional}];return result[0].toStr();"),
+            format!("match {conditional}{{captured{{return captured.toStr();}}}}"),
+            format!("let result:Int={conditional};return result.toStr();"),
+        ] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let source = temp_path("logical-not-inference.in");
+                fs::write(&source, format!("fn main()->String{{{body}}}")).unwrap();
+                let mut request =
+                    default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.execution_started && report.degradations.is_empty(),
+                    "{body} {profile:?}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Str("42".into())),
+                    "{body} {profile:?}: {report:?}"
+                );
+                let _ = fs::remove_file(source);
+            }
+        }
+    }
+    for (text, code) in [
+        (
+            "fn main()->Bool{return !missing;}",
+            "verify-unresolved-symbol",
+        ),
+        (
+            "fn sink()->Void{return;}fn main()->Bool{return !sink();}",
+            "verify-type-mismatch",
+        ),
+        ("fn main()->Bool{return !();}", "verify-type-mismatch"),
+    ] {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let source = temp_path("logical-not-invalid.in");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                !report.success && !report.execution_started,
+                "{text} {profile:?}: {report:?}"
+            );
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some(code),
+                "{text} {profile:?}: {report:?}"
+            );
+            assert!(report.artifact_path.is_none(), "{report:?}");
+            let _ = fs::remove_file(source);
+        }
+    }
+}

@@ -3591,3 +3591,60 @@ fn boolean_numeric_negation_receiver_inference_is_integer() {
         );
     }
 }
+
+#[test]
+fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
+    use super::validate::infer_in_expr_type;
+    use std::collections::HashMap;
+    for operand in ["true", "42", "2.5", "-0.0", "\"hello\"", "missing", "()"] {
+        assert_eq!(
+            infer_in_expr_type(
+                &parse_expr(&format!("!({operand})")),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
+            Some(Typ::Bool),
+            "{operand}"
+        );
+    }
+    for operand in ["!42", "!2.5", "!\"hello\"", "!(-0.0)", "!true"] {
+        let conditional = format!("(if({operand}){{42}}else{{0}})");
+        for body in [
+            format!("return {conditional}.toStr();"),
+            format!("let result={conditional};return result.toStr();"),
+            format!("let result=[{conditional}];return result[0].toStr();"),
+            format!("match {conditional}{{captured{{return captured.toStr();}}}}"),
+            format!("let result:Int={conditional};return result.toStr();"),
+        ] {
+            let mut module = parse_in_source(&format!("fn main()->String{{{body}}}")).unwrap();
+            let mut resolved = false;
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                if let Expr::Call { callee, .. } = expr
+                    && let Expr::Ident(name) = callee.as_ref()
+                {
+                    assert_ne!(name, "__method__toStr", "{body}");
+                    resolved |= name == "to-string";
+                }
+            });
+            assert!(resolved, "{body}");
+        }
+    }
+    for (source, code) in [
+        ("fn main()->Bool{return !missing;}", "unresolved-symbol"),
+        (
+            "fn sink()->Void{return;}fn main()->Bool{return !sink();}",
+            "type-mismatch",
+        ),
+        ("fn main()->Bool{return !();}", "type-mismatch"),
+    ] {
+        let module = parse_in_source(source).unwrap();
+        let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+        assert!(!report.ok, "{source}");
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some(code),
+            "{source}: {report:?}"
+        );
+    }
+}
