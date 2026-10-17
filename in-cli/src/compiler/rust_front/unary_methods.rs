@@ -171,31 +171,6 @@ fn standard_neg(path: &syn::Path, file: &syn::File) -> bool {
     }
 }
 
-fn self_type(value: Typ, owner: &Typ) -> Typ {
-    match value {
-        Typ::Named(name) if name == "Self" => owner.clone(),
-        Typ::Named(name) => {
-            if let Some(mut reference) = rust_references::decode(&name) {
-                reference.referent = self_type(reference.referent, owner);
-                reference.runtime = self_type(reference.runtime, owner);
-                return rust_references::typ(reference);
-            }
-            if let Some(fields) = crate::core_ir::tuples::fields(&name) {
-                return crate::core_ir::tuples::typ(
-                    &fields
-                        .into_iter()
-                        .map(|(_, field)| self_type(field, owner))
-                        .collect::<Vec<_>>(),
-                );
-            }
-            Typ::Named(name)
-        }
-        Typ::Array(item) => Typ::Array(Box::new(self_type(*item, owner))),
-        Typ::Vector(item) => Typ::Vector(Box::new(self_type(*item, owner))),
-        value => value,
-    }
-}
-
 pub(super) fn collect(file: &syn::File) -> UnaryMethodBindings {
     let mut bindings = UnaryMethodBindings::new();
     for item in &file.items {
@@ -254,8 +229,13 @@ pub(super) fn collect(file: &syn::File) -> UnaryMethodBindings {
             && matches!(methods[0].sig.inputs.first(), Some(syn::FnArg::Receiver(value)) if value.reference.is_none() && value.colon_token.is_none())
             && match &methods[0].sig.output {
                 syn::ReturnType::Type(_, ret) => {
-                    self_type(map_type(ret), &receiver_type)
-                        == self_type(map_type(&outputs[0].ty), &receiver_type)
+                    match (
+                        resolve_impl_type(map_type(ret), &receiver_type, implementation),
+                        resolve_impl_type(map_type(&outputs[0].ty), &receiver_type, implementation),
+                    ) {
+                        (Ok(actual), Ok(expected)) => actual == expected,
+                        _ => false,
+                    }
                 }
                 _ => false,
             };

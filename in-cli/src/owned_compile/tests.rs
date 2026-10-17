@@ -9118,3 +9118,137 @@ fn effectful_snapshot_inlining_preserves_array_formal_refusals_across_profiles()
         fs::remove_file(path).unwrap();
     }
 }
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn rust_impl_local_associated_outputs_execute_and_refuse_unresolved_contracts() {
+    for (name, source, expected) in [
+        (
+            "owned",
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->Self::Output{let value:Self::Output=77;value}}fn main()->i64{-Row{x:42}}\n",
+            Some(77),
+        ),
+        (
+            "borrowed",
+            "struct Row{x:i64}impl std::ops::Neg for &Row{type Output=i64;fn neg(self)->Self::Output{88}}fn main()->i64{let value=Row{x:42};-&value}\n",
+            Some(88),
+        ),
+        (
+            "aggregate",
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=Self;fn neg(self)->Self::Output{self}}fn main()->i64{(-Row{x:42}).x}\n",
+            Some(42),
+        ),
+        (
+            "u64-output",
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=u64;fn neg(self)->Self::Output{18446744073709551615u64}}fn main()->i64{if (-Row{x:42})==18446744073709551615u64{42}else{7}}\n",
+            Some(42),
+        ),
+        (
+            "trait-alias",
+            "use std::ops::Neg as Minus;struct Row{x:i64}impl Minus for Row{type Output=i64;fn neg(self)->Self::Output{77}}fn main()->i64{-Row{x:42}}",
+            Some(77),
+        ),
+        (
+            "scoped-traits",
+            "struct Row{x:i64}trait Other{type Output;fn other(self)->Self::Output;}impl Other for Row{type Output=u64;fn other(self)->Self::Output{42u64}}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->Self::Output{77}}fn main()->i64{if (-Row{x:42})==77&&<Row as Other>::other(Row{x:42})==42u64{42}else{7}}",
+            Some(42),
+        ),
+        (
+            "qualified-projection",
+            "struct Row{x:i64}trait Other{type Output;}impl Other for Row{type Output=i64;}impl std::ops::Neg for Row{type Output=<Self as Other>::Output;fn neg(self)->Self::Output{77}}fn main()->i64{-Row{x:42}}",
+            None,
+        ),
+        (
+            "cycle-invalid",
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=Self::Output;fn neg(self)->Self::Output{77}}fn main()->i64{-Row{x:42}}",
+            None,
+        ),
+        (
+            "signature-invalid",
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->u64{77}}fn main()->i64{-Row{x:42}}",
+            None,
+        ),
+    ] {
+        let path = temp_path(&format!("associated-output-{name}.rs"));
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            if let Some(expected) = expected {
+                assert!(report.success, "{name} {profile:?}: {report:?}");
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(expected)),
+                    "{name} {profile:?}: {report:?}"
+                );
+            } else {
+                assert!(!report.success, "{name} {profile:?}: {report:?}");
+                assert!(!report.execution_started, "{name} {profile:?}: {report:?}");
+                assert!(
+                    report.eval_result.is_none(),
+                    "{name} {profile:?}: {report:?}"
+                );
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn rust_tuple_references_preserve_negation_receiver_identity() {
+    for (name, source, expected) in [
+        (
+            "direct-borrow",
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}impl std::ops::Neg for &Row{type Output=i64;fn neg(self)->i64{88}}fn evaluate()->i64{let row=Row{x:42};-&row}fn main()->i64{evaluate()}",
+            88,
+        ),
+        (
+            "inferred-tuple",
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}impl std::ops::Neg for &Row{type Output=i64;fn neg(self)->i64{88}}fn evaluate()->i64{let row=Row{x:42};let pair=(&row,0i64);-pair.0}fn main()->i64{evaluate()}",
+            88,
+        ),
+        (
+            "typed-tuple",
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}impl std::ops::Neg for &Row{type Output=i64;fn neg(self)->i64{88}}fn evaluate()->i64{let row=Row{x:42};let pair:(&Row,i64)=(&row,0);-pair.0}fn main()->i64{evaluate()}",
+            88,
+        ),
+        (
+            "tuple-return",
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}impl std::ops::Neg for &Row{type Output=i64;fn neg(self)->i64{88}}fn reference(row:&Row)->(&Row,i64){(row,0)}fn evaluate()->i64{let row=Row{x:42};-reference(&row).0}fn main()->i64{evaluate()}",
+            88,
+        ),
+        (
+            "tuple-ufcs",
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}impl std::ops::Neg for &Row{type Output=i64;fn neg(self)->i64{88}}fn evaluate()->i64{let row=Row{x:42};let pair=(&row,0i64);<&Row as std::ops::Neg>::neg(pair.0)}fn main()->i64{evaluate()}",
+            88,
+        ),
+        (
+            "combined-shapes",
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}impl std::ops::Neg for &Row{type Output=i64;fn neg(self)->i64{88}}fn main()->i64{let row=Row{x:42};let borrowed=(&row,0i64);let owned=(Row{x:1},0i64);-borrowed.0+-owned.0}",
+            165,
+        ),
+    ] {
+        let path = temp_path(&format!("tuple-reference-{name}.rs"));
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{name} {profile:?}: {report:?}");
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(expected)),
+                "{name} {profile:?}: {report:?}"
+            );
+        }
+        fs::remove_file(path).unwrap();
+    }
+}

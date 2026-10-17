@@ -155,11 +155,56 @@ pub(crate) fn qualify_receiver_identity(
     qualify(key, &rename)
 }
 
-pub(crate) fn erase_declarations(decls: &mut [super::Decl]) {
+pub(crate) fn erase_declarations(decls: &mut Vec<super::Decl>) {
+    // Distinct source proof tuples can share one old runtime storage shape.
+    // Remember only canonical generated schemas; malformed/user-generic tuple
+    // declarations must retain their conflicts for the verifier to reject.
+    let originals: Vec<_> = decls
+        .iter()
+        .map(|decl| match decl {
+            super::Decl::Struct {
+                name,
+                fields,
+                type_params,
+            } => super::tuples::fields(name)
+                .map(|expected| (name.clone(), type_params.is_empty() && &expected == fields)),
+            _ => None,
+        })
+        .collect();
     crate::core_bindings::rewrite_named_types(decls, &|name| {
         decode(name).map(|reference| erase_type(reference.runtime))
     });
     crate::core_opt::map_decl_exprs_mut(decls, &mut erase_value);
+    for (decl, original) in decls.iter_mut().zip(&originals) {
+        if let Some((original_name, canonical)) = original
+            && let super::Decl::Struct { name, fields, .. } = decl
+            && let Typ::Named(runtime_name) = erase_type(Typ::Named(original_name.clone()))
+        {
+            // All uses rewrite from the original encoded identity. A malformed
+            // schema must not acquire a different identity from its bad fields.
+            *name = runtime_name;
+            if *canonical && let Some(runtime_fields) = super::tuples::fields(name) {
+                // Restore the old canonical tuple storage under erased leaves.
+                *fields = runtime_fields;
+            }
+        }
+    }
+    let mut seen: std::collections::HashMap<super::Decl, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    let mut index = 0;
+    decls.retain(|decl| {
+        let original = &originals[index];
+        index += 1;
+        let Some((original, true)) = original else {
+            return true;
+        };
+        let origins = seen.entry(decl.clone()).or_default();
+        let first = origins.is_empty();
+        let repeated_original = !origins.insert(original.clone());
+        // Do not hide preexisting duplicate declarations, even when an earlier
+        // occurrence of that same original was merged into another shape.
+        first || repeated_original
+    });
 }
 
 #[cfg(test)]
@@ -277,5 +322,210 @@ mod tests {
         assert_ne!(decorated, original);
         erase_declarations(&mut decorated);
         assert_eq!(decorated, original);
+    }
+}
+
+#[cfg(test)]
+mod tuple_erasure_tests {
+    use super::*;
+    use crate::core_ir::{Decl, Stmt, UnifiedModule};
+    fn named(value: &Typ) -> String {
+        let Typ::Named(name) = value else {
+            panic!("expected tuple")
+        };
+        name.clone()
+    }
+    fn schema(value: &Typ) -> Decl {
+        let name = named(value);
+        Decl::Struct {
+            name: name.clone(),
+            fields: super::super::tuples::fields(&name).unwrap(),
+            type_params: vec![],
+        }
+    }
+    fn tuple_value(value: &Typ, first: Expr) -> Expr {
+        Expr::StructInit {
+            name: named(value),
+            fields: vec![("_0".into(), first), ("_1".into(), Expr::IntLit(0))],
+        }
+    }
+    #[test]
+    fn erasure_keeps_nested_tuple_schemas_constructors_aliases_params_and_returns_consistent() {
+        let row = Typ::Named("Row".into());
+        let borrowed = value_type(SHARED_VALUE, row.clone()).unwrap();
+        let proof = super::super::tuples::typ(&[borrowed, Typ::Int]);
+        let runtime = erase_type(proof.clone());
+        assert_ne!(proof, runtime);
+        let nested = super::super::tuples::typ(&[
+            Typ::Array(Box::new(proof.clone())),
+            Typ::Vector(Box::new(proof.clone())),
+        ]);
+        let nested_runtime = erase_type(nested.clone());
+        let mut declarations = vec![
+            Decl::Struct {
+                name: "Row".into(),
+                fields: vec![("x".into(), Typ::Int)],
+                type_params: vec![],
+            },
+            schema(&proof),
+            schema(&runtime),
+            schema(&nested),
+            schema(&nested_runtime),
+            Decl::Struct {
+                name: "Alias".into(),
+                fields: vec![
+                    ("tuple".into(), proof.clone()),
+                    ("nested".into(), nested.clone()),
+                ],
+                type_params: vec![],
+            },
+            Decl::Global {
+                name: "pair".into(),
+                typ: proof.clone(),
+                init: Some(Box::new(tuple_value(
+                    &proof,
+                    Expr::StructInit {
+                        name: "Row".into(),
+                        fields: vec![("x".into(), Expr::IntLit(42))],
+                    },
+                ))),
+                mutable: false,
+                constant_value: false,
+            },
+            Decl::Function {
+                name: "roundtrip".into(),
+                params: vec![("value".into(), proof.clone())],
+                ret: proof.clone(),
+                body: vec![
+                    Stmt::Let("local".into(), Some(proof), Expr::Ident("value".into())),
+                    Stmt::Return(Some(Expr::Ident("local".into()))),
+                ],
+                type_params: vec![],
+            },
+        ];
+        erase_declarations(&mut declarations);
+        assert_eq!(
+            declarations
+                .iter()
+                .filter(|decl| matches!(decl,Decl::Struct{name,..}if name==&named(&runtime)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            declarations
+                .iter()
+                .filter(|decl| matches!(decl,Decl::Struct{name,..}if name==&named(&nested_runtime)))
+                .count(),
+            1
+        );
+        let Decl::Struct { fields, .. } = declarations
+            .iter()
+            .find(|decl| matches!(decl,Decl::Struct{name,..}if name=="Alias"))
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            fields,
+            &vec![
+                ("tuple".into(), runtime.clone()),
+                ("nested".into(), nested_runtime)
+            ]
+        );
+        let Decl::Global {
+            typ,
+            init: Some(init),
+            ..
+        } = declarations
+            .iter()
+            .find(|decl| matches!(decl, Decl::Global { .. }))
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(typ, &runtime);
+        assert!(matches!(init.as_ref(),Expr::StructInit{name,..}if name==&named(&runtime)));
+        let Decl::Function {
+            params, ret, body, ..
+        } = declarations
+            .iter()
+            .find(|decl| matches!(decl, Decl::Function { .. }))
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(params[0].1, runtime);
+        assert_eq!(ret, typ);
+        assert!(matches!(&body[0],Stmt::Let(_,Some(typ),_)if typ==ret));
+        let once = declarations.clone();
+        erase_declarations(&mut declarations);
+        assert_eq!(declarations, once);
+        let module = UnifiedModule::new(declarations);
+        let report = crate::core_ir_verifier::verify_module(
+            &module,
+            &crate::core_ir_verifier::VerifyOptions {
+                entry: None,
+                require_entry: false,
+            },
+        );
+        assert!(report.ok, "{report:?}");
+    }
+    #[test]
+    fn erasure_preserves_repeated_original_and_conflicting_tuple_declarations() {
+        let row = Typ::Named("Row".into());
+        let proof = super::super::tuples::typ(&[value_type(SHARED_VALUE, row).unwrap(), Typ::Int]);
+        let runtime = erase_type(proof.clone());
+        // B,A,A must not hide the duplicate A merely because its first occurrence merged.
+        let mut declarations = vec![schema(&runtime), schema(&proof), schema(&proof)];
+        erase_declarations(&mut declarations);
+        assert_eq!(declarations.len(), 2);
+        let mut malformed = schema(&proof);
+        let Decl::Struct { fields, .. } = &mut malformed else {
+            panic!()
+        };
+        fields[0].1 = Typ::String;
+        let mut declarations = vec![schema(&proof), malformed];
+        erase_declarations(&mut declarations);
+        assert_eq!(declarations.len(), 2);
+        let module = UnifiedModule::new(declarations);
+        let report = crate::core_ir_verifier::verify_module(
+            &module,
+            &crate::core_ir_verifier::VerifyOptions {
+                entry: None,
+                require_entry: false,
+            },
+        );
+        assert!(!report.ok);
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("duplicate-top-level-name")
+        );
+        let mut generic = schema(&proof);
+        let Decl::Struct { type_params, .. } = &mut generic else {
+            panic!()
+        };
+        type_params.push("T".into());
+        let mut declarations = vec![schema(&proof), generic];
+        erase_declarations(&mut declarations);
+        assert_eq!(declarations.len(), 2);
+    }
+    #[test]
+    fn erased_reference_integer_leaves_return_to_canonical_tuple_storage() {
+        let integer = Typ::Named("#rust-integer-i32".into());
+        let proof =
+            super::super::tuples::typ(&[value_type(SHARED_VALUE, integer).unwrap(), Typ::Int]);
+        let runtime = super::super::tuples::typ(&[Typ::Int, Typ::Int]);
+        let mut declarations = vec![schema(&proof), schema(&runtime)];
+        erase_declarations(&mut declarations);
+        assert_eq!(declarations, vec![schema(&runtime)]);
+        let module = UnifiedModule::new(declarations);
+        let report = crate::core_ir_verifier::verify_module(
+            &module,
+            &crate::core_ir_verifier::VerifyOptions {
+                entry: None,
+                require_entry: false,
+            },
+        );
+        assert!(report.ok, "{report:?}");
     }
 }

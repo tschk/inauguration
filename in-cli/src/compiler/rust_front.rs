@@ -1410,6 +1410,87 @@ fn compact_rust_tokens(value: &impl ToTokens) -> String {
         .collect()
 }
 
+/// Resolve associated type projections only in their defining impl scope.
+/// Other traits' qualified projections and generic associated types stay unsupported.
+fn resolve_impl_type(
+    value: Typ,
+    owner: &Typ,
+    implementation: &syn::ItemImpl,
+) -> Result<Typ, String> {
+    fn resolve(
+        value: Typ,
+        owner: &Typ,
+        implementation: &syn::ItemImpl,
+        active: &mut HashSet<String>,
+    ) -> Result<Typ, String> {
+        match value {
+            Typ::Named(name) if name == "Self" => Ok(owner.clone()),
+            Typ::Named(name) => {
+                if let Some(member) = name.strip_prefix("Self::") {
+                    if !active.insert(member.to_string()) {
+                        return Err(format!("cyclic associated type `{name}`"));
+                    }
+                    let mut definitions =
+                        implementation.items.iter().filter_map(|item| match item {
+                            syn::ImplItem::Type(item) if item.ident == member => Some(item),
+                            _ => None,
+                        });
+                    let item = definitions
+                        .next()
+                        .ok_or_else(|| format!("unresolved associated type `{name}`"))?;
+                    if definitions.next().is_some()
+                        || !item.generics.params.is_empty()
+                        || item.generics.where_clause.is_some()
+                    {
+                        return Err(format!("unsupported associated type definition `{name}`"));
+                    }
+                    let result = resolve(map_type(&item.ty), owner, implementation, active);
+                    active.remove(member);
+                    return result;
+                }
+                if implementation
+                    .generics
+                    .type_params()
+                    .any(|parameter| parameter.ident == name)
+                {
+                    return Ok(Typ::Generic(name));
+                }
+                if let Some(mut reference) = crate::core_ir::rust_references::decode(&name) {
+                    reference.referent =
+                        resolve(reference.referent, owner, implementation, active)?;
+                    reference.runtime = resolve(reference.runtime, owner, implementation, active)?;
+                    return Ok(crate::core_ir::rust_references::typ(reference));
+                }
+                if let Some(fields) = crate::core_ir::tuples::fields(&name) {
+                    let items = fields
+                        .into_iter()
+                        .map(|(_, field)| resolve(field, owner, implementation, active))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return Ok(crate::core_ir::tuples::typ(&items));
+                }
+                if name.contains('<') || name.contains('>') || name.contains("Self::") {
+                    return Err(format!("unsupported associated type projection `{name}`"));
+                }
+                Ok(Typ::Named(name))
+            }
+            Typ::Array(item) => Ok(Typ::Array(Box::new(resolve(
+                *item,
+                owner,
+                implementation,
+                active,
+            )?))),
+            Typ::Vector(item) => Ok(Typ::Vector(Box::new(resolve(
+                *item,
+                owner,
+                implementation,
+                active,
+            )?))),
+            value => Ok(value),
+        }
+    }
+    resolve(value, owner, implementation, &mut HashSet::new())
+}
+
 fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
     // Retain generic arguments so distinct impl receivers retain distinct identities.
     let self_type = compact_rust_tokens(&i.self_ty);
@@ -1494,7 +1575,18 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
         self_proof = crate::core_ir::rust_references::typ(reference);
     }
     crate::core_bindings::rewrite_named_types(&mut decls, &|name| {
-        (name == "Self").then(|| self_proof.clone())
+        // This walker also visits constructor/pattern names. Resolve only an
+        // actual associated type here; other Self::member value paths keep the
+        // existing nominal/value rewrite below.
+        let projection = name.strip_prefix("Self::").is_some_and(|member| {
+            i.items
+                .iter()
+                .any(|item| matches!(item, syn::ImplItem::Type(item) if item.ident == member))
+        });
+        (name == "Self" || projection).then(|| {
+            resolve_impl_type(Typ::Named(name.into()), &self_proof, i)
+                .unwrap_or_else(|_| Typ::Named("#unsupported-rust-associated-type".into()))
+        })
     });
     let resolve_self = |name: &str| {
         if name == "Self" {
@@ -4629,5 +4721,134 @@ mod nested_module_proof_boundaries {
         .unwrap_err();
         assert!(error.contains("module nest limit"), "{error}");
         std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod impl_associated_type_tests {
+    use super::*;
+    fn implementation(source: &str) -> syn::ItemImpl {
+        syn::parse_str(source).unwrap()
+    }
+    #[test]
+    fn associated_output_is_impl_local_exact_width_and_generic_identity() {
+        for (source, expected) in [
+            (
+                "impl First for Row{type Output=i8;}",
+                Typ::Named("#rust-integer-i8".into()),
+            ),
+            (
+                "impl Second for Row{type Output=u64;}",
+                Typ::Named("#rust-integer-u64".into()),
+            ),
+            (
+                "impl<T> Other for Row<T>{type Output=T;}",
+                Typ::Generic("T".into()),
+            ),
+        ] {
+            let item = implementation(source);
+            assert_eq!(
+                resolve_impl_type(
+                    Typ::Named("Self::Output".into()),
+                    &Typ::Named("Row".into()),
+                    &item
+                ),
+                Ok(expected)
+            );
+        }
+    }
+    #[test]
+    fn output_projection_reaches_reference_and_container_types_without_erasing_proof() {
+        let item = implementation("impl Other for Row{type Output=i64;}");
+        let source: syn::Type = syn::parse_str("(&Self::Output, Vec<Self::Output>)").unwrap();
+        let resolved =
+            resolve_impl_type(map_type(&source), &Typ::Named("Row".into()), &item).unwrap();
+        let fields = crate::core_ir::tuples::fields(match &resolved {
+            Typ::Named(name) => name,
+            _ => panic!(),
+        })
+        .unwrap();
+        let Typ::Named(reference) = &fields[0].1 else {
+            panic!()
+        };
+        let reference = crate::core_ir::rust_references::decode(reference).unwrap();
+        assert_eq!(reference.referent, Typ::Named("#rust-integer-i64".into()));
+        assert_eq!(reference.runtime, Typ::Named("#rust-integer-i64".into()));
+        assert_eq!(fields[1].1, Typ::Vector(Box::new(Typ::Int)));
+    }
+    #[test]
+    fn unsupported_associated_contracts_refuse_instead_of_guessing_row_member() {
+        for source in [
+            "impl Other for Row{type Output=Self::Output;}",
+            "impl Other for Row{type Output=Self::Other;type Other=Self::Output;}",
+            "impl Other for Row{type Output=i64;type Output=i32;}",
+            "impl Other for Row{type Output<T>=T;}",
+            "impl Other for Row{}",
+            "impl Other for Row{type Output=<Row as Other>::Output;}",
+            "impl Other for Row{type Output=Holder<Self::Output>;}",
+            "impl Other for Row{type Output=fn()->Self::Output;}",
+        ] {
+            assert!(
+                resolve_impl_type(
+                    Typ::Named("Self::Output".into()),
+                    &Typ::Named("Row".into()),
+                    &implementation(source)
+                )
+                .is_err(),
+                "{source}"
+            );
+        }
+    }
+    #[test]
+    fn unresolved_neg_output_projections_never_establish_dispatch_proof() {
+        for output in [
+            "<Row as Other>::Output",
+            "Holder<Self::Output>",
+            "fn()->Self::Output",
+            "Self::Output",
+        ] {
+            let file = syn::parse_file(&format!("struct Row{{x:i64}}impl std::ops::Neg for Row{{type Output={output};fn neg(self)->Self::Output{{77}}}}" )).unwrap();
+            let bindings = unary_methods::collect(&file);
+            assert_eq!(bindings.len(), 1, "{output}: {bindings:?}");
+            assert!(
+                bindings.values().all(Result::is_err),
+                "{output}: {bindings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn neg_self_output_uses_the_same_resolved_type_in_binding_and_lowered_return() {
+        for (receiver, output, method_body, expected) in [
+            ("Row", "i64", "77", Typ::Named("#rust-integer-i64".into())),
+            ("&Row", "i64", "88", Typ::Named("#rust-integer-i64".into())),
+            ("Row", "Self", "self", Typ::Named("Row".into())),
+        ] {
+            let source = format!(
+                "struct Row{{x:i64}}impl std::ops::Neg for {receiver}{{type Output={output};fn neg(self)->Self::Output{{let value:Self::Output={method_body};value}}}}"
+            );
+            let file = syn::parse_file(&source).unwrap();
+            let bindings = unary_methods::collect(&file);
+            assert!(
+                bindings.values().all(Result::is_ok),
+                "{source}: {bindings:?}"
+            );
+            let item = file
+                .items
+                .iter()
+                .find_map(|item| {
+                    if let syn::Item::Impl(item) = item {
+                        Some(item)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            let lowered = lower_impl(item);
+            assert!(
+                matches!(&lowered[0], Decl::Function {ret,body,..} if ret == &expected && matches!(&body[0], Stmt::Let(_,Some(typ),_) if typ==&expected)),
+                "{lowered:?}"
+            );
+        }
     }
 }

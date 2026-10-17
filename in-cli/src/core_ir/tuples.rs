@@ -36,13 +36,21 @@ enum Shape {
 
 impl Shape {
     fn from_type(typ: &Typ) -> Self {
+        // Preserve transient reference proof until operator resolution; other
+        // leaves keep the existing canonical tuple storage shape.
+        if super::rust_references::has_reference_proof(typ) {
+            return Self::Core(typ.clone());
+        }
+        match typ {
+            Typ::Array(item) => return Self::Array(Box::new(Self::from_type(item))),
+            Typ::Vector(item) => return Self::Vector(Box::new(Self::from_type(item))),
+            _ => {}
+        }
         match typ.canonical() {
             Typ::Named(name) => match decode(&name) {
                 Some(items) => Self::Tuple(items),
                 None => Self::Core(Typ::Named(name)),
             },
-            Typ::Array(item) => Self::Array(Box::new(Self::from_type(&item))),
-            Typ::Vector(item) => Self::Vector(Box::new(Self::from_type(&item))),
             typ => Self::Core(typ),
         }
     }
@@ -365,5 +373,44 @@ mod tests {
         }
         assert_eq!(typ(&[]), Typ::Void);
         assert!(fields("in-tuple-not-hex").is_none());
+    }
+}
+
+#[cfg(test)]
+mod reference_shape_tests {
+    use super::*;
+    #[test]
+    fn tuple_shapes_preserve_reference_proof_and_canonical_storage_leaves() {
+        let reference = crate::core_ir::rust_references::value_type(
+            crate::core_ir::rust_references::SHARED_VALUE,
+            Typ::Named("Row".into()),
+        )
+        .unwrap();
+        let items = vec![
+            reference.clone(),
+            Typ::Array(Box::new(reference.clone())),
+            Typ::Vector(Box::new(reference.clone())),
+            Typ::Named("#rust-integer-i8".into()),
+        ];
+        let Typ::Named(name) = typ(&items) else {
+            panic!()
+        };
+        let recovered: Vec<_> = fields(&name)
+            .unwrap()
+            .into_iter()
+            .map(|(_, typ)| typ)
+            .collect();
+        assert_eq!(recovered[..3], items[..3]);
+        assert_eq!(recovered[3], Typ::Int);
+        let erased = crate::core_ir::rust_references::erase_type(Typ::Named(name));
+        assert_eq!(
+            erased,
+            typ(&[
+                Typ::Named("Row".into()),
+                Typ::Array(Box::new(Typ::Named("Row".into()))),
+                Typ::Vector(Box::new(Typ::Named("Row".into()))),
+                Typ::Int
+            ])
+        );
     }
 }
