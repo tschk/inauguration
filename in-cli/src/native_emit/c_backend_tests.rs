@@ -2326,3 +2326,175 @@ fn unsigned_division_projection_checks_operand_trees_and_preserves_integer_alias
         }
     }
 }
+
+#[test]
+fn scalar_binary_projection_matches_owned_primitive_operand_contract() {
+    for op in ["&", "|", "xor", "==", "!=", "<", "<=", ">", ">="] {
+        for (left_type, left_value) in [
+            ("Int", "42"),
+            ("Bool", "true"),
+            ("Float", "1.5"),
+            ("String", "\"hello\""),
+        ] {
+            for (right_type, right_value) in [
+                ("Int", "42"),
+                ("Bool", "true"),
+                ("Float", "1.5"),
+                ("String", "\"hello\""),
+            ] {
+                let bitwise = matches!(op, "&" | "|" | "xor");
+                let same = left_type == right_type;
+                let valid = same
+                    && if bitwise {
+                        matches!(left_type, "Int" | "Bool")
+                    } else if matches!(op, "==" | "!=") {
+                        true
+                    } else {
+                        matches!(left_type, "Int" | "Float")
+                    };
+                let boolean = !bitwise || (left_type == "Bool" && right_type == "Bool");
+                let ret = if boolean { "Bool" } else { "Int" };
+                let symbol = if op == "xor" { "^" } else { op };
+                let expected = if boolean {
+                    if matches!(op, "==" | "<=" | ">=" | "&" | "|") {
+                        "true"
+                    } else {
+                        "false"
+                    }
+                } else if op == "xor" {
+                    "0"
+                } else {
+                    "42"
+                };
+                let source = format!(
+                    "fn test(left:{left_type},right:{right_type})->{ret}{{return left{symbol}right;}}fn main()->Int{{if test({left_value},{right_value})=={expected}{{return 42;}}return 7;}}"
+                );
+                let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                if op == "xor" {
+                    crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                        if let Expr::Binary { op, .. } = expr
+                            && op == "^"
+                        {
+                            *op = "xor".into();
+                        }
+                    });
+                }
+                if valid {
+                    if let Decl::Function { name, .. } = &mut module.decls[1] {
+                        *name = "answer".into();
+                    }
+                    assert_inferred_c_executes(&module, "if(answer()!=42)return 7;return 42;");
+                } else {
+                    let error = emit_c_module(&module).unwrap_err();
+                    assert!(
+                        error.contains(
+                            "scalar binary operation requires resolved compatible operands"
+                        ),
+                        "{op} {left_type}/{right_type}: {error}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn scalar_binary_projection_validates_nested_operands_existing_aliases_and_unknowns() {
+    for op in ["==", "!=", "<", "<=", ">", ">=", "&", "|", "^"] {
+        for bad in ["(true+1)", "(\"hello\"+1)", "unknown"] {
+            for side in [0, 1] {
+                let expression = if side == 0 {
+                    format!("{bad}{op}1")
+                } else {
+                    format!("1{op}{bad}")
+                };
+                let module = crate::in_lang_parse::parse_in_source(&format!(
+                    "fn main()->Int{{let value={expression};return 42;}}"
+                ))
+                .unwrap();
+                assert!(emit_c_module(&module).is_err(), "{expression}");
+            }
+        }
+    }
+    for (alias, symbol) in [
+        ("eq", "=="),
+        ("neq", "!="),
+        ("lt", "<"),
+        ("le", "<="),
+        ("gt", ">"),
+        ("ge", ">="),
+        ("band", "&"),
+        ("bor", "|"),
+    ] {
+        let boolean = !matches!(alias, "band" | "bor");
+        let ret = if boolean { "Bool" } else { "Int" };
+        let expected = if boolean {
+            if matches!(alias, "eq" | "le" | "ge") {
+                "true"
+            } else {
+                "false"
+            }
+        } else {
+            "42"
+        };
+        let mut module=crate::in_lang_parse::parse_in_source(&format!("fn test(left:Int,right:Int)->{ret}{{return left{symbol}right;}}fn main()->Int{{if test(42,42)=={expected}{{return 42;}}return 7;}}")).unwrap();
+        crate::core_opt::map_decl_exprs_mut(
+            std::slice::from_mut(&mut module.decls[0]),
+            &mut |expr| {
+                if let Expr::Binary { op, .. } = expr
+                    && op == symbol
+                {
+                    *op = alias.into();
+                }
+            },
+        );
+        if let Decl::Function { name, .. } = &mut module.decls[1] {
+            *name = "answer".into();
+        }
+        assert_inferred_c_executes(&module, "if(answer()!=42)return 7;return 42;");
+    }
+}
+
+#[test]
+fn scalar_comparison_projection_preserves_raw_alias_identity_and_refuses_generic_proof() {
+    for (left, right, op, valid) in [
+        (Typ::Named("i32".into()), Typ::Int, "==", false),
+        (
+            Typ::Named("i32".into()),
+            Typ::Named("i32".into()),
+            "==",
+            true,
+        ),
+        (Typ::Named("i32".into()), Typ::Int, "<", true),
+        (Typ::Named("f64".into()), Typ::Float, "<", true),
+        (
+            Typ::Named("f64".into()),
+            Typ::Named("f64".into()),
+            "<",
+            false,
+        ),
+        (
+            Typ::Generic("T".into()),
+            Typ::Generic("T".into()),
+            "==",
+            false,
+        ),
+        (
+            Typ::Named("Any".into()),
+            Typ::Named("Any".into()),
+            "==",
+            false,
+        ),
+    ] {
+        let mut module = crate::in_lang_parse::parse_in_source(&format!(
+            "fn test(left:Int,right:Int)->Bool{{return left{op}right;}}fn main()->Int{{return 42;}}"
+        ))
+        .unwrap();
+        if let Decl::Function { params, .. } = &mut module.decls[0] {
+            params[0].1 = left.clone();
+            params[1].1 = right.clone();
+        }
+        let result = emit_c_module(&module);
+        assert_eq!(result.is_ok(), valid, "{left:?} {op} {right:?}: {result:?}");
+    }
+}

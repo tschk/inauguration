@@ -57,6 +57,9 @@ Zero exits the containing function using the owned native failure value for
 Int, Bool, Void and Float returns; other return ABIs refuse projection. Float
 operand division retains ordinary floating-point behavior.
 Unsigned division and remainder require recursively validated Int operands.
+Bitwise operators and comparisons use the shared Core IR operand rules before
+C projection. Ordering requires numeric operands, and equality preserves type
+identity. C-family numeric conversions run before these checks.
 
 Objective-C free C functions use the existing C-family numeric normalization
 before native verification. This covers integer promotions without adding

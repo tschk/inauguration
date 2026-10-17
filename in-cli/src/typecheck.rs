@@ -2066,10 +2066,38 @@ impl TypeChecker {
                     "mul" => "*",
                     "div" => "/",
                     "mod" => "%",
+                    "shl" => "<<",
+                    "shr" => ">>",
+                    "eq" => "==",
+                    "neq" => "!=",
+                    "lt" => "<",
+                    "le" => "<=",
+                    "gt" => ">",
+                    "ge" => ">=",
+                    "band" => "&",
+                    "bor" => "|",
                     other => other,
                 };
                 self.check_expr(fn_name, lhs, facts, env, errors);
                 self.check_expr(fn_name, rhs, facts, env, errors);
+                if matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=") {
+                    let left = self.expr_type(lhs, facts, env);
+                    let right = self.expr_type(rhs, facts, env);
+                    if let Some(mismatch) = crate::core_ir::comparison_operand_mismatch(
+                        op,
+                        left.as_ref(),
+                        right.as_ref(),
+                        crate::core_ir::expr_diverges(lhs),
+                        crate::core_ir::expr_diverges(rhs),
+                    ) {
+                        errors.push(TypeError::TypeMismatch {
+                            context: format!("binary `{op}` in `{fn_name}`"),
+                            expected: mismatch.expected,
+                            got: mismatch.actual,
+                        });
+                    }
+                    return;
+                }
                 if let (Some(l), Some(r)) = (
                     self.expr_type(lhs, facts, env),
                     self.expr_type(rhs, facts, env),
@@ -2145,15 +2173,6 @@ impl TypeChecker {
                                 errors.push(TypeError::TypeMismatch {
                                     context: format!("binary `{op}` rhs in `{fn_name}`"),
                                     expected: Typ::Int,
-                                    got: r,
-                                });
-                            }
-                        }
-                        "==" | "!=" | "<" | ">" | "<=" | ">=" => {
-                            if is_concrete(&l) && is_concrete(&r) && !is_compatible(&l, &r) {
-                                errors.push(TypeError::TypeMismatch {
-                                    context: format!("binary `{op}` in `{fn_name}`"),
-                                    expected: l,
                                     got: r,
                                 });
                             }
@@ -2573,6 +2592,16 @@ impl TypeChecker {
                     "mul" => "*",
                     "div" => "/",
                     "mod" => "%",
+                    "shl" => "<<",
+                    "shr" => ">>",
+                    "eq" => "==",
+                    "neq" => "!=",
+                    "lt" => "<",
+                    "le" => "<=",
+                    "gt" => ">",
+                    "ge" => ">=",
+                    "band" => "&",
+                    "bor" => "|",
                     other => other,
                 };
                 let left = self.expr_type(lhs, facts, env);

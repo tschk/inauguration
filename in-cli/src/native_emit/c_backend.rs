@@ -567,6 +567,42 @@ impl Ctx {
             }
             Expr::Binary { op, lhs, rhs } => {
                 let (l, r) = (self.expr_str(lhs), self.expr_str(rhs));
+                if matches!(
+                    op.as_str(),
+                    "eq" | "=="
+                        | "neq"
+                        | "!="
+                        | "lt"
+                        | "<"
+                        | "le"
+                        | "<="
+                        | "gt"
+                        | ">"
+                        | "ge"
+                        | ">="
+                        | "band"
+                        | "&"
+                        | "bor"
+                        | "|"
+                        | "xor"
+                        | "^"
+                ) {
+                    let checker = TypeChecker::new();
+                    let resolved = |operand: &Expr| {
+                        checker
+                            .checked_expr_type(operand, &self.facts, &self.types)
+                            .is_some_and(|typ| !matches!(typ, Typ::Generic(_)) && !typ.is_any())
+                    };
+                    if !resolved(lhs)
+                        || !resolved(rhs)
+                        || checker
+                            .checked_expr_type(expr, &self.facts, &self.types)
+                            .is_none()
+                    {
+                        self.fail("c-backend: scalar binary operation requires resolved compatible operands".into());
+                        return "0".into();
+                    }
+                }
                 if matches!(op.as_str(), "eq" | "==" | "neq" | "!=") {
                     let checker = TypeChecker::new();
                     if checker
@@ -729,8 +765,17 @@ impl Ctx {
             }
             Expr::Unary { op, expr } => {
                 if crate::core_ir::integer_cast_spec(op).is_some() {
-                    let value =
-                        crate::core_ir::integer_cast_expr(expr.as_ref().clone(), op).unwrap();
+                    let mut operand = expr.as_ref().clone();
+                    if TypeChecker::new()
+                        .checked_expr_type(expr, &self.facts, &self.types)
+                        .is_some_and(|typ| typ.canonical() == Typ::Bool)
+                    {
+                        operand = Expr::Unary {
+                            op: "bool-to-int".into(),
+                            expr: Box::new(operand),
+                        };
+                    }
+                    let value = crate::core_ir::integer_cast_expr(operand, op).unwrap();
                     return format!("((int64_t)({}))", self.expr_str(&value));
                 }
                 if matches!(op.as_str(), "neg" | "-")

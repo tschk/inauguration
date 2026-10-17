@@ -1726,9 +1726,7 @@ fn check_expr_with_array_borrow(
                         check_numeric_binop_operands(fn_name, lhs, rhs, facts, env)
                     }
                 }
-                "-" | "*" | "/" | "<" | ">" | "<=" | ">=" => {
-                    check_numeric_binop_operands(fn_name, lhs, rhs, facts, env)
-                }
+                "-" | "*" | "/" => check_numeric_binop_operands(fn_name, lhs, rhs, facts, env),
                 "&" | "|" | "^" | "xor" => {
                     if crate::core_ir::bitwise_result_type(
                         expr_type(lhs, facts, env),
@@ -1750,19 +1748,30 @@ fn check_expr_with_array_borrow(
                     require_type(fn_name, "binary operand", &Typ::Int, lhs, facts, env)?;
                     require_type(fn_name, "binary operand", &Typ::Int, rhs, facts, env)
                 }
-                "==" | "!=" => {
-                    if let (Some(lhs_typ), Some(rhs_typ)) =
-                        (expr_type(lhs, facts, env), expr_type(rhs, facts, env))
-                        && lhs_typ != rhs_typ
-                    {
-                        return Err((
-                            "type-mismatch".to_string(),
+                "==" | "!=" | "<" | ">" | "<=" | ">=" => {
+                    let left = expr_type(lhs, facts, env);
+                    let right = expr_type(rhs, facts, env);
+                    if let Some(mismatch) = crate::core_ir::comparison_operand_mismatch(
+                        op,
+                        left.as_ref(),
+                        right.as_ref(),
+                        crate::core_ir::expr_diverges(lhs),
+                        crate::core_ir::expr_diverges(rhs),
+                    ) {
+                        let message = if mismatch.side.is_none() {
                             format!(
                                 "type mismatch for binary `{op}` in `{fn_name}`: left {}, right {}",
-                                type_name(&lhs_typ),
-                                type_name(&rhs_typ)
-                            ),
-                        ));
+                                type_name(&mismatch.expected),
+                                type_name(&mismatch.actual)
+                            )
+                        } else {
+                            format!(
+                                "binary operand in `{fn_name}` expected {}, got {}",
+                                type_name(&mismatch.expected),
+                                type_name(&mismatch.actual)
+                            )
+                        };
+                        return Err(("type-mismatch".into(), message));
                     }
                     Ok(())
                 }
@@ -4570,6 +4579,111 @@ mod tests {
                     "{name}: declared ABI must be checked"
                 );
             }
+        }
+    }
+    #[test]
+    fn comparison_operand_contract_is_used_by_whole_module_verification() {
+        for op in ["<", "<=", ">", ">="] {
+            for side in [0usize, 1] {
+                let divergent = Expr::Block {
+                    body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                    // Deliberately not numeric: numeric require_type exempts a
+                    // divergent operand even when its unreachable result has a type.
+                    result: Some(Box::new(Expr::StringLit("unreachable".into()))),
+                };
+                let mut operands = [Expr::IntLit(1), Expr::IntLit(2)];
+                operands[side] = divergent;
+                let report = verify_for_entry(
+                    &module(vec![function_with_ret(
+                        "main",
+                        Typ::Int,
+                        vec![
+                            Stmt::Expr(Expr::Binary {
+                                op: op.into(),
+                                lhs: Box::new(operands[0].clone()),
+                                rhs: Box::new(operands[1].clone()),
+                            }),
+                            Stmt::Return(Some(Expr::IntLit(42))),
+                        ],
+                    )]),
+                    "main",
+                );
+                assert!(report.ok, "{op} divergent side{side}: {report:?}");
+            }
+            for alias in ["i32", "u32", "#integer-i32", "#rust-integer-u32"] {
+                for side in [0usize, 1] {
+                    let mut params = vec![("left".into(), Typ::Int), ("right".into(), Typ::Int)];
+                    params[side].1 = Typ::Named(alias.into());
+                    let report = verify_for_entry(
+                        &module(vec![function_with_params(
+                            "main",
+                            params,
+                            Typ::Bool,
+                            vec![Stmt::Return(Some(Expr::Binary {
+                                op: op.into(),
+                                lhs: Box::new(Expr::Ident("left".into())),
+                                rhs: Box::new(Expr::Ident("right".into())),
+                            }))],
+                        )]),
+                        "main",
+                    );
+                    assert!(report.ok, "{op} {alias} side{side}: {report:?}");
+                }
+            }
+        }
+        // Equality keeps raw identity rather than the ordering compatibility rule.
+        for op in ["==", "!="] {
+            let report = verify_for_entry(
+                &module(vec![function_with_params(
+                    "main",
+                    vec![
+                        ("left".into(), Typ::Named("i32".into())),
+                        ("right".into(), Typ::Int),
+                    ],
+                    Typ::Bool,
+                    vec![Stmt::Return(Some(Expr::Binary {
+                        op: op.into(),
+                        lhs: Box::new(Expr::Ident("left".into())),
+                        rhs: Box::new(Expr::Ident("right".into())),
+                    }))],
+                )]),
+                "main",
+            );
+            assert!(!report.ok);
+            assert_eq!(report.reason_code.as_deref(), Some("type-mismatch"));
+            assert_eq!(
+                report.reason,
+                Some(format!(
+                    "type mismatch for binary `{op}` in `main`: left i32, right Int"
+                ))
+            );
+            let divergent = Expr::Block {
+                body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                result: Some(Box::new(Expr::StringLit("unreachable".into()))),
+            };
+            let report = verify_for_entry(
+                &module(vec![function_with_ret(
+                    "main",
+                    Typ::Int,
+                    vec![
+                        Stmt::Expr(Expr::Binary {
+                            op: op.into(),
+                            lhs: Box::new(divergent),
+                            rhs: Box::new(Expr::IntLit(1)),
+                        }),
+                        Stmt::Return(Some(Expr::IntLit(42))),
+                    ],
+                )]),
+                "main",
+            );
+            assert!(!report.ok);
+            assert_eq!(report.reason_code.as_deref(), Some("type-mismatch"));
+            assert_eq!(
+                report.reason,
+                Some(format!(
+                    "type mismatch for binary `{op}` in `main`: left String, right Int"
+                ))
+            );
         }
     }
 }

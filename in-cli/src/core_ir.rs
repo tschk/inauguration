@@ -294,6 +294,55 @@ pub(crate) fn bitwise_result_type(lhs: Option<Typ>, rhs: Option<Typ>) -> Option<
     }
 }
 
+/// A resolved comparison mismatch. Equality retains original type identity;
+/// numeric ordering accepts compatible scalar aliases and divergent operands.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ComparisonOperandMismatch {
+    pub(crate) side: Option<usize>,
+    pub(crate) expected: Typ,
+    pub(crate) actual: Typ,
+}
+
+pub(crate) fn comparison_operand_mismatch(
+    op: &str,
+    lhs: Option<&Typ>,
+    rhs: Option<&Typ>,
+    lhs_diverges: bool,
+    rhs_diverges: bool,
+) -> Option<ComparisonOperandMismatch> {
+    if matches!(op, "==" | "!=") {
+        return match (lhs, rhs) {
+            (Some(left), Some(right)) if left != right => Some(ComparisonOperandMismatch {
+                side: None,
+                expected: left.clone(),
+                actual: right.clone(),
+            }),
+            _ => None,
+        };
+    }
+    if !matches!(op, "<" | "<=" | ">" | ">=") {
+        return None;
+    }
+    let expected = if lhs == Some(&Typ::Float) || rhs == Some(&Typ::Float) {
+        Typ::Float
+    } else {
+        Typ::Int
+    };
+    for (side, actual, diverges) in [(0, lhs, lhs_diverges), (1, rhs, rhs_diverges)] {
+        if let Some(actual) = actual
+            && !diverges
+            && !expected.compatible_with(actual)
+        {
+            return Some(ComparisonOperandMismatch {
+                side: Some(side),
+                expected,
+                actual: actual.clone(),
+            });
+        }
+    }
+    None
+}
+
 pub(crate) fn stmts_diverge(body: &[Stmt]) -> bool {
     body.iter().any(|stmt| match stmt {
         Stmt::Return(_) | Stmt::Throw(_) | Stmt::Break | Stmt::Continue => true,
@@ -2356,5 +2405,37 @@ mod private_ordered_operation_tests {
         assert_eq!(legacy_compiler_callee("field-modify-place-first"), None);
         assert_eq!(legacy_compiler_callee("array_repeat"), None);
         assert_eq!(legacy_compiler_callee(ARRAY_REPEAT), None);
+    }
+}
+
+#[cfg(test)]
+mod comparison_operand_contract_tests {
+    use super::*;
+    #[test]
+    fn comparison_contract_preserves_raw_equality_numeric_aliases_unknowns_and_divergence() {
+        let named_int = Typ::Named("i32".into());
+        let named_float = Typ::Named("f64".into());
+        let generic = Typ::Generic("T".into());
+        let other_generic = Typ::Generic("U".into());
+        let check = |op, left: Option<&Typ>, right: Option<&Typ>, ld, rd| {
+            comparison_operand_mismatch(op, left, right, ld, rd)
+        };
+        assert!(check("==", Some(&named_int), Some(&Typ::Int), false, false).is_some());
+        assert!(check("==", Some(&named_int), Some(&named_int), false, false).is_none());
+        assert!(check("==", Some(&generic), Some(&other_generic), false, false).is_some());
+        assert!(check("==", Some(&generic), Some(&generic), false, false).is_none());
+        assert!(check("==", None, Some(&Typ::Int), false, false).is_none());
+        assert!(check("==", Some(&Typ::Void), Some(&Typ::Int), true, false).is_some());
+        assert!(check("<", Some(&named_int), Some(&Typ::Int), false, false).is_none());
+        // Exact Float selects Float; two raw named f64s select Int as before.
+        assert!(check("<", Some(&Typ::Float), Some(&named_float), false, false).is_none());
+        assert!(check("<", Some(&named_float), Some(&named_float), false, false).is_some());
+        assert!(check("<", Some(&Typ::Float), Some(&Typ::Int), false, false).is_some());
+        assert!(check("<", Some(&Typ::Bool), Some(&Typ::Bool), false, false).is_some());
+        assert!(check("<", Some(&Typ::String), Some(&Typ::String), false, false).is_some());
+        assert!(check("<", None, Some(&Typ::Int), false, false).is_none());
+        assert!(check("<", Some(&Typ::Void), Some(&Typ::Int), true, false).is_none());
+        assert!(check("<", Some(&Typ::Int), Some(&Typ::Void), false, true).is_none());
+        assert!(check("<", Some(&Typ::Void), Some(&Typ::Int), false, false).is_some());
     }
 }
