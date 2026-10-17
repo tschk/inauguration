@@ -614,6 +614,7 @@ pub fn lower_module_with_jobs(
     linkage: NativeLinkage,
     jobs: usize,
 ) -> Result<LoweredModule, String> {
+    crate::core_ir_verifier::check_execution_contracts(module)?;
     let prepared = crate::lower_core::prepared_native_module(module);
     let module = prepared.as_ref();
     // Clear any stale external refs from previous invocations
@@ -1263,7 +1264,11 @@ fn has_iter_once(body: &[Stmt]) -> bool {
         Stmt::Try { body, catches, .. } => {
             has_iter_once(body) || catches.iter().any(|catch| has_iter_once(&catch.body))
         }
-        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => false,
+        Stmt::Declare(_, _)
+        | Stmt::Return(None)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Propagate => false,
     })
 }
 
@@ -1330,7 +1335,11 @@ fn has_iter_map(body: &[Stmt]) -> bool {
         Stmt::Try { body, catches, .. } => {
             has_iter_map(body) || catches.iter().any(|catch| has_iter_map(&catch.body))
         }
-        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => false,
+        Stmt::Declare(_, _)
+        | Stmt::Return(None)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Propagate => false,
     })
 }
 
@@ -1399,7 +1408,11 @@ fn has_iter_chain(body: &[Stmt]) -> bool {
             base, index, value, ..
         } => expr_has_chain(base) || expr_has_chain(index) || expr_has_chain(value),
         Stmt::FieldAssign { base, value, .. } => expr_has_chain(base) || expr_has_chain(value),
-        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => false,
+        Stmt::Declare(_, _)
+        | Stmt::Return(None)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Propagate => false,
     })
 }
 
@@ -1772,7 +1785,11 @@ fn native_staging_plan(
                         }
                         words
                     }
-                    Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => 0,
+                    Stmt::Declare(_, _)
+                    | Stmt::Return(None)
+                    | Stmt::Break
+                    | Stmt::Continue
+                    | Stmt::Propagate => 0,
                 };
                 peak = peak.max(words);
             }
@@ -2019,5 +2036,81 @@ mod record_array_lowering_tests {
                 "{source}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod uninitialized_declaration_boundaries {
+    use super::*;
+    #[test]
+    fn direct_backends_refuse_a_read_without_an_assignment() {
+        let mut module =
+            crate::in_lang_parse::parse_in_source("fn main()->Int{let value:Int=7;return value;}")
+                .unwrap();
+        let Decl::Function { body, .. } = &mut module.decls[0] else {
+            panic!("function")
+        };
+        body[0] = Stmt::Declare("value".into(), Typ::Int);
+        assert!(
+            lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .err()
+            .unwrap()
+            .starts_with("definite-initialization:")
+        );
+        assert!(
+            crate::native_emit::x86_64_lower::lower_module(&module, "main")
+                .err()
+                .unwrap()
+                .starts_with("definite-initialization:")
+        );
+        assert!(
+            crate::native_emit::thumb_lower::lower_module(&module, "main")
+                .err()
+                .unwrap()
+                .starts_with("definite-initialization:")
+        );
+        assert!(
+            crate::compiler::mir_lower::lower_to_mir(&module)
+                .err()
+                .unwrap()
+                .starts_with("definite-initialization:")
+        );
+        assert!(
+            crate::native_emit::c_backend::emit_c_module(&module)
+                .err()
+                .unwrap()
+                .starts_with("definite-initialization:")
+        );
+        for lang in [
+            crate::native_emit::source_emit::SourceLang::Rust,
+            crate::native_emit::source_emit::SourceLang::Go,
+        ] {
+            assert!(
+                crate::native_emit::source_emit::emit_source_module(&module, lang)
+                    .err()
+                    .unwrap()
+                    .starts_with("definite-initialization:")
+            );
+        }
+        let Decl::Function { body, .. } = &mut module.decls[0] else {
+            panic!("function")
+        };
+        body.insert(1, Stmt::Assign("value".into(), Expr::IntLit(42)));
+        assert!(
+            lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .is_ok()
+        );
+        assert!(crate::native_emit::x86_64_lower::lower_module(&module, "main").is_ok());
+        assert!(crate::native_emit::thumb_lower::lower_module(&module, "main").is_ok());
+        assert!(crate::compiler::mir_lower::lower_to_mir(&module).is_ok());
+        assert!(crate::native_emit::c_backend::emit_c_module(&module).is_ok());
     }
 }

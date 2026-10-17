@@ -175,6 +175,9 @@ pub(crate) fn reserve_expr(expr: &Expr, names: &mut HashSet<String>) {
 pub(crate) fn reserve_body(body: &[Stmt], names: &mut HashSet<String>) {
     for stmt in body {
         match stmt {
+            Stmt::Declare(name, _) => {
+                names.insert(name.clone());
+            }
             Stmt::Let(name, _, expr) | Stmt::Assign(name, expr) => {
                 names.insert(name.clone());
                 reserve_expr(expr, names);
@@ -424,6 +427,7 @@ impl Bindings<'_> {
     fn body(&mut self, body: &mut [Stmt], scope: &mut HashMap<String, String>) {
         for stmt in body {
             match stmt {
+                Stmt::Declare(name, _) => self.bind(name, scope),
                 Stmt::Let(name, _, expr) => {
                     self.expr(expr, scope);
                     self.bind(name, scope);
@@ -1107,5 +1111,37 @@ mod function_alias_tests {
             panic!()
         };
         assert_operation_callee(value, public);
+    }
+}
+
+#[cfg(test)]
+mod declaration_binding_tests {
+    use super::*;
+    #[test]
+    fn declaration_shadows_parameter_and_reserves_name_without_value() {
+        let mut decls = vec![Decl::Function {
+            name: "work".into(),
+            params: vec![("value".into(), Typ::Int)],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![
+                Stmt::Declare("value".into(), Typ::Int),
+                Stmt::Assign("value".into(), Expr::IntLit(42)),
+                Stmt::Return(Some(Expr::Ident("value".into()))),
+            ],
+        }];
+        normalize_decls(&mut decls);
+        let Decl::Function { params, body, .. } = &decls[0] else {
+            panic!()
+        };
+        let Stmt::Declare(name, _) = &body[0] else {
+            panic!()
+        };
+        assert_ne!(name, &params[0].0);
+        assert!(matches!(&body[1],Stmt::Assign(target,_) if target==name));
+        assert!(matches!(&body[2],Stmt::Return(Some(Expr::Ident(target))) if target==name));
+        let once = decls.clone();
+        normalize_decls(&mut decls);
+        assert_eq!(once, decls);
     }
 }

@@ -6,6 +6,15 @@ use inauguration::{core_opt, in_lang_parse::parse_in_source, native_emit::inisa}
 fn native_rust_assignments_preserve_values_order_and_integer_kinds() {
     use inauguration::emit_profile::EmitProfile;
     for source in [
+        "fn main() -> i64 { let unused: i64; 42 }",
+        "fn main() -> i64 { let value:i64; value=42; value }",
+        "fn apply(flag:bool)->i64 {let value:i64;if flag {value=42;} else {value=7;} if flag {value} else {value+35}} fn main() -> i64 {apply(true)}",
+        "fn apply(flag:bool)->i64 {let value:i64;if flag {value=42;} else {value=7;} if flag {value} else {value+35}} fn main() -> i64 {apply(false)}",
+        "fn apply(flag:bool)->i64 {let value:i64;if flag {return 42;} else {value=7;} value+35} fn main() -> i64 {apply(true)}",
+        "fn apply(flag:bool)->i64 {let value:i64;if flag {return 42;} else {value=7;} value+35} fn main() -> i64 {apply(false)}",
+        "fn main() -> i64 {let value:i64;value=40;let right={let value:i64;value=2;value};value+right}",
+        "fn main() -> i64 {let values:[i64;2];values=[20,22];values[0]+values[1]}",
+        "fn main() -> i64 {let value:&'static str;value=\"ready\";if value==\"ready\" {42} else {7}}",
         "fn main()->i64{let mut x:i64=20;x+={x=40;2};x}",
         "const VALUE:i64={let mut x:i64=20;x+=22;x};fn main()->i64{VALUE}",
         "fn main()->i64{let mut a:i64=20;let mut b:i64=22;(a,b)=(b,a);if a==22&&b==20{42}else{7}}",

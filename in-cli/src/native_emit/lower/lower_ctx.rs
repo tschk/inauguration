@@ -230,7 +230,11 @@ fn rebound_array_bindings(body: &[Stmt]) -> HashSet<String> {
                         statements(&catch.body, assigned, links);
                     }
                 }
-                Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => {}
+                Stmt::Declare(_, _)
+                | Stmt::Return(None)
+                | Stmt::Break
+                | Stmt::Continue
+                | Stmt::Propagate => {}
             }
         }
     }
@@ -346,6 +350,7 @@ pub(crate) fn alloc_declared_locals(
         }
 
         match stmt {
+            Stmt::Declare(name, typ) => ctx.alloc_declared_local(name, typ, fn_name)?,
             Stmt::Let(name, typ, expr) => {
                 ctx.alloc_let_local(name, typ.as_ref(), expr, fn_name, functions)?
             }
@@ -1031,6 +1036,42 @@ impl<'a> LowerCtx<'a> {
                 "native-lower: unsupported let binding type in `{fn_name}` ({typ:?})"
             )),
         }
+    }
+
+    pub(crate) fn alloc_declared_local(
+        &mut self,
+        name: &str,
+        typ: &Typ,
+        fn_name: &str,
+    ) -> Result<(), String> {
+        if self.locals.contains_key(name) {
+            return Ok(());
+        }
+        super::lower_util::ensure_unit_sequence_layout(typ)?;
+        match typ.canonical() {
+            Typ::Array(elem) => {
+                super::lower_util::ensure_native_array_element(&elem, fn_name, "local")?;
+                super::lower_util::record_array_fields(&elem, self.structs)?;
+                let ptr_offset = self.alloc_slot();
+                let len_offset = self.alloc_slot();
+                self.locals.insert(
+                    name.into(),
+                    LocalSlot::ArrayParam {
+                        elem: *elem,
+                        ptr_offset,
+                        len_offset,
+                    },
+                );
+            }
+            Typ::Void | Typ::Generic(_) => {
+                return Err(format!(
+                    "native-lower: declaration `{name}` needs a supported value layout"
+                ));
+            }
+            typ => self.alloc_local(name, Some(&typ), fn_name)?,
+        }
+        self.scalar_types.insert(name.into(), typ.clone());
+        Ok(())
     }
 
     pub(crate) fn alloc_let_local(

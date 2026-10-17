@@ -292,8 +292,14 @@ fn cmd_emit_source(
             inauguration::native_emit::c_backend::emit_c_module(&module)
                 .map_err(InError::Message)?,
         ),
-        EmitKindCli::Go => ("go", emit_source_module(&module, SourceLang::Go)),
-        EmitKindCli::Rust => ("rust", emit_source_module(&module, SourceLang::Rust)),
+        EmitKindCli::Go => (
+            "go",
+            emit_source_module(&module, SourceLang::Go).map_err(InError::Message)?,
+        ),
+        EmitKindCli::Rust => (
+            "rust",
+            emit_source_module(&module, SourceLang::Rust).map_err(InError::Message)?,
+        ),
         _ => {
             return Err(InError::Message(format!(
                 "internal: cmd_emit_source got {kind:?}"

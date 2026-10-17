@@ -520,6 +520,9 @@ pub fn merge_dependency_artifacts(
 fn prefix_calls(stmts: &mut [Stmt], crate_name: &str, _in_prefixed: bool) {
     for stmt in stmts {
         match stmt {
+            // Type qualification is performed by the shared namespace walker;
+            // a declaration has no initializer call to prefix.
+            Stmt::Declare(..) => {}
             Stmt::Expr(expr) | Stmt::Return(Some(expr)) => prefix_call_expr(expr, crate_name),
             Stmt::Let(_, _, expr) | Stmt::Assign(_, expr) => prefix_call_expr(expr, crate_name),
             Stmt::If {

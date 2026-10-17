@@ -327,7 +327,7 @@ fn collect_body_strings(body: &[Stmt], values: &mut Vec<String>) {
                     collect_pattern_strings(&arm.pattern, values);
                 }
             }
-            Stmt::Return(None) => {}
+            Stmt::Declare(_, _) | Stmt::Return(None) => {}
 
             Stmt::Throw(expr) => collect_expr_strings(expr, values),
             Stmt::Try { body, catches, .. } => {

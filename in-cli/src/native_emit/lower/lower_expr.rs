@@ -1392,6 +1392,9 @@ fn native_expr_type_with_bindings(
         Expr::Block { body, result } => {
             let mut scoped = bindings.clone();
             for stmt in body {
+                if let crate::core_ir::Stmt::Declare(name, typ) = stmt {
+                    scoped.insert(name.clone(), typ.clone());
+                }
                 if let crate::core_ir::Stmt::Let(name, typ, value) = stmt {
                     if let Some(typ) = typ
                         .clone()

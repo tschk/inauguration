@@ -81,14 +81,20 @@ pub(super) fn argument_type(
         Expr::Block { body, result } => {
             let mut inner = env.clone();
             for stmt in body {
-                if let Stmt::Let(name, typ, value) = stmt {
-                    let typ = typ
-                        .clone()
-                        .or_else(|| argument_type(checker, value, facts, &inner));
-                    inner.remove(name);
-                    if let Some(typ) = typ {
-                        inner.insert(name.clone(), typ);
+                match stmt {
+                    Stmt::Declare(name, typ) => {
+                        inner.insert(name.clone(), typ.clone());
                     }
+                    Stmt::Let(name, typ, value) => {
+                        let typ = typ
+                            .clone()
+                            .or_else(|| argument_type(checker, value, facts, &inner));
+                        inner.remove(name);
+                        if let Some(typ) = typ {
+                            inner.insert(name.clone(), typ);
+                        }
+                    }
+                    _ => {}
                 }
             }
             return result.as_deref().map_or(Some(Typ::Void), |value| {
@@ -220,6 +226,9 @@ fn body_constraints(
 ) {
     for stmt in body {
         match stmt {
+            Stmt::Declare(name, typ) => {
+                env.insert(name.clone(), typ.clone());
+            }
             Stmt::Let(name, typ, value) => {
                 expression_constraints(checker, value, facts, generated, env, changed);
                 if let Some(typ) = typ

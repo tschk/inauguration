@@ -171,8 +171,13 @@ pub(crate) fn map_decl_exprs_mut(decls: &mut [Decl], rewrite: &mut impl FnMut(&m
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 fn fn_bodies_mut(decls: &mut [Decl]) -> impl Iterator<Item = &mut Vec<Stmt>> {
-    decls.iter_mut().filter_map(|d| match d {
-        Decl::Function { body, .. } => Some(body),
+    let mut protected: HashSet<_> = crate::typecheck::TypeChecker::new()
+        .typed_proof_functions(decls)
+        .into_keys()
+        .collect();
+    protected.extend(crate::core_ir_verifier::initialization_errors_by_function(decls).into_keys());
+    decls.iter_mut().filter_map(move |d| match d {
+        Decl::Function { name, body, .. } if !protected.contains(name) => Some(body),
         _ => None,
     })
 }
@@ -282,6 +287,7 @@ pub(crate) fn map_stmt_exprs_mut(stmt: &mut Stmt, rewrite: &mut impl FnMut(&mut 
 
 fn map_stmt_mut<F: FnMut(&mut Expr)>(s: &mut Stmt, f: &mut F) {
     match s {
+        Stmt::Declare(_, _) => {}
         Stmt::Let(_, _, e) => map_expr_mut(e, f),
         Stmt::Assign(_, e) => map_expr_mut(e, f),
         Stmt::FieldAssign { base, value, .. } => {
@@ -421,6 +427,7 @@ pub(crate) fn map_expr<F: FnMut(Expr) -> Expr>(e: Expr, f: &mut F) -> Expr {
 
 fn map_stmt<F: FnMut(Expr) -> Expr>(s: Stmt, f: &mut F) -> Stmt {
     match s {
+        Stmt::Declare(n, t) => Stmt::Declare(n, t),
         Stmt::Let(n, t, e) => Stmt::Let(n, t, map_expr(e, f)),
         Stmt::Assign(n, e) => Stmt::Assign(n, map_expr(e, f)),
         Stmt::FieldAssign {
@@ -532,6 +539,7 @@ fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: 
     // An inlined body must not erase an invalid/unsupported source type.
     // This applies to pure and zero-argument calls as well as snapshots.
     let typed_proofs = crate::typecheck::TypeChecker::new().typed_proof_functions(decls);
+    let initialization_errors = crate::core_ir_verifier::initialization_errors_by_function(decls);
     let candidates: Vec<&String> = functions
         .iter()
         .filter(|(n, d)| {
@@ -549,6 +557,7 @@ fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: 
                         && !ptr_refs.contains(n)
                         && !has_cf(body)
                         && !typed_proofs.contains_key(n.as_str())
+                        && !initialization_errors.contains_key(n.as_str())
             )
         })
         .map(|(n, _)| n)
@@ -577,6 +586,9 @@ fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: 
     for decl in decls.iter_mut() {
         if let Decl::Function { name, body, .. } = decl {
             names.caller_checked = names.checked_functions.contains(name);
+            if initialization_errors.contains_key(name) || typed_proofs.contains_key(name) {
+                continue;
+            }
             *body = inline_body_limited(
                 std::mem::take(body),
                 &candidates,
@@ -1322,8 +1334,13 @@ fn collect_calls_in_expr(e: &Expr, out: &mut HashSet<String>) {
 
 /// Evaluate compile-time integer expressions: `3 + 4` → `7`.
 fn fold_constants_in_decls(decls: &mut [Decl], semantics: IntegerSemantics) {
+    let proofs = crate::typecheck::TypeChecker::new().typed_proof_globals(decls);
+    let initialization_errors = crate::core_ir_verifier::initialization_errors_by_global(decls);
     for decl in decls.iter_mut() {
-        if let Decl::Global { init, .. } = decl {
+        if let Decl::Global { name, init, .. } = decl {
+            if proofs.contains_key(name) || initialization_errors.contains_key(name) {
+                continue;
+            }
             *init = init.take().map(|expr| {
                 Box::new(map_expr(*expr, &mut |e| {
                     fold_expr_with_semantics(e, semantics)
@@ -1700,7 +1717,10 @@ fn dce_body(stmts: &mut Vec<Stmt>) {
         collect_used(stmts, &mut s);
         s
     };
-    stmts.retain(|s| !matches!(s, Stmt::Let(n, _, e) if !used.contains(n) && !expr_has_effects(e)));
+    stmts.retain(|s| {
+        !matches!(s, Stmt::Declare(n, _) if !used.contains(n))
+            && !matches!(s, Stmt::Let(n, _, e) if !used.contains(n) && !expr_has_effects(e))
+    });
 
     // Recurse
     for s in stmts.iter_mut() {
@@ -2576,7 +2596,8 @@ fn stmts_forbid_cfg_dispatch(stmts: &[Stmt]) -> bool {
             return true;
         }
         match stmt {
-            Stmt::Loop { .. }
+            Stmt::Declare(..)
+            | Stmt::Loop { .. }
             | Stmt::Break
             | Stmt::Continue
             | Stmt::Try { .. }
@@ -5713,6 +5734,147 @@ mod associated_type_inline_barrier_tests {
                 };
                 assert_eq!(body, &vec![Stmt::Return(Some(call))]);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod declaration_optimization_tests {
+    use super::*;
+    #[test]
+    fn harden_preserves_branch_assignment_followed_by_a_conditional_value() {
+        let module = crate::compiler::rust_front::parse_rust_source(
+            "fn apply(flag:bool)->i64 {let value:i64;if flag {value=42;} else {value=7;} if flag {value} else {value+35}} fn main()->i64 {apply(true)}"
+        ).unwrap();
+        let mut module =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &module);
+        optimize(&mut module, EmitProfile::Harden);
+        let checked = crate::core_ir_verifier::check_execution_contracts(&module);
+        assert!(checked.is_ok(), "{checked:?}\n{module:#?}");
+    }
+    fn function(name: &str, params: Vec<(String, Typ)>, body: Vec<Stmt>) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params,
+            ret: Typ::Int,
+            body,
+            type_params: vec![],
+        }
+    }
+    fn optimize(module: &mut crate::core_ir::UnifiedModule, profile: EmitProfile) {
+        optimize_with_linkage_and_semantics(
+            &mut module.decls,
+            Some("main"),
+            profile,
+            true,
+            IntegerSemantics::Word64,
+        );
+    }
+    #[test]
+    fn profiles_preserve_valid_declaration_assignment_control_flow() {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut module = crate::core_ir::UnifiedModule::new(vec![function(
+                "main",
+                vec![],
+                vec![
+                    Stmt::Declare("value".into(), Typ::Int),
+                    Stmt::Assign("value".into(), Expr::IntLit(42)),
+                    Stmt::Return(Some(Expr::Ident("value".into()))),
+                ],
+            )]);
+            optimize(&mut module, profile);
+            crate::core_ir_verifier::check_execution_contracts(&module).unwrap();
+            let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+            assert!(report.ok, "{profile:?}: {report:?}");
+        }
+    }
+    #[test]
+    fn profiles_cannot_erase_an_uninitialized_ignored_argument() {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut module = crate::core_ir::UnifiedModule::new(vec![
+                function(
+                    "ignore",
+                    vec![("unused".into(), Typ::Int)],
+                    vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                ),
+                function(
+                    "main",
+                    vec![],
+                    vec![
+                        Stmt::Declare("value".into(), Typ::Int),
+                        Stmt::Return(Some(Expr::Call {
+                            callee: Box::new(Expr::Ident("ignore".into())),
+                            args: vec![Expr::Ident("value".into())],
+                        })),
+                    ],
+                ),
+            ]);
+            optimize(&mut module, profile);
+            assert!(
+                crate::core_ir_verifier::check_execution_contracts(&module).is_err(),
+                "{profile:?}"
+            );
+        }
+    }
+    #[test]
+    fn profiles_preserve_global_reads_and_unresolved_annotation_obligations() {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for annotation in [
+                Typ::Int,
+                crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                    "associated output".into(),
+                )
+                .typ(),
+            ] {
+                let mut module = crate::core_ir::UnifiedModule::new(vec![
+                    Decl::Global {
+                        name: "answer".into(),
+                        typ: Typ::Int,
+                        mutable: false,
+                        constant_value: false,
+                        init: Some(Box::new(Expr::Block {
+                            body: vec![Stmt::Declare("value".into(), annotation)],
+                            result: Some(Box::new(Expr::Binary {
+                                op: "*".into(),
+                                lhs: Box::new(Expr::Ident("value".into())),
+                                rhs: Box::new(Expr::IntLit(0)),
+                            })),
+                        })),
+                    },
+                    function(
+                        "main",
+                        vec![],
+                        vec![Stmt::Return(Some(Expr::Ident("answer".into())))],
+                    ),
+                ]);
+                optimize(&mut module, profile);
+                assert!(
+                    crate::core_ir_verifier::check_execution_contracts(&module).is_err(),
+                    "{profile:?}"
+                );
+            }
+            let mut module = crate::core_ir::UnifiedModule::new(vec![function(
+                "main",
+                vec![],
+                vec![
+                    Stmt::Declare(
+                        "unused".into(),
+                        crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                            "associated output".into(),
+                        )
+                        .typ(),
+                    ),
+                    Stmt::Return(Some(Expr::IntLit(42))),
+                ],
+            )]);
+            optimize(&mut module, profile);
+            assert!(
+                !crate::typecheck::TypeChecker::new()
+                    .typed_proof_functions(&module.decls)
+                    .is_empty(),
+                "{profile:?}"
+            );
+            assert!(crate::core_ir_verifier::check_execution_contracts(&module).is_err());
         }
     }
 }

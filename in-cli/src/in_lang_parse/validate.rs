@@ -252,6 +252,13 @@ pub(crate) fn validate_stmt_types(
     stmt: &Stmt,
 ) -> Result<(), String> {
     match stmt {
+        Stmt::Declare(_, ty) => {
+            if !type_known(structs, ty) {
+                return Err(format!(
+                    ".in: unknown type in declaration annotation in fn {fn_name}"
+                ));
+            }
+        }
         Stmt::Let(_, Some(ty), expr) => {
             if !type_known(structs, ty) {
                 return Err(format!(
@@ -383,6 +390,9 @@ pub(crate) fn desugar_method_calls_in_body(
 ) {
     for stmt in body {
         match stmt {
+            Stmt::Declare(name, typ) => {
+                env.insert(name.clone(), typ.clone());
+            }
             Stmt::Let(name, typ, expr) => {
                 desugar_method_calls_in_expr(expr, env, structs, fn_rets);
                 let value_type = typ
@@ -605,7 +615,10 @@ fn infer_in_expr_type_scoped(
             let mut inner = env.clone();
             let mut inner_shadowed = shadowed.clone();
             for stmt in body {
-                if let Stmt::Let(name, typ, value) = stmt {
+                if let Stmt::Declare(name, typ) = stmt {
+                    inner.insert(name.clone(), typ.clone());
+                    inner_shadowed.insert(name.clone());
+                } else if let Stmt::Let(name, typ, value) = stmt {
                     let value_type = typ.clone().or_else(|| {
                         infer_in_expr_type_scoped(value, &inner, structs, fn_rets, &inner_shadowed)
                     });
@@ -806,7 +819,7 @@ fn replace_body_idents(body: &mut [Stmt], consts: &mut HashMap<String, Expr>) {
     for stmt in body {
         replace_stmt_idents(stmt, consts);
         // A local initializer sees the outer binding before its name is shadowed.
-        if let Stmt::Let(name, _, _) = stmt {
+        if let Stmt::Let(name, _, _) | Stmt::Declare(name, _) = stmt {
             consts.remove(name);
         }
     }
@@ -824,6 +837,7 @@ fn pattern_constants(pattern: &str, consts: &HashMap<String, Expr>) -> HashMap<S
 
 fn replace_stmt_idents(stmt: &mut Stmt, consts: &std::collections::HashMap<String, Expr>) {
     match stmt {
+        Stmt::Declare(..) => {}
         Stmt::Let(_, _, expr)
         | Stmt::Assign(_, expr)
         | Stmt::Return(Some(expr))
@@ -1040,5 +1054,50 @@ mod value_scope_tests {
         let mut outside = Expr::Ident("answer".into());
         replace_idents(&mut outside, &consts);
         assert_eq!(outside, Expr::IntLit(42));
+    }
+}
+
+#[cfg(test)]
+mod declaration_scope_tests {
+    use super::*;
+
+    #[test]
+    fn declarations_shadow_constants_without_an_initializer() {
+        let mut body = vec![
+            Stmt::Declare("answer".into(), Typ::Int),
+            Stmt::Assign("answer".into(), Expr::IntLit(42)),
+            Stmt::Return(Some(Expr::Ident("answer".into()))),
+        ];
+        replace_body_idents(
+            &mut body,
+            &mut HashMap::from([("answer".into(), Expr::IntLit(7))]),
+        );
+        assert!(matches!(&body[0], Stmt::Declare(_, Typ::Int)));
+        assert!(matches!(&body[2], Stmt::Return(Some(Expr::Ident(name))) if name == "answer"));
+    }
+
+    #[test]
+    fn block_declarations_supply_their_exact_type_and_shadow_function_names() {
+        let value = Expr::Block {
+            body: vec![Stmt::Declare("answer".into(), Typ::Bool)],
+            result: Some(Box::new(Expr::Ident("answer".into()))),
+        };
+        assert_eq!(
+            infer_in_expr_type(
+                &value,
+                &HashMap::from([("answer".into(), Typ::Int)]),
+                &HashMap::new(),
+                &HashMap::from([("answer".into(), Typ::String)]),
+            ),
+            Some(Typ::Bool)
+        );
+        let error = validate_stmt_types(
+            "work",
+            &HashSet::new(),
+            &HashMap::new(),
+            &Stmt::Declare("answer".into(), Typ::Named("Missing".into())),
+        )
+        .unwrap_err();
+        assert!(error.contains("unknown type in declaration annotation"));
     }
 }

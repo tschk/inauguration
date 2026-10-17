@@ -12,12 +12,13 @@ pub enum SourceLang {
 const MAX_EMIT_DEPTH: u32 = 256;
 const MAX_EMIT_NODES: usize = 100_000;
 
-pub fn emit_source_module(module: &UnifiedModule, lang: SourceLang) -> String {
+pub fn emit_source_module(module: &UnifiedModule, lang: SourceLang) -> Result<String, String> {
+    crate::core_ir_verifier::check_execution_contracts(module)?;
     // Soft DoS guard: truncate emission rather than hang (lossy printers).
     if !module_within_limits(module, lang) {
-        return format!(
+        return Ok(format!(
             "// emit aborted: Core IR exceeds size/depth limits or uses unsupported operations\n// lang={lang:?}\n"
-        );
+        ));
     }
     let mut out = String::with_capacity(4096);
     match lang {
@@ -38,9 +39,8 @@ pub fn emit_source_module(module: &UnifiedModule, lang: SourceLang) -> String {
     for decl in &module.decls {
         emit_decl(&mut out, lang, decl);
     }
-    out
+    Ok(out)
 }
-
 fn emit_decl(out: &mut String, lang: SourceLang, decl: &Decl) {
     match decl {
         Decl::Struct { name, fields, .. } => emit_struct(out, lang, name, fields),
@@ -424,6 +424,18 @@ fn stmt(out: &mut String, lang: SourceLang, s: &Stmt, indent: usize) {
     let p = pad(lang, indent);
     let semi = if lang == SourceLang::Rust { ";" } else { "" };
     match s {
+        Stmt::Declare(name, typ) => match lang {
+            SourceLang::Rust => out.push_str(&format!(
+                "{p}let mut {}: {};\n",
+                sanitize(name),
+                type_str(lang, typ)
+            )),
+            SourceLang::Go => out.push_str(&format!(
+                "{p}var {} {}\n",
+                sanitize(name),
+                type_str(lang, typ)
+            )),
+        },
         Stmt::Let(name, typ, e) => match lang {
             SourceLang::Go => {
                 out.push_str(&format!("{p}{} := {}\n", sanitize(name), expr(lang, e)));
@@ -675,7 +687,11 @@ fn count_stmt(s: &Stmt, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool
             count_expr(e, depth + 1, nodes, lang)
         }
         Stmt::Return(Some(e)) => count_expr(e, depth + 1, nodes, lang),
-        Stmt::Return(None) | Stmt::Propagate | Stmt::Break | Stmt::Continue => true,
+        Stmt::Declare(_, _)
+        | Stmt::Return(None)
+        | Stmt::Propagate
+        | Stmt::Break
+        | Stmt::Continue => true,
         Stmt::IndexAssign { base, index, value } => {
             count_expr(base, depth + 1, nodes, lang)
                 && count_expr(index, depth + 1, nodes, lang)
@@ -821,11 +837,15 @@ mod tests {
                 else_expr: Box::new(Expr::IntLit(0)),
             }))],
         }]);
-        let rust = emit_source_module(&module, SourceLang::Rust);
+        let rust = emit_source_module(&module, SourceLang::Rust).unwrap();
         assert!(rust.contains("if (true)"));
         assert!(rust.contains("return 42;"));
         assert!(!rust.contains("move ||"));
-        assert!(emit_source_module(&module, SourceLang::Go).contains("emit aborted"));
+        assert!(
+            emit_source_module(&module, SourceLang::Go)
+                .unwrap()
+                .contains("emit aborted")
+        );
     }
 
     #[test]
@@ -841,7 +861,7 @@ mod tests {
             }],
             type_params: vec![],
         }]);
-        let go = emit_source_module(&module, SourceLang::Go);
+        let go = emit_source_module(&module, SourceLang::Go).unwrap();
         assert!(go.contains("package main"), "{go}");
         assert!(go.contains("func answer()"), "{go}");
         assert!(go.contains("if true"), "{go}");
@@ -876,7 +896,7 @@ mod tests {
             ],
             type_params: vec![],
         }]);
-        let rs = emit_source_module(&module, SourceLang::Rust);
+        let rs = emit_source_module(&module, SourceLang::Rust).unwrap();
         assert!(rs.contains("fn loop_sum(n: i64) -> i64"), "{rs}");
         assert!(rs.contains("while"), "{rs}");
         assert!(rs.contains("let mut i: i64 = 0"), "{rs}");
@@ -901,8 +921,8 @@ mod tests {
                 type_params: vec![],
             },
         ]);
-        let go = emit_source_module(&module, SourceLang::Go);
-        let rs = emit_source_module(&module, SourceLang::Rust);
+        let go = emit_source_module(&module, SourceLang::Go).unwrap();
+        let rs = emit_source_module(&module, SourceLang::Rust).unwrap();
         assert!(go.contains("type Point struct"), "{go}");
         assert!(go.contains("Point{"), "{go}");
         assert!(rs.contains("struct Point"), "{rs}");
@@ -929,7 +949,7 @@ mod unsigned_projection_tests {
                 }))],
             }]);
             for lang in [SourceLang::Rust, SourceLang::Go] {
-                let source = emit_source_module(&module, lang);
+                let source = emit_source_module(&module, lang).unwrap();
                 assert!(source.starts_with("// emit aborted:"), "{lang:?}: {source}");
                 assert!(!source.contains("fn main") && !source.contains("func main"));
             }
@@ -946,9 +966,32 @@ mod private_print_tests {
         )
         .unwrap();
         for lang in [super::SourceLang::Rust, super::SourceLang::Go] {
-            let source = super::emit_source_module(&module, lang);
+            let source = super::emit_source_module(&module, lang).unwrap();
             assert!(source.starts_with("// emit aborted:"), "{source}");
             assert!(!source.contains("_print_int("), "{source}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod declaration_source_tests {
+    use super::*;
+    #[test]
+    fn source_declarations_have_no_fabricated_initializer() {
+        let mut module = crate::in_lang_parse::parse_in_library_source(
+            "fn answer()->Int{let value:Int=7;value=42;return value;}",
+        )
+        .unwrap();
+        let Decl::Function { body, .. } = &mut module.decls[0] else {
+            panic!("function")
+        };
+        body[0] = Stmt::Declare("value".into(), Typ::Int);
+        let rust = emit_source_module(&module, SourceLang::Rust).unwrap();
+        assert!(rust.contains("let mut value: i64;"), "{rust}");
+        let go = emit_source_module(&module, SourceLang::Go).unwrap();
+        assert!(go.contains("var value int64"), "{go}");
+        for source in [rust, go] {
+            assert!(!source.contains("value = 7"), "{source}");
         }
     }
 }

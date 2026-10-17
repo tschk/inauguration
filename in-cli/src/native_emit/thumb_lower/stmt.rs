@@ -103,6 +103,28 @@ pub(crate) fn lower_function(
 pub(crate) fn alloc_declared_locals(ctx: &mut LowerCtx<'_>, body: &[Stmt]) -> Result<(), String> {
     for stmt in body {
         match stmt {
+            Stmt::Declare(name, typ) => {
+                if ctx.locals.contains_key(name) {
+                    continue;
+                }
+                match typ.canonical() {
+                    Typ::Int | Typ::Bool => {
+                        let offset = ctx.alloc_slot();
+                        ctx.locals.insert(name.clone(), LocalSlot::Scalar(offset));
+                    }
+                    Typ::Named(owner) if ctx.structs.contains_key(&owner) => {
+                        let (_, fields) = ctx.alloc_struct(&owner)?;
+                        ctx.locals
+                            .insert(name.clone(), LocalSlot::Struct { fields });
+                    }
+                    _ => {
+                        return Err(format!(
+                            "thumb-lower: unsupported declared local `{name}` type {typ:?}"
+                        ));
+                    }
+                }
+                ctx.local_types.insert(name.clone(), typ.clone());
+            }
             Stmt::Let(name, typ, expr) => {
                 if ctx.locals.contains_key(name) {
                     continue;
@@ -213,7 +235,11 @@ fn stmt_expr_demand(stmt: &Stmt, demand: &impl Fn(&Expr) -> usize) -> usize {
                 .max()
                 .unwrap_or(0),
         ),
-        Stmt::Return(None) | Stmt::Propagate | Stmt::Break | Stmt::Continue => 0,
+        Stmt::Declare(_, _)
+        | Stmt::Return(None)
+        | Stmt::Propagate
+        | Stmt::Break
+        | Stmt::Continue => 0,
     }
 }
 
@@ -292,6 +318,15 @@ pub(crate) fn lower_stmt(
             }
             thumb::emit_epilogue(emitter, frame)?;
             ctx.emitted_return = true;
+            Ok(())
+        }
+        Stmt::Declare(name, typ) => {
+            if !ctx.locals.contains_key(name) {
+                return Err(format!(
+                    "thumb-lower: declaration `{name}` has no planned storage"
+                ));
+            }
+            ctx.local_types.insert(name.clone(), typ.clone());
             Ok(())
         }
         Stmt::Let(name, annotation, expr) => {
@@ -727,5 +762,32 @@ mod call_temp_tests {
         ctx.release_call_arg_temps(2).unwrap();
         assert_eq!(ctx.call_arg_used, 0);
         assert!(ctx.release_call_arg_temps(1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod declaration_storage_tests {
+    use super::*;
+    #[test]
+    fn declaration_reserves_a_slot_without_emitting_a_store() {
+        let structs = HashMap::new();
+        let functions = HashMap::new();
+        let mut ctx = LowerCtx::new("test", &[], &functions, &structs);
+        let declaration = Stmt::Declare("value".into(), Typ::Int);
+        alloc_declared_locals(&mut ctx, std::slice::from_ref(&declaration)).unwrap();
+        let mut emitter = CodeEmitter::new();
+        let mut pending = vec![];
+        lower_stmt(&mut emitter, &mut ctx, &declaration, &mut pending, 0).unwrap();
+        assert!(ctx.locals.contains_key("value"));
+        assert!(emitter.bytes.is_empty());
+        lower_stmt(
+            &mut emitter,
+            &mut ctx,
+            &Stmt::Assign("value".into(), Expr::IntLit(42)),
+            &mut pending,
+            0,
+        )
+        .unwrap();
+        assert!(!emitter.bytes.is_empty());
     }
 }

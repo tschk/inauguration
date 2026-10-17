@@ -138,6 +138,7 @@ fn collect_dependency_symbol_calls_from_stmt<'a>(
     out: &mut std::collections::BTreeSet<(&'a str, &'a str, &'a str)>,
 ) {
     match stmt {
+        Stmt::Declare(..) => {}
         Stmt::Let(_, _, expr)
         | Stmt::Assign(_, expr)
         | Stmt::Return(Some(expr))
@@ -308,7 +309,7 @@ fn collect_dependency_symbol_calls_from_expr<'a>(
             let mut inner = bound_aliases.clone();
             for stmt in body {
                 collect_dependency_symbol_calls_from_stmt(stmt, symbols, functions, &inner, out);
-                if let Stmt::Let(name, _, _) = stmt {
+                if let Stmt::Let(name, _, _) | Stmt::Declare(name, _) = stmt {
                     inner.insert(name.as_str());
                 }
             }

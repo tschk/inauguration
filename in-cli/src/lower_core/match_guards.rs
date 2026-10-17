@@ -144,6 +144,7 @@ fn match_scrutinee_needs_storage(value: &Expr) -> bool {
 
 fn stmt_has_guard(stmt: &Stmt, whole_bindings: bool) -> bool {
     match stmt {
+        Stmt::Declare(_, _) => false,
         // Shared typed preparation records inferred fixed-array layouts.
         Stmt::Let(_, None, Expr::ArrayLit(_)) => true,
         Stmt::Let(_, _, expr)
@@ -252,6 +253,7 @@ fn lower_body(
     let mut out = Vec::with_capacity(body.len());
     for mut stmt in std::mem::take(body) {
         match &mut stmt {
+            Stmt::Declare(_, _) => {}
             Stmt::Let(_, _, expr)
             | Stmt::Assign(_, expr)
             | Stmt::Expr(expr)
@@ -585,6 +587,9 @@ fn prepare_native_patterns(
             let mut expanded = None;
             let stmt = &mut body[index];
             match stmt {
+                Stmt::Declare(name, typ) => {
+                    env.insert(name.clone(), typ.clone());
+                }
                 Stmt::Let(name, typ, value) => {
                     if !expr_valid(value, env, checker, facts, names, counter, structs) {
                         return false;

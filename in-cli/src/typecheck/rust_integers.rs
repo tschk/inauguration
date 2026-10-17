@@ -1036,6 +1036,21 @@ impl Pass<'_> {
     fn body(&mut self, body: &mut [Stmt], env: &mut HashMap<String, Typ>, ret: Option<Kind>) {
         for stmt in body {
             match stmt {
+                Stmt::Declare(name, typ) => {
+                    self.flexible.remove(name);
+                    self.opaque.remove(name);
+                    self.inferred.remove(name);
+                    if *typ == Typ::Int {
+                        self.opaque.insert(name.clone());
+                    }
+                    if let Some(kind) = self.expected(Some(typ)) {
+                        self.inferred.insert(name.clone(), kind);
+                    }
+                    if let Some(constants) = &mut self.const_env {
+                        constants.remove(name);
+                    }
+                    env.insert(name.clone(), typ.clone());
+                }
                 Stmt::Let(name, annotation, value) => {
                     // Canonical Int is a lowering carrier, not an explicit Rust width.
                     let carrier_kind = if *annotation == Some(Typ::Int) {
@@ -1275,6 +1290,7 @@ fn decl_has_metadata(value: &Decl) -> bool {
     }
     fn stmts(body: &[Stmt]) -> bool {
         body.iter().any(|stmt| match stmt {
+            Stmt::Declare(_, annotation) => typ(annotation),
             Stmt::Let(_, annotation, value) => annotation.as_ref().is_some_and(typ) || expr(value),
             Stmt::Assign(_, value)
             | Stmt::Expr(value)

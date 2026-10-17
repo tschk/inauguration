@@ -392,6 +392,7 @@ pub(crate) fn comparison_operand_mismatch(
 
 pub(crate) fn stmts_diverge(body: &[Stmt]) -> bool {
     body.iter().any(|stmt| match stmt {
+        Stmt::Declare(_, _) => false,
         Stmt::Return(_) | Stmt::Throw(_) | Stmt::Break | Stmt::Continue => true,
         Stmt::Let(_, _, value) | Stmt::Assign(_, value) | Stmt::Expr(value) => expr_diverges(value),
         Stmt::FieldAssign { base, value, .. } => expr_diverges(base) || expr_diverges(value),
@@ -731,6 +732,8 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Stmt {
+    /// Bind typed local storage without evaluating or initializing a value.
+    Declare(String, Typ),
     Let(String, Option<Typ>, Expr),
     Assign(String, Expr),
     IndexAssign {

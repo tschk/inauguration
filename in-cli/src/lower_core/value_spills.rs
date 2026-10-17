@@ -476,6 +476,10 @@ impl Lower {
             let types = self.types.clone();
             self.body(body);
             for stmt in body.iter() {
+                if let Stmt::Declare(name, typ) = stmt {
+                    self.constants.remove(name);
+                    self.types.insert(name.clone(), typ.clone());
+                }
                 if let Stmt::Let(name, typ, value) = stmt {
                     self.constants.remove(name);
                     if let Some(typ) = typ.clone().or_else(|| self.expr_type(value)) {
@@ -846,6 +850,10 @@ impl Lower {
                     }
                 }
                 _ => {}
+            }
+            if let Stmt::Declare(name, typ) = &stmt {
+                self.constants.remove(name);
+                self.types.insert(name.clone(), typ.clone());
             }
             if let Stmt::Let(name, typ, expr) = &stmt {
                 // Initializers still see the previous binding; the new local

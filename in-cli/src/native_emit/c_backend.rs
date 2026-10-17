@@ -71,6 +71,7 @@ fn sanitize_comment(s: &str) -> String {
 
 /// Emit a complete C translation unit from Core IR.
 pub fn emit_c_module(module: &UnifiedModule) -> Result<String, String> {
+    crate::core_ir_verifier::check_execution_contracts(module)?;
     let mut prepared = crate::lower_core::prepared_native_module(module);
     check_module_limits(prepared.as_ref())?;
     // Hoisted declarations require unique lexical names, even on the borrowed fast path.
@@ -1260,6 +1261,7 @@ fn emit_fn_def(ctx: &mut Ctx, name: &str, params: &[(String, Typ)], ret: &Typ, b
 
 fn emit_stmt(ctx: &mut Ctx, stmt: &Stmt) {
     match stmt {
+        Stmt::Declare(_, _) => {}
         Stmt::Let(name, _, expr) => {
             let rhs = ctx.expr_str(expr);
             ctx.push(&format!("{} = {};", sanitize_ident(name), rhs));
@@ -1512,6 +1514,16 @@ fn collect_locals(
     let checker = TypeChecker::new();
     for stmt in stmts {
         match stmt {
+            Stmt::Declare(name, typ) => {
+                let emitted = sanitize_ident(name);
+                if !known.contains(&emitted)
+                    && !locals.iter().any(|(existing, _)| existing == &emitted)
+                {
+                    locals.push((emitted, ctype(typ)));
+                }
+                all_types.insert(name.clone(), typ.clone());
+                env.insert(name.clone(), typ.clone());
+            }
             Stmt::Let(name, _, value) | Stmt::Assign(name, value) => {
                 let annotation = match stmt {
                     Stmt::Let(_, annotation, _) => annotation.as_ref(),

@@ -107,6 +107,7 @@ pub(crate) fn serialize_program(prog: &Program) -> Vec<u8> {
 }
 
 fn compile(module: &UnifiedModule, entry: &str) -> Result<Program, String> {
+    crate::core_ir_verifier::check_execution_contracts(module)?;
     fn check_matches(body: &[Stmt]) -> Result<(), String> {
         for stmt in body {
             match stmt {
@@ -261,6 +262,11 @@ fn compile_stmt(
     slots: &std::collections::HashMap<String, u16>,
 ) -> Result<(), String> {
     match stmt {
+        Stmt::Declare(_, _) => {
+            return Err(
+                "inisa: declarations without initializers require owned native lowering".into(),
+            );
+        }
         Stmt::Let(name, _, e) | Stmt::Assign(name, e) => {
             compile_expr(c, e, slots)?;
             let slot = *slots
@@ -866,5 +872,22 @@ mod tests {
                 assert_eq!(eval_module(&module, "main").unwrap(), value >> count);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod declaration_refusal_tests {
+    use super::*;
+    use crate::core_ir::Typ;
+    #[test]
+    fn declarations_do_not_gain_vm_default_values() {
+        let mut module =
+            crate::in_lang_parse::parse_in_source("fn main()->Int{let value:Int=7;return value;}")
+                .unwrap();
+        let Decl::Function { body, .. } = &mut module.decls[0] else {
+            panic!("function")
+        };
+        body[0] = Stmt::Declare("value".into(), Typ::Int);
+        assert!(compile(&module, "main").is_err());
     }
 }

@@ -20,23 +20,8 @@ pub(crate) use match_guards::{
 };
 pub(crate) use value_spills::lower_value_spills;
 
-pub fn desugar_module(module: &mut UnifiedModule) {
-    desugar_module_with_semantics(module, crate::integer_semantics::IntegerSemantics::Word64);
-}
-
-pub fn desugar_module_with_semantics(
-    module: &mut UnifiedModule,
-    semantics: crate::integer_semantics::IntegerSemantics,
-) {
-    if crate::typecheck::rust_integers::has_metadata(module) {
-        *module = crate::typecheck::normalize_module_with_semantics(
-            crate::parser_registry::ParserId::Rust,
-            module,
-            semantics,
-        );
-    }
-    crate::core_bindings::normalize_decls(&mut module.decls);
-    lower_guarded_decls(&mut module.decls);
+/// Flatten classes and rewrite method symbols without folding source facts.
+pub(crate) fn desugar_class_declarations(module: &mut UnifiedModule) {
     let mut method_map: HashMap<String, String> = HashMap::new();
     let mut new_decls: Vec<Decl> = Vec::new();
 
@@ -98,6 +83,28 @@ pub fn desugar_module_with_semantics(
             }
         }
     }
+    module.decls = new_decls;
+}
+
+pub fn desugar_module(module: &mut UnifiedModule) {
+    desugar_module_with_semantics(module, crate::integer_semantics::IntegerSemantics::Word64);
+}
+
+pub fn desugar_module_with_semantics(
+    module: &mut UnifiedModule,
+    semantics: crate::integer_semantics::IntegerSemantics,
+) {
+    if crate::typecheck::rust_integers::has_metadata(module) {
+        *module = crate::typecheck::normalize_module_with_semantics(
+            crate::parser_registry::ParserId::Rust,
+            module,
+            semantics,
+        );
+    }
+    crate::core_bindings::normalize_decls(&mut module.decls);
+    lower_guarded_decls(&mut module.decls);
+    desugar_class_declarations(module);
+    let mut new_decls = std::mem::take(&mut module.decls);
     lower_inline_constants_with_semantics(&mut new_decls, semantics);
     static_initializers::fold_static_initializers_with_semantics(&mut new_decls, semantics);
     lower_named_constants_with_semantics(&mut new_decls, semantics);
@@ -452,6 +459,9 @@ fn rewrite_field_refs_in_body(body: &mut [Stmt], fields: &HashSet<String>) {
 fn collect_bound_names_in_body(body: &[Stmt], bound: &mut HashSet<String>) {
     for stmt in body {
         match stmt {
+            Stmt::Declare(name, _) => {
+                bound.insert(name.clone());
+            }
             Stmt::Let(name, _, e) => {
                 collect_bound_names_in_expr(e, bound);
                 bound.insert(name.clone());
@@ -527,6 +537,7 @@ fn collect_bound_names_in_expr(expr: &Expr, bound: &mut HashSet<String>) {
 
 fn rewrite_field_refs_in_stmt(stmt: &mut Stmt, fields: &HashSet<String>, bound: &HashSet<String>) {
     match stmt {
+        Stmt::Declare(_, _) => {}
         Stmt::Let(_, _, e) => rewrite_field_refs_in_expr(e, fields, bound),
         Stmt::Assign(name, e) => {
             rewrite_field_refs_in_expr(e, fields, bound);
@@ -694,6 +705,7 @@ fn desugar_closures_in_body(
 ) {
     for stmt in body {
         match stmt {
+            Stmt::Declare(_, _) => {}
             Stmt::Let(_, _, e)
             | Stmt::Assign(_, e)
             | Stmt::FieldAssign { value: e, .. }
@@ -760,7 +772,7 @@ fn collect_declared_vars_in_body(body: &[Stmt], out: &mut HashSet<String>) {
             }
         });
         match stmt {
-            Stmt::Let(name, _, _) => {
+            Stmt::Declare(name, _) | Stmt::Let(name, _, _) => {
                 out.insert(name.clone());
             }
             Stmt::If {
@@ -818,6 +830,7 @@ fn collect_free_vars(body: &[Stmt], params: &[(String, Typ)]) -> Vec<String> {
 fn rewrite_captures_in_body(body: &mut [Stmt], captures: &HashSet<&str>) {
     for stmt in body {
         match stmt {
+            Stmt::Declare(_, _) => {}
             Stmt::Let(_, _, e)
             | Stmt::Assign(_, e)
             | Stmt::FieldAssign { value: e, .. }
@@ -1071,6 +1084,7 @@ fn desugar_closures_in_expr(
 fn rewrite_method_calls_in_body(body: &mut [Stmt], method_map: &HashMap<String, String>) {
     for stmt in body {
         match stmt {
+            Stmt::Declare(_, _) => {}
             Stmt::Let(_, _, e)
             | Stmt::Assign(_, e)
             | Stmt::FieldAssign { value: e, .. }
@@ -1610,6 +1624,7 @@ fn collect_expr_reads(e: &Expr, reads: &mut HashSet<String>) {
 
 fn collect_stmt_reads(st: &Stmt, reads: &mut HashSet<String>) {
     match st {
+        Stmt::Declare(_, _) => {}
         Stmt::Let(_, _, e)
         | Stmt::Assign(_, e)
         | Stmt::FieldAssign { value: e, .. }
@@ -1883,6 +1898,9 @@ fn lower_stmts_with_env(
     let mut out = String::new();
     for (idx, st) in body.iter().enumerate() {
         match st {
+            Stmt::Declare(name, _) => {
+                env.remove(name);
+            }
             Stmt::Let(name, _, e) => {
                 let id = lower_expr(e, env, direct_env, ssa, &mut out);
                 env.insert(name.clone(), id);

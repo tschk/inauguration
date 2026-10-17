@@ -220,6 +220,9 @@ fn format_body(body: &[Stmt], depth: usize, out: &mut String) {
 fn format_stmt(stmt: &Stmt, depth: usize, out: &mut String) {
     let indent = "  ".repeat(depth);
     match stmt {
+        Stmt::Declare(name, typ) => {
+            out.push_str(&format!("{indent}let {name}: {}\n", format_type(typ)));
+        }
         Stmt::Let(name, typ, expr) => {
             out.push_str(&indent);
             out.push_str("let ");

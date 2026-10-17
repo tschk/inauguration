@@ -59,23 +59,22 @@ impl TypeChecker {
     /// query deliberately does not treat ordinary deferred checking as proof.
     /// A normalized private view makes local shadows distinct from globals and
     /// call targets, without changing the input or adding expression markers.
-    pub(crate) fn typed_proof_functions(
-        &self,
-        decls: &[Decl],
-    ) -> HashMap<String, ResolutionFailure> {
+    pub(crate) fn typed_proof_nodes(&self, decls: &[Decl]) -> HashMap<String, ResolutionFailure> {
         if !type_proofs::present(decls) {
             return HashMap::new();
         }
-        let facts = self.collect_decl_facts(decls);
-        let mut view = decls.to_vec();
-        crate::core_bindings::normalize_decls(&mut view);
-        let functions: HashSet<_> = view
+        let mut view = UnifiedModule::new(decls.to_vec());
+        crate::core_bindings::normalize_decls(&mut view.decls);
+        if view
+            .decls
             .iter()
-            .filter_map(|decl| match decl {
-                Decl::Function { name, .. } => Some(name.clone()),
-                _ => None,
-            })
-            .collect();
+            .any(|decl| matches!(decl, Decl::Class { .. }))
+        {
+            crate::lower_core::desugar_class_declarations(&mut view);
+            crate::core_bindings::normalize_decls(&mut view.decls);
+        }
+        let facts = self.collect_decl_facts(&view.decls);
+        let mut view = view.decls;
         let nodes: HashSet<_> = view
             .iter()
             .filter_map(|decl| match decl {
@@ -135,7 +134,33 @@ impl TypeChecker {
             }
             proofs.extend(changes);
         }
-        proofs.retain(|name, _| functions.contains(name));
+        proofs
+    }
+
+    /// Function proofs include structurally desugared class methods under their
+    /// production names. Unreferenced global proofs do not poison clean callers.
+    pub(crate) fn typed_proof_functions(
+        &self,
+        decls: &[Decl],
+    ) -> HashMap<String, ResolutionFailure> {
+        let mut proofs = self.typed_proof_nodes(decls);
+        proofs.retain(|name, _| {
+            !decls
+                .iter()
+                .any(|decl| matches!(decl, Decl::Global { name: global, .. } if global == name))
+        });
+        proofs
+    }
+
+    /// Initializer/type proofs keyed by actual global declarations, including
+    /// dependencies on other globals and callable bodies.
+    pub(crate) fn typed_proof_globals(&self, decls: &[Decl]) -> HashMap<String, ResolutionFailure> {
+        let mut proofs = self.typed_proof_nodes(decls);
+        proofs.retain(|name, _| {
+            decls
+                .iter()
+                .any(|decl| matches!(decl, Decl::Global { name: global, .. } if global == name))
+        });
         proofs
     }
 }
@@ -390,5 +415,121 @@ mod ordering_and_guard_tests {
         )];
         assert!(type_proofs::present(&declarations));
         assert!(TypeChecker::new().typed_proof_functions(&declarations)["main"].is_invalid());
+    }
+}
+
+#[cfg(test)]
+mod declaration_proof_tests {
+    use super::*;
+    #[test]
+    fn uninitialized_annotations_in_guards_and_closures_are_observed() {
+        let bad = ResolutionFailure::Invalid("declaration cycle".into()).typ();
+        let guard = Expr::Block {
+            body: vec![Stmt::Declare("unused".into(), bad.clone())],
+            result: Some(Box::new(Expr::BoolLit(true))),
+        };
+        let decls = vec![Decl::Function {
+            name: "work".into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![
+                Stmt::Expr(Expr::Closure {
+                    params: vec![],
+                    ret: Typ::Void,
+                    captures: vec![],
+                    body: vec![Stmt::Declare("nested".into(), bad)],
+                }),
+                Stmt::Match {
+                    scrutinee: Expr::BoolLit(true),
+                    arms: vec![crate::core_ir::MatchArm {
+                        pattern: "true".into(),
+                        guard: Some(guard),
+                        body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                    }],
+                },
+            ],
+        }];
+        assert!(type_proofs::present(&decls));
+        assert!(TypeChecker::new().typed_proof_functions(&decls)["work"].is_invalid());
+    }
+}
+
+#[cfg(test)]
+mod node_proof_tests {
+    use super::*;
+
+    fn function(name: &str, body: Vec<Stmt>) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params: vec![],
+            ret: Typ::Int,
+            body,
+            type_params: vec![],
+        }
+    }
+
+    #[test]
+    fn global_annotation_proofs_are_retained_without_poisoning_unrelated_functions() {
+        let bad = ResolutionFailure::Unsupported("opaque associated output".into());
+        let decls = vec![
+            Decl::Global {
+                name: "bad".into(),
+                typ: bad.clone().typ(),
+                init: Some(Box::new(Expr::IntLit(77))),
+                mutable: false,
+                constant_value: false,
+            },
+            function(
+                "reader",
+                vec![Stmt::Return(Some(Expr::Ident("bad".into())))],
+            ),
+            function(
+                "transitive",
+                vec![Stmt::Return(Some(Expr::Call {
+                    callee: Box::new(Expr::Ident("reader".into())),
+                    args: vec![],
+                }))],
+            ),
+            function("clean", vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+        ];
+        let original = decls.clone();
+        let checker = TypeChecker::new();
+        let nodes = checker.typed_proof_nodes(&decls);
+        assert_eq!(nodes.len(), 3);
+        for name in ["bad", "reader", "transitive"] {
+            assert_eq!(nodes[name], bad);
+        }
+        let globals = checker.typed_proof_globals(&decls);
+        assert_eq!(globals, HashMap::from([("bad".into(), bad.clone())]));
+        let functions = checker.typed_proof_functions(&decls);
+        assert_eq!(functions.len(), 2);
+        assert!(!functions.contains_key("bad"));
+        assert!(!functions.contains_key("clean"));
+        assert_eq!(decls, original);
+        // A global-only input must still expose its proof to the folding gate.
+        assert_eq!(checker.typed_proof_nodes(&decls[..1]), globals);
+        assert!(checker.typed_proof_functions(&decls[..1]).is_empty());
+    }
+
+    #[test]
+    fn raw_class_methods_use_production_names_and_desugared_field_facts() {
+        let bad = ResolutionFailure::Invalid("class field cycle".into());
+        let decls = vec![Decl::Class {
+            name: "Row".into(),
+            fields: vec![("field".into(), bad.clone().typ())],
+            methods: vec![function("get", vec![Stmt::Return(Some(Expr::IntLit(77)))])],
+            visibility: crate::core_ir::Visibility::Pub,
+            extends: None,
+            implements: vec![],
+            type_params: vec![],
+        }];
+        let original = decls.clone();
+        let checker = TypeChecker::new();
+        let nodes = checker.typed_proof_nodes(&decls);
+        assert_eq!(nodes, HashMap::from([("Row_get".into(), bad)]));
+        assert_eq!(checker.typed_proof_functions(&decls), nodes);
+        assert!(checker.typed_proof_globals(&decls).is_empty());
+        assert_eq!(decls, original);
     }
 }

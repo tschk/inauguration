@@ -1,3 +1,9 @@
+mod definite_initialization;
+pub(crate) use definite_initialization::{
+    check_definite_initialization, initialization_errors_by_function,
+    initialization_errors_by_global,
+};
+
 use crate::core_ir::{Decl, UnifiedModule};
 use crate::core_ir::{Expr, Stmt, Typ};
 use std::collections::{HashMap, HashSet};
@@ -15,6 +21,18 @@ pub struct VerifyReport {
     pub reason: Option<String>,
     pub parsed_function_count: usize,
     pub call_edges: Vec<(String, String)>,
+}
+
+/// Runtime/source emission requires all retained source contracts to be resolved.
+pub(crate) fn check_execution_contracts(module: &UnifiedModule) -> Result<(), String> {
+    let proofs = crate::typecheck::TypeChecker::new().typed_proof_nodes(&module.decls);
+    if let Some((name, proof)) = proofs.iter().min_by_key(|(name, _)| *name) {
+        return Err(format!(
+            "source-type-proof: unresolved contract in `{name}`: {}",
+            proof.message()
+        ));
+    }
+    check_definite_initialization(module)
 }
 
 pub fn verify_for_entry(module: &UnifiedModule, entry: &str) -> VerifyReport {
@@ -55,6 +73,14 @@ pub fn verify_module(module: &UnifiedModule, options: &VerifyOptions) -> VerifyR
         }
     }
 
+    if let Err(reason) = check_definite_initialization(module) {
+        return fail_report(
+            parsed_function_count,
+            call_edges,
+            "uninitialized-local",
+            reason,
+        );
+    }
     let completion = CompletionContext::new(module, &facts);
 
     for decl in &module.decls {
@@ -811,14 +837,63 @@ fn completion_body(
     flow
 }
 
+// Keep every intermediate representable at both supported word widths.
+fn known_integer(value: &Expr) -> Option<i64> {
+    let value = match value {
+        Expr::IntLit(value) => *value,
+        Expr::Unary { op, expr } if op == "-" => known_integer(expr)?.checked_neg()?,
+        Expr::Binary { op, lhs, rhs } => {
+            let left = known_integer(lhs)?;
+            let right = known_integer(rhs)?;
+            match op.as_str() {
+                "+" | "add" => left.checked_add(right)?,
+                "-" | "sub" => left.checked_sub(right)?,
+                "*" | "mul" => left.checked_mul(right)?,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    i32::try_from(value).ok().map(i64::from)
+}
+
+fn known_boolean(value: &Expr) -> Option<bool> {
+    match value {
+        Expr::BoolLit(value) => Some(*value),
+        Expr::Unary { op, expr } if op == "!" => known_boolean(expr).map(|value| !value),
+        Expr::Binary { op, lhs, rhs } => {
+            if let (Some(left), Some(right)) = (known_integer(lhs), known_integer(rhs)) {
+                return match op.as_str() {
+                    "==" | "eq" => Some(left == right),
+                    "!=" | "neq" => Some(left != right),
+                    "<" | "lt" => Some(left < right),
+                    "<=" | "le" => Some(left <= right),
+                    ">" | "gt" => Some(left > right),
+                    ">=" | "ge" => Some(left >= right),
+                    _ => None,
+                };
+            }
+            let left = known_boolean(lhs)?;
+            match op.as_str() {
+                "&&" | "and" => Some(left && known_boolean(rhs)?),
+                "||" | "or" => Some(left || known_boolean(rhs)?),
+                "==" | "eq" => Some(left == known_boolean(rhs)?),
+                "!=" | "neq" => Some(left != known_boolean(rhs)?),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn completion_branch(
     cond: &Expr,
     then_flow: impl FnOnce() -> Completion,
     else_flow: impl FnOnce() -> Completion,
 ) -> Completion {
-    match cond {
-        Expr::BoolLit(true) => then_flow(),
-        Expr::BoolLit(false) => else_flow(),
+    match known_boolean(cond) {
+        Some(true) => then_flow(),
+        Some(false) => else_flow(),
         _ => then_flow().union(else_flow()),
     }
 }
@@ -829,6 +904,10 @@ fn completion_stmt(
     context: &CompletionContext<'_, '_>,
 ) -> Completion {
     match statement {
+        Stmt::Declare(name, typ) => {
+            env.insert(name.clone(), typ.clone());
+            Completion::NORMAL
+        }
         Stmt::Let(name, annotation, value) => {
             let flow = completion_expr(value, env, context);
             if let Some(typ) = annotation
@@ -872,12 +951,14 @@ fn completion_stmt(
             let condition = cond.as_ref().map_or(Completion::NORMAL, |value| {
                 completion_expr(value, env, context)
             });
-            if matches!(cond, Some(Expr::BoolLit(false))) {
+            if cond.as_ref().and_then(known_boolean) == Some(false) {
                 return condition;
             }
             let body = completion_body(body, &mut env.clone(), context);
             let can_exit = matches!(kind, crate::core_ir::LoopKind::For { .. })
-                || !matches!(cond, None | Some(Expr::BoolLit(true)))
+                || cond
+                    .as_ref()
+                    .is_some_and(|value| known_boolean(value) != Some(true))
                 || body.has(Completion::BREAK);
             let iterations = body
                 .without(Completion::NORMAL)
@@ -964,6 +1045,14 @@ fn completion_match<'a>(
     env: &HashMap<String, Typ>,
     context: &CompletionContext<'_, '_>,
 ) -> Completion {
+    completion_match_with_fallthrough(scrutinee, arms, env, context).0
+}
+fn completion_match_with_fallthrough<'a>(
+    scrutinee: &Expr,
+    arms: impl IntoIterator<Item = (&'a str, Option<&'a Expr>, CompletionArm<'a>)>,
+    env: &HashMap<String, Typ>,
+    context: &CompletionContext<'_, '_>,
+) -> (Completion, bool) {
     let typ = expr_type(scrutinee, context.facts, env).unwrap_or(Typ::Named("Any".into()));
     let schema = |name: &str| context.facts.structs.get(name).copied();
     let mut flow = Completion::DIVERGE;
@@ -985,7 +1074,7 @@ fn completion_match<'a>(
         let guard_flow = guard.map_or(Completion::NORMAL, |guard| {
             completion_expr(guard, &arm_env, context)
         });
-        let selected = if matches!(guard, Some(Expr::BoolLit(false))) {
+        let selected = if guard.and_then(known_boolean) == Some(false) {
             Completion::DIVERGE
         } else {
             match body {
@@ -998,7 +1087,7 @@ fn completion_match<'a>(
             flow = flow.union(selected);
         }
         if guard.is_none()
-            || matches!(guard, Some(Expr::BoolLit(true)))
+            || guard.and_then(known_boolean) == Some(true)
             || !guard_flow.has(Completion::NORMAL)
         {
             if let Some(pattern) = &pattern {
@@ -1023,7 +1112,7 @@ fn completion_match<'a>(
     if pending {
         flow = flow.union(Completion::NORMAL);
     }
-    flow
+    (flow, pending)
 }
 
 fn completion_expr(
@@ -1175,6 +1264,10 @@ fn check_stmt(
     loop_depth: usize,
 ) -> Result<(), (String, String)> {
     match stmt {
+        Stmt::Declare(name, typ) => {
+            env.insert(name.clone(), typ.clone());
+            Ok(())
+        }
         Stmt::Let(name, typ, expr) => {
             if matches!(typ, Some(Typ::Vector(item)) if matches!(item.as_ref(), Typ::Generic(name) if name == "_"))
             {
@@ -2195,12 +2288,18 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
         Expr::Block { body, result } => {
             let mut inner = env.clone();
             for stmt in body {
-                if let Stmt::Let(name, typ, value) = stmt {
-                    if let Some(typ) = typ.clone().or_else(|| expr_type(value, facts, &inner)) {
-                        inner.insert(name.clone(), typ);
-                    } else {
-                        inner.remove(name);
+                match stmt {
+                    Stmt::Declare(name, typ) => {
+                        inner.insert(name.clone(), typ.clone());
                     }
+                    Stmt::Let(name, typ, value) => {
+                        if let Some(typ) = typ.clone().or_else(|| expr_type(value, facts, &inner)) {
+                            inner.insert(name.clone(), typ);
+                        } else {
+                            inner.remove(name);
+                        }
+                    }
+                    _ => {}
                 }
             }
             result

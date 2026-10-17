@@ -2624,3 +2624,20 @@ fn numeric_negation_requires_recursively_checked_scalar_operands() {
         assert!(emit_c_module(&module).is_err(), "{source}");
     }
 }
+
+#[test]
+fn declaration_has_no_initializer_and_later_assignment_executes() {
+    let mut module = crate::in_lang_parse::parse_in_library_source(
+        "fn answer()->Int{let value:Int=7;value=42;return value;}",
+    )
+    .unwrap();
+    let Decl::Function { body, .. } = &mut module.decls[0] else {
+        panic!("function")
+    };
+    body[0] = Stmt::Declare("value".into(), Typ::Int);
+    let emitted = emit_c_module(&module).unwrap();
+    assert!(emitted.contains("int64_t value;"), "{emitted}");
+    assert!(!emitted.contains("value = 0"), "{emitted}");
+    assert!(!emitted.contains("value = 7"), "{emitted}");
+    assert_inferred_c_executes(&module, "return (int)answer();");
+}

@@ -143,6 +143,7 @@ pub(crate) fn register(module: &mut UnifiedModule) {
     fn body(stmts: &[Stmt], shapes: &mut BTreeMap<String, Vec<(String, Typ)>>) {
         for stmt in stmts {
             match stmt {
+                Stmt::Declare(_, typ) => add(typ, shapes),
                 Stmt::Let(_, typ, value) => {
                     if let Some(typ) = typ {
                         add(typ, shapes);
@@ -412,5 +413,24 @@ mod reference_shape_tests {
                 Typ::Int
             ])
         );
+    }
+}
+
+#[cfg(test)]
+mod declaration_tuple_tests {
+    use super::*;
+    #[test]
+    fn declaration_only_tuple_shape_is_registered() {
+        let tuple = typ(&[Typ::Int, Typ::Bool]);
+        let Typ::Named(name) = &tuple else { panic!() };
+        let mut module = UnifiedModule::new(vec![Decl::Function {
+            name: "work".into(),
+            params: vec![],
+            ret: Typ::Void,
+            type_params: vec![],
+            body: vec![Stmt::Declare("pair".into(), tuple.clone())],
+        }]);
+        register(&mut module);
+        assert!(module.decls.iter().any(|decl| matches!(decl, Decl::Struct {name:actual, fields:actual_fields,..} if actual == name && actual_fields == &fields(name).unwrap())));
     }
 }

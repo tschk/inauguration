@@ -36,6 +36,7 @@ pub struct ThumbCompileResult {
 }
 
 pub fn lower_module(module: &UnifiedModule, entry: &str) -> Result<ThumbCompileResult, String> {
+    crate::core_ir_verifier::check_execution_contracts(module)?;
     let prepared = crate::lower_core::prepared_native_module_with_semantics(
         module,
         crate::integer_semantics::IntegerSemantics::Word32,

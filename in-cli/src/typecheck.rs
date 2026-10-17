@@ -150,6 +150,13 @@ impl TypeChecker {
             .collect();
 
         self.check_interface_conformance(module, &mut errors);
+        if let Err(reason) = crate::core_ir_verifier::check_definite_initialization(module) {
+            errors.push(TypeError::TypeMismatch {
+                context: reason,
+                expected: Typ::Named("initialized local".into()),
+                got: Typ::Named("uninitialized or unsupported local".into()),
+            });
+        }
 
         for decl in &module.decls {
             match decl {
@@ -179,6 +186,8 @@ impl TypeChecker {
     /// Eligibility only for the new effectful-argument inline path. Reuse the
     /// checker scoped walk; unrelated unsupported functions keep their old path.
     pub(crate) fn checked_inline_functions(&self, decls: &[Decl]) -> HashSet<String> {
+        let initialization_errors =
+            crate::core_ir_verifier::initialization_errors_by_function(decls);
         let mut facts = self.collect_decl_facts(decls);
         facts.require_resolved_inline_values = true;
         let globals: HashMap<_, _> = decls
@@ -201,6 +210,9 @@ impl TypeChecker {
                 else {
                     return None;
                 };
+                if initialization_errors.contains_key(name) {
+                    return None;
+                }
                 let mut env = globals.clone();
                 env.extend(params.iter().cloned());
                 let mut errors = Vec::new();
@@ -409,6 +421,9 @@ impl TypeChecker {
                 }
                 update(stmt, env)?;
                 match stmt {
+                    Stmt::Declare(name, typ) => {
+                        env.insert(name.clone(), typ.clone());
+                    }
                     Stmt::Let(name, typ, value) => {
                         if let Some(typ) = typ.clone().or_else(|| resolve(value, env)) {
                             env.insert(name.clone(), typ);
@@ -1338,6 +1353,9 @@ impl TypeChecker {
         vector_inference::infer(self, body, facts, env, return_type);
         for stmt in body {
             match stmt {
+                Stmt::Declare(name, typ) => {
+                    env.insert(name.clone(), typ.clone());
+                }
                 Stmt::Let(name, typ, expr) => {
                     if let Some(expected) = typ.as_ref() {
                         self.resolve_vector_allocation(expr, expected, facts);
@@ -1750,6 +1768,9 @@ impl TypeChecker {
             return;
         }
         match stmt {
+            Stmt::Declare(name, typ) => {
+                env.insert(name.clone(), typ.clone());
+            }
             Stmt::Let(name, annot, expr) => {
                 self.check_expr(fn_name, expr, facts, env, errors);
                 let expr_typ = self.expr_type(expr, facts, env);
@@ -2673,11 +2694,18 @@ impl TypeChecker {
             Expr::Block { body, result } => {
                 let mut inner = env.clone();
                 for stmt in body {
-                    if let Stmt::Let(name, typ, value) = stmt
-                        && let Some(typ) =
-                            typ.clone().or_else(|| self.expr_type(value, facts, &inner))
-                    {
-                        inner.insert(name.clone(), typ);
+                    match stmt {
+                        Stmt::Declare(name, typ) => {
+                            inner.insert(name.clone(), typ.clone());
+                        }
+                        Stmt::Let(name, typ, value) => {
+                            if let Some(typ) =
+                                typ.clone().or_else(|| self.expr_type(value, facts, &inner))
+                            {
+                                inner.insert(name.clone(), typ);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 result

@@ -112,6 +112,7 @@ pub(crate) fn present(decls: &[super::Decl]) -> bool {
     }
     fn statements(body: &[Stmt]) -> bool {
         body.iter().any(|stmt| match stmt {
+            Stmt::Declare(_, annotation) => typ(annotation),
             Stmt::Let(_, annotation, value) => annotation.as_ref().is_some_and(typ) || expr(value),
             Stmt::Assign(_, value)
             | Stmt::Expr(value)

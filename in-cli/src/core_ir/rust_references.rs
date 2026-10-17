@@ -529,3 +529,27 @@ mod tuple_erasure_tests {
         assert!(report.ok, "{report:?}");
     }
 }
+
+#[cfg(test)]
+mod declaration_reference_tests {
+    use super::*;
+    #[test]
+    fn declaration_reference_annotation_is_erased_through_existing_type_walk() {
+        let reference = value_type(SHARED_VALUE, Typ::String).unwrap();
+        let mut decls = vec![crate::core_ir::Decl::Function {
+            name: "work".into(),
+            params: vec![],
+            ret: Typ::Void,
+            type_params: vec![],
+            body: vec![crate::core_ir::Stmt::Declare("text".into(), reference)],
+        }];
+        erase_declarations(&mut decls);
+        let crate::core_ir::Decl::Function { body, .. } = &decls[0] else {
+            panic!()
+        };
+        assert!(matches!(
+            &body[0],
+            crate::core_ir::Stmt::Declare(_, Typ::String)
+        ));
+    }
+}

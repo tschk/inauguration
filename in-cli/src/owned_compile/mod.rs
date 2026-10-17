@@ -539,6 +539,12 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         report.error = Some(error);
         return finalize_report(report, started, &cwd, &frontend_hash);
     }
+    if let Err(error) = reject_uninitialized_locals(&module, proof_roots) {
+        report.reason_code = Some("uninitialized-local".into());
+        report.reason = Some(error.clone());
+        report.error = Some(error);
+        return finalize_report(report, started, &cwd, &frontend_hash);
+    }
     if request.target != CompileTarget::Jit {
         let context = format!(
             "{frontend_hash}:{:?}:{:?}:{:?}",
@@ -882,6 +888,25 @@ fn merge_retained_dependency_artifacts(
 /// Only callable roots poison an executable; unrelated library declarations
 /// remain eligible for ordinary DCE. native_entry_module retains schemas, so
 /// inspect function proof results rather than blanket-scanning that view.
+fn reject_uninitialized_locals(
+    module: &crate::core_ir::UnifiedModule,
+    entry: Option<&str>,
+) -> Result<(), String> {
+    let Some(entry) = entry else {
+        return crate::core_ir_verifier::check_definite_initialization(module);
+    };
+    // Keep ordinary modules on the allocation-free presence path.
+    if crate::core_ir_verifier::initialization_errors_by_function(&module.decls).is_empty() {
+        return Ok(());
+    }
+    let reachable = native::native_entry_module(module, entry);
+    let errors = crate::core_ir_verifier::initialization_errors_by_function(&reachable.decls);
+    match errors.iter().min_by_key(|(name, _)| *name) {
+        Some((_, reason)) => Err(reason.clone()),
+        None => Ok(()),
+    }
+}
+
 pub(crate) fn reject_invalid_type_proofs(
     module: &crate::core_ir::UnifiedModule,
     entry: Option<&str>,
@@ -921,6 +946,7 @@ pub(crate) fn optimize_retained_module(
     semantics: crate::integer_semantics::IntegerSemantics,
 ) -> Result<(), String> {
     reject_invalid_type_proofs(module, if keep_all { None } else { entry })?;
+    reject_uninitialized_locals(module, if keep_all { None } else { entry })?;
     fn count_tags(decls: &mut [Decl]) -> (usize, bool) {
         let mut tags = 0;
         let mut reference_values = false;

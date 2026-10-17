@@ -215,6 +215,7 @@ pub(super) fn rewrite_this_receiver_in_body(body: &mut [Stmt]) {
 
 fn rewrite_this_receiver_in_stmt(stmt: &mut Stmt) {
     match stmt {
+        Stmt::Declare(..) => {}
         Stmt::Let(_, _, expr)
         | Stmt::Assign(_, expr)
         | Stmt::Return(Some(expr))
@@ -370,6 +371,7 @@ fn rewrite_constructor_calls_in_body(
 
 fn rewrite_constructor_calls_in_stmt(stmt: &mut Stmt, class_fields: &HashMap<String, Vec<String>>) {
     match stmt {
+        Stmt::Declare(..) => {}
         Stmt::Let(_, _, expr)
         | Stmt::Assign(_, expr)
         | Stmt::Return(Some(expr))

@@ -2239,6 +2239,22 @@ fn lower_block_inner_with_types_go(
                         local_types.insert(name.clone(), type_to_string(typ));
                     }
                     out.push(Stmt::Let(name, local_ty, expr));
+                } else if let syn::Pat::Type(typed) = &local.pat
+                    && let syn::Pat::Ident(binding) = typed.pat.as_ref()
+                    && binding.by_ref.is_none()
+                    && binding.subpat.is_none()
+                {
+                    let name = binding.ident.to_string();
+                    let typ = map_type(&typed.ty);
+                    local_types.insert(name.clone(), type_to_string(&typ));
+                    out.push(Stmt::Declare(name, typ));
+                } else {
+                    out.push(Stmt::Expr(Expr::Call {
+                        callee: Box::new(Expr::Ident(
+                            crate::core_ir::UNSUPPORTED_DEFINED_BODY.into(),
+                        )),
+                        args: vec![],
+                    }));
                 }
             }
             syn::Stmt::Expr(expr, semi) => {
@@ -4924,5 +4940,54 @@ mod associated_failure_classification_tests {
         ));
 
         assert!(format!("{body:?}").contains("Row::new"));
+    }
+}
+
+#[cfg(test)]
+mod uninitialized_declaration_tests {
+    use super::*;
+    #[test]
+    fn typed_identifier_declarations_have_no_initializer() {
+        let module = parse_rust_source(
+            "fn main(){let mut value:i64;value=42;let closure=||{let inner:bool;};}",
+        )
+        .unwrap();
+        let Decl::Function { body, .. } = &module.decls[0] else {
+            panic!()
+        };
+        assert!(
+            matches!(&body[0],Stmt::Declare(name,Typ::Named(typ)) if name=="value" && typ=="#rust-integer-i64")
+        );
+        assert!(matches!(&body[1],Stmt::Assign(name,_) if name=="value"));
+        let Stmt::Let(_, _, Expr::Closure { body, .. }) = &body[2] else {
+            panic!()
+        };
+        assert!(matches!(&body[0],Stmt::Declare(name,Typ::Bool) if name=="inner"));
+    }
+    #[test]
+    fn unsupported_uninitialized_patterns_are_not_dropped() {
+        for source in [
+            "fn main(){let value;}",
+            "fn main(){let (a,b):(i64,i64);}",
+            "fn main(){let _:i64;}",
+            "fn main(){let ref value:i64;}",
+        ] {
+            let module = parse_rust_source(source).unwrap();
+            let Decl::Function { body, .. } = &module.decls[0] else {
+                panic!()
+            };
+            assert!(
+                matches!(&body[0],Stmt::Expr(Expr::Call{callee,args}) if args.is_empty() && matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::UNSUPPORTED_DEFINED_BODY)),
+                "{source}"
+            );
+        }
+    }
+    #[test]
+    fn impl_declaration_annotation_retains_associated_cycle_proof() {
+        let module = parse_rust_source(
+            "struct Row{} trait Other{type Output;fn work();} impl Other for Row{type Output=Self::Output;fn work(){let value:Self::Output;}} ",
+        )
+        .unwrap();
+        assert!(crate::core_ir::type_proofs::present(&module.decls));
     }
 }

@@ -319,7 +319,14 @@ pub(super) fn compile_jit_with_execution_state(
         Err(reason)
             if compile_only
                 && !crate::config::env_config().strict_lowering
-                && reason.starts_with("unsupported native initializer for global ") =>
+                && (reason.starts_with("unsupported native initializer for global ")
+                    || (request.entry.is_none()
+                        && reason.starts_with("source-type-proof:")
+                        && {
+                            let proofs = crate::typecheck::TypeChecker::new()
+                                .typed_proof_nodes(&module.decls);
+                            !proofs.is_empty() && proofs.values().all(|proof| !proof.is_invalid())
+                        })) =>
         {
             return Ok(NativeCompileResult {
                 artifact_path: String::new(),

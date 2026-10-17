@@ -3573,6 +3573,48 @@ fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
 }
 
 #[test]
+fn owned_rust_compile_only_keeps_unsupported_type_contracts_without_executing() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let unsupported = "struct Row;trait Other{type Output;}impl Other for Row{type Output=i64;}trait Factory{type Output;fn make()->Self::Output;}impl Factory for Row{type Output=<Self as Other>::Output;fn make()->Self::Output{42}}fn main()->i64{<Row as Factory>::make()}";
+    let invalid = "struct Row{x:i64}impl std::ops::Neg for Row{type Output=Self::Output;fn neg(self)->Self::Output{77}}fn main()->i64{-Row{x:42}}";
+    let unused_invalid = format!(
+        "{unsupported} struct Bad;trait Broken{{type Output;fn work()->i64;}}impl Broken for Bad{{type Output=Self::Output;fn work()->i64{{let unused:Self::Output;42}}}}"
+    );
+    let mixed = unused_invalid.replace(
+        "fn main()->i64{<Row as Factory>::make()}",
+        "fn main()->i64{<Row as Factory>::make()+<Bad as Broken>::work()}",
+    );
+    for (name, source, entry, expected) in [
+        ("unsupported", unsupported, None, true),
+        ("explicit-entry", unsupported, Some("main"), false),
+        ("invalid", invalid, None, false),
+        ("unused-invalid", unused_invalid.as_str(), None, true),
+        ("mixed", mixed.as_str(), None, false),
+    ] {
+        let path = temp_path(&format!("rust-type-proof-ir-only-{name}.rs"));
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, entry, None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert_eq!(report.success, expected, "{name} {profile:?}: {report:?}");
+            assert!(!report.execution_started, "{report:?}");
+            assert_eq!(report.eval_result, None);
+            assert_eq!(report.eval_exit_code, None);
+            assert_eq!(report.artifact_path, None);
+            if expected {
+                assert_eq!(report.reason_code.as_deref(), Some("jit-ir-only"));
+                assert_eq!(report.backend_level, "owned-core-ir-only");
+                assert_eq!(report.runtime_level, "not-executed");
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
 fn owned_rust_jit_verifies_before_execution() {
     if !native_backend::native_subset_host_available() {
         return;

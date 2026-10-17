@@ -168,6 +168,7 @@ pub(crate) fn lower_stmt(
             ctx.emitted_return = true;
             Ok(())
         }
+        Stmt::Declare(name, typ) => ctx.alloc_declared_local(name, typ, fn_name),
         Stmt::Let(name, typ, expr) => {
             ctx.alloc_let_local(name, typ.as_ref(), expr, fn_name, functions)?;
             lower_store_local(emitter, ctx, name, expr, functions, pending_calls, fn_name)
@@ -2263,5 +2264,57 @@ mod owned_word_storage_tests {
         assert!(owned_word_storage_size(usize::MAX).is_err());
         let overflowing = (i64::MAX as usize / 8) + 1;
         assert!(owned_word_storage_size(overflowing).is_err());
+    }
+}
+
+#[cfg(test)]
+mod declaration_storage_tests {
+    use super::*;
+    #[test]
+    fn declaration_reserves_a_slot_without_emitting_a_store() {
+        let structs = HashMap::new();
+        let strings = HashMap::new();
+        let globals = HashMap::new();
+        let types = HashMap::new();
+        let mut inrt = vec![];
+        let mut pending_strings = vec![];
+        let mut ctx = LowerCtx::new(
+            &[],
+            &structs,
+            &strings,
+            &globals,
+            &types,
+            &mut inrt,
+            &mut pending_strings,
+            "test",
+        )
+        .unwrap();
+        let functions = HashMap::new();
+        let mut pending = vec![];
+        let mut emitter = CodeEmitter::new();
+        let declaration = Stmt::Declare("value".into(), Typ::Int);
+        lower_stmt(
+            &mut emitter,
+            &mut ctx,
+            &declaration,
+            &functions,
+            &mut pending,
+            "test",
+            &Typ::Int,
+        )
+        .unwrap();
+        assert!(ctx.locals.contains_key("value"));
+        assert!(emitter.bytes.is_empty());
+        lower_stmt(
+            &mut emitter,
+            &mut ctx,
+            &Stmt::Assign("value".into(), Expr::IntLit(42)),
+            &functions,
+            &mut pending,
+            "test",
+            &Typ::Int,
+        )
+        .unwrap();
+        assert!(!emitter.bytes.is_empty());
     }
 }

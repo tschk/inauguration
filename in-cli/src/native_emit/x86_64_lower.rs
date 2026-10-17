@@ -432,6 +432,7 @@ fn lower_module_impl(
     layout: X86StringLayout,
     runtime_error_slot: bool,
 ) -> Result<X86_64CompileResult, String> {
+    crate::core_ir_verifier::check_execution_contracts(module)?;
     let semantics = if x86_64::is_32bit() {
         crate::integer_semantics::IntegerSemantics::Word32
     } else {
@@ -730,7 +731,7 @@ fn rename_calls_in_stmt(stmt: &mut Stmt, name_map: &HashMap<String, String>) {
         | Stmt::Assign(_, expr)
         | Stmt::Expr(expr)
         | Stmt::Return(Some(expr)) => rename_calls_in_expr(expr, name_map),
-        Stmt::Return(None) => {}
+        Stmt::Declare(_, _) | Stmt::Return(None) => {}
         Stmt::If {
             cond,
             then_body,
@@ -981,7 +982,7 @@ fn collect_strings_from_stmt(stmt: &Stmt, out: &mut Vec<String>) {
             collect_strings_from_expr(value, out);
         }
         Stmt::Return(Some(expr)) => collect_strings_from_expr(expr, out),
-        Stmt::Return(None) => {}
+        Stmt::Declare(_, _) | Stmt::Return(None) => {}
         Stmt::If {
             cond,
             then_body,
@@ -1248,6 +1249,15 @@ fn lower_function(
 fn alloc_declared_locals(ctx: &mut LowerCtx<'_>, body: &[Stmt]) -> Result<(), String> {
     for stmt in body {
         match stmt {
+            Stmt::Declare(name, typ) => {
+                if matches!(typ.canonical(), Typ::Void | Typ::Generic(_)) {
+                    return Err(format!(
+                        "x86_64-lower: declaration `{name}` needs a supported value layout"
+                    ));
+                }
+                ctx.alloc_local(name, &typ.canonical())?;
+                ctx.scalar_types.insert(name.clone(), typ.clone());
+            }
             Stmt::Let(name, typ, expr) => {
                 if x86_64::is_32bit()
                     && let Expr::ArrayLit(items) = expr
@@ -1389,6 +1399,15 @@ fn lower_stmt(
             }
             emit_function_epilogue(emitter, ctx.is_interrupt);
             ctx.emitted_return = true;
+            Ok(())
+        }
+        Stmt::Declare(name, typ) => {
+            if !ctx.locals.contains_key(name) {
+                return Err(format!(
+                    "x86_64-lower: declaration `{name}` has no planned storage"
+                ));
+            }
+            ctx.scalar_types.insert(name.clone(), typ.clone());
             Ok(())
         }
         Stmt::Let(name, typ, expr) => {
@@ -2518,6 +2537,9 @@ fn scalar_expr_type_with_bindings(
         Expr::Block { body, result } => {
             let mut scoped = bindings.clone();
             for stmt in body {
+                if let crate::core_ir::Stmt::Declare(name, typ) = stmt {
+                    scoped.insert(name.clone(), typ.clone());
+                }
                 if let crate::core_ir::Stmt::Let(name, typ, value) = stmt {
                     if let Some(typ) = typ
                         .clone()
@@ -6817,5 +6839,31 @@ mod empty_definition_export_tests {
         assert!(lowered.exports.iter().any(|(name, _)| name == "main"));
         assert!(lowered.exports.iter().any(|(name, _)| name == "helper"));
         assert!(!lowered.exports.iter().any(|(name, _)| name == "external"));
+    }
+}
+
+#[cfg(test)]
+mod declaration_storage_tests {
+    use super::*;
+    #[test]
+    fn declaration_reserves_a_slot_without_emitting_a_store() {
+        let structs = HashMap::new();
+        let functions = HashMap::new();
+        let mut ctx = LowerCtx::new("test", &[], &structs, &functions, HashMap::new());
+        let declaration = Stmt::Declare("value".into(), Typ::Int);
+        alloc_declared_locals(&mut ctx, std::slice::from_ref(&declaration)).unwrap();
+        let mut emitter = CodeEmitter::new();
+        let mut pending = vec![];
+        lower_stmt(&mut emitter, &mut ctx, &declaration, &mut pending).unwrap();
+        assert!(ctx.locals.contains_key("value"));
+        assert!(emitter.bytes.is_empty());
+        lower_stmt(
+            &mut emitter,
+            &mut ctx,
+            &Stmt::Assign("value".into(), Expr::IntLit(42)),
+            &mut pending,
+        )
+        .unwrap();
+        assert!(!emitter.bytes.is_empty());
     }
 }

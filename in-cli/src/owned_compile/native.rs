@@ -300,6 +300,7 @@ fn collect_expr_calls(expr: &Expr, out: &mut HashSet<String>) {
 fn collect_stmt_calls(stmts: &[Stmt], out: &mut HashSet<String>) {
     for stmt in stmts {
         match stmt {
+            Stmt::Declare(_, _) => {}
             Stmt::Let(_, _, expr)
             | Stmt::Assign(_, expr)
             | Stmt::Return(Some(expr))
@@ -352,6 +353,21 @@ fn collect_stmt_calls(stmts: &[Stmt], out: &mut HashSet<String>) {
 }
 
 pub fn native_entry_module(module: &UnifiedModule, entry: &str) -> UnifiedModule {
+    let prepared;
+    let module = if module
+        .decls
+        .iter()
+        .any(|decl| matches!(decl, Decl::Class { .. }))
+    {
+        let mut classes = module.clone();
+        crate::core_bindings::normalize_decls(&mut classes.decls);
+        crate::lower_core::desugar_class_declarations(&mut classes);
+        crate::core_bindings::normalize_decls(&mut classes.decls);
+        prepared = classes;
+        &prepared
+    } else {
+        module
+    };
     let mut reachable = HashSet::from([entry.to_string()]);
     loop {
         let mut next = reachable.clone();

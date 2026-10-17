@@ -48,6 +48,7 @@ fn stmts_need_invec(stmts: &[Stmt]) -> bool {
 
 fn stmt_needs_invec(s: &Stmt) -> bool {
     match s {
+        Stmt::Declare(_, typ) => typ_needs_invec(typ),
         Stmt::Let(_, ty, e) => ty.as_ref().map_or(false, typ_needs_invec) || expr_needs_invec(e),
         Stmt::Assign(_, e) | Stmt::Return(Some(e)) | Stmt::Throw(e) | Stmt::Expr(e) => {
             expr_needs_invec(e)
@@ -175,7 +176,11 @@ fn count_stmt(s: &Stmt, depth: u32, nodes: &mut usize) -> Result<(), String> {
             count_expr(e, depth + 1, nodes)
         }
         Stmt::Return(Some(e)) => count_expr(e, depth + 1, nodes),
-        Stmt::Return(None) | Stmt::Propagate | Stmt::Break | Stmt::Continue => Ok(()),
+        Stmt::Declare(_, _)
+        | Stmt::Return(None)
+        | Stmt::Propagate
+        | Stmt::Break
+        | Stmt::Continue => Ok(()),
         Stmt::IndexAssign { base, index, value } => {
             count_expr(base, depth + 1, nodes)?;
             count_expr(index, depth + 1, nodes)?;

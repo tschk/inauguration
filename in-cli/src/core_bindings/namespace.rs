@@ -343,6 +343,7 @@ fn expr(value: &mut Expr, names: &NominalNames<'_>, generics: &HashSet<String>) 
 fn statements(body: &mut [Stmt], names: &NominalNames<'_>, generics: &HashSet<String>) {
     for stmt in body {
         match stmt {
+            Stmt::Declare(_, annotation) => typ(annotation, names, generics),
             Stmt::Let(_, annotation, value) => {
                 if let Some(annotation) = annotation {
                     typ(annotation, names, generics);
@@ -1139,5 +1140,40 @@ mod retained_qualification_tests {
         let once = artifact.clone();
         qualify_module_artifact(&mut artifact, "dep::nested").unwrap();
         assert_eq!(artifact, once);
+    }
+}
+
+#[cfg(test)]
+mod declaration_annotation_tests {
+    use super::*;
+    #[test]
+    fn declaration_annotation_is_resolved_inside_closure_without_rewriting_value_names() {
+        let mut decls = vec![Decl::Function {
+            name: "work".into(),
+            params: vec![],
+            ret: Typ::Void,
+            type_params: vec![],
+            body: vec![Stmt::Expr(Expr::Closure {
+                params: vec![],
+                ret: Typ::Void,
+                captures: vec![],
+                body: vec![Stmt::Declare(
+                    "Self::Output".into(),
+                    Typ::Array(Box::new(Typ::Named("Self::Output".into()))),
+                )],
+            })],
+        }];
+        rewrite_type_annotations(&mut decls, &|name| {
+            (name == "Self::Output").then_some(Typ::Int)
+        });
+        let Decl::Function { body, .. } = &decls[0] else {
+            panic!()
+        };
+        let Stmt::Expr(Expr::Closure { body, .. }) = &body[0] else {
+            panic!()
+        };
+        assert!(
+            matches!(&body[0], Stmt::Declare(name, Typ::Array(item)) if name == "Self::Output" && **item == Typ::Int)
+        );
     }
 }

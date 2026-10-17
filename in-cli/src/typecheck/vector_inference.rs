@@ -262,6 +262,9 @@ fn collect(
 ) {
     for stmt in body {
         match stmt {
+            Stmt::Declare(name, typ) => {
+                env.insert(name.clone(), typ.clone());
+            }
             Stmt::Let(name, typ, value) => {
                 expression(
                     checker,

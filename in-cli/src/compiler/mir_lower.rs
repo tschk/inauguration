@@ -15,6 +15,7 @@ macro_rules! need {
 /// The boot path retains native_emit for globals, data and ABI features that
 /// are not represented by the scalar typed-to-machine pass.
 pub fn lower_to_mir(module: &UnifiedModule) -> Result<MirModule, String> {
+    crate::core_ir_verifier::check_execution_contracts(module)?;
     let verified = crate::core_ir_verifier::verify_module(
         module,
         &crate::core_ir_verifier::VerifyOptions {
@@ -213,6 +214,13 @@ impl ScalarBuilder<'_> {
     }
     fn stmt(&mut self, statement: &Stmt) -> Result<(), String> {
         match statement {
+            Stmt::Declare(name, typ) => {
+                let typ = scalar_type(typ)?;
+                if typ == Typ::Void {
+                    return Err("typed-mir: unit declaration has no local storage".into());
+                }
+                self.local(name, typ)?;
+            }
             Stmt::Let(name, annotation, value) => {
                 let reg = need!(self, value, ());
                 if !self.open {
@@ -555,6 +563,14 @@ impl ScalarBuilder<'_> {
 }
 fn validate_statement(statement: &Stmt) -> Result<(), String> {
     match statement {
+        Stmt::Declare(_, typ) => {
+            let typ = scalar_type(typ)?;
+            if typ == Typ::Void {
+                Err("typed-mir: unit declaration has no local storage".into())
+            } else {
+                Ok(())
+            }
+        }
         Stmt::Let(_, annotation, value) => {
             if let Some(typ) = annotation {
                 scalar_type(typ)?;
@@ -825,6 +841,39 @@ mod tests {
         assert!(
             error.contains("do not yet relocate writable globals"),
             "{error}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod declaration_storage_tests {
+    use super::*;
+    #[test]
+    fn only_assignment_defines_a_declared_mir_local() {
+        let mut module = crate::in_lang_parse::parse_in_source(
+            "fn main()->Int{let value:Int=7;value=42;return value;}",
+        )
+        .unwrap();
+        let Decl::Function { body, .. } = &mut module.decls[0] else {
+            panic!("function")
+        };
+        body[0] = Stmt::Declare("value".into(), Typ::Int);
+        let lowered = lower_to_mir(&module).unwrap();
+        let function = &lowered.functions[0];
+        assert_eq!(function.local_types, vec![Typ::Int]);
+        assert_eq!(
+            function
+                .instructions
+                .iter()
+                .filter(|inst| matches!(inst.op, MirOp::Typed(TypedOp::LocalStore { .. })))
+                .count(),
+            1
+        );
+        assert!(
+            !function
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst.op, MirOp::Typed(TypedOp::ScalarInt { value: 7, .. })))
         );
     }
 }
