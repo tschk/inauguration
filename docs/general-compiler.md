@@ -99,6 +99,12 @@ Core IR `xor` shares the native and typed MIR integer XOR implementation with
 Lua `^` retains its power refusal and is never interpreted as XOR.
 `.icore` also admits `&` and `|` with matching integer or Boolean operands;
 String and mixed-type operands fail verification before execution.
+Explicit `Float` types and `{"kind":"float","value":1.5}` literals use finite
+binary64 values; integer payloads in explicit Float nodes convert to binary64
+with its normal rounding. Bare decimal numbers and out-of-range bare integers
+remain unsupported; use an explicit Float node for floating-point literals.
+Native Float functions retain the owned integer-register bit-carrier ABI;
+this does not add platform C `double` argument or return marshalling.
 
 Python scalar-name augmented assignments support `+=`, `-=`, `*=`, `&=`,
 `|=` and `^=` through the existing typed native operations. They read the old

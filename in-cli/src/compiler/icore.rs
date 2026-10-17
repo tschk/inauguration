@@ -61,6 +61,7 @@ fn parse_typ(s: &str) -> Typ {
     }
     match s {
         "Int" => Typ::Int,
+        "Float" => Typ::Float,
         "String" => Typ::String,
         "Bool" => Typ::Bool,
         "Void" => Typ::Void,
@@ -313,6 +314,11 @@ fn parse_v2_expr(value: &Value, context: &str) -> Result<Expr, String> {
             .as_i64()
             .map(Expr::IntLit)
             .ok_or_else(|| format!("{context}: int literal `value` must be an integer")),
+        "float" => required_field(object, "value", context)?
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .map(|value| Expr::FloatLit(crate::core_ir::FloatVal(value)))
+            .ok_or_else(|| format!("{context}: float literal `value` must be a finite number")),
         "string" => required_field(object, "value", context)?
             .as_str()
             .map(|value| Expr::StringLit(value.to_string()))
@@ -600,6 +606,63 @@ fn validate_module(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_float_literals_preserve_binary64_values_and_signed_zero() {
+        for (value, expected) in [
+            (serde_json::json!(1.5), 1.5f64),
+            (serde_json::json!(42), 42.0),
+            (serde_json::json!(9007199254740993u64), 9007199254740992.0),
+            (serde_json::json!(-0.0), -0.0),
+        ] {
+            let expr =
+                super::parse_v2_expr(&serde_json::json!({"kind":"float","value":value}), "test")
+                    .unwrap();
+            let crate::core_ir::Expr::FloatLit(value) = expr else {
+                panic!("expected Float")
+            };
+            assert_eq!(value.0.to_bits(), expected.to_bits());
+        }
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!("1.5"),
+        ] {
+            assert!(
+                super::parse_v2_expr(&serde_json::json!({"kind":"float","value":value}), "test")
+                    .is_err()
+            );
+        }
+        assert!(super::parse_v2_expr(&serde_json::json!({"kind":"float"}), "test").is_err());
+    }
+
+    #[test]
+    fn explicit_float_type_is_primitive_while_shorthand_numbers_stay_integer_only() {
+        let source = r#"{"icoreVersion":2,"decls":[{"kind":"function","name":"identity","params":[{"name":"value","type":"Float"}],"return":"Float","body":[{"kind":"return","value":{"kind":"ident","name":"value"}}]},{"kind":"function","name":"main","params":[],"return":"Float","body":[{"kind":"return","value":{"kind":"float","value":1.5}}]}]}"#;
+        let module = super::parse_icore_source(source).unwrap();
+        assert!(
+            matches!(&module.decls[0], crate::core_ir::Decl::Function { params, ret, .. }
+            if params[0].1 == crate::core_ir::Typ::Float && ret == &crate::core_ir::Typ::Float)
+        );
+        for raw in [
+            "1.5",
+            "1e2",
+            "9223372036854775808",
+            "18446744073709551616",
+            "-9223372036854775809",
+        ] {
+            let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+            assert!(super::parse_v2_expr(&value, "test").is_err(), "{raw}");
+        }
+        assert!(
+            super::parse_v2_expr(
+                &serde_json::json!({"kind":"int","value":9223372036854775808u64}),
+                "test"
+            )
+            .is_err()
+        );
+        assert!(super::parse_icore_source(&source.replace("1.5", "1e400")).is_err());
+    }
+
     #[test]
     fn parses_explicit_unit_without_accepting_legacy_null() {
         assert_eq!(

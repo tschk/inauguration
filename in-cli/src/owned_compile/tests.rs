@@ -8063,6 +8063,86 @@ fn python_augmented_rhs_preserves_lazy_branches_and_old_binding_order() {
 }
 
 #[test]
+fn icore_explicit_float_helpers_preserve_values_and_type_boundaries() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("explicit-float.icore");
+    let original = serde_json::json!({"icoreVersion":2,"decls":[
+        {"kind":"function","name":"mix","params":[{"name":"left","type":"Float"},{"name":"right","type":"Float"}],"return":"Float","body":[{"kind":"return","value":{"kind":"binary","op":"+","lhs":{"kind":"ident","name":"left"},"rhs":{"kind":"ident","name":"right"}}}]},
+        {"kind":"function","name":"main","params":[],"return":"Float","body":[{"kind":"return","value":{"kind":"call","callee":"mix","args":[{"kind":"float","value":20.5},{"kind":"float","value":21.5}]}}]}
+    ]});
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for (op, expected) in [
+            ("+", 42.0f64),
+            ("-", -1.0),
+            ("*", 440.75),
+            ("/", 20.5 / 21.5),
+        ] {
+            let mut module = original.clone();
+            module["decls"][0]["body"][0]["value"]["op"] = op.into();
+            fs::write(&path, serde_json::to_string(&module).unwrap()).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.execution_started,
+                "{op} {profile:?}: {report:?}"
+            );
+            let Some(EvalValue::Float(actual)) = report.eval_result else {
+                panic!("{report:?}")
+            };
+            assert_eq!(actual.to_bits(), expected.to_bits(), "{op} {profile:?}");
+        }
+        for (value, expected) in [
+            (serde_json::json!(-0.0), -0.0f64),
+            (serde_json::json!(9007199254740993u64), 9007199254740992.0),
+        ] {
+            let mut module = original.clone();
+            module["decls"][1]["body"][0]["value"] =
+                serde_json::json!({"kind":"float","value":value});
+            fs::write(&path, serde_json::to_string(&module).unwrap()).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.execution_started,
+                "{profile:?}: {report:?}"
+            );
+            let Some(EvalValue::Float(actual)) = report.eval_result else {
+                panic!("{report:?}")
+            };
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        for op in ["xor", "^", "&", "|"] {
+            let mut module = original.clone();
+            module["decls"][0]["body"][0]["value"]["op"] = op.into();
+            fs::write(&path, serde_json::to_string(&module).unwrap()).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                !report.success && !report.execution_started,
+                "{op} {profile:?}: {report:?}"
+            );
+            assert_eq!(report.eval_result, None);
+            assert!(
+                report
+                    .reason_code
+                    .as_deref()
+                    .is_some_and(|code| code.starts_with("verify-")),
+                "{report:?}"
+            );
+        }
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn canonical_bitwise_operators_execute_parameterized_helpers() {
     if !super::jit::host_supports_jit() {
         return;
