@@ -1423,7 +1423,13 @@ fn unsigned_c_projection_executes_high_bits_and_orders_operands_once() {
 
 #[test]
 fn unsigned_global_initializers_require_folding_before_c_projection() {
-    for (op, expected) in [("udiv", i64::MAX), ("urem", 1), ("lshr", i64::MAX)] {
+    for (op, expected) in [
+        ("udiv", i64::MAX),
+        ("urem", 1),
+        ("lshr", i64::MAX),
+        ("<<", -4),
+        (">>", -1),
+    ] {
         let global = |name: &str, init: Expr| Decl::Global {
             name: name.into(),
             typ: Typ::Int,
@@ -1595,4 +1601,177 @@ fn private_print_cannot_be_sanitized_into_a_source_override() {
         error.contains("private print requires a hosted runtime"),
         "{error}"
     );
+}
+
+#[test]
+fn word_shift_projection_is_sanitizer_clean_and_sequences_operands() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let source = "var trace:Int=0; fn left()->Int{trace=trace*10+1;return -84;} fn right()->Int{trace=trace*10+2;return 65;} fn shift(value:Int,count:Int)->Int{return value<<count;} fn effects()->Int{return left()<<right();} fn skipped()->Int{if false&&((left()<<right())==0){return 7;}return trace;} fn main()->Int{return 42;}";
+    for op in ["<<", ">>", "lshr", "shl", "shr"] {
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        for decl in &mut module.decls {
+            if let Decl::Function { name, .. } = decl
+                && name == "main"
+            {
+                *name = "answer".into();
+            }
+        }
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            if let Expr::Binary { op: current, .. } = expr
+                && current == "<<"
+            {
+                *current = op.into();
+            }
+        });
+        let before = module.clone();
+        let emitted = emit_c_module(&module).unwrap();
+        assert_eq!(module, before);
+        let expected = |value: i64, count: i64| match op {
+            "<<" | "shl" => value.wrapping_shl(count as u32),
+            "lshr" => (value as u64).wrapping_shr(count as u32) as i64,
+            _ => value.wrapping_shr(count as u32),
+        };
+        let literal = |value: i64| {
+            if value == i64::MIN {
+                "INT64_MIN".to_owned()
+            } else {
+                format!("INT64_C({value})")
+            }
+        };
+        let mut checks = String::new();
+        for value in [0i64, 1, -84, i64::MIN, i64::MAX] {
+            for count in [0i64, 1, 63, 64, 65, -1] {
+                checks.push_str(&format!(
+                    "{{volatile int64_t value={};volatile int64_t count={};if(shift(value,count)!={})return 7;}}\n",
+                    literal(value), literal(count), literal(expected(value, count))));
+            }
+        }
+        checks.push_str(&format!(
+            "trace=0;if(effects()!={}||trace!=12)return 8;trace=0;if(skipped()!=0||trace!=0)return 9;return 42;",
+            literal(expected(-84, 65))));
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "inauguration-c-shifts-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("shifts.c");
+        let binary = directory.join("shifts");
+        std::fs::write(&path, format!("{emitted}\nint main(void){{{checks}}}\n")).unwrap();
+        let build = Command::new("clang")
+            .args([
+                "-std=gnu11",
+                "-O2",
+                "-fsanitize=undefined",
+                "-fno-sanitize-recover=undefined",
+            ])
+            .arg(&path)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{op}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let result = Command::new(&binary).output().unwrap();
+        assert_eq!(
+            result.status.code(),
+            Some(42),
+            "{op}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            result.stderr.is_empty(),
+            "{op}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
+fn out_of_range_global_word_shifts_refuse_before_c_emission() {
+    for op in ["<<", ">>", "lshr"] {
+        for count in [-1, 64] {
+            let module = UnifiedModule::new(vec![Decl::Global {
+                name: "result".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(Expr::Binary {
+                    op: op.into(),
+                    lhs: Box::new(Expr::IntLit(1)),
+                    rhs: Box::new(Expr::IntLit(count)),
+                })),
+                mutable: true,
+                constant_value: false,
+            }]);
+            let error = emit_c_module(&module).unwrap_err();
+            assert!(
+                error.contains("global initializer requires constant folding"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn word_shift_projection_requires_integer_operands() {
+    for op in ["<<", ">>", "lshr", "shl", "shr"] {
+        for invalid in [
+            Typ::Float,
+            Typ::Bool,
+            Typ::String,
+            Typ::Named("Unknown".into()),
+        ] {
+            for side in [0usize, 1] {
+                let mut module = crate::in_lang_parse::parse_in_source(
+                    "fn shift(left:Int,right:Int)->Int{return left<<right;}fn main()->Int{return shift(21,1);}").unwrap();
+                if let Decl::Function { params, body, .. } = &mut module.decls[0] {
+                    params[side].1 = invalid.clone();
+                    if let Stmt::Return(Some(Expr::Binary { op: current, .. })) = &mut body[0] {
+                        *current = op.into();
+                    }
+                }
+                let error = emit_c_module(&module).unwrap_err();
+                assert!(
+                    error.contains("word shift requires resolved Int operands"),
+                    "{op} {invalid:?} {side}: {error}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn word_shift_projection_preserves_resolved_integer_aliases() {
+    for alias in ["i32", "u32"] {
+        for op in ["<<", ">>", "lshr", "shl", "shr"] {
+            let mut module = crate::in_lang_parse::parse_in_source(
+                "fn shift(left:Int,right:Int)->Int{return left<<right;}fn main()->Int{return shift(21,1);}").unwrap();
+            if let Decl::Function { params, body, .. } = &mut module.decls[0] {
+                for (_, typ) in params {
+                    *typ = Typ::Named(alias.into());
+                }
+                if let Stmt::Return(Some(Expr::Binary { op: current, .. })) = &mut body[0] {
+                    *current = op.into();
+                }
+            }
+            if let Decl::Function { name, body, .. } = &mut module.decls[1] {
+                *name = "answer".into();
+                if let Stmt::Return(Some(Expr::Call { args, .. })) = &mut body[0] {
+                    if !matches!(op, "<<" | "shl") {
+                        args[0] = Expr::IntLit(84);
+                    }
+                }
+            }
+            assert_inferred_c_executes(&module, "if(answer()!=42)return 7;return 42;");
+        }
+    }
 }

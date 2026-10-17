@@ -392,3 +392,61 @@ fn daemon_eval_requires_proven_execution_and_never_replays_legacy_unknown() {
         "unknown execution state was replayed: {requests:?}"
     );
 }
+
+#[test]
+fn c_projection_promotes_c_family_shifts_without_coercing_in_operands() {
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "in-c-projection-fronts-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    for (index, (extension, source)) in [
+        ("c", "int shift(_Bool value,int count){return value<<count;}int main(){return shift(1,1)+40;}"),
+        ("c", "int shift(int value,_Bool count){return value<<count;}int main(){return shift(21,1);}"),
+        ("cpp", "int shift(bool value,int count){return value<<count;}int main(){return shift(true,1)+40;}"),
+        ("cpp", "int shift(int value,bool count){return value<<count;}int main(){return shift(21,true);}"),
+        ("cpp", "int shift(bool value,bool count){return value<<count;}int main(){return shift(true,true)+40;}"),
+        ("m", "int shift(_Bool value,int count){return value<<count;}int main(){return shift(1,1)+40;}"),
+        ("mm", "int shift(bool value,int count){return value<<count;}int main(){return shift(true,1)+40;}"),
+        ("rs", "fn shift(value:u32,count:u32)->u32{value<<count}fn main()->i64{shift(21,1) as i64}"),
+    ].into_iter().enumerate() {
+        let directory = root.join(index.to_string()); std::fs::create_dir(&directory).unwrap();
+        let input = directory.join(format!("input.{extension}"));
+        let output = directory.join("output.c"); let object = directory.join("output.o");
+        let wrapper = directory.join("wrapper.c"); let executable = directory.join("program");
+        std::fs::write(&input, source).unwrap();
+        let projected = Command::new(env!("CARGO_BIN_EXE_in")).args(["compile","--path"]).arg(&input).args(["--emit","c","--out"]).arg(&output).output().unwrap();
+        assert!(projected.status.success(), "{extension} {source}: {}", String::from_utf8_lossy(&projected.stderr));
+        let compiled = Command::new("clang").args(["-std=gnu11","-O2","-Dmain=inauguration_main","-c"]).arg(&output).arg("-o").arg(&object).output().unwrap();
+        assert!(compiled.status.success(), "{extension}: {}", String::from_utf8_lossy(&compiled.stderr));
+        std::fs::write(&wrapper, "#include <stdint.h>\nint64_t inauguration_main(void);int main(void){return inauguration_main()==42?42:7;}\n").unwrap();
+        let linked = Command::new("clang").arg(&object).arg(&wrapper).arg("-o").arg(&executable).output().unwrap();
+        assert!(linked.status.success(), "{}", String::from_utf8_lossy(&linked.stderr));
+        let executed = Command::new(&executable).output().unwrap();
+        assert_eq!(executed.status.code(), Some(42), "{extension}: {source}");
+        assert!(executed.stdout.is_empty() && executed.stderr.is_empty());
+    }
+    let invalid = root.join("invalid.in");
+    let output = root.join("invalid.c");
+    std::fs::write(&invalid,"fn shift(value:Bool,count:Int)->Int{return value<<count;}fn main()->Int{return shift(true,1);}").unwrap();
+    let rejected = Command::new(env!("CARGO_BIN_EXE_in"))
+        .args(["compile", "--path"])
+        .arg(&invalid)
+        .args(["--emit", "c", "--out"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success() && !output.exists());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("word shift requires resolved Int operands")
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

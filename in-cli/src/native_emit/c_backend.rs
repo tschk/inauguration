@@ -588,7 +588,39 @@ impl Ctx {
                     "add" | "+" => format!("({} + {})", l, r),
                     "sub" | "-" => format!("({} - {})", l, r),
                     "mul" | "*" => format!("({} * {})", l, r),
-                    "udiv" | "urem" | "lshr" => {
+                    "shl" | "<<" | "shr" | ">>" | "lshr" => {
+                        let checker = TypeChecker::new();
+                        if [lhs.as_ref(), rhs.as_ref()].into_iter().any(|operand| {
+                            checker
+                                .expr_type(operand, &self.facts, &self.types)
+                                .map(|typ| typ.canonical())
+                                != Some(Typ::Int)
+                        }) {
+                            self.fail(
+                                "c-backend: word shift requires resolved Int operands".into(),
+                            );
+                            return "0".into();
+                        }
+                        if self.global_initializer {
+                            self.fail("c-backend: unsigned operation in a global initializer requires constant folding".into());
+                            return "0".into();
+                        }
+                        let left = self.fresh("shift_left");
+                        let count = self.fresh("shift_count");
+                        let bits = self.fresh("shift_bits");
+                        let operation = match op.as_str() {
+                            "shl" | "<<" => format!("{left} << {count}"),
+                            "lshr" => format!("{left} >> {count}"),
+                            _ => format!(
+                                "({left} >> {count}) | (({left} >> 63) ? ~(UINT64_MAX >> {count}) : UINT64_C(0))"
+                            ),
+                        };
+                        // Sequence operands once, shift unsigned bits, then reconstruct the signed word in range.
+                        format!(
+                            "({{ uint64_t {left} = (uint64_t)({l}); uint64_t {count} = (uint64_t)({r}) & UINT64_C(63); uint64_t {bits} = {operation}; {bits} <= INT64_MAX ? (int64_t){bits} : -INT64_C(1) - (int64_t)(UINT64_MAX - {bits}); }})"
+                        )
+                    }
+                    "udiv" | "urem" => {
                         if self.global_initializer {
                             self.fail("c-backend: unsigned operation in a global initializer requires constant folding".into());
                             return "0".into();
@@ -606,21 +638,12 @@ impl Ctx {
                         // both operands in source order before unsigned math.
                         let left = self.fresh("unsigned_left");
                         let right = self.fresh("unsigned_right");
-                        let operator = match op.as_str() {
-                            "udiv" => "/",
-                            "urem" => "%",
-                            _ => ">>",
-                        };
-                        let right_value = if op == "lshr" {
-                            format!("({right} & 63)")
-                        } else {
-                            right.clone()
-                        };
+                        let operator = if op == "udiv" { "/" } else { "%" };
                         let guard = failure
                             .map(|failure| format!("if ({right} == 0) {{ {failure} }} "))
                             .unwrap_or_default();
                         format!(
-                            "({{ uint64_t {left} = (uint64_t)({l}); uint64_t {right} = (uint64_t)({r}); {guard}(int64_t)({left} {operator} {right_value}); }})"
+                            "({{ uint64_t {left} = (uint64_t)({l}); uint64_t {right} = (uint64_t)({r}); {guard}(int64_t)({left} {operator} {right}); }})"
                         )
                     }
                     "div" | "/" => format!("({} / {})", l, r),
@@ -628,8 +651,6 @@ impl Ctx {
                     "band" | "&" => format!("({} & {})", l, r),
                     "bor" | "|" => format!("({} | {})", l, r),
                     "xor" | "^" => format!("({} ^ {})", l, r),
-                    "shl" | "<<" => format!("({} << {})", l, r),
-                    "shr" | ">>" => format!("({} >> {})", l, r),
                     _ => format!("({} /*op:{}*/ {})", l, sanitize_comment(op), r),
                 }
             }

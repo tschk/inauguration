@@ -252,7 +252,7 @@ fn cmd_emit_source(
     use inauguration::parser_registry;
 
     let resolved = parser_registry::resolve_parser_id(source_path, parser);
-    let module = match parser_registry::parse_with_resolved(resolved, source_path) {
+    let mut module = match parser_registry::parse_with_resolved(resolved, source_path) {
         Ok(Some(module)) => module,
         Ok(None) => {
             return Err(InError::Message(
@@ -276,6 +276,16 @@ fn cmd_emit_source(
             }
         }
     };
+    if matches!(kind, EmitKindCli::C)
+        && let parser_registry::ResolvedBuildParser::CoreIr(
+            parser_id @ (parser_registry::ParserId::C
+            | parser_registry::ParserId::Cpp
+            | parser_registry::ParserId::ObjC
+            | parser_registry::ParserId::ObjCpp),
+        ) = resolved
+    {
+        module = inauguration::typecheck::normalize_module(parser_id, &module);
+    }
     let (label, text) = match kind {
         EmitKindCli::C => (
             "c",

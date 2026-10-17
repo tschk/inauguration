@@ -40,6 +40,11 @@ reporting are shared; successful MIR execution is identified in the report's
 human-readable reason. Compile-only Rust modules and native artifacts retain
 their existing routes. Textual analysis IR is separate from this execution path.
 
+The C projection preserves C-family integer promotions and requires resolved
+integer operands for word shifts. It uses unsigned shifts with masked counts
+and explicit sign extension for arithmetic right shifts. Each operand evaluates
+once in source order. Global shift initializers must fold before projection.
+
 The component `Compiler` API emits executables through the same owned native
 emitter used by the CLI. It reports parse errors and unsupported artifact kinds
 instead of fabricating a successful placeholder. Host macOS AArch64 emission
