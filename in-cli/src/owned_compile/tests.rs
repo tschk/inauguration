@@ -10298,6 +10298,23 @@ fn rust_constant_negation_errors_survive_entry_pruning() {
 #[test]
 fn rust_unused_alias_declarations_refuse_before_entry_pruning() {
     for source in [
+        "type Id<T>=T<u8>;fn main()->i64{let value:Id<i64>=42;value}",
+        "type Bad=u8<u16>;fn main()->i64{42}",
+        "type Bad=bool<u8>;fn main()->i64{42}",
+        "type A<#[cfg(feature=\"x\")] T=u8>=u8;type B=A<u8,u16>;fn main()->i64{42}",
+        "struct Row<#[cfg(feature=\"x\")] T>{#[cfg(feature=\"x\")] value:T}type B=Row<u8,u16>;fn main()->i64{42}",
+        "mod owner{pub type Id<T=super::Id>=T;}use owner::Id;fn main()->i64{42}",
+        "mod owner{pub type Id<T>=super::Id<T>;}use owner::Id;fn main()->i64{42}",
+        "type Id<T=Id>=T;fn main()->i64{42}",
+        "type A<T=B>=T;type B<U=A>=U;fn main()->i64{42}",
+        "type A<T>=A<T>;fn main()->i64{42}",
+        "type A<T>=B<T>;type B<U>=A<U>;fn main()->i64{42}",
+        "type A<T>=(T,A<T>);fn main()->i64{42}",
+        "type A<T>=A<(T,)>;fn main()->i64{42}",
+        "type Identity<T>=T;type Wrong=Identity<u8,u16>;fn main()->i64{42}",
+        "struct Row<T>{value:T}type Broken<T>=(T,Row);fn main()->i64{42}",
+        "fn value(){}type Broken<T>=(T,value);fn main()->i64{42}",
+        "type Bad<T,T>=(T,T);fn main()->i64{42}",
         "type A=B;type B=A;fn main()->i64{42}",
         "type Byte=u8;type Byte=u16;fn main()->i64{42}",
         "fn unused(){fn nested(){type A=A;}}fn main()->i64{42}",
@@ -10350,7 +10367,6 @@ fn rust_unused_alias_declarations_preserve_valid_and_deferred_scopes() {
         "type A=u8;fn unused(){type A=u16;mod child{type X=super::A;type Y=self::X;}}fn main()->i64{42}",
         "#[cfg(any())]mod disabled{type A=A;}fn main()->i64{42}",
         "#[cfg(feature=\"unknown\")]mod deferred{type A=A;}fn main()->i64{42}",
-        "type A<T>=A<T>;fn main()->i64{42}",
     ] {
         let path = temp_path("unused-alias-declaration-valid.rs");
         fs::write(&path, source).unwrap();
@@ -10374,6 +10390,104 @@ fn rust_unused_alias_declarations_preserve_valid_and_deferred_scopes() {
                         "{source}: {report:?}"
                     );
                     fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_generic_alias_applications_execute_with_source_type_semantics() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "type Id<T>=T<>;fn main()->i64{let value:Id<i64>=42;value}",
+        "type Id=u8<>;fn main()->i64{if Id::wrapping_add(255,43)==42{42}else{7}}",
+        "type Borrow<'a,T>=&'a T;fn unused(value:&u8){let local:Borrow<u8>=value;}fn main()->i64{42}",
+        "type Id<T=u8>=T;fn main()->i64{if Id::<u8>::wrapping_add(255,43)==42{42}else{7}}",
+        "type Id<T=u8>=T;type Concrete=Id;fn main()->i64{if Concrete::wrapping_add(255,43)==42{42}else{7}}",
+        "mod owner{pub type Id<T=super::Id<u8>>=T;}use owner::Id;fn main()->i64{let value:Id=255;if value.wrapping_add(43)==42{42}else{7}}",
+        "mod owner{pub type Identity<T>=T;}use owner::Identity;fn main()->i64{let value:Identity<Identity<u8>>=255;if value.wrapping_add(43)==42{42}else{7}}",
+        "type Pick<'a,a>=a;fn main()->i64{42}",
+        "type Identity<U>=U;type Alias<#[cfg(feature=\"x\")] T=Identity<u8,u16>>=u8;fn main()->i64{42}",
+        "type Id<T=Id<u8>>=T;fn main()->i64{let value:Id=255;if value.wrapping_add(43)==42{42}else{7}}",
+        "fn main()->i64{let pair:(u8,u8)=(255,43);if pair.0.wrapping_add(pair.1)==42{42}else{7}}",
+        "type Identity<T>=T;fn main()->i64{let value:Identity<bool>=true;if value{42}else{7}}",
+        "type Identity<T>=T;fn main()->i64{let value:Identity<f64>=20.5;if value+21.5==42.0{42}else{7}}",
+        "type Identity<T>=T;fn main()->i64{let value:Identity<Identity<u8>>=255;if value.wrapping_add(43)==42{42}else{7}}",
+        "type Identity<T>=T;fn main()->i64{let value:Identity<u8>=255;if value.wrapping_add(43)==42{42}else{7}}",
+        "type Byte<T=u8>=T;fn main()->i64{let value:Byte=255;if value.wrapping_add(43)==42{42}else{7}}",
+        "type Identity<T>=T;type Nested<U>=Identity<U>;fn main()->i64{let value:Nested<u8>=255;if value.wrapping_add(43)==42{42}else{7}}",
+        "type Pair<T>=(T,T);fn main()->i64{let pair:Pair<i64>=(20,22);pair.0+pair.1}",
+        "mod owner{pub type T=u16;pub type Identity<U>=U;}type T=u8;fn main()->i64{let value:owner::Identity<T>=255;if value.wrapping_add(43)==42{42}else{7}}",
+        "type T=u16;type Identity<U>=U;fn main()->i64{type T=u8;let value:Identity<T>=255;if value.wrapping_add(43)==42{42}else{7}}",
+        "type PairDefault<A=u8,B=A>=(A,B);fn main()->i64{let pair:PairDefault=(255,43);if pair.0.wrapping_add(pair.1)==42{42}else{7}}",
+        "mod owner{pub type T=u8;pub type Defaulted<U=T>=U;}type T=u16;fn main()->i64{let value:owner::Defaulted=255;if value.wrapping_add(43)==42{42}else{7}}",
+        "type Pair<T>=[T;2];fn main()->i64{let a:Pair<i64>=[20,22];let mut b=a;b[0]=0;a[0]+a[1]}",
+    ] {
+        let path = temp_path("generic-alias-application.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("generic-alias-application-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{source}: {report:?}");
+                assert!(report.degradations.is_empty(), "{source}: {report:?}");
+                assert!(report.external_invocations.is_empty());
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started, "{source}: {report:?}");
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(42)),
+                        "{source}: {report:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{source}: {report:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_generic_alias_applications_require_owned_source_facts() {
+    for source in [
+        "type Identity<'a,T>=T;fn main()->i64{let value:Identity<u8>=42;value as i64}",
+        "type Id<T=u8>=T;fn main()->i64{if Id::wrapping_add(255,43)==42{42}else{7}}",
+        "type Id<T=u8>=T;fn main()->i64{if Id::MAX==255{42}else{7}}",
+    ] {
+        let path = temp_path("generic-alias-value-owner.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                for entry in [None, Some("main")] {
+                    let out = temp_path("generic-alias-value-owner-out");
+                    let mut request =
+                        default_request(path.clone(), target, entry, Some(out.clone()));
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(!report.execution_started, "{source}: {report:?}");
+                    assert_eq!(report.eval_result, None, "{source}: {report:?}");
+                    assert_eq!(report.eval_exit_code, None);
+                    assert_eq!(report.artifact_path, None);
+                    assert_eq!(report.executable_path, None);
+                    assert_eq!(report.abi_path, None);
+                    assert!(report.external_invocations.is_empty());
+                    assert!(!out.exists());
+                    if target == CompileTarget::Native {
+                        assert!(!report.success, "{source}: {report:?}");
+                    }
                 }
             }
         }

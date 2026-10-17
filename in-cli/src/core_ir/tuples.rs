@@ -36,9 +36,10 @@ enum Shape {
 
 impl Shape {
     fn from_type(typ: &Typ) -> Self {
-        // Preserve transient reference proof until operator resolution; other
-        // leaves keep the existing canonical tuple storage shape.
-        if super::rust_references::has_reference_proof(typ) {
+        // Preserve source proofs until reference and integer operator resolution.
+        if super::rust_references::has_reference_proof(typ)
+            || matches!(typ, Typ::Named(name) if super::rust_integer_type_name(name).is_some())
+        {
             return Self::Core(typ.clone());
         }
         match typ {
@@ -103,6 +104,70 @@ pub(crate) fn fields(name: &str) -> Option<Vec<(String, Typ)>> {
             .map(|(i, typ)| (format!("_{i}"), typ.into_type()))
             .collect(),
     )
+}
+
+/// Project generated tuple identities while retaining preexisting schema conflicts.
+pub(crate) fn project_declarations(decls: &mut Vec<Decl>, mut project: impl FnMut(&mut [Decl])) {
+    let originals: Vec<_> = decls
+        .iter()
+        .map(|decl| match decl {
+            Decl::Struct {
+                name,
+                fields: actual,
+                type_params,
+            } => fields(name).map(|expected| {
+                let canonical = type_params.is_empty() && &expected == actual;
+                (
+                    name.clone(),
+                    canonical,
+                    Decl::Struct {
+                        name: name.clone(),
+                        fields: expected,
+                        type_params: vec![],
+                    },
+                )
+            }),
+            _ => None,
+        })
+        .collect();
+    let mut schemas: Vec<_> = originals
+        .iter()
+        .filter_map(|original| original.as_ref().map(|(_, _, schema)| schema.clone()))
+        .collect();
+    project(decls);
+    project(&mut schemas);
+    let mut schemas = schemas.into_iter();
+    for (decl, original) in decls.iter_mut().zip(&originals) {
+        if let Some((_, canonical, _)) = original
+            && let Some(Decl::Struct {
+                name: projected,
+                fields: projected_fields,
+                ..
+            }) = schemas.next()
+            && let Decl::Struct { name, fields, .. } = decl
+        {
+            // Derive identity from the original encoding, never malformed payload fields.
+            *name = projected;
+            if *canonical {
+                *fields = projected_fields;
+            }
+        }
+    }
+    let mut seen: std::collections::HashMap<Decl, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    let mut index = 0;
+    decls.retain(|decl| {
+        let original = &originals[index];
+        index += 1;
+        let Some((original, true, _)) = original else {
+            return true;
+        };
+        let origins = seen.entry(decl.clone()).or_default();
+        let first = origins.is_empty();
+        let repeated_original = !origins.insert(original.clone());
+        // Repeated original declarations remain errors even if their first occurrence merged.
+        first || repeated_original
+    });
 }
 
 pub(crate) fn register(module: &mut UnifiedModule) {
@@ -381,7 +446,7 @@ mod tests {
 mod reference_shape_tests {
     use super::*;
     #[test]
-    fn tuple_shapes_preserve_reference_proof_and_canonical_storage_leaves() {
+    fn tuple_shapes_preserve_reference_and_integer_proofs() {
         let reference = crate::core_ir::rust_references::value_type(
             crate::core_ir::rust_references::SHARED_VALUE,
             Typ::Named("Row".into()),
@@ -401,8 +466,7 @@ mod reference_shape_tests {
             .into_iter()
             .map(|(_, typ)| typ)
             .collect();
-        assert_eq!(recovered[..3], items[..3]);
-        assert_eq!(recovered[3], Typ::Int);
+        assert_eq!(recovered, items);
         let erased = crate::core_ir::rust_references::erase_type(Typ::Named(name));
         assert_eq!(
             erased,
@@ -410,7 +474,7 @@ mod reference_shape_tests {
                 Typ::Named("Row".into()),
                 Typ::Array(Box::new(Typ::Named("Row".into()))),
                 Typ::Vector(Box::new(Typ::Named("Row".into()))),
-                Typ::Int
+                Typ::Named("#rust-integer-i8".into())
             ])
         );
     }
@@ -432,5 +496,70 @@ mod declaration_tuple_tests {
         }]);
         register(&mut module);
         assert!(module.decls.iter().any(|decl| matches!(decl, Decl::Struct {name:actual, fields:actual_fields,..} if actual == name && actual_fields == &fields(name).unwrap())));
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    fn schema(typ: &Typ) -> Decl {
+        let Typ::Named(name) = typ else {
+            panic!("tuple")
+        };
+        Decl::Struct {
+            name: name.clone(),
+            fields: fields(name).unwrap(),
+            type_params: vec![],
+        }
+    }
+    fn erase_integers(decls: &mut Vec<Decl>) {
+        project_declarations(decls, |decls| {
+            crate::core_bindings::rewrite_named_types(decls, &|name| {
+                super::super::rust_integer_type_name(name).map(|_| Typ::Int)
+            });
+        });
+    }
+    #[test]
+    fn integer_proof_and_runtime_tuple_schemas_merge_after_projection() {
+        let proof = typ(&[
+            Typ::Named("#rust-integer-i64".into()),
+            Typ::Named("#rust-integer-i64".into()),
+        ]);
+        let runtime = typ(&[Typ::Int, Typ::Int]);
+        assert_ne!(proof, runtime);
+        let mut declarations = vec![schema(&proof), schema(&runtime)];
+        erase_integers(&mut declarations);
+        assert_eq!(declarations, vec![schema(&runtime)]);
+    }
+    #[test]
+    fn tuple_projection_retains_preexisting_duplicate_origins() {
+        let proof = typ(&[Typ::Named("#rust-integer-u8".into())]);
+        let runtime = typ(&[Typ::Int]);
+        let mut declarations = vec![schema(&runtime), schema(&proof), schema(&proof)];
+        erase_integers(&mut declarations);
+        assert_eq!(declarations, vec![schema(&runtime), schema(&runtime)]);
+    }
+    #[test]
+    fn tuple_projection_preserves_malformed_identity_and_generic_conflicts() {
+        let proof = typ(&[Typ::Named("#rust-integer-u8".into())]);
+        let runtime = typ(&[Typ::Int]);
+        let mut malformed = schema(&proof);
+        let Decl::Struct { fields, .. } = &mut malformed else {
+            panic!()
+        };
+        fields[0].1 = Typ::String;
+        let mut generic = schema(&proof);
+        let Decl::Struct { type_params, .. } = &mut generic else {
+            panic!()
+        };
+        type_params.push("T".into());
+        let mut declarations = vec![schema(&proof), malformed, generic];
+        erase_integers(&mut declarations);
+        assert_eq!(declarations.len(), 3);
+        let Decl::Struct { name, fields, .. } = &declarations[1] else {
+            panic!()
+        };
+        assert_eq!(Typ::Named(name.clone()), runtime);
+        assert_eq!(fields, &vec![("_0".into(), Typ::String)]);
     }
 }

@@ -6292,7 +6292,11 @@ mod impl_associated_type_tests {
         let reference = crate::core_ir::rust_references::decode(reference).unwrap();
         assert_eq!(reference.referent, Typ::Named("#rust-integer-i64".into()));
         assert_eq!(reference.runtime, Typ::Named("#rust-integer-i64".into()));
-        assert_eq!(fields[1].1, Typ::Vector(Box::new(Typ::Int)));
+        assert_eq!(
+            fields[1].1,
+            Typ::Vector(Box::new(Typ::Named("#rust-integer-i64".into())))
+        );
+        assert_eq!(fields[1].1.canonical(), Typ::Vector(Box::new(Typ::Int)));
     }
     #[test]
     fn unsupported_associated_contracts_refuse_instead_of_guessing_row_member() {

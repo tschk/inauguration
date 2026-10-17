@@ -1813,11 +1813,13 @@ pub(crate) fn normalize(
         }
     }
     crate::lower_core::validate_constant_arithmetic_with_semantics(&mut module.decls, semantics);
-    crate::core_bindings::rewrite_named_types(&mut module.decls, &|name| {
-        core_ir::rust_integer_type_name(name)
-            .and_then(|name| Kind::parse(name, semantics))
-            .filter(|kind| kind.supported(semantics))
-            .map(|_| Typ::Int)
+    core_ir::tuples::project_declarations(&mut module.decls, |decls| {
+        crate::core_bindings::rewrite_named_types(decls, &|name| {
+            core_ir::rust_integer_type_name(name)
+                .and_then(|name| Kind::parse(name, semantics))
+                .filter(|kind| kind.supported(semantics))
+                .map(|_| Typ::Int)
+        });
     });
 }
 

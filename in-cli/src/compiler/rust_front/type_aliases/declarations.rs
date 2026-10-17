@@ -270,7 +270,7 @@ impl Validator<'_> {
         let _scope = self.frame.enter();
         for alias in &scope.aliases {
             if let Err(failure @ Failure::Invalid(_)) =
-                source_type_owned(&syn::Path::from(alias.clone()))
+                validate_alias_declaration(&syn::Path::from(alias.clone()), &self.frame)
             {
                 self.failures.push(failure);
             }
@@ -392,6 +392,7 @@ mod tests {
     fn unused_alias_declarations_retain_definite_errors_in_all_parsed_bodies() {
         for source in [
             "type A=B;type B=A;fn main()->i64{42}",
+            "type A<T>=A<T>;",
             "type Byte=u8;type Byte=u16;",
             "fn unused(){type A=B;type B=A;}",
             "fn outer(){fn unused(){type A=B;type B=A;}}",
@@ -447,7 +448,6 @@ mod tests {
             "trait Row{#[cfg(feature=\"unknown\")]fn unused(){type A=A;}}",
             "struct Row{#[cfg(any())]field:[u8;{type A=A;1}]}",
             "enum Row{#[cfg(any())]Variant([u8;{type A=A;1}])}",
-            "type A<T>=A<T>;",
             "fn outer<T>(){type A=T;fn nested(){type A=T;}}",
             "type A=external::Missing;",
             "opaque!{type A=A;}",

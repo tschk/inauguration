@@ -156,54 +156,11 @@ pub(crate) fn qualify_receiver_identity(
 }
 
 pub(crate) fn erase_declarations(decls: &mut Vec<super::Decl>) {
-    // Distinct source proof tuples can share one old runtime storage shape.
-    // Remember only canonical generated schemas; malformed/user-generic tuple
-    // declarations must retain their conflicts for the verifier to reject.
-    let originals: Vec<_> = decls
-        .iter()
-        .map(|decl| match decl {
-            super::Decl::Struct {
-                name,
-                fields,
-                type_params,
-            } => super::tuples::fields(name)
-                .map(|expected| (name.clone(), type_params.is_empty() && &expected == fields)),
-            _ => None,
-        })
-        .collect();
-    crate::core_bindings::rewrite_named_types(decls, &|name| {
-        decode(name).map(|reference| erase_type(reference.runtime))
-    });
-    crate::core_opt::map_decl_exprs_mut(decls, &mut erase_value);
-    for (decl, original) in decls.iter_mut().zip(&originals) {
-        if let Some((original_name, canonical)) = original
-            && let super::Decl::Struct { name, fields, .. } = decl
-            && let Typ::Named(runtime_name) = erase_type(Typ::Named(original_name.clone()))
-        {
-            // All uses rewrite from the original encoded identity. A malformed
-            // schema must not acquire a different identity from its bad fields.
-            *name = runtime_name;
-            if *canonical && let Some(runtime_fields) = super::tuples::fields(name) {
-                // Restore the old canonical tuple storage under erased leaves.
-                *fields = runtime_fields;
-            }
-        }
-    }
-    let mut seen: std::collections::HashMap<super::Decl, std::collections::HashSet<String>> =
-        std::collections::HashMap::new();
-    let mut index = 0;
-    decls.retain(|decl| {
-        let original = &originals[index];
-        index += 1;
-        let Some((original, true)) = original else {
-            return true;
-        };
-        let origins = seen.entry(decl.clone()).or_default();
-        let first = origins.is_empty();
-        let repeated_original = !origins.insert(original.clone());
-        // Do not hide preexisting duplicate declarations, even when an earlier
-        // occurrence of that same original was merged into another shape.
-        first || repeated_original
+    super::tuples::project_declarations(decls, |decls| {
+        crate::core_bindings::rewrite_named_types(decls, &|name| {
+            decode(name).map(|reference| erase_type(reference.runtime))
+        });
+        crate::core_opt::map_decl_exprs_mut(decls, &mut erase_value);
     });
 }
 
@@ -510,15 +467,24 @@ mod tuple_erasure_tests {
         assert_eq!(declarations.len(), 2);
     }
     #[test]
-    fn erased_reference_integer_leaves_return_to_canonical_tuple_storage() {
+    fn erased_references_preserve_integer_proof_until_integer_normalization() {
         let integer = Typ::Named("#rust-integer-i32".into());
-        let proof =
-            super::super::tuples::typ(&[value_type(SHARED_VALUE, integer).unwrap(), Typ::Int]);
+        let proof = super::super::tuples::typ(&[
+            value_type(SHARED_VALUE, integer.clone()).unwrap(),
+            Typ::Int,
+        ]);
+        let integer_proof = super::super::tuples::typ(&[integer, Typ::Int]);
         let runtime = super::super::tuples::typ(&[Typ::Int, Typ::Int]);
         let mut declarations = vec![schema(&proof), schema(&runtime)];
         erase_declarations(&mut declarations);
-        assert_eq!(declarations, vec![schema(&runtime)]);
-        let module = UnifiedModule::new(declarations);
+        assert_eq!(declarations, vec![schema(&integer_proof), schema(&runtime)]);
+        let mut module = UnifiedModule::new(declarations);
+        crate::typecheck::rust_integers::normalize(
+            &crate::typecheck::TypeChecker::new(),
+            &mut module,
+            crate::integer_semantics::IntegerSemantics::Word64,
+        );
+        assert_eq!(module.decls, vec![schema(&runtime)]);
         let report = crate::core_ir_verifier::verify_module(
             &module,
             &crate::core_ir_verifier::VerifyOptions {

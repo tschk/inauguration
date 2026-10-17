@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 mod declarations;
+mod generic_aliases;
 pub(super) fn validate_declarations(
     file: &syn::File,
     catalog: Rc<Catalog>,
@@ -134,11 +135,36 @@ fn generic_presence(parameter: &syn::GenericParam) -> Presence {
     attrs_presence(attrs)
 }
 
+// Lifetimes may elide, and conditional parameters may be absent. Only active,
+// required type/const parameters establish a definite minimum arity.
+fn generic_arity(generics: &syn::Generics) -> (usize, usize) {
+    let mut minimum = 0;
+    let mut maximum = 0;
+    for parameter in &generics.params {
+        let presence = generic_presence(parameter);
+        if presence == Presence::Inactive {
+            continue;
+        }
+        maximum += 1;
+        if presence == Presence::Active
+            && match parameter {
+                syn::GenericParam::Type(parameter) => parameter.default.is_none(),
+                syn::GenericParam::Const(parameter) => parameter.default.is_none(),
+                syn::GenericParam::Lifetime(_) => false,
+            }
+        {
+            minimum += 1;
+        }
+    }
+    (minimum, maximum)
+}
+
 type Failure = ResolutionFailure;
 #[derive(Clone)]
 enum Binding {
     Visible(Box<Binding>, syn::Visibility),
-    Alias(syn::Type, bool),
+    Alias(Rc<(syn::Generics, syn::Type)>),
+    Parameter(Rc<Resolved>),
     Import(Vec<String>, bool),
     Module(Vec<String>),
     External,
@@ -153,6 +179,7 @@ enum Binding {
 #[derive(Clone, Default)]
 struct Scope {
     aliases: Vec<syn::Ident>,
+    parameters: bool,
     bindings: HashMap<String, Binding>,
     imports: HashMap<String, Vec<Binding>>,
     values: HashMap<String, Binding>,
@@ -195,10 +222,7 @@ impl Scope {
             let named = match item {
                 syn::Item::Type(item) => Some((
                     item.ident.to_string(),
-                    Binding::Alias(
-                        (*item.ty).clone(),
-                        !item.generics.params.is_empty() || item.generics.where_clause.is_some(),
-                    ),
+                    Binding::Alias(Rc::new((item.generics.clone(), (*item.ty).clone()))),
                 )),
                 syn::Item::Mod(item) => {
                     let binding = match (module, &item.content) {
@@ -480,35 +504,44 @@ impl Extent {
         }
     }
 }
+#[derive(Clone)]
 struct NominalApplication {
     generics: syn::Generics,
     arguments: usize,
     unsupported_arguments: bool,
 }
+#[derive(Clone)]
 enum NominalObligation {
     Application(NominalApplication),
     Failure(Failure),
 }
-fn structural_obligations(value: Resolved) -> Vec<NominalObligation> {
+fn structural_failure(value: Resolved) -> Option<Failure> {
     match value.visibility().0 {
-        Resolved::Nominal(obligations) => obligations,
-        Resolved::Type(_) => vec![],
-        Resolved::Value | Resolved::Constant(_) => vec![NominalObligation::Failure(
-            Failure::Invalid("structural source alias names a value instead of a type".into()),
-        )],
-        Resolved::Missing | Resolved::Module(_) => vec![NominalObligation::Failure(unsupported(
-            "structural source alias child type is unresolved",
-        ))],
-        Resolved::Visible(..) => vec![NominalObligation::Failure(unsupported(
-            "nested structural source visibility result",
-        ))],
+        Resolved::Nominal(obligations) => {
+            obligations.into_iter().fold(None, |failure, obligation| {
+                let result = match obligation {
+                    NominalObligation::Application(application) => {
+                        nominal_application(&application)
+                    }
+                    NominalObligation::Failure(failure) => Err(failure),
+                };
+                crate::core_ir::type_proofs::prefer_failure(failure, result.err())
+            })
+        }
+        Resolved::Type(_) => None,
+        Resolved::Value | Resolved::Constant(_) => Some(Failure::Invalid(
+            "source alias names a value instead of a type".into(),
+        )),
+        _ => Some(unsupported("source alias type is unresolved")),
     }
 }
+#[derive(Clone)]
 struct SourceConstant {
     syntax: Rc<(syn::Type, syn::Expr)>,
     declared: Frame,
     key: Key,
 }
+#[derive(Clone)]
 enum Resolved {
     Visible(Box<Resolved>, Extent),
     Type(Typ),
@@ -592,54 +625,11 @@ fn visibility_extent(visibility: &syn::Visibility, declared: &[String]) -> Resul
     Ok(Extent::Module(owner))
 }
 
-fn rhs_type(ty: &syn::Type, frame: &Frame, active: &mut HashSet<Key>) -> Result<Resolved, Failure> {
-    match ty {
-        syn::Type::Path(path) if path.qself.is_none() => {
-            // Only an owned alias RHS requires recursive cycle checks. Ordinary expression
-            // type arguments may contain inference placeholders such as Vec::<_>.
-            // Visit generic leaves for definite cycles, even though generic alias application is deferred.
-            for part in &path.path.segments {
-                if let syn::PathArguments::AngleBracketed(arguments) = &part.arguments {
-                    for argument in &arguments.args {
-                        if let syn::GenericArgument::Type(ty) = argument {
-                            rhs_type(ty, frame, active)?;
-                        }
-                    }
-                }
-            }
-            path_type(&path.path, frame, active, true)
-        }
-        syn::Type::Reference(value) => Ok(Resolved::Nominal(structural_obligations(rhs_type(
-            &value.elem,
-            frame,
-            active,
-        )?))),
-        syn::Type::Array(value) => Ok(Resolved::Nominal(structural_obligations(rhs_type(
-            &value.elem,
-            frame,
-            active,
-        )?))),
-        syn::Type::Slice(value) => Ok(Resolved::Nominal(structural_obligations(rhs_type(
-            &value.elem,
-            frame,
-            active,
-        )?))),
-        syn::Type::Tuple(value) => {
-            let mut applications = Vec::new();
-            for item in &value.elems {
-                applications.extend(structural_obligations(rhs_type(item, frame, active)?));
-            }
-            Ok(Resolved::Nominal(applications))
-        }
-        syn::Type::Paren(value) => rhs_type(&value.elem, frame, active),
-        syn::Type::Group(value) => rhs_type(&value.elem, frame, active),
-        _ => Err(unsupported(
-            "alias target requires unsupported type resolution",
-        )),
-    }
-}
 #[derive(Clone, Copy)]
-struct LookupContext {
+struct LookupContext<'a> {
+    arguments: Option<(&'a syn::PathArguments, &'a Frame)>,
+    caller_active: Option<&'a HashSet<Key>>,
+    declaration: bool,
     alias_target: bool,
     source_qualified: bool,
     ordinary_value_owner: bool,
@@ -647,7 +637,7 @@ struct LookupContext {
     nominal_arguments: usize,
     unsupported_nominal_arguments: bool,
 }
-impl LookupContext {
+impl LookupContext<'_> {
     fn qualified(self) -> Self {
         Self {
             source_qualified: true,
@@ -661,6 +651,27 @@ fn path_type(
     active: &mut HashSet<Key>,
     alias_target: bool,
 ) -> Result<Resolved, Failure> {
+    path_type_with_mode(path, frame, active, alias_target, false)
+}
+fn path_type_with_mode(
+    path: &syn::Path,
+    frame: &Frame,
+    active: &mut HashSet<Key>,
+    alias_target: bool,
+    declaration: bool,
+) -> Result<Resolved, Failure> {
+    let _query = generic_aliases::query()?;
+    let caller_active = active.clone();
+    if path
+        .segments
+        .iter()
+        .take(path.segments.len().saturating_sub(1))
+        .any(|segment| has_generic_arguments(&segment.arguments))
+    {
+        return Err(unsupported(
+            "source namespace prefix arguments require associated type resolution",
+        ));
+    }
     let parts: Vec<_> = path
         .segments
         .iter()
@@ -669,7 +680,7 @@ fn path_type(
     let generic = path
         .segments
         .iter()
-        .any(|part| !matches!(part.arguments, syn::PathArguments::None));
+        .any(|part| has_generic_arguments(&part.arguments));
     resolve_parts(
         &parts,
         path.leading_colon.is_some(),
@@ -678,6 +689,9 @@ fn path_type(
         &frame.module,
         active,
         LookupContext {
+            arguments: path.segments.last().map(|part| (&part.arguments, frame)),
+            caller_active: Some(&caller_active),
+            declaration,
             alias_target,
             source_qualified: false,
             ordinary_value_owner: false,
@@ -745,6 +759,9 @@ fn scope_binding(
             &declared.module,
             active,
             LookupContext {
+                arguments: None,
+                caller_active: None,
+                declaration: true,
                 alias_target: true,
                 source_qualified: false,
                 ordinary_value_owner: false,
@@ -795,6 +812,7 @@ fn resolve_parts(
     active: &mut HashSet<Key>,
     context: LookupContext,
 ) -> Result<Resolved, Failure> {
+    let _query = generic_aliases::query()?;
     let Some(first) = parts.first() else {
         return Ok(Resolved::Missing);
     };
@@ -941,7 +959,7 @@ fn resolve_parts(
         ) || (parts.len() == 1
             && matches!(&binding, Binding::Import(..) | Binding::Module(..)));
         let key = (frame.module.clone(), depth, first.clone());
-        let tracked = matches!(&binding, Binding::Alias(..) | Binding::Import(..));
+        let tracked = matches!(&binding, Binding::Import(..));
         if tracked && !active.insert(key.clone()) {
             return Err(Failure::Invalid(format!(
                 "cyclic type alias `{}`",
@@ -969,6 +987,9 @@ fn resolve_parts(
             Binding::Generic if parts.len() == 1 && !generic => {
                 Ok(Resolved::Type(Typ::Generic(first.clone())))
             }
+            Binding::Generic if parts.len() == 1 => Err(Failure::Invalid(
+                "type parameter requires zero generic arguments".into(),
+            )),
             Binding::Generic => Err(unsupported("generic type owner requires monomorphization")),
             Binding::Nominal(generics) if parts.len() == 1 => {
                 Ok(Resolved::Nominal(vec![NominalObligation::Application(
@@ -1016,9 +1037,12 @@ fn resolve_parts(
                     &declared.module,
                     active,
                     LookupContext {
+                        arguments: context.arguments,
+                        caller_active: context.caller_active,
+                        declaration: context.declaration,
                         alias_target: true,
                         source_qualified: false,
-                        ordinary_value_owner: false,
+                        ordinary_value_owner: context.ordinary_value_owner && parts.len() == 1,
                         constant_value: context.constant_value && parts.len() == 1,
                         nominal_arguments: context.nominal_arguments,
                         unsupported_nominal_arguments: context.unsupported_nominal_arguments,
@@ -1068,28 +1092,29 @@ fn resolve_parts(
                     }
                 }
             }
-            Binding::Alias(ty, parameters) => {
-                if generic || parameters || parts.len() != 1 {
-                    Err(unsupported(format!(
-                        "generic or projected type alias `{first}`"
-                    )))
+            Binding::Parameter(value) => {
+                if parts.len() == 1 && generic {
+                    Err(Failure::Invalid(
+                        "type parameter requires zero generic arguments".into(),
+                    ))
+                } else if parts.len() == 1 {
+                    Ok(value.as_ref().clone())
                 } else {
-                    match rhs_type(&ty, &declared, active)?.visibility().0 {
-                        Resolved::Value | Resolved::Constant(_) => Err(Failure::Invalid(format!(
-                            "source alias `{first}` names a value instead of a type"
-                        ))),
-                        Resolved::Missing => Err(unsupported(format!(
-                            "unresolved type alias target `{first}`{}",
-                            if module.glob || declared.locals.iter().any(|scope| scope.glob) {
-                                " under glob imports"
-                            } else {
-                                ""
-                            }
-                        ))),
-                        result => Ok(result),
-                    }
+                    Ok(generic_aliases::deferred(
+                        "generic associated projection is unresolved",
+                    ))
                 }
             }
+            Binding::Alias(syntax) => generic_aliases::expand(
+                &syntax,
+                first,
+                &key,
+                &declared,
+                access,
+                active,
+                context,
+                parts.len() == 1,
+            ),
         };
         if tracked {
             active.remove(&key);
@@ -1119,13 +1144,37 @@ fn resolve_parts(
     }
     Ok(result)
 }
-fn primitive(parts: &[String], generic: bool) -> Result<Resolved, Failure> {
-    if generic {
-        return Ok(Resolved::Missing);
+fn has_generic_arguments(arguments: &syn::PathArguments) -> bool {
+    match arguments {
+        syn::PathArguments::None => false,
+        syn::PathArguments::AngleBracketed(arguments) => !arguments.args.is_empty(),
+        syn::PathArguments::Parenthesized(_) => true,
     }
+}
+fn primitive(parts: &[String], generic: bool) -> Result<Resolved, Failure> {
+    let builtin = match parts {
+        [name] => Some(name.as_str()),
+        [root, primitive, name]
+            if matches!(root.as_str(), "std" | "core") && primitive == "primitive" =>
+        {
+            Some(name.as_str())
+        }
+        _ => None,
+    };
     let path = syn::parse_str::<syn::Path>(&parts.join("::"))
         .map_err(|_| unsupported("unresolved type path"))?;
-    match rust_integer_path(&path) {
+    let integer = rust_integer_path(&path);
+    if generic && (integer.is_some() || matches!(builtin, Some("bool" | "f32" | "f64"))) {
+        return Err(Failure::Invalid(
+            "primitive type requires zero generic arguments".into(),
+        ));
+    }
+    match builtin {
+        Some("bool") => return Ok(Resolved::Type(Typ::Bool)),
+        Some("f32" | "f64") => return Ok(Resolved::Type(Typ::Float)),
+        _ => {}
+    }
+    match integer {
         Some("i128" | "u128") => Err(unsupported(
             "primitive alias exceeds supported native integer width",
         )),
@@ -1133,17 +1182,28 @@ fn primitive(parts: &[String], generic: bool) -> Result<Resolved, Failure> {
         None => Ok(Resolved::Missing),
     }
 }
+
 pub(super) fn resolve_in(frame: &Frame, path: &syn::Path) -> Result<Option<Typ>, Failure> {
     match path_type(path, frame, &mut HashSet::new(), false)?
         .visibility()
         .0
     {
         Resolved::Type(typ) => Ok(Some(typ)),
-        Resolved::Nominal(_)
-        | Resolved::Value
-        | Resolved::Constant(_)
-        | Resolved::Missing
-        | Resolved::Module(_) => Ok(None),
+        Resolved::Nominal(obligations) => {
+            let failure = obligations
+                .into_iter()
+                .filter_map(|obligation| match obligation {
+                    NominalObligation::Failure(failure) => Some(failure),
+                    _ => None,
+                })
+                .fold(None, |failure, next| {
+                    crate::core_ir::type_proofs::prefer_failure(failure, Some(next))
+                });
+            failure.map_or(Ok(None), Err)
+        }
+        Resolved::Value | Resolved::Constant(_) | Resolved::Missing | Resolved::Module(_) => {
+            Ok(None)
+        }
         Resolved::Visible(..) => Err(unsupported("nested source visibility result")),
     }
 }
@@ -1175,7 +1235,8 @@ pub(super) fn resolve_value_owner(path: &syn::Path) -> Result<Option<Typ>, Failu
     let generic = path
         .segments
         .iter()
-        .any(|part| !matches!(part.arguments, syn::PathArguments::None));
+        .any(|part| has_generic_arguments(&part.arguments));
+    let caller_active = HashSet::new();
     let result = resolve_parts(
         &parts,
         path.leading_colon.is_some(),
@@ -1184,6 +1245,12 @@ pub(super) fn resolve_value_owner(path: &syn::Path) -> Result<Option<Typ>, Failu
         &frame.module,
         &mut HashSet::new(),
         LookupContext {
+            arguments: path
+                .segments
+                .last()
+                .map(|segment| (&segment.arguments, &frame)),
+            caller_active: Some(&caller_active),
+            declaration: false,
             alias_target: false,
             source_qualified: false,
             ordinary_value_owner: true,
@@ -1194,6 +1261,18 @@ pub(super) fn resolve_value_owner(path: &syn::Path) -> Result<Option<Typ>, Failu
     )?;
     match result.visibility().0 {
         Resolved::Type(typ) => Ok(Some(typ)),
+        Resolved::Nominal(obligations) => {
+            let failure = obligations
+                .into_iter()
+                .filter_map(|obligation| match obligation {
+                    NominalObligation::Failure(failure) => Some(failure),
+                    _ => None,
+                })
+                .fold(None, |failure, next| {
+                    crate::core_ir::type_proofs::prefer_failure(failure, Some(next))
+                });
+            failure.map_or(Ok(None), Err)
+        }
         _ => Ok(None),
     }
 }
@@ -1312,7 +1391,7 @@ pub(super) fn usize_length(
                     .path
                     .segments
                     .iter()
-                    .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+                    .any(|segment| has_generic_arguments(&segment.arguments))
             {
                 return Ok(None);
             }
@@ -1339,6 +1418,9 @@ pub(super) fn usize_length(
                 &frame.module,
                 &mut HashSet::new(),
                 LookupContext {
+                    arguments: None,
+                    caller_active: None,
+                    declaration: false,
                     alias_target: false,
                     source_qualified: false,
                     ordinary_value_owner: false,
@@ -1525,6 +1607,50 @@ pub(super) fn usize_length(
     }
 }
 
+fn nominal_application(application: &NominalApplication) -> Result<(), Failure> {
+    let generics = &application.generics;
+    let parameters: Vec<_> = generics
+        .params
+        .iter()
+        .filter(|parameter| generic_presence(parameter) != Presence::Inactive)
+        .collect();
+    let (minimum, maximum) = generic_arity(generics);
+    if application.arguments < minimum || application.arguments > maximum {
+        return Err(Failure::Invalid(format!(
+            "nominal type requires {minimum}..={maximum} type arguments, found {}",
+            application.arguments
+        )));
+    }
+    if parameters
+        .iter()
+        .any(|parameter| generic_presence(parameter) == Presence::Conditional)
+    {
+        return Err(unsupported(
+            "nominal generic parameters depend on unresolved cfg predicates",
+        ));
+    }
+    if application.unsupported_arguments
+        || parameters
+            .iter()
+            .any(|parameter| !matches!(parameter, syn::GenericParam::Type(_)))
+    {
+        return Err(unsupported(
+            "nominal lifetime/const arguments require source type specialization",
+        ));
+    }
+    if maximum != 0 || generics.where_clause.is_some() {
+        return Err(unsupported(
+            "generic nominal arguments require source type specialization",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_alias_declaration(path: &syn::Path, frame: &Frame) -> Result<(), Failure> {
+    let value = path_type_with_mode(path, frame, &mut HashSet::new(), false, true)?;
+    structural_failure(value).map_or(Ok(()), Err)
+}
+
 /// Whether an explicit source type argument has an owned type declaration.
 /// Presence, visibility and recursive alias failures remain authoritative.
 pub(super) fn source_type_owned(path: &syn::Path) -> Result<bool, Failure> {
@@ -1544,45 +1670,7 @@ pub(super) fn source_type_owned(path: &syn::Path) -> Result<bool, Failure> {
                         NominalObligation::Application(application) => application,
                         NominalObligation::Failure(failure) => return Err(failure),
                     };
-                    let generics = &application.generics;
-                    let parameters: Vec<_> = generics
-                        .params
-                        .iter()
-                        .filter(|parameter| generic_presence(parameter) != Presence::Inactive)
-                        .collect();
-                    if parameters
-                        .iter()
-                        .any(|parameter| generic_presence(parameter) == Presence::Conditional)
-                    {
-                        return Err(unsupported(
-                            "nominal generic parameters depend on unresolved cfg predicates",
-                        ));
-                    }
-                    if application.unsupported_arguments
-                        || parameters
-                            .iter()
-                            .any(|parameter| !matches!(parameter, syn::GenericParam::Type(_)))
-                    {
-                        return Err(unsupported(
-                            "nominal lifetime/const arguments require source type specialization",
-                        ));
-                    }
-                    let maximum = parameters.len();
-                    let minimum = parameters.iter().filter(|parameter|
-                        matches!(parameter, syn::GenericParam::Type(parameter) if parameter.default.is_none())
-                    ).count();
-                    if application.arguments < minimum || application.arguments > maximum {
-                        return Err(Failure::Invalid(format!(
-                            "nominal type requires {minimum}..={maximum} type arguments, found {}",
-                            application.arguments
-                        )));
-                    }
-                    if maximum != 0 || generics.where_clause.is_some() {
-                        return Err(unsupported(
-                            "generic nominal arguments require source type specialization",
-                        ));
-                    }
-                    Ok(())
+                    nominal_application(&application)
                 })();
                 failure = crate::core_ir::type_proofs::prefer_failure(failure, result.err());
             }
@@ -1622,7 +1710,10 @@ mod tests {
                     .is_invalid(),
                 "{name}"
             );
-            assert_eq!(resolve(&syn::parse_str(name).unwrap()).unwrap(), None);
+            assert!(matches!(
+                resolve(&syn::parse_str(name).unwrap()),
+                Err(Failure::Unsupported(_))
+            ));
         }
         for name in ["Value", "Mixed"] {
             assert!(
@@ -1631,7 +1722,10 @@ mod tests {
                     .is_invalid(),
                 "{name}"
             );
-            assert_eq!(resolve(&syn::parse_str(name).unwrap()).unwrap(), None);
+            assert!(matches!(
+                resolve(&syn::parse_str(name).unwrap()),
+                Err(Failure::Invalid(_))
+            ));
         }
         assert!(source_type_owned(&syn::parse_str("Valid").unwrap()).unwrap());
     }
@@ -2049,10 +2143,7 @@ mod tests {
             "use artifact::Byte;type Generic<T>=T;mod nominal{pub struct u64{}}type Decoy=nominal::u64;",
         );
         assert!(matches!(query(&root, "Byte"), Err(Failure::Unsupported(_))));
-        assert!(matches!(
-            query(&root, "Generic<u8>"),
-            Err(Failure::Unsupported(_))
-        ));
+        integer(&root, "Generic<u8>", "u8");
         assert_eq!(query(&root, "Decoy").unwrap(), None);
         assert!(matches!(query(&root, "::u8"), Err(Failure::Unsupported(_))));
         integer(&root, "::core::primitive::u8", "u8");
