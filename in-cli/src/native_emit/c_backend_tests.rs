@@ -1563,30 +1563,25 @@ fn checked_unsigned_c_failure_exits_current_function_after_ordered_operands() {
 #[test]
 fn checked_unsigned_c_operations_refuse_unsupported_failure_return_abis() {
     for op in ["udiv", "urem"] {
-        for (ret, value) in [
-            (Typ::Float, Expr::FloatLit(crate::core_ir::FloatVal(1.0))),
-            (Typ::String, Expr::StringLit("text".into())),
-        ] {
-            let module = UnifiedModule::new(vec![Decl::Function {
-                name: "unsupported".into(),
-                params: vec![],
-                ret,
-                type_params: vec![],
-                body: vec![
-                    Stmt::Expr(Expr::Binary {
-                        op: op.into(),
-                        lhs: Box::new(Expr::IntLit(42)),
-                        rhs: Box::new(Expr::IntLit(0)),
-                    }),
-                    Stmt::Return(Some(value)),
-                ],
-            }]);
-            let error = emit_c_module(&module).expect_err("unsupported failure ABI");
-            assert!(
-                error.contains("checked unsigned division requires"),
-                "{op}: {error}"
-            );
-        }
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "unsupported".into(),
+            params: vec![],
+            ret: Typ::String,
+            type_params: vec![],
+            body: vec![
+                Stmt::Expr(Expr::Binary {
+                    op: op.into(),
+                    lhs: Box::new(Expr::IntLit(42)),
+                    rhs: Box::new(Expr::IntLit(0)),
+                }),
+                Stmt::Return(Some(Expr::StringLit("text".into()))),
+            ],
+        }]);
+        let error = emit_c_module(&module).expect_err("unsupported failure ABI");
+        assert!(
+            error.contains("checked unsigned division requires"),
+            "{op}: {error}"
+        );
     }
 }
 
@@ -2043,4 +2038,167 @@ fn arithmetic_primitive_aliases_preserve_float_results_and_checked_types() {
         }
     }
     assert_inferred_c_executes(&module, "if(calculate(1.5,1)!=3.5)return 7;return 42;");
+}
+
+#[test]
+fn signed_division_projection_matches_native_failure_and_overflow_without_ubsan() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let source = "var trace:Int=0;var after:Int=0;fn left()->Int{trace=trace*10+1;return 84;}fn right()->Int{trace=trace*10+2;return 0;}fn calc(left:Int,right:Int)->Int{let q:Int=left/right;after=1;return q;}fn boolean(left:Int,right:Int)->Bool{let q:Int=left/right;after=1;return q==99;}fn nothing(left:Int,right:Int)->Void{let q:Int=left/right;after=q+10;return;}fn floating(left:Int,right:Int)->Float{let q:Int=left/right;after=1;if q==42{return 1.5;}return 2.5;}fn nested(left:Int,right:Int)->Int{return (left/right)/right;}fn effects()->Int{return left()/right()+100;}fn skipped()->Int{if false&&((left()/right())==0){return 7;}return trace;}fn float_operands(left:Float,right:Float)->Float{return left/right;}fn main()->Int{return 42;}";
+    for op in ["/", "div", "%", "mod", "udiv", "urem"] {
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        for decl in &mut module.decls {
+            if let Decl::Function { name, .. } = decl {
+                if name == "main" {
+                    *name = "answer".into();
+                }
+                if name != "float_operands" {
+                    crate::core_opt::map_decl_exprs_mut(std::slice::from_mut(decl), &mut |expr| {
+                        if let Expr::Binary { op: current, .. } = expr
+                            && current == "/"
+                        {
+                            *current = op.into();
+                        }
+                    });
+                }
+            }
+        }
+        let emitted = emit_c_module(&module).unwrap();
+        let rem = matches!(op, "%" | "mod" | "urem");
+        let unsigned = matches!(op, "udiv" | "urem");
+        let expected = |left: i64, right: i64| {
+            if unsigned {
+                if rem {
+                    ((left as u64) % (right as u64)) as i64
+                } else {
+                    ((left as u64) / (right as u64)) as i64
+                }
+            } else if left == i64::MIN && right == -1 {
+                if rem { 0 } else { i64::MIN }
+            } else if rem {
+                left % right
+            } else {
+                left / right
+            }
+        };
+        let literal = |value: i64| {
+            if value == i64::MIN {
+                "INT64_MIN".to_owned()
+            } else {
+                format!("INT64_C({value})")
+            }
+        };
+        let mut checks = String::new();
+        for left in [i64::MIN, i64::MAX, -84, -1, 0, 84] {
+            for right in [-1, 1, 2, i64::MIN, i64::MAX] {
+                let result = expected(left, right);
+                checks.push_str(&format!("{{volatile int64_t l={};volatile int64_t r={};after=0;if(calc(l,r)!={}||after!=1)return 2;after=0;if(boolean(l,r)!={}||after!=1)return 3;after=0;nothing(l,r);if(after!={})return 4;after=0;if(floating(l,r)!={}||after!=1)return 5;}}\n", literal(left), literal(right), literal(result), if result==99 {1}else{0}, literal(result.wrapping_add(10)), if result==42 {"1.5"}else{"2.5"}));
+            }
+        }
+        // Zero exits the containing function before subsequent statements; Float
+        // carries native integer-register failure bits 1, not numerical 1.0.
+        checks.push_str("volatile int64_t zero=0;after=0;if(calc(84,zero)!=1||after!=0)return 6;if(!boolean(84,zero)||after!=0)return 7;nothing(84,zero);if(after!=0)return 8;double f=floating(84,zero);uint64_t bits;memcpy(&bits,&f,sizeof(bits));if(bits!=UINT64_C(1)||after!=0)return 9;trace=0;if(effects()!=1||trace!=12)return 10;trace=0;if(skipped()!=0||trace!=0)return 11;if(float_operands(3.0,2.0)!=1.5)return 12;");
+        // Both layers use the alias under test; a nested unknown result must not
+        // silently fall through to signed C division at the outer layer.
+        let inner = expected(i64::MIN, -1);
+        checks.push_str(&format!("volatile int64_t minimum=INT64_MIN;volatile int64_t minus_one=-1;if(nested(minimum,minus_one)!={})return 13;return 42;",literal(expected(inner,-1))));
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "inauguration-c-signed-div-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("division.c");
+        let binary = directory.join("division");
+        std::fs::write(
+            &path,
+            format!("#include <string.h>\n{emitted}\nint main(void){{{checks}}}\n"),
+        )
+        .unwrap();
+        let build = Command::new("clang")
+            .args([
+                "-std=gnu11",
+                "-O2",
+                "-fsanitize=undefined",
+                "-fno-sanitize-recover=undefined",
+            ])
+            .arg(&path)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{op}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let result = Command::new(&binary).output().unwrap();
+        assert_eq!(
+            result.status.code(),
+            Some(42),
+            "{op}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            result.stderr.is_empty(),
+            "{op}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
+fn signed_division_globals_fold_or_explicitly_refuse_and_string_failure_abi_refuses() {
+    for op in ["/", "div", "%", "mod"] {
+        let global = |left, right| {
+            UnifiedModule::new(vec![Decl::Global {
+                name: "result".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(Expr::Binary {
+                    op: op.into(),
+                    lhs: Box::new(Expr::IntLit(left)),
+                    rhs: Box::new(Expr::IntLit(right)),
+                })),
+                mutable: true,
+                constant_value: false,
+            }])
+        };
+        let expected = if matches!(op, "%" | "mod") { 0 } else { 42 };
+        assert_inferred_c_executes(
+            &global(84, 2),
+            &format!("if(result!={expected})return 7;return 42;"),
+        );
+        for (left, right) in [(84, 0), (i64::MIN, -1)] {
+            let error = emit_c_module(&global(left, right)).unwrap_err();
+            assert!(
+                error.contains("signed division in a global initializer requires constant folding"),
+                "{op}: {error}"
+            );
+        }
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "unsupported".into(),
+            params: vec![],
+            ret: Typ::String,
+            type_params: vec![],
+            body: vec![
+                Stmt::Expr(Expr::Binary {
+                    op: op.into(),
+                    lhs: Box::new(Expr::IntLit(42)),
+                    rhs: Box::new(Expr::IntLit(0)),
+                }),
+                Stmt::Return(Some(Expr::StringLit("text".into()))),
+            ],
+        }]);
+        let error = emit_c_module(&module).unwrap_err();
+        assert!(
+            error.contains("checked signed division requires"),
+            "{op}: {error}"
+        );
+    }
 }

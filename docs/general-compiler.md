@@ -51,6 +51,12 @@ signed result without overflow. Operands evaluate once in source order; Float
 arithmetic retains its floating-point representation. Global integer arithmetic
 initializers must fold before projection.
 
+Integer division and remainder in C projection guard zero before evaluating the
+C operator and handle the minimum signed word divided by minus one explicitly.
+Zero exits the containing function using the owned native failure value for
+Int, Bool, Void and Float returns; other return ABIs refuse projection. Float
+operand division retains ordinary floating-point behavior.
+
 Objective-C free C functions use the existing C-family numeric normalization
 before native verification. This covers integer promotions without adding
 Objective-C message dispatch, a runtime, or full frontend typechecking.

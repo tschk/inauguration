@@ -2064,6 +2064,8 @@ impl TypeChecker {
                     "add" => "+",
                     "sub" => "-",
                     "mul" => "*",
+                    "div" => "/",
+                    "mod" => "%",
                     other => other,
                 };
                 self.check_expr(fn_name, lhs, facts, env, errors);
@@ -2569,6 +2571,8 @@ impl TypeChecker {
                     "add" => "+",
                     "sub" => "-",
                     "mul" => "*",
+                    "div" => "/",
+                    "mod" => "%",
                     other => other,
                 };
                 let left = self.expr_type(lhs, facts, env);

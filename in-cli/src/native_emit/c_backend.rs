@@ -383,6 +383,7 @@ fn word_failure_return(ret: &Typ) -> Option<&'static str> {
     match ret.canonical() {
         Typ::Int | Typ::Bool => Some("return 1;"),
         Typ::Void => Some("return;"),
+        Typ::Float => Some("return 0x0.0000000000001p-1022;"),
         _ => None,
     }
 }
@@ -580,6 +581,34 @@ impl Ctx {
                         return self.string_equality(&l, &r, matches!(op.as_str(), "neq" | "!="));
                     }
                 }
+                if matches!(op.as_str(), "/" | "div" | "%" | "mod") {
+                    let checker = TypeChecker::new();
+                    let integer = |value: &Expr| {
+                        checker
+                            .checked_expr_type(value, &self.facts, &self.types)
+                            .is_some_and(|typ| typ.canonical() == Typ::Int)
+                    };
+                    if integer(lhs) && integer(rhs) {
+                        if self.global_initializer {
+                            self.fail("c-backend: signed division in a global initializer requires constant folding".into());
+                            return "0".into();
+                        }
+                        let Some(failure) = self.word_failure_return else {
+                            self.fail("c-backend: checked signed division requires an Int, Bool, Void, or Float function return".into());
+                            return "0".into();
+                        };
+                        let left = self.fresh("signed_left");
+                        let right = self.fresh("signed_right");
+                        let (operator, overflow) = if matches!(op.as_str(), "%" | "mod") {
+                            ("%", "INT64_C(0)")
+                        } else {
+                            ("/", "INT64_MIN")
+                        };
+                        return format!(
+                            "({{ int64_t {left} = (int64_t)({l}); int64_t {right} = (int64_t)({r}); if ({right} == 0) {{ {failure} }} ({left} == INT64_MIN && {right} == -INT64_C(1)) ? {overflow} : ({left} {operator} {right}); }})"
+                        );
+                    }
+                }
                 if matches!(op.as_str(), "+" | "add" | "-" | "sub" | "*" | "mul") {
                     let checker = TypeChecker::new();
                     let integer = |value: &Expr| {
@@ -658,7 +687,7 @@ impl Ctx {
                         }
                         let failure = if matches!(op.as_str(), "udiv" | "urem") {
                             let Some(failure) = self.word_failure_return else {
-                                self.fail("c-backend: checked unsigned division requires an Int, Bool, or Void function return".into());
+                                self.fail("c-backend: checked unsigned division requires an Int, Bool, Void, or Float function return".into());
                                 return "0".into();
                             };
                             Some(failure)
