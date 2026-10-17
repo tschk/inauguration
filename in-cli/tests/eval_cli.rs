@@ -493,3 +493,51 @@ fn c_projection_rejects_nested_invalid_shift_operands_before_writing_source() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn c_projection_rejects_invalid_unsigned_operands_before_writing_source() {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "in-c-unsigned-proof-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let input = root.join("invalid.icore");
+    let output = root.join("invalid.c");
+    for op in ["udiv", "urem"] {
+        for bad in [
+            serde_json::json!({"kind":"float","value":2.5}),
+            serde_json::json!(true),
+            serde_json::json!("hello"),
+            serde_json::json!({"kind":"binary","op":"+","lhs":"hello","rhs":1}),
+            serde_json::json!({"kind":"binary","op":"+","lhs":true,"rhs":1}),
+        ] {
+            for side in [0usize, 1] {
+                let mut args = [serde_json::json!(84), serde_json::json!(2)];
+                args[side] = bad.clone();
+                let module = serde_json::json!({"icoreVersion":2,"decls":[{"kind":"function","name":"main","params":[],"return":"Int","body":[{"kind":"return","value":{"kind":"binary","op":op,"lhs":args[0],"rhs":args[1]}}]}]});
+                std::fs::write(&input, serde_json::to_string(&module).unwrap()).unwrap();
+                let result = Command::new(env!("CARGO_BIN_EXE_in"))
+                    .args(["compile", "--path"])
+                    .arg(&input)
+                    .args(["--emit", "c", "--out"])
+                    .arg(&output)
+                    .output()
+                    .unwrap();
+                assert!(
+                    !result.status.success() && !output.exists(),
+                    "{op} {side} {bad}: {result:?}"
+                );
+                assert!(
+                    String::from_utf8_lossy(&result.stderr)
+                        .contains("unsigned division requires resolved Int operands"),
+                    "{result:?}"
+                );
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

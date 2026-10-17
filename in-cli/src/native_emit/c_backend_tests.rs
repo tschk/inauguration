@@ -2264,3 +2264,65 @@ fn word_shift_projection_checks_nested_operand_types_and_preserves_integer_alias
         }
     }
 }
+
+#[test]
+fn unsigned_division_projection_checks_operand_trees_and_preserves_integer_aliases() {
+    let nested = |left| Expr::Binary {
+        op: "+".into(),
+        lhs: Box::new(left),
+        rhs: Box::new(Expr::IntLit(1)),
+    };
+    for op in ["udiv", "urem"] {
+        for bad in [
+            Expr::FloatLit(crate::core_ir::FloatVal(2.5)),
+            Expr::BoolLit(true),
+            Expr::StringLit("hello".into()),
+            nested(Expr::StringLit("hello".into())),
+            nested(Expr::BoolLit(true)),
+            Expr::Ident("unknown".into()),
+        ] {
+            for side in [0usize, 1] {
+                let mut args = [Expr::IntLit(84), Expr::IntLit(2)];
+                args[side] = bad.clone();
+                let module = UnifiedModule::new(vec![Decl::Function {
+                    name: "main".into(),
+                    params: vec![],
+                    ret: Typ::Int,
+                    type_params: vec![],
+                    body: vec![Stmt::Return(Some(Expr::Binary {
+                        op: op.into(),
+                        lhs: Box::new(args[0].clone()),
+                        rhs: Box::new(args[1].clone()),
+                    }))],
+                }]);
+                let error = emit_c_module(&module).unwrap_err();
+                assert!(
+                    error.contains("unsigned division requires resolved Int operands"),
+                    "{op} {side} {bad:?}: {error}"
+                );
+            }
+        }
+        for alias in ["Int", "i32", "u32"] {
+            let mut module=crate::in_lang_parse::parse_in_source("fn calc(left:Int,right:Int)->Int{return (left+0)/(right+0);}fn main()->Int{return calc(84,2);}").unwrap();
+            if let Decl::Function { params, body, .. } = &mut module.decls[0] {
+                if alias != "Int" {
+                    for (_, typ) in params {
+                        *typ = Typ::Named(alias.into());
+                    }
+                }
+                if let Stmt::Return(Some(Expr::Binary { op: current, .. })) = &mut body[0] {
+                    *current = op.into();
+                }
+            }
+            if let Decl::Function { name, body, .. } = &mut module.decls[1] {
+                *name = "answer".into();
+                if op == "urem" {
+                    if let Stmt::Return(Some(Expr::Call { args, .. })) = &mut body[0] {
+                        *args = vec![Expr::IntLit(85), Expr::IntLit(43)];
+                    }
+                }
+            }
+            assert_inferred_c_executes(&module, "if(answer()!=42)return 7;return 42;");
+        }
+    }
+}

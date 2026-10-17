@@ -681,6 +681,19 @@ impl Ctx {
                         )
                     }
                     "udiv" | "urem" => {
+                        let checker = TypeChecker::new();
+                        if [lhs.as_ref(), rhs.as_ref()].into_iter().any(|operand| {
+                            checker
+                                .checked_expr_type(operand, &self.facts, &self.types)
+                                .map(|typ| typ.canonical())
+                                != Some(Typ::Int)
+                        }) {
+                            self.fail(
+                                "c-backend: unsigned division requires resolved Int operands"
+                                    .into(),
+                            );
+                            return "0".into();
+                        }
                         if self.global_initializer {
                             self.fail("c-backend: unsigned operation in a global initializer requires constant folding".into());
                             return "0".into();

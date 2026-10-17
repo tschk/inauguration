@@ -56,6 +56,7 @@ C operator and handle the minimum signed word divided by minus one explicitly.
 Zero exits the containing function using the owned native failure value for
 Int, Bool, Void and Float returns; other return ABIs refuse projection. Float
 operand division retains ordinary floating-point behavior.
+Unsigned division and remainder require recursively validated Int operands.
 
 Objective-C free C functions use the existing C-family numeric normalization
 before native verification. This covers integer promotions without adding
