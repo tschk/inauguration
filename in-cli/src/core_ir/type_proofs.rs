@@ -10,11 +10,14 @@ pub(crate) enum ResolutionFailure {
 }
 impl ResolutionFailure {
     pub(crate) fn typ(self) -> Typ {
+        Typ::Named(self.symbol())
+    }
+    pub(crate) fn symbol(&self) -> String {
         let (kind, message) = match self {
             Self::Invalid(message) => ("invalid:", message),
             Self::Unsupported(message) => ("unsupported:", message),
         };
-        Typ::Named(format!("{PREFIX}{kind}{message}"))
+        format!("{PREFIX}{kind}{message}")
     }
     pub(crate) fn is_invalid(&self) -> bool {
         matches!(self, Self::Invalid(_))
@@ -92,6 +95,7 @@ pub(crate) fn present(decls: &[super::Decl]) -> bool {
     }
     fn expr(value: &Expr) -> bool {
         match value {
+            Expr::Ident(name) if decode(name).is_some() => return true,
             Expr::StructInit { name, .. } if named(name) => return true,
             Expr::Closure {
                 params, ret, body, ..
@@ -165,6 +169,42 @@ pub(crate) fn present(decls: &[super::Decl]) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn presence_scan_observes_value_only_failures_in_dead_code_and_globals() {
+        use crate::core_ir::{Decl, Expr, Stmt};
+        for proof in [
+            ResolutionFailure::Invalid("value cycle".into()),
+            ResolutionFailure::Unsupported("value projection".into()),
+        ] {
+            let value = Expr::Ident(proof.symbol());
+            let function = Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![Stmt::If {
+                    cond: Expr::BoolLit(false),
+                    then_body: vec![Stmt::Expr(Expr::Call {
+                        callee: Box::new(value.clone()),
+                        args: vec![],
+                    })],
+                    else_body: vec![],
+                }],
+            };
+            assert!(present(&[function]));
+            let global = |value| Decl::Global {
+                name: "VALUE".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(value)),
+                mutable: false,
+                constant_value: false,
+            };
+            assert!(present(&[global(value)]));
+            assert!(!present(&[global(Expr::StringLit(proof.symbol()))]));
+            assert!(!present(&[global(Expr::Ident("ordinary".into()))]));
+        }
+    }
+
+    #[test]
     fn classifications_and_malformed_private_proofs_survive() {
         for proof in [
             ResolutionFailure::Invalid("cycle".into()),
@@ -173,6 +213,7 @@ mod tests {
             let Typ::Named(name) = proof.clone().typ() else {
                 panic!()
             };
+            assert_eq!(name, proof.symbol());
             assert_eq!(decode(&name), Some(proof));
         }
         for name in [STEM, PREFIX, "#rust-associated-type-proof:bad", LEGACY] {

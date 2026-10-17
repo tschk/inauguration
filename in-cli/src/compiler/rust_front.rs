@@ -1601,7 +1601,7 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
                 .unwrap_or_else(crate::core_ir::type_proofs::ResolutionFailure::typ)
         })
     });
-    let resolve_self = |name: &str| {
+    let resolve_self_type = |name: &str| {
         if name == "Self" {
             Some(self_type.clone())
         } else {
@@ -1609,7 +1609,43 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
                 .map(|member| format!("{self_type}::{member}"))
         }
     };
-    crate::core_bindings::rewrite_nominal_names(&mut decls, &resolve_self, &resolve_self);
+    let resolve_self_value = |name: &str| {
+        if let Some((head, member)) = name
+            .strip_prefix("Self::")
+            .and_then(|path| path.split_once("::"))
+            && i.items
+                .iter()
+                .any(|item| matches!(item, syn::ImplItem::Type(item) if item.ident == head))
+        {
+            // Resolve only a declared impl-associated type, never a same-spelled
+            // type or trait from another scope. The target member stays exact.
+            let resolved = resolve_impl_type(Typ::Named(format!("Self::{head}")), &self_proof, i);
+            return Some(match resolved {
+                Ok(Typ::Named(owner))
+                    if crate::core_ir::rust_references::decode(&owner).is_none()
+                        && crate::core_ir::rust_integer_type_name(&owner).is_none()
+                        && crate::core_ir::integer_type_name(&owner).is_none()
+                        && !owner.starts_with('#')
+                        && !owner.contains('<')
+                        && !owner.contains('>')
+                        && crate::core_ir::tuples::fields(&owner).is_none() =>
+                {
+                    format!("{owner}::{member}")
+                }
+                Err(proof) => proof.symbol(),
+                Ok(owner) => crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
+                    "associated value path `{name}` has unsupported owner `{owner:?}`"
+                ))
+                .symbol(),
+            });
+        }
+        resolve_self_type(name)
+    };
+    crate::core_bindings::rewrite_nominal_names(
+        &mut decls,
+        &resolve_self_type,
+        &resolve_self_value,
+    );
     decls
 }
 
@@ -4989,5 +5025,80 @@ mod uninitialized_declaration_tests {
         )
         .unwrap();
         assert!(crate::core_ir::type_proofs::present(&module.decls));
+    }
+}
+
+#[cfg(test)]
+mod associated_value_path_tests {
+    use super::*;
+    fn callees(source: &str) -> HashSet<String> {
+        let implementation: syn::ItemImpl = syn::parse_str(source).unwrap();
+        let mut declarations = lower_impl(&implementation);
+        let mut names = HashSet::new();
+        crate::core_opt::map_decl_exprs_mut(&mut declarations, &mut |expr| {
+            if let Expr::Call { callee, .. } = expr
+                && let Expr::Ident(name) = callee.as_ref()
+            {
+                names.insert(name.clone());
+            }
+        });
+        names
+    }
+    #[test]
+    fn associated_value_path_matches_explicit_nominal_control() {
+        for (annotation, target) in [
+            ("Self::Output", "Self::Output::identity"),
+            ("Boxed", "Boxed::identity"),
+        ] {
+            let source = format!(
+                "impl std::ops::Neg for Row{{type Output=Boxed;fn neg(self)->Self::Output{{let value:{annotation}=Boxed{{x:42}};{target}(value)}}}}"
+            );
+            let names = callees(&source);
+            assert!(names.contains("Boxed::identity"), "{names:?}");
+            assert!(!names.contains("Row::Output::identity"));
+        }
+    }
+    #[test]
+    fn associated_type_owner_is_impl_scoped_and_ordinary_self_calls_stay_ordinary() {
+        for (receiver, output) in [("First", "one::Boxed"), ("Second", "two::Boxed")] {
+            let names = callees(&format!(
+                "impl Other for {receiver}{{type Output={output};fn create()->Self::Output{{Self::Output::new()}}}}"
+            ));
+            assert!(names.contains(&format!("{output}::new")), "{names:?}");
+        }
+        assert!(callees("impl Row{fn forward()->Self{Self::new()}}").contains("Row::new"));
+    }
+    #[test]
+    fn unsupported_projections_never_use_contextual_reference_or_integer_symbols() {
+        for output in ["Self::Output", "&Row", "i64", "<Self as Other>::Output"] {
+            let names = callees(&format!(
+                "impl Other for Row{{type Output={output};fn create()->Self::Output{{Self::Output::new()}}}}"
+            ));
+            assert!(
+                names
+                    .iter()
+                    .any(|name| crate::core_ir::type_proofs::decode(name).is_some()),
+                "{output}: {names:?}"
+            );
+            assert!(!names.contains("Row::Output::new"));
+        }
+        let generic = callees(
+            "impl<T> Other for Row<T>{type Output=Self;fn create()->Self::Output{Self::Output::new()}}",
+        );
+        assert!(
+            generic
+                .iter()
+                .any(|name| crate::core_ir::type_proofs::decode(name).is_some()),
+            "{generic:?}"
+        );
+        let names = callees(
+            "impl Other for Row{type Output<T>=T;fn create()->Self::Output<i64>{Self::Output::new()}}",
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| crate::core_ir::type_proofs::decode(name).is_some()),
+            "{names:?}"
+        );
     }
 }

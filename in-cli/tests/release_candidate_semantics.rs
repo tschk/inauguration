@@ -6,6 +6,12 @@ use inauguration::{core_opt, in_lang_parse::parse_in_source, native_emit::inisa}
 fn native_rust_assignments_preserve_values_order_and_integer_kinds() {
     use inauguration::emit_profile::EmitProfile;
     for source in [
+        "struct Row{x:i64}struct Boxed{x:i64}impl Boxed{fn identity(self)->Self{self}}impl std::ops::Neg for Row{type Output=Boxed;fn neg(self)->Self::Output{let value:Self::Output=Boxed{x:42};Self::Output::identity(value)}}fn main()->i64{(-Row{x:1}).x}",
+        "struct Row{x:i64}struct Boxed{x:i64}impl Boxed{fn identity(self)->Self{self}}impl std::ops::Neg for Row{type Output=Boxed;fn neg(self)->Self::Output{let value:Boxed=Boxed{x:42};Boxed::identity(value)}}fn main()->i64{(-Row{x:1}).x}",
+        "struct Row{x:i64}struct Boxed{x:i64}impl Boxed{fn identity(self)->Self{self}}impl std::ops::Neg for Row{type Output=Boxed;fn neg(self)->Self::Output{let value:Self::Output=Boxed{x:42};value.identity()}}fn main()->i64{(-Row{x:1}).x}",
+        "struct Row{x:i64}impl Row{fn new()->Self{Self{x:42}}fn forward()->Self{Self::new()}}fn main()->i64{Row::forward().x}",
+        "mod one{pub struct Boxed{pub x:i64}impl Boxed{pub fn new()->Self{Self{x:20}}}}mod two{pub struct Boxed{pub x:i64}impl Boxed{pub fn new()->Self{Self{x:22}}}}struct Left;struct Right;trait Build{type Output;fn make()->Self::Output;}impl Build for Left{type Output=one::Boxed;fn make()->Self::Output{Self::Output::new()}}impl Build for Right{type Output=two::Boxed;fn make()->Self::Output{Self::Output::new()}}fn main()->i64{<Left as Build>::make().x+<Right as Build>::make().x}",
+        "struct Boxed{x:i64}impl Boxed{fn new()->Self{Self{x:42}}}struct Row;trait Build{type Actual;type Output;fn make()->Self::Output;}impl Build for Row{type Actual=Boxed;type Output=Self::Actual;fn make()->Self::Output{Self::Output::new()}}fn main()->i64{<Row as Build>::make().x}",
         "fn main() -> i64 { let unused: i64; 42 }",
         "fn main() -> i64 { let value:i64; value=42; value }",
         "fn apply(flag:bool)->i64 {let value:i64;if flag {value=42;} else {value=7;} if flag {value} else {value+35}} fn main() -> i64 {apply(true)}",

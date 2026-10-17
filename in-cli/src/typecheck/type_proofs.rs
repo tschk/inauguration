@@ -55,7 +55,7 @@ impl Facts {
     }
 }
 impl TypeChecker {
-    /// Observe all typed sites with the existing scope-aware name walker. This
+    /// Observe typed sites and private value failures with the scope-aware walker. This
     /// query deliberately does not treat ordinary deferred checking as proof.
     /// A normalized private view makes local shadows distinct from globals and
     /// call targets, without changing the input or adding expression markers.
@@ -102,6 +102,8 @@ impl TypeChecker {
                     None
                 },
                 &|name| {
+                    let previous = result.take();
+                    *result.borrow_mut() = prefer(previous, type_proofs::decode(name));
                     if nodes.contains(name) {
                         references.borrow_mut().insert(name.to_string());
                     }
@@ -467,6 +469,91 @@ mod node_proof_tests {
             body,
             type_params: vec![],
         }
+    }
+
+    #[test]
+    fn value_only_failures_follow_real_dependencies_without_mutating_source() {
+        let call = |name: &str| Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args: vec![],
+        };
+        for failure in [
+            ResolutionFailure::Invalid("value cycle".into()),
+            ResolutionFailure::Unsupported("value projection".into()),
+        ] {
+            let decls = vec![
+                function(
+                    "helper",
+                    vec![
+                        Stmt::If {
+                            cond: Expr::BoolLit(false),
+                            then_body: vec![Stmt::Expr(call(&failure.symbol()))],
+                            else_body: vec![],
+                        },
+                        Stmt::Return(Some(Expr::IntLit(42))),
+                    ],
+                ),
+                Decl::Global {
+                    name: "VALUE".into(),
+                    typ: Typ::Int,
+                    init: Some(Box::new(call("helper"))),
+                    mutable: false,
+                    constant_value: false,
+                },
+                function("main", vec![Stmt::Return(Some(call("helper")))]),
+                function(
+                    "reader",
+                    vec![Stmt::Return(Some(Expr::Ident("VALUE".into())))],
+                ),
+                function("clean", vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+                function(
+                    "shadow",
+                    vec![
+                        Stmt::Let("VALUE".into(), Some(Typ::Int), Expr::IntLit(42)),
+                        Stmt::Return(Some(Expr::Ident("VALUE".into()))),
+                    ],
+                ),
+            ];
+            let original = decls.clone();
+            let checker = TypeChecker::new();
+            let nodes = checker.typed_proof_nodes(&decls);
+            assert_eq!(nodes.len(), 4);
+            for name in ["helper", "VALUE", "main", "reader"] {
+                assert_eq!(nodes[name], failure, "{name}");
+            }
+            assert!(!nodes.contains_key("clean"));
+            assert!(!nodes.contains_key("shadow"));
+            assert_eq!(
+                checker.typed_proof_globals(&decls),
+                HashMap::from([("VALUE".into(), failure)])
+            );
+            assert_eq!(decls, original);
+        }
+    }
+
+    #[test]
+    fn invalid_value_failure_dominates_unsupported_type_failure() {
+        let invalid = ResolutionFailure::Invalid("value cycle".into());
+        let declarations = vec![function(
+            "main",
+            vec![
+                Stmt::Let(
+                    "unused".into(),
+                    Some(ResolutionFailure::Unsupported("opaque type".into()).typ()),
+                    Expr::IntLit(0),
+                ),
+                Stmt::Expr(Expr::Binary {
+                    op: "&&".into(),
+                    lhs: Box::new(Expr::BoolLit(false)),
+                    rhs: Box::new(Expr::Ident(invalid.symbol())),
+                }),
+                Stmt::Return(Some(Expr::IntLit(42))),
+            ],
+        )];
+        assert_eq!(
+            TypeChecker::new().typed_proof_nodes(&declarations)["main"],
+            invalid
+        );
     }
 
     #[test]

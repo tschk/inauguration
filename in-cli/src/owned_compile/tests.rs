@@ -9240,6 +9240,42 @@ fn rust_impl_local_associated_outputs_execute_and_refuse_unresolved_contracts() 
     }
 }
 
+#[test]
+fn rust_value_only_associated_cycles_refuse_even_in_dead_conditions() {
+    for condition in [
+        "if false { Self::Output::new(); }",
+        "false && { Self::Output::new(); true };",
+        "true || { Self::Output::new(); false };",
+    ] {
+        let source = format!(
+            "struct Row;trait Build{{type Output;fn make()->i64;}}impl Build for Row{{type Output=Self::Output;fn make()->i64{{{condition}42}}}}fn main()->i64{{<Row as Build>::make()}}"
+        );
+        let parsed = crate::compiler::rust_front::parse_rust_source(&source).unwrap();
+        let error = crate::native_emit::c_backend::emit_c_module(&parsed).unwrap_err();
+        assert!(error.contains("source-type-proof"), "{error}");
+        let path = temp_path("associated-value-only-cycle.rs");
+        fs::write(&path, &source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("associated-value-only-cycle.artifact");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    !report.success,
+                    "{condition} {target:?} {profile:?}: {report:?}"
+                );
+                assert!(!report.execution_started, "{report:?}");
+                assert_eq!(report.eval_result, None);
+                assert_eq!(report.artifact_path, None);
+                assert!(!out.exists());
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
 #[cfg(any(
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64")
