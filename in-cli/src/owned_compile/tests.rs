@@ -8642,3 +8642,37 @@ fn objective_c_numeric_normalization_preserves_word32_artifact_target() {
     }
     fs::remove_file(path).unwrap();
 }
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn boolean_negation_structured_consumers_keep_integer_results() {
+    for body in [
+        "let values=[-value];return values[0];",
+        "let result=(if(value){-value}else{0});return result;",
+    ] {
+        let text = format!(
+            "fn norm(value:Bool)->Int{{{body}}}fn main()->Int{{if norm(false)!=0{{return 7;}}return norm(true);}}"
+        );
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let source = temp_path("boolean-negation-structured.in");
+            fs::write(&source, &text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.degradations.is_empty(),
+                "{body} {profile:?}: {report:?}"
+            );
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(-1)),
+                "{body} {profile:?}: {report:?}"
+            );
+            let _ = fs::remove_file(source);
+        }
+    }
+}

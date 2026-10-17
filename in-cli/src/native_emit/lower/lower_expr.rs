@@ -1389,7 +1389,12 @@ fn native_expr_type_with_bindings(
             _ => None,
         },
         Expr::Unary { op, expr } if op == "-" || op == "vector-clone" => {
-            native_expr_type_with_bindings(expr, ctx, functions, bindings)
+            let typ = native_expr_type_with_bindings(expr, ctx, functions, bindings);
+            if op == "-" && typ.as_ref().is_some_and(|typ| typ.canonical() == Typ::Bool) {
+                Some(Typ::Int)
+            } else {
+                typ
+            }
         }
         Expr::Unary { op, .. } if op == "!" => Some(Typ::Bool),
         Expr::Unary { op, .. }

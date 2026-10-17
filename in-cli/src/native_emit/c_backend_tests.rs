@@ -2498,3 +2498,18 @@ fn scalar_comparison_projection_preserves_raw_alias_identity_and_refuses_generic
         assert_eq!(result.is_ok(), valid, "{left:?} {op} {right:?}: {result:?}");
     }
 }
+
+#[test]
+fn boolean_negation_inferred_locals_keep_negative_integer_and_single_evaluation() {
+    let source = "var calls:Int=0;fn next()->Bool{calls+=1;return true;}fn norm(value:Bool)->Int{let result=-value;return result;}fn compared(value:Bool)->Int{if -value == -1{return -1;}return 7;}fn effects()->Int{let result=-next();return result;}fn skipped()->Int{if false&&(-next()==-1){return 7;}return calls;}fn main()->Int{return 42;}";
+    let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+    let native = crate::core_ir_verifier::verify_for_entry(&module, "main");
+    assert!(native.ok, "{native:?}");
+    if let Decl::Function { name, .. } = module.decls.last_mut().unwrap() {
+        *name = "answer".into();
+    }
+    assert_inferred_c_executes(
+        &module,
+        "if(norm(1)!=-1||norm(0)!=0||compared(1)!=-1)return 7;calls=0;if(effects()!=-1||calls!=1)return 8;calls=0;if(skipped()!=0||calls!=0)return 9;return 42;",
+    );
+}

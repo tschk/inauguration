@@ -660,6 +660,14 @@ fn infer_in_expr_type_scoped(
             }
         }
         Expr::Unary { op, expr, .. } => match op.as_str() {
+            "-" => {
+                let typ = infer_in_expr_type_scoped(expr, env, structs, fn_rets, shadowed)?;
+                Some(if typ.canonical() == Typ::Bool {
+                    Typ::Int
+                } else {
+                    typ
+                })
+            }
             "!" => (infer_in_expr_type_scoped(expr, env, structs, fn_rets, shadowed)?.canonical()
                 == Typ::Bool)
                 .then_some(Typ::Bool),

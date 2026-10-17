@@ -2576,6 +2576,9 @@ impl TypeChecker {
                 }
                 "-" | "~" | "+" => {
                     let typ = self.expr_type(expr, facts, env);
+                    if op == "-" && typ.as_ref().is_some_and(|typ| typ.canonical() == Typ::Bool) {
+                        return Some(Typ::Int);
+                    }
                     if matches!(&typ, Some(Typ::Named(name)) if crate::core_ir::integer_type_name(name).is_some())
                     {
                         c_expression_leaf_kind(expr, typ.as_ref()).map(CIntegerKind::typ)
@@ -5790,6 +5793,70 @@ mod lua_word32_integer_tests {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod boolean_negation_inference_tests {
+    use super::TypeChecker;
+    use crate::core_ir::{Expr, Typ};
+    use std::collections::HashMap;
+
+    #[test]
+    fn boolean_negation_has_integer_facts_in_nested_expressions() {
+        let checker = TypeChecker::new();
+        let facts = checker.collect_decl_facts(&[]);
+        for typ in [Typ::Bool, Typ::Named("Bool".into())] {
+            let env = HashMap::from([("flag".into(), typ)]);
+            let neg = Expr::Unary {
+                op: "-".into(),
+                expr: Box::new(Expr::Ident("flag".into())),
+            };
+            assert_eq!(checker.expr_type(&neg, &facts, &env), Some(Typ::Int));
+            assert_eq!(
+                checker.checked_expr_type(&neg, &facts, &env),
+                Some(Typ::Int)
+            );
+            let comparison = Expr::Binary {
+                op: "==".into(),
+                lhs: Box::new(neg.clone()),
+                rhs: Box::new(Expr::IntLit(-1)),
+            };
+            assert_eq!(
+                checker.checked_expr_type(&comparison, &facts, &env),
+                Some(Typ::Bool)
+            );
+            assert_eq!(
+                checker.expr_type(&Expr::ArrayLit(vec![neg.clone()]), &facts, &env),
+                Some(Typ::Array(Box::new(Typ::Int)))
+            );
+            let conditional = Expr::Conditional {
+                cond: Box::new(Expr::BoolLit(true)),
+                then_expr: Box::new(neg.clone()),
+                else_expr: Box::new(Expr::IntLit(0)),
+            };
+            assert_eq!(
+                checker.checked_expr_type(&conditional, &facts, &env),
+                Some(Typ::Int)
+            );
+            let addition = Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(neg),
+                rhs: Box::new(Expr::IntLit(1)),
+            };
+            assert_eq!(
+                checker.checked_expr_type(&addition, &facts, &env),
+                Some(Typ::Int)
+            );
+        }
+        for typ in [Typ::Int, Typ::Float, Typ::Named("#rust-integer-u32".into())] {
+            let env = HashMap::from([("value".into(), typ.clone())]);
+            let neg = Expr::Unary {
+                op: "-".into(),
+                expr: Box::new(Expr::Ident("value".into())),
+            };
+            assert_eq!(checker.expr_type(&neg, &facts, &env), Some(typ));
         }
     }
 }

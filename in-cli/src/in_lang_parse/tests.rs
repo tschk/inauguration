@@ -3567,3 +3567,27 @@ fn parallel_task_facts_keep_comments_opaque_and_malformed_regions_refused() {
         assert!(parse_in_surface_info(source).is_err(), "{source}");
     }
 }
+
+#[test]
+fn boolean_numeric_negation_receiver_inference_is_integer() {
+    use super::validate::infer_in_expr_type;
+    use std::collections::HashMap;
+    let env = HashMap::from([
+        ("flag".into(), Typ::Bool),
+        ("value".into(), Typ::Float),
+        ("n".into(), Typ::Int),
+    ]);
+    for (source, expected) in [
+        ("-flag", Typ::Int),
+        ("-true", Typ::Int),
+        ("(-flag)+1", Typ::Int),
+        ("-value", Typ::Float),
+        ("-n", Typ::Int),
+    ] {
+        assert_eq!(
+            infer_in_expr_type(&parse_expr(source), &env, &HashMap::new(), &HashMap::new()),
+            Some(expected),
+            "{source}"
+        );
+    }
+}
