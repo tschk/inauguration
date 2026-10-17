@@ -519,6 +519,9 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) binop_temp: u32,
     pub(crate) binop_temps: [u32; 64],
     pub(crate) binop_depth: usize,
+    // Dedicated per-function storage for implicit calls in scalar array literals.
+    pub(crate) scalar_array_spills: Vec<u32>,
+    pub(crate) scalar_array_depth: usize,
     pub(crate) call_arg_temps: [u32; 64],
     pub(crate) call_arg_depth: usize,
     call_arg_frames: Vec<usize>,
@@ -764,6 +767,8 @@ impl<'a> LowerCtx<'a> {
             binop_temp: 0,
             binop_temps: [0; 64],
             binop_depth: 0,
+            scalar_array_spills: Vec::new(),
+            scalar_array_depth: 0,
             call_arg_temps: [0; 64],
             call_arg_depth: 0,
             call_arg_frames: Vec::new(),
@@ -1224,6 +1229,27 @@ impl<'a> LowerCtx<'a> {
             .checked_sub(words)
             .ok_or("native-lower: unbalanced record array staging")?;
         Ok(())
+    }
+
+    pub(crate) fn acquire_scalar_array_spills(&mut self, fn_name: &str) -> Result<usize, String> {
+        let base = self
+            .scalar_array_depth
+            .checked_mul(19)
+            .ok_or("native-lower: scalar array spill size overflow")?;
+        if base
+            .checked_add(19)
+            .is_none_or(|end| end > self.scalar_array_spills.len())
+        {
+            return Err(format!(
+                "native-lower: scalar array spills exceed planned frame in `{fn_name}`"
+            ));
+        }
+        self.scalar_array_depth += 1;
+        Ok(base)
+    }
+
+    pub(crate) fn release_scalar_array_spills(&mut self) {
+        self.scalar_array_depth -= 1;
     }
 
     pub(crate) fn acquire_binop_temp(&mut self, fn_name: &str) -> Result<u32, String> {

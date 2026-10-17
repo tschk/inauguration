@@ -8754,3 +8754,95 @@ fn logical_not_conditions_preserve_integer_receiver_methods_and_validation() {
         }
     }
 }
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn array_literal_scalar_values_materialize_once_across_profiles() {
+    use crate::emit_profile::EmitProfile;
+    let mut nested = "true".to_string();
+    for _ in 0..8 {
+        nested = format!("![{nested}]");
+    }
+    let nested_source = format!(
+        "struct Row{{Int x;Bool flag}}fn consume(a:Int,b:Int,c:Int,d:Int,e:Int,f:Int,g:Int,row:Row)->Int{{if row.flag{{return 7;}}return a+b+c+d+e+f+g+row.x;}}fn main()->Int{{return consume(1,2,3,4,5,6,7,Row{{x:14,flag:{nested}}});}}"
+    );
+    for text in [
+        nested_source.as_str(),
+        "fn norm(value:[Int])->Bool{return !value;}fn main()->Int{if norm([1,2]){return 7;}return 42;}",
+        "var calls:Int=0;fn norm(value:[Int])->Bool{calls+=1;return !value;}fn main()->Int{if norm([1,2])||calls!=1{return 7;}return 42;}",
+        "fn main()->Int{let values=[1,2];if !values{return 7;}return 42;}",
+        "var trace:Int=0;fn left()->Int{trace=trace*10+1;return 1;}fn right()->Int{trace=trace*10+2;return 2;}fn main()->Int{if ![left(),right()]||trace!=12{return 7;}return 42;}",
+        "var trace:Int=0;fn item()->Int{trace+=1;return 1;}fn main()->Int{if false&&![item()]{return 7;}if trace!=0{return 7;}return 42;}",
+        "fn sum(a:Int,b:Int)->Int{return a+b;}fn main()->Int{if sum(42,if ![1,2]{7}else{0})!=42{return 7;}return 42;}",
+        "fn main()->Int{if (if true{![1,2]}else{true}){return 7;}return 42;}",
+        "fn main()->Int{let value=(match (true){true -> {![1,2]}false -> {true}});if value{return 7;}return 42;}",
+        "fn main()->Int{let value={let unused=0;![1,2]};if value{return 7;}return 42;}",
+        "struct Row{Int x;Int y}fn main()->Int{if ![Row{x:20,y:22}]{return 7;}return 42;}",
+        "fn main()->Int{let values=[0];values[0]=if ![1,2]{7}else{42};return values[0];}",
+    ] {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let source = temp_path("array-scalar-value.in");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.execution_started && report.degradations.is_empty(),
+                "{text} {profile:?}: {report:?}"
+            );
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{text} {profile:?}: {report:?}"
+            );
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                let binary = temp_path("array-scalar-value-native");
+                request.target = CompileTarget::Native;
+                request.out = Some(binary.clone());
+                let report = compile_owned(&request);
+                assert!(report.success, "{text} {profile:?}: {report:?}");
+                assert_eq!(
+                    std::process::Command::new(&binary).status().unwrap().code(),
+                    Some(42),
+                    "{text} {profile:?}"
+                );
+                fs::remove_file(binary).unwrap();
+            }
+            fs::remove_file(source).unwrap();
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn scalar_array_values_reject_unmaterializable_layouts() {
+    for text in [
+        "fn main()->Bool{return ![()];}",
+        "fn main()->Bool{return ![[1],[2]];}",
+        "struct Inner{Int x}struct Outer{Inner inner}fn main()->Bool{return ![Outer{inner:Inner{x:42}}];}",
+    ] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let source = temp_path("array-scalar-invalid.in");
+            fs::write(&source, text).unwrap();
+            let mut request =
+                default_request(source.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                !report.success && !report.execution_started && report.eval_result.is_none(),
+                "{text} {profile:?}: {report:?}"
+            );
+            assert!(report.artifact_path.is_none(), "{report:?}");
+            fs::remove_file(source).unwrap();
+        }
+    }
+}

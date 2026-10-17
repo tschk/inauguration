@@ -1020,6 +1020,23 @@ fn lower_function(
         ctx.call_arg_temps[index] = ctx.alloc_slot();
     }
     let staging = native_staging_plan(&func.body, &ctx, functions, &func.name)?;
+    let scalar_array_words = staging
+        .scalar_array_depth
+        .checked_mul(19)
+        .ok_or("native-lower: scalar array spill size overflow")?;
+    let scalar_array_bytes = scalar_array_words
+        .checked_mul(8)
+        .ok_or("native-lower: scalar array spill size overflow")?;
+    if scalar_array_bytes > 4095 {
+        return Err(format!(
+            "native-lower: stack frame exceeds the AArch64 immediate-offset subset in `{}`",
+            func.name
+        ));
+    }
+    for _ in 0..scalar_array_words {
+        let offset = ctx.alloc_slot();
+        ctx.scalar_array_spills.push(offset);
+    }
     let aggregate_vector_words = (staging.vector != 0).then_some(staging.vector);
     if has_struct_return_vec_literal(&func.body)
         || aggregate_vector_words.is_some()
@@ -1479,6 +1496,7 @@ fn max_nested_vector_element_words(
 struct NativeStagingPlan {
     record: usize,
     vector: usize,
+    scalar_array_depth: usize,
 }
 
 fn native_staging_plan(
@@ -1491,6 +1509,8 @@ fn native_staging_plan(
         ctx: &'a LowerCtx<'b>,
         functions: &'a HashMap<String, FunctionInfo>,
         vector: std::cell::Cell<usize>,
+        array_depth: std::cell::Cell<usize>,
+        array_peak: std::cell::Cell<usize>,
         fn_name: &'a str,
     }
     impl Planner<'_, '_> {
@@ -1499,6 +1519,26 @@ fn native_staging_plan(
                 .map_or(0, |fields| fields.len()))
         }
         fn value(&self, expr: &Expr, expected: Option<&Typ>) -> Result<usize, String> {
+            // Typed array/vector destinations use their existing materializers.
+            // Only scalar literal value lowering acquires a preservation frame.
+            let scalar_literal = matches!(expr, Expr::ArrayLit(items) if !items.is_empty())
+                && !matches!(
+                    expected.map(Typ::canonical),
+                    Some(Typ::Array(_) | Typ::Vector(_))
+                );
+            let depth = self.array_depth.get();
+            if scalar_literal {
+                let next = depth
+                    .checked_add(1)
+                    .ok_or("native-lower: scalar array spill depth overflow")?;
+                self.array_depth.set(next);
+                self.array_peak.set(self.array_peak.get().max(next));
+            }
+            let result = self.value_inner(expr, expected);
+            self.array_depth.set(depth);
+            result
+        }
+        fn value_inner(&self, expr: &Expr, expected: Option<&Typ>) -> Result<usize, String> {
             match expr {
                 Expr::ArrayLit(items) => {
                     // An explicit Array destination does not use Vec staging. For
@@ -1628,7 +1668,12 @@ fn native_staging_plan(
                             self.vector.set(self.vector.get().max(words).max(nested));
                         }
                     }
-                    self.body(body)?;
+                    let depth = self.array_depth.replace(0);
+                    let peak = self.array_peak.get();
+                    let result = self.body(body);
+                    self.array_depth.set(depth);
+                    self.array_peak.set(peak);
+                    result?;
                     Ok(0)
                 }
                 _ => {
@@ -1738,12 +1783,15 @@ fn native_staging_plan(
         ctx,
         functions,
         vector: std::cell::Cell::new(0),
+        array_depth: std::cell::Cell::new(0),
+        array_peak: std::cell::Cell::new(0),
         fn_name,
     };
     let record = planner.body(body)?;
     Ok(NativeStagingPlan {
         record,
         vector: planner.vector.get(),
+        scalar_array_depth: planner.array_peak.get(),
     })
 }
 
@@ -1820,7 +1868,8 @@ mod record_array_plan_tests {
             plan(&body, &[]),
             NativeStagingPlan {
                 record: 2,
-                vector: 0
+                vector: 0,
+                scalar_array_depth: 0,
             }
         );
     }
@@ -1854,7 +1903,8 @@ mod record_array_plan_tests {
             plan(&body, &[("value".into(), Typ::Named("Row".into()))]),
             NativeStagingPlan {
                 record: 2,
-                vector: 0
+                vector: 0,
+                scalar_array_depth: 0,
             }
         );
     }
@@ -1890,8 +1940,51 @@ mod record_array_plan_tests {
             native_staging_plan(&body, &ctx, &HashMap::new(), "test").unwrap(),
             NativeStagingPlan {
                 record: 0,
-                vector: 2
+                vector: 2,
+                scalar_array_depth: 0,
             }
+        );
+    }
+}
+
+#[cfg(test)]
+mod scalar_array_frame_plan_tests {
+    use super::*;
+
+    #[test]
+    fn plans_deep_scalar_arrays_independently_of_call_and_record_pools() {
+        let mut value = "true".to_string();
+        for _ in 0..8 {
+            value = format!("![{value}]");
+        }
+        let source = format!(
+            "struct Row{{Int x;Bool flag}}fn consume(a:Int,b:Int,c:Int,d:Int,e:Int,f:Int,g:Int,row:Row)->Int{{if row.flag{{return 7;}}return a+b+c+d+e+f+g+row.x;}}fn main()->Int{{return consume(1,2,3,4,5,6,7,Row{{x:14,flag:{value}}});}}"
+        );
+        let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+        lower_module(&module, "main", NativeLinkage::Executable)
+            .expect("depth8 fits the existing frame subset");
+        // A typed destination does not reserve the new scalar preservation area.
+        let typed = crate::in_lang_parse::parse_in_source(
+            "fn main()->Int{let values:[Int]=[20,22];return values[0]+values[1];}",
+        )
+        .unwrap();
+        lower_module(&typed, "main", NativeLinkage::Executable).unwrap();
+    }
+
+    #[test]
+    fn excessive_scalar_array_preservation_reports_existing_frame_limit() {
+        let mut value = "true".to_string();
+        for _ in 0..64 {
+            value = format!("![{value}]");
+        }
+        let module =
+            crate::in_lang_parse::parse_in_source(&format!("fn main()->Bool{{return {value};}}"))
+                .unwrap();
+        let error =
+            lower_module(&module, "main", NativeLinkage::Executable).expect_err("frame limit");
+        assert!(
+            error.contains("stack frame exceeds the AArch64 immediate-offset subset"),
+            "{error}"
         );
     }
 }

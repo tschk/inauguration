@@ -381,7 +381,64 @@ pub(crate) fn lower_expr_into(
             ctx.release_call_arg_temps();
             Ok(())
         }
-        Expr::ArrayLit(_) | Expr::Closure { .. } => {
+        Expr::ArrayLit(items) => {
+            // Scalar value contexts use the same data carrier as array locals.
+            // Keep the existing empty carrier; this does not define sequence truthiness.
+            if items.is_empty() {
+                emitter.emit_insns(&aarch64::load_i64(rd, 0));
+                return Ok(());
+            }
+            let Some(Typ::Array(elem)) = native_expr_type(expr, ctx, functions) else {
+                return Err("native-lower: array literal needs a resolved element type".into());
+            };
+            super::lower_util::ensure_native_array_element(&elem, fn_name, "value")?;
+            if !super::lower_util::is_native_scalar_type(&elem)
+                && super::lower_util::record_array_fields(&elem, ctx.structs)?.is_none()
+            {
+                return Err(
+                    "native-lower: array value requires scalar or flat record elements".into(),
+                );
+            }
+            // This was a literal leaf: implicit allocation must not clobber
+            // registers retained by scalar/aggregate/stdlib operand consumers.
+            // Preserve the Darwin platform register x18 without using it as scratch.
+            let base = ctx.acquire_scalar_array_spills(fn_name)?;
+            for reg in 0..19u8 {
+                if reg != rd {
+                    emitter.emit_u32(aarch64::str64(
+                        reg,
+                        aarch64::REG_SP,
+                        ctx.scalar_array_spills[base + reg as usize],
+                    ));
+                }
+            }
+            let result = super::lower_stmt::lower_array_expr_into_regs(
+                emitter,
+                ctx,
+                expr,
+                &elem,
+                functions,
+                pending_calls,
+                fn_name,
+            );
+            if result.is_ok() {
+                if rd != 0 {
+                    emitter.emit_u32(aarch64::mov_reg64(rd, 0));
+                }
+                for reg in 0..19u8 {
+                    if reg != rd {
+                        emitter.emit_u32(aarch64::ldr64(
+                            reg,
+                            aarch64::REG_SP,
+                            ctx.scalar_array_spills[base + reg as usize],
+                        ));
+                    }
+                }
+            }
+            ctx.release_scalar_array_spills();
+            result
+        }
+        Expr::Closure { .. } => {
             emitter.emit_insns(&aarch64::load_i64(rd, 0));
             Ok(())
         }
@@ -1734,5 +1791,216 @@ mod record_index_place_tests {
         );
         assert!(words.iter().any(|word| *word & 0xff00_001f == 0x5400_000b));
         assert!(words.iter().any(|word| *word & 0xff00_001f == 0x5400_000a));
+    }
+}
+
+#[cfg(test)]
+mod scalar_array_preservation_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_array_literal_restores_other_gp_registers_and_releases_depth() {
+        for rd in [0u8, 1, 7] {
+            let structs = HashMap::new();
+            let strings = HashMap::new();
+            let globals = HashMap::new();
+            let types = HashMap::new();
+            let mut runtime = Vec::new();
+            let mut pending_strings = Vec::new();
+            let mut ctx = LowerCtx::new(
+                &[],
+                &structs,
+                &strings,
+                &globals,
+                &types,
+                &mut runtime,
+                &mut pending_strings,
+                "test",
+            )
+            .unwrap();
+            for index in 0..ctx.binop_temps.len() {
+                ctx.binop_temps[index] = ctx.alloc_slot();
+            }
+            for _ in 0..19 {
+                let offset = ctx.alloc_slot();
+                ctx.scalar_array_spills.push(offset);
+            }
+            let mut emitter = CodeEmitter::new();
+            let mut calls = Vec::new();
+            lower_expr_into(
+                &mut emitter,
+                &mut ctx,
+                &Expr::ArrayLit(vec![Expr::IntLit(42)]),
+                rd,
+                &HashMap::new(),
+                &mut calls,
+                "test",
+            )
+            .unwrap();
+            let words: Vec<u32> = emitter
+                .bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| u32::from_le_bytes(*bytes))
+                .collect();
+            let expected_stores: Vec<_> = (0..19u8)
+                .filter(|reg| *reg != rd)
+                .map(|reg| {
+                    aarch64::str64(reg, aarch64::REG_SP, ctx.scalar_array_spills[reg as usize])
+                })
+                .collect();
+            let expected_loads: Vec<_> = (0..19u8)
+                .filter(|reg| *reg != rd)
+                .map(|reg| {
+                    aarch64::ldr64(reg, aarch64::REG_SP, ctx.scalar_array_spills[reg as usize])
+                })
+                .collect();
+            assert!(words.starts_with(&expected_stores));
+            assert!(words.ends_with(&expected_loads));
+            // In particular the platform x18 is saved/restored, never poisoned.
+            assert!(expected_stores.contains(&aarch64::str64(
+                18,
+                aarch64::REG_SP,
+                ctx.scalar_array_spills[18]
+            )));
+            assert_eq!(ctx.scalar_array_depth, 0);
+            let error = lower_expr_into(
+                &mut emitter,
+                &mut ctx,
+                &Expr::ArrayLit(vec![
+                    Expr::IntLit(42),
+                    Expr::FloatLit(crate::core_ir::FloatVal(1.5)),
+                ]),
+                rd,
+                &HashMap::new(),
+                &mut calls,
+                "test",
+            )
+            .unwrap_err();
+            assert!(error.contains("array return type mismatch"), "{error}");
+            assert_eq!(ctx.scalar_array_depth, 0);
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+mod scalar_array_register_runtime_tests {
+    use super::*;
+
+    #[test]
+    fn jit_scalar_array_literal_preserves_other_gp_registers() {
+        struct NativeModeGuard(bool);
+        impl Drop for NativeModeGuard {
+            fn drop(&mut self) {
+                super::super::TL_NATIVE_MODE.with(|mode| {
+                    mode.replace(self.0);
+                });
+            }
+        }
+        let _mode = NativeModeGuard(super::super::TL_NATIVE_MODE.with(|mode| mode.replace(false)));
+        for rd in [0u8, 1, 7] {
+            let structs = HashMap::new();
+            let strings = HashMap::new();
+            let globals = HashMap::new();
+            let types = HashMap::new();
+            let mut runtime = Vec::new();
+            let mut pending_strings = Vec::new();
+            let mut ctx = LowerCtx::new(
+                &[],
+                &structs,
+                &strings,
+                &globals,
+                &types,
+                &mut runtime,
+                &mut pending_strings,
+                "probe",
+            )
+            .unwrap();
+            for index in 0..ctx.binop_temps.len() {
+                ctx.binop_temps[index] = ctx.alloc_slot();
+            }
+            for _ in 0..19 {
+                let offset = ctx.alloc_slot();
+                ctx.scalar_array_spills.push(offset);
+            }
+            let expected: Vec<_> = (0..19).map(|_| ctx.alloc_slot()).collect();
+            let observed: Vec<_> = (0..19).map(|_| ctx.alloc_slot()).collect();
+            let reserve = u16::try_from(ctx.stack_reserve()).unwrap();
+            assert!(reserve <= 4095);
+            let mut emitter = CodeEmitter::new();
+            emitter.emit_u32(aarch64::stp_pre(aarch64::REG_FP, 30, -16));
+            emitter.emit_u32(aarch64::mov_reg64(aarch64::REG_FP, aarch64::REG_SP));
+            emitter.emit_u32(aarch64::sub_imm64(
+                aarch64::REG_SP,
+                aarch64::REG_SP,
+                reserve,
+            ));
+            // Snapshot the platform register, never poison it.
+            emitter.emit_u32(aarch64::str64(18, aarch64::REG_SP, expected[18]));
+            for reg in 0..18u8 {
+                emitter.emit_insns(&aarch64::load_i64(reg, 1000 + i64::from(reg)));
+                emitter.emit_u32(aarch64::str64(reg, aarch64::REG_SP, expected[reg as usize]));
+            }
+            let mut calls = Vec::new();
+            lower_expr_into(
+                &mut emitter,
+                &mut ctx,
+                &Expr::ArrayLit(vec![Expr::IntLit(42)]),
+                rd,
+                &HashMap::new(),
+                &mut calls,
+                "probe",
+            )
+            .unwrap();
+            assert!(calls.is_empty());
+            assert_eq!(ctx.scalar_array_depth, 0);
+            // Capture every result before checking with scratch x0/x1.
+            for reg in 0..19u8 {
+                emitter.emit_u32(aarch64::str64(reg, aarch64::REG_SP, observed[reg as usize]));
+            }
+            let mut failures = Vec::new();
+            for reg in 0..19u8 {
+                if reg == rd {
+                    continue;
+                }
+                emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, observed[reg as usize]));
+                emitter.emit_u32(aarch64::ldr64(1, aarch64::REG_SP, expected[reg as usize]));
+                emitter.emit_u32(aarch64::cmp_reg64(0, 1));
+                failures.push(emitter.emit_insn(aarch64::b_cond(1, 0))); // NE
+            }
+            emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, observed[rd as usize]));
+            emitter.emit_insns(&aarch64::load_i64(1, 1));
+            emitter.emit_u32(aarch64::cmp_reg64(0, 1));
+            failures.push(emitter.emit_insn(aarch64::b_cond(9, 0))); // LS: null/failure sentinel
+            emitter.emit_u32(aarch64::ldr64(0, 0, 0));
+            emitter.emit_insns(&aarch64::load_i64(1, 42));
+            emitter.emit_u32(aarch64::cmp_reg64(0, 1));
+            failures.push(emitter.emit_insn(aarch64::b_cond(1, 0)));
+            emitter.emit_insns(&aarch64::load_i64(0, 42));
+            let success = emitter.emit_insn(aarch64::b(0));
+            let failed = emitter.len();
+            emitter.emit_insns(&aarch64::load_i64(0, 7));
+            let finish = emitter.len();
+            for site in failures {
+                // All failure branches have the condition encoded in their low bits.
+                let word = u32::from_le_bytes(
+                    emitter.bytes[site as usize..site as usize + 4]
+                        .try_into()
+                        .unwrap(),
+                );
+                emitter.patch_u32(
+                    site,
+                    aarch64::b_cond((word & 15) as u8, failed as i32 - site as i32),
+                );
+            }
+            emitter.patch_u32(success, aarch64::b(finish as i32 - success as i32));
+            super::super::lower_util::emit_epilogue(&mut emitter, u32::from(reserve));
+            let length = emitter.len();
+            let mut jit = crate::jit_runtime::JitRuntime::new();
+            jit.load(&emitter.bytes, &[("probe".into(), 0, length)], &[])
+                .unwrap();
+            assert_eq!(unsafe { jit.invoke("probe", &[]) }, Some(42), "rd={rd}");
+        }
     }
 }
