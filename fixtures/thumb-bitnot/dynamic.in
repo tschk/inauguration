@@ -1,3 +1,5 @@
+fn shift_left(value: Int, count: Int) -> Int { return value << count; }
+fn shift_right(value: Int, count: Int) -> Int { return value >> count; }
 fn read_once() -> Int {
   store32(0x38000004, load32(0x38000004) + 1);
   return load32(0x38000000);
@@ -66,5 +68,20 @@ fn main() -> Int {
   if load32(0x38000004) != 4 {
     return 15;
   }
+  // Parameterized shifts use the target word count mask for all counts.
+  if shift_left(1, 0) != 1 { return 7; }
+  if shift_right(-2147483648, 0) != -2147483648 { return 7; }
+  if shift_left(1, 1) != 2 { return 7; }
+  if shift_right(-2147483648, 1) != -1073741824 { return 7; }
+  if shift_left(1, 31) != -2147483648 { return 7; }
+  if shift_right(-2147483648, 31) != -1 { return 7; }
+  if shift_left(1, 32) != 1 { return 7; }
+  if shift_right(-2147483648, 32) != -2147483648 { return 7; }
+  if shift_left(1, 33) != 2 { return 7; }
+  if shift_right(-2147483648, 33) != -1073741824 { return 7; }
+  if shift_left(1, 64) != 1 { return 7; }
+  if shift_right(-2147483648, 64) != -2147483648 { return 7; }
+  if shift_left(1, -1) != -2147483648 { return 7; }
+  if shift_right(-2147483648, -1) != -1 { return 7; }
   return 42;
 }

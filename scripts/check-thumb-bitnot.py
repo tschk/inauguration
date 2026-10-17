@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Optional Cortex-M33 dynamic bitwise-complement and logical-NOT regression; no compiler build."""
+"""Optional Cortex-M33 dynamic complement, logical-NOT and word-masked shift regression; no compiler build."""
 
 import argparse
 import hashlib
@@ -94,4 +94,4 @@ for profile in ("default", "lean", "harden"):
         assert "PASS dynamic bitnot" in text and "FAIL dynamic bitnot" not in text, text
         results.append({"profile": profile, "form": form, "frontend_hash": report["frontend_hash"]})
 (root / "summary.json").write_text(json.dumps(results, indent=2) + "\n")
-print("PASS: six Thumb runs, dynamic complement and logical-NOT values, single evaluation, skipped branches")
+print("PASS: six Thumb runs, dynamic complement, logical-NOT and word-masked shifts, single evaluation, skipped branches")

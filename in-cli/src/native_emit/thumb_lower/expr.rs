@@ -851,20 +851,16 @@ pub(crate) fn lower_binary(
             emitter.emit_u16(thumb::mov_low(R0, R1));
             emitter.emit_u16(thumb::eors(R0, R2));
         }
-        "<<" => {
-            emitter.emit_u16(thumb::mov_low(R0, R1));
-            emitter.emit_u32_thumb(thumb::lsls_reg(R0, R1, R2));
-        }
-        ">>" => {
-            emitter.emit_u16(thumb::mov_low(R0, R1));
-            emitter.emit_u32_thumb(thumb::asrs_reg(R0, R1, R2));
-        }
-        "lshr" => {
-            // Match target-word shifts: Cortex-M otherwise uses the low byte
-            // and produces zero for counts at least 32.
+        "<<" | ">>" | "lshr" => {
+            // Match native target-word shifts; Cortex-M otherwise uses the
+            // low byte and saturates counts at least 32 instead of wrapping.
             emitter.emit_u16(thumb::movs_imm8(R3, 31));
             emitter.emit_u16(thumb::ands(R2, R3));
-            emitter.emit_u32_thumb(thumb::lsrs_reg(R0, R1, R2));
+            emitter.emit_u32_thumb(match op {
+                "<<" => thumb::lsls_reg(R0, R1, R2),
+                ">>" => thumb::asrs_reg(R0, R1, R2),
+                _ => thumb::lsrs_reg(R0, R1, R2),
+            });
         }
         "/" | "%" | "udiv" | "urem" => {
             lower_checked_div_or_mod(
@@ -1292,28 +1288,43 @@ mod checked_division_tests {
     }
 
     #[test]
-    fn logical_right_shift_uses_lsrs_after_staged_operands() {
+    fn target_word_shifts_mask_counts_after_staging_operands() {
         let functions = HashMap::new();
         let structs = HashMap::new();
-        let mut ctx = LowerCtx::new("shift", &[], &functions, &structs);
-        ctx.scratch_temps = vec![0, 4];
-        let mut emitter = CodeEmitter::new();
-        lower_binary(
-            &mut emitter,
-            &mut ctx,
-            "lshr",
-            &Expr::IntLit(-1),
-            &Expr::IntLit(1),
-            R0,
-            &mut Vec::new(),
-        )
-        .unwrap();
-        let mut shift = CodeEmitter::new();
-        shift.emit_u16(thumb::movs_imm8(R3, 31));
-        shift.emit_u16(thumb::ands(R2, R3));
-        shift.emit_u32_thumb(thumb::lsrs_reg(R0, R1, R2));
-        assert!(emitter.bytes.ends_with(&shift.bytes));
-        assert_eq!(ctx.scratch_depth, 0);
+        for (op, instruction) in [
+            ("<<", thumb::lsls_reg(R0, R1, R2)),
+            (">>", thumb::asrs_reg(R0, R1, R2)),
+            ("lshr", thumb::lsrs_reg(R0, R1, R2)),
+        ] {
+            for dest in [R0, R4] {
+                let mut ctx = LowerCtx::new("shift", &[], &functions, &structs);
+                ctx.scratch_temps = vec![0, 4];
+                let mut emitter = CodeEmitter::new();
+                let mut pending = Vec::new();
+                lower_binary(
+                    &mut emitter,
+                    &mut ctx,
+                    op,
+                    &Expr::IntLit(-84),
+                    &Expr::IntLit(33),
+                    dest,
+                    &mut pending,
+                )
+                .unwrap();
+                let mut shift = CodeEmitter::new();
+                shift.emit_u16(thumb::ldr_sp(R1, 0).unwrap());
+                shift.emit_u16(thumb::ldr_sp(R2, 4).unwrap());
+                shift.emit_u16(thumb::movs_imm8(R3, 31));
+                shift.emit_u16(thumb::ands(R2, R3));
+                shift.emit_u32_thumb(instruction);
+                if dest != R0 {
+                    shift.emit_u16(thumb::mov_low(dest, R0));
+                }
+                assert!(emitter.bytes.ends_with(&shift.bytes), "{op} r{dest}");
+                assert_eq!(ctx.scratch_depth, 0);
+                assert!(pending.is_empty());
+            }
+        }
     }
 }
 
