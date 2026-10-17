@@ -5,6 +5,14 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+mod declarations;
+pub(super) fn validate_declarations(
+    file: &syn::File,
+    catalog: Rc<Catalog>,
+) -> Vec<ResolutionFailure> {
+    declarations::validate(file, catalog)
+}
+
 /// Source-only cfg truth. Unknown flags/features never select a host configuration.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Presence {
@@ -110,9 +118,20 @@ pub(super) fn item_presence(item: &syn::Item) -> Presence {
         syn::Item::Use(item) => &item.attrs,
         _ => return Presence::Active,
     };
+    attrs_presence(attrs)
+}
+fn attrs_presence(attrs: &[syn::Attribute]) -> Presence {
     attrs.iter().fold(Presence::Active, |value, attr| {
         value.and(meta_presence(&attr.meta))
     })
+}
+fn generic_presence(parameter: &syn::GenericParam) -> Presence {
+    let attrs = match parameter {
+        syn::GenericParam::Lifetime(parameter) => &parameter.attrs,
+        syn::GenericParam::Type(parameter) => &parameter.attrs,
+        syn::GenericParam::Const(parameter) => &parameter.attrs,
+    };
+    attrs_presence(attrs)
 }
 
 type Failure = ResolutionFailure;
@@ -131,8 +150,9 @@ enum Binding {
     UnknownImport,
     Duplicate,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Scope {
+    aliases: Vec<syn::Ident>,
     bindings: HashMap<String, Binding>,
     imports: HashMap<String, Vec<Binding>>,
     values: HashMap<String, Binding>,
@@ -166,6 +186,11 @@ impl Scope {
             let presence = item_presence(item);
             if presence == Presence::Inactive {
                 continue;
+            }
+            if presence == Presence::Active
+                && let syn::Item::Type(alias) = item
+            {
+                scope.aliases.push(alias.ident.clone());
             }
             let named = match item {
                 syn::Item::Type(item) => Some((
@@ -293,18 +318,22 @@ impl Scope {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Catalog {
     owns_crate_root: bool,
     modules: HashMap<Vec<String>, Rc<Scope>>,
 }
 impl Catalog {
     pub(super) fn new(file: &syn::File) -> Rc<Self> {
-        Self::with_crate_root(file, true)
+        Self::with_crate_root(file, true, Presence::Active)
     }
     pub(super) fn module_source(file: &syn::File) -> Rc<Self> {
-        Self::with_crate_root(file, false)
+        Self::module_source_with_presence(file, Presence::Active)
     }
-    fn with_crate_root(file: &syn::File, owns_crate_root: bool) -> Rc<Self> {
+    pub(super) fn module_source_with_presence(file: &syn::File, presence: Presence) -> Rc<Self> {
+        Self::with_crate_root(file, false, presence)
+    }
+    fn with_crate_root(file: &syn::File, owns_crate_root: bool, presence: Presence) -> Rc<Self> {
         fn collect(
             items: &[syn::Item],
             module: Vec<String>,
@@ -332,7 +361,12 @@ impl Catalog {
             }
         }
         let mut modules = HashMap::new();
-        collect(&file.items, vec![], &mut modules, false);
+        collect(
+            &file.items,
+            vec![],
+            &mut modules,
+            presence.and(attrs_presence(&file.attrs)) != Presence::Active,
+        );
         Rc::new(Self {
             modules,
             owns_crate_root,
@@ -352,6 +386,12 @@ impl Frame {
             module: vec![],
             locals: vec![],
         }
+    }
+    pub(super) fn source_is_active(&self) -> bool {
+        self.catalog
+            .modules
+            .get(&self.module)
+            .is_some_and(|scope| !scope.conditional)
     }
     pub(super) fn module(&self, name: &str) -> Self {
         let mut module = self.module.clone();
@@ -380,7 +420,12 @@ impl Frame {
     pub(super) fn generics(&self, generics: &syn::Generics) -> Self {
         let mut scope = Scope::default();
         for parameter in generics.type_params() {
-            scope.insert(parameter.ident.to_string(), Binding::Generic);
+            let binding = match attrs_presence(&parameter.attrs) {
+                Presence::Inactive => continue,
+                Presence::Conditional => Binding::Conditional,
+                Presence::Active => Binding::Generic,
+            };
+            scope.insert(parameter.ident.to_string(), binding);
         }
         let mut frame = self.clone();
         frame.locals.push(Rc::new(scope));
@@ -1500,9 +1545,21 @@ pub(super) fn source_type_owned(path: &syn::Path) -> Result<bool, Failure> {
                         NominalObligation::Failure(failure) => return Err(failure),
                     };
                     let generics = &application.generics;
+                    let parameters: Vec<_> = generics
+                        .params
+                        .iter()
+                        .filter(|parameter| generic_presence(parameter) != Presence::Inactive)
+                        .collect();
+                    if parameters
+                        .iter()
+                        .any(|parameter| generic_presence(parameter) == Presence::Conditional)
+                    {
+                        return Err(unsupported(
+                            "nominal generic parameters depend on unresolved cfg predicates",
+                        ));
+                    }
                     if application.unsupported_arguments
-                        || generics
-                            .params
+                        || parameters
                             .iter()
                             .any(|parameter| !matches!(parameter, syn::GenericParam::Type(_)))
                     {
@@ -1510,11 +1567,10 @@ pub(super) fn source_type_owned(path: &syn::Path) -> Result<bool, Failure> {
                             "nominal lifetime/const arguments require source type specialization",
                         ));
                     }
-                    let maximum = generics.type_params().count();
-                    let minimum = generics
-                        .type_params()
-                        .filter(|parameter| parameter.default.is_none())
-                        .count();
+                    let maximum = parameters.len();
+                    let minimum = parameters.iter().filter(|parameter|
+                        matches!(parameter, syn::GenericParam::Type(parameter) if parameter.default.is_none())
+                    ).count();
                     if application.arguments < minimum || application.arguments > maximum {
                         return Err(Failure::Invalid(format!(
                             "nominal type requires {minimum}..={maximum} type arguments, found {}",
@@ -1643,7 +1699,7 @@ mod tests {
     #[test]
     fn ordinary_value_owners_defer_modules_but_keep_owned_alias_obligations() {
         let file = syn::parse_file("mod child;type Unknown=crate::other::Value;type Cycle=Cycle;type Duplicate=u8;type Duplicate=u16;").unwrap();
-        let _scope = Frame::root(Catalog::with_crate_root(&file, false)).enter();
+        let _scope = Frame::root(Catalog::module_source(&file)).enter();
         for owner in ["crate::shared", "child"] {
             let path = syn::parse_str(owner).unwrap();
             assert!(resolve_value_owner(&path).unwrap().is_none(), "{owner}");

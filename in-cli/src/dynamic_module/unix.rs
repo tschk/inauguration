@@ -105,16 +105,50 @@ mod tests {
     use super::*;
     use std::process::Command;
 
+    fn fixture_directory(timestamp: u128) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let directory = std::env::temp_dir().join(format!(
+                "in-dyn-unix-test-{}-{timestamp}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&directory) {
+                Ok(()) => return directory,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create fixture directory: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_directories_are_unique_with_a_shared_clock() {
+        let paths = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| fixture_directory(42)))
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            paths.iter().collect::<std::collections::HashSet<_>>().len(),
+            paths.len()
+        );
+        for path in paths {
+            std::fs::remove_dir(path).unwrap();
+        }
+    }
+
     fn compile_c_fixture(c_src: &str, lib_name: &str) -> std::path::PathBuf {
-        let out_dir = std::env::temp_dir().join(format!(
-            "in-dyn-unix-test-{}-{}",
-            std::process::id(),
+        let out_dir = fixture_directory(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&out_dir).expect("temp dir");
+                .as_nanos(),
+        );
         let lib = out_dir.join(lib_name);
         let src = out_dir.join("src.c");
         std::fs::write(&src, c_src).expect("write src");

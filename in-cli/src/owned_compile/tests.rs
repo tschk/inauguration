@@ -10294,3 +10294,89 @@ fn rust_constant_negation_errors_survive_entry_pruning() {
         fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+fn rust_unused_alias_declarations_refuse_before_entry_pruning() {
+    for source in [
+        "type A=B;type B=A;fn main()->i64{42}",
+        "type Byte=u8;type Byte=u16;fn main()->i64{42}",
+        "fn unused(){fn nested(){type A=A;}}fn main()->i64{42}",
+        "fn unused(){mod child{type A=A;}}fn main()->i64{42}",
+        "fn unused(){let callback=||{type A=A;};}fn main()->i64{42}",
+        "const N:i64={type A=A;42};fn main()->i64{42}",
+        "type A=A;",
+    ] {
+        let path = temp_path("unused-alias-declaration.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                for entry in [None, Some("main")] {
+                    let out = temp_path("unused-alias-declaration-out");
+                    let mut request =
+                        default_request(path.clone(), target, entry, Some(out.clone()));
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(
+                        !report.success && !report.execution_started,
+                        "{source}: {report:?}"
+                    );
+                    assert_eq!(
+                        report.reason_code.as_deref(),
+                        Some("rust-invalid-associated-type"),
+                        "{source}: {report:?}"
+                    );
+                    assert_eq!(report.eval_result, None);
+                    assert_eq!(report.eval_exit_code, None);
+                    assert_eq!(report.artifact_path, None);
+                    assert_eq!(report.executable_path, None);
+                    assert_eq!(report.abi_path, None);
+                    assert!(report.external_invocations.is_empty());
+                    assert!(!out.exists());
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_unused_alias_declarations_preserve_valid_and_deferred_scopes() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "type A=B;type B=u8;fn main()->i64{42}",
+        "fn unused(){{mod same{pub type A=u8;}type X=same::A;}{mod same{pub type A=u16;}type X=same::A;}}fn main()->i64{42}",
+        "type A=u8;fn unused(){type A=u16;mod child{type X=super::A;type Y=self::X;}}fn main()->i64{42}",
+        "#[cfg(any())]mod disabled{type A=A;}fn main()->i64{42}",
+        "#[cfg(feature=\"unknown\")]mod deferred{type A=A;}fn main()->i64{42}",
+        "type A<T>=A<T>;fn main()->i64{42}",
+    ] {
+        let path = temp_path("unused-alias-declaration-valid.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("unused-alias-declaration-valid-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{source}: {report:?}");
+                assert!(report.degradations.is_empty(), "{source}: {report:?}");
+                assert!(report.external_invocations.is_empty());
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started);
+                    assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{source}: {report:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}

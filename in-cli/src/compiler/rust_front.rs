@@ -78,11 +78,35 @@ fn parse_rust_source_unit(
     } else {
         type_aliases::Catalog::module_source(&file)
     };
+    let failures = type_aliases::validate_declarations(&file, catalog.clone());
     let frame = type_aliases::Frame::root(catalog);
     let _aliases = frame.enter();
     let mut artifact = lower_file_items_at(&file, base_dir, owns_crate_root)?;
+    retain_alias_declaration_failures(&mut artifact, failures);
     artifact.boundary = extract_boundary_module(&file, module_id);
     Ok(artifact)
+}
+
+fn retain_alias_declaration_failures(
+    artifact: &mut CompileArtifact,
+    failures: Vec<crate::core_ir::type_proofs::ResolutionFailure>,
+) {
+    let failure = failures
+        .into_iter()
+        .filter(crate::core_ir::type_proofs::ResolutionFailure::is_invalid)
+        .fold(None, |previous, failure| {
+            crate::core_ir::type_proofs::prefer_failure(previous, Some(failure))
+        });
+    if let Some(failure) = failure {
+        // This private typed site is rejected before entry pruning or executable emission.
+        artifact.semantic.decls.push(Decl::Global {
+            name: "#rust-source-alias-validation".into(),
+            typ: failure.typ(),
+            init: None,
+            mutable: false,
+            constant_value: false,
+        });
+    }
 }
 
 fn lower_file_items_at(
@@ -708,7 +732,7 @@ fn lower_file_items_at_visited(
     let mut decls = Vec::new();
     let mut access = function_access::FunctionAccessFacts::collect(file);
     let mut unary_methods = unary_methods::collect(file);
-    let mut external_modules: Vec<String> = Vec::new();
+    let mut external_modules: Vec<(String, type_aliases::Presence)> = Vec::new();
     let mut uses: Vec<syn::ItemUse> = Vec::new();
 
     for item in &file.items {
@@ -877,7 +901,13 @@ fn lower_file_items_at_visited(
                     }
                 } else {
                     // External module: record candidate path for parallel parsing
-                    external_modules.push(m.ident.to_string());
+                    let presence =
+                        if type_aliases::current().is_some_and(|frame| !frame.source_is_active()) {
+                            type_aliases::Presence::Conditional
+                        } else {
+                            type_aliases::item_presence(item)
+                        };
+                    external_modules.push((m.ident.to_string(), presence));
                 }
             }
             _ => {}
@@ -890,10 +920,10 @@ fn lower_file_items_at_visited(
         std::thread::scope(|scope| -> Result<(), String> {
             let handles: Vec<_> = external_modules
                 .into_iter()
-                .map(|name| {
+                .map(|(name, presence)| {
                     let mut ancestors = visited.clone();
                     scope.spawn(move || {
-                        load_external_module(base_dir, &name, &mut ancestors, depth + 1)
+                        load_external_module(base_dir, &name, &mut ancestors, depth + 1, presence)
                     })
                 })
                 .collect();
@@ -913,8 +943,8 @@ fn lower_file_items_at_visited(
             }
             Ok(())
         })?;
-    } else if let Some(name) = external_modules.first()
-        && let Some(inner) = load_external_module(base_dir, name, visited, depth + 1)?
+    } else if let Some((name, presence)) = external_modules.first()
+        && let Some(inner) = load_external_module(base_dir, name, visited, depth + 1, *presence)?
     {
         access.merge(inner.access);
         let inner = inner.artifact;
@@ -939,6 +969,7 @@ fn load_external_module(
     name: &str,
     visited: &mut HashSet<PathBuf>,
     depth: u32,
+    presence: type_aliases::Presence,
 ) -> Result<Option<LoweredRustArtifact>, String> {
     let Some(path) = [
         base_dir.join(format!("{name}.rs")),
@@ -956,10 +987,13 @@ fn load_external_module(
         .map_err(|error| format!("read Rust module {}: {error}", path.display()))?;
     let file = syn::parse_file(&source)
         .map_err(|error| format!("parse Rust module {}: {error}", path.display()))?;
-    let frame = type_aliases::Frame::root(type_aliases::Catalog::module_source(&file));
+    let catalog = type_aliases::Catalog::module_source_with_presence(&file, presence);
+    let failures = type_aliases::validate_declarations(&file, catalog.clone());
+    let frame = type_aliases::Frame::root(catalog);
     let _aliases = frame.enter();
-    let artifact =
+    let mut artifact =
         lower_file_items_at_visited(&file, path.parent().unwrap_or(base_dir), visited, depth)?;
+    retain_alias_declaration_failures(&mut artifact.artifact, failures);
     let mut access = function_access::FunctionAccessFacts::default();
     access.merge_prefixed(name, artifact.access);
     Ok(Some(LoweredRustArtifact {
@@ -4153,6 +4187,104 @@ fn lower_expr_with_types_inner(
 mod tests {
     use super::*;
     use crate::boundary_ir::{BoundaryRepr, BoundaryTransfer};
+
+    #[test]
+    fn unused_alias_declaration_failures_survive_source_artifact_assembly() {
+        for source in [
+            "type A=B;type B=A;fn main()->i64{42}",
+            "fn unused(){fn nested(){type A=A;}}fn main()->i64{42}",
+            "fn unused(){mod child{type A=A;}}fn main()->i64{42}",
+            "type A=u8;type A=u16;",
+        ] {
+            let artifact = parse_rust_artifact_source(source, "aliases").unwrap();
+            let error = crate::owned_compile::reject_invalid_type_proofs(&artifact.semantic)
+                .expect_err(source);
+            assert!(
+                error.contains("type alias") || error.contains("duplicate type binding"),
+                "{source}: {error}"
+            );
+        }
+        let artifact = parse_rust_artifact_source(
+            "#[cfg(any())]mod disabled{type A=A;}type A=u8;fn main()->i64{42}",
+            "aliases",
+        )
+        .unwrap();
+        assert!(crate::owned_compile::reject_invalid_type_proofs(&artifact.semantic).is_ok());
+        assert!(!artifact.semantic.decls.iter().any(|decl| matches!(decl, Decl::Global { name, .. } if name == "#rust-source-alias-validation")));
+    }
+
+    #[test]
+    fn unused_alias_declaration_failures_survive_parallel_external_modules() {
+        let directory =
+            std::env::temp_dir().join(format!("in-unused-alias-proof-{}", std::process::id()));
+        std::fs::create_dir_all(directory.join("nested")).unwrap();
+        std::fs::write(directory.join("bad.rs"), "type A=B;type B=A;").unwrap();
+        std::fs::write(directory.join("nested/mod.rs"), "pub mod child;").unwrap();
+        std::fs::write(directory.join("nested/child.rs"), "fn unused(){type A=A;}").unwrap();
+        let artifact = parse_rust_artifact_source_with_dir(
+            "mod bad;mod nested;fn main()->i64{42}",
+            "aliases",
+            &directory,
+        )
+        .unwrap();
+        let proofs =
+            crate::typecheck::TypeChecker::new().typed_proof_nodes(&artifact.semantic.decls);
+        assert!(
+            proofs
+                .get("bad::#rust-source-alias-validation")
+                .is_some_and(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+            "{proofs:?}"
+        );
+        assert!(
+            proofs
+                .get("nested::child::#rust-source-alias-validation")
+                .is_some_and(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+            "{proofs:?}"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn conditional_external_alias_declarations_preserve_all_ancestor_presence() {
+        let directory =
+            std::env::temp_dir().join(format!("in-conditional-alias-proof-{}", std::process::id()));
+        std::fs::create_dir_all(directory.join("nested")).unwrap();
+        std::fs::write(directory.join("child.rs"), "type A=A;").unwrap();
+        std::fs::write(directory.join("nested/mod.rs"), "pub mod child;").unwrap();
+        std::fs::write(directory.join("nested/child.rs"), "type A=A;").unwrap();
+        std::fs::write(directory.join("good.rs"), "pub type A=u8;").unwrap();
+        for source in [
+            "#[cfg(feature=\"unknown\")]mod child;fn main()->i64{42}",
+            "#![cfg(feature=\"unknown\")]mod child;fn main()->i64{42}",
+            "#[cfg(feature=\"unknown\")]mod parent{mod child;}fn main()->i64{42}",
+            "#[cfg(feature=\"unknown\")]mod nested;mod good;fn main()->i64{42}",
+        ] {
+            let artifact =
+                parse_rust_artifact_source_with_dir(source, "aliases", &directory).unwrap();
+            assert!(
+                crate::owned_compile::reject_invalid_type_proofs(&artifact.semantic).is_ok(),
+                "{source}: {:?}",
+                artifact.semantic
+            );
+        }
+        std::fs::write(directory.join("child.rs"), "#![cfg(any())]type A=A;").unwrap();
+        let artifact = parse_rust_artifact_source_with_dir(
+            "mod child;fn main()->i64{42}",
+            "aliases",
+            &directory,
+        )
+        .unwrap();
+        assert!(crate::owned_compile::reject_invalid_type_proofs(&artifact.semantic).is_ok());
+        std::fs::write(directory.join("child.rs"), "type A=A;").unwrap();
+        let artifact = parse_rust_artifact_source_with_dir(
+            "mod child;fn main()->i64{42}",
+            "aliases",
+            &directory,
+        )
+        .unwrap();
+        assert!(crate::owned_compile::reject_invalid_type_proofs(&artifact.semantic).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn block_value_imports_resolve_calls_without_losing_tail_bindings() {
