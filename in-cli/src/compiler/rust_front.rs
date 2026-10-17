@@ -15,6 +15,9 @@ use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use syn::parse::Parser;
 
+mod function_access;
+mod imports;
+mod type_aliases;
 mod unary_methods;
 
 type RustLayoutSpecs = HashMap<String, (BoundaryRepr, Vec<(String, syn::Type)>)>;
@@ -24,13 +27,27 @@ pub fn parse_rust_file(path: &Path) -> Result<UnifiedModule, String> {
 }
 
 pub fn parse_rust_artifact(path: &Path) -> Result<CompileArtifact, String> {
+    parse_rust_path_artifact(path, true)
+}
+
+/// Parse a lazily discovered module without claiming that its source file owns `crate::`.
+pub(crate) fn parse_rust_module_artifact(path: &Path) -> Result<CompileArtifact, String> {
+    parse_rust_path_artifact(path, false)
+}
+
+fn parse_rust_path_artifact(path: &Path, owns_crate_root: bool) -> Result<CompileArtifact, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let module_id = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("rust")
         .to_string();
-    parse_rust_artifact_source_with_dir(&src, &module_id, path.parent().unwrap_or(Path::new(".")))
+    parse_rust_source_unit(
+        &src,
+        &module_id,
+        path.parent().unwrap_or(Path::new(".")),
+        owns_crate_root,
+    )
 }
 
 pub fn parse_rust_source(src: &str) -> Result<UnifiedModule, String> {
@@ -46,14 +63,37 @@ pub fn parse_rust_artifact_source_with_dir(
     module_id: &str,
     base_dir: &Path,
 ) -> Result<CompileArtifact, String> {
+    parse_rust_source_unit(src, module_id, base_dir, true)
+}
+
+fn parse_rust_source_unit(
+    src: &str,
+    module_id: &str,
+    base_dir: &Path,
+    owns_crate_root: bool,
+) -> Result<CompileArtifact, String> {
     let file = syn::parse_file(src).map_err(|e| format!("rust parse failed: {e}"))?;
-    let mut artifact = lower_file_items_at(&file, base_dir)?;
+    let catalog = if owns_crate_root {
+        type_aliases::Catalog::new(&file)
+    } else {
+        type_aliases::Catalog::module_source(&file)
+    };
+    let frame = type_aliases::Frame::root(catalog);
+    let _aliases = frame.enter();
+    let mut artifact = lower_file_items_at(&file, base_dir, owns_crate_root)?;
     artifact.boundary = extract_boundary_module(&file, module_id);
     Ok(artifact)
 }
 
-fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<CompileArtifact, String> {
-    let mut artifact = lower_file_items_at_visited(file, base_dir, &mut HashSet::new(), 0)?;
+fn lower_file_items_at(
+    file: &syn::File,
+    base_dir: &Path,
+    owns_crate_root: bool,
+) -> Result<CompileArtifact, String> {
+    let LoweredRustArtifact {
+        mut artifact,
+        access,
+    } = lower_file_items_at_visited(file, base_dir, &mut HashSet::new(), 0)?;
     let module = &mut artifact.semantic;
     let references = module
         .decls
@@ -79,22 +119,85 @@ fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<CompileArtif
         })
         .collect();
     rewrite_global_references(&mut module.decls, &references, file);
-    crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
-        if let Expr::Call { callee, .. } = expr
-            && let Expr::Ident(name) = callee.as_ref()
-            && name.rsplit_once("::").is_some_and(|(owner, member)| {
-                crate::core_ir::rust_integer_type_name(owner).is_some()
-                    && matches!(member, "MIN" | "MAX" | "BITS")
-            })
-        {
-            **callee = Expr::Ident(
-                crate::core_ir::type_proofs::ResolutionFailure::Invalid(format!(
-                    "integer constant `{name}` is not callable"
-                ))
-                .symbol(),
-            );
+    let function_names = crate::core_bindings::module_names(&module.decls);
+    for declaration in &mut module.decls {
+        let caller = match declaration {
+            Decl::Function { name, .. } | Decl::Global { name, .. } => name.clone(),
+            _ => String::new(),
+        };
+        let mut referenced = HashSet::new();
+        match declaration {
+            Decl::Function { body, .. } => {
+                crate::core_bindings::reserve_body(body, &mut referenced)
+            }
+            Decl::Global {
+                init: Some(init), ..
+            } => crate::core_bindings::reserve_expr(init, &mut referenced),
+            _ => {}
         }
-    });
+        let failures = referenced
+            .iter()
+            .filter_map(|target| {
+                access
+                    .validate(target, &caller)
+                    .map(|failure| (target.clone(), failure.symbol()))
+            })
+            .collect::<HashMap<_, _>>();
+        if !failures.is_empty() {
+            match declaration {
+                Decl::Function { params, body, .. } => {
+                    crate::core_bindings::normalize_function_with_references(
+                        params,
+                        body,
+                        &function_names,
+                        &failures,
+                    );
+                }
+                Decl::Global {
+                    init: Some(init), ..
+                } => {
+                    crate::core_bindings::normalize_initializer_with_references(
+                        init,
+                        &function_names,
+                        &failures,
+                    );
+                }
+                _ => {}
+            }
+        }
+        crate::core_opt::map_decl_exprs_mut(std::slice::from_mut(declaration), &mut |expr| {
+            if let Expr::Ident(name) = expr {
+                let target = name.strip_prefix("crate::").unwrap_or(name);
+                if name.contains("::")
+                    && (owns_crate_root || !name.starts_with("crate::"))
+                    && let Some(failure) = access.validate(target, &caller)
+                {
+                    *name = failure.symbol();
+                }
+            }
+            if let Expr::Ident(name) = expr
+                && let Some(canonical) = name.strip_prefix("crate::")
+                && owns_crate_root
+                && access.contains_function(canonical)
+            {
+                *name = canonical.to_owned();
+            }
+            if let Expr::Call { callee, .. } = expr
+                && let Expr::Ident(name) = callee.as_ref()
+                && name.rsplit_once("::").is_some_and(|(owner, member)| {
+                    crate::core_ir::rust_integer_type_name(owner).is_some()
+                        && matches!(member, "MIN" | "MAX" | "BITS")
+                })
+            {
+                **callee = Expr::Ident(
+                    crate::core_ir::type_proofs::ResolutionFailure::Invalid(format!(
+                        "integer constant `{name}` is not callable"
+                    ))
+                    .symbol(),
+                );
+            }
+        });
+    }
     register_explicit_vector_constructors(module);
     refuse_static_array_value_uses(module);
     crate::typecheck::rust_integers::mark_declaration_origins(&mut module.decls);
@@ -103,6 +206,8 @@ fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<CompileArtif
 }
 
 fn register_explicit_vector_constructors(module: &mut UnifiedModule) {
+    // Scoped aliases were normalized at source lowering; do not reinterpret generic leftovers.
+    let _aliases = type_aliases::suspend();
     let names = crate::core_bindings::module_names(&module.decls);
     let shadowed = module.decls.iter().any(|decl| {
         matches!(decl, Decl::Struct {name, ..} | Decl::Class {name, ..}
@@ -468,6 +573,9 @@ fn reject_integer_primitive_shadowing(items: &[syn::Item]) -> Result<(), String>
         Ok(())
     }
     for item in items {
+        if type_aliases::item_presence(item) == type_aliases::Presence::Inactive {
+            continue;
+        }
         match item {
             syn::Item::ExternCrate(value) => {
                 let alias = value
@@ -578,12 +686,17 @@ fn reject_integer_primitive_shadowing(items: &[syn::Item]) -> Result<(), String>
     Ok(())
 }
 
+struct LoweredRustArtifact {
+    artifact: CompileArtifact,
+    access: function_access::FunctionAccessFacts,
+}
+
 fn lower_file_items_at_visited(
     file: &syn::File,
     base_dir: &Path,
     visited: &mut HashSet<PathBuf>,
     depth: u32,
-) -> Result<CompileArtifact, String> {
+) -> Result<LoweredRustArtifact, String> {
     if depth > 8 {
         return Err("rust front: module nest limit".into());
     }
@@ -591,11 +704,24 @@ fn lower_file_items_at_visited(
         PrimitiveRootScope::new(primitive_root_bindings(file.items.iter()), false);
     reject_integer_primitive_shadowing(&file.items)?;
     let mut decls = Vec::new();
+    let mut access = function_access::FunctionAccessFacts::collect(file);
     let mut unary_methods = unary_methods::collect(file);
     let mut external_modules: Vec<String> = Vec::new();
     let mut uses: Vec<syn::ItemUse> = Vec::new();
 
     for item in &file.items {
+        if type_aliases::item_presence(item) == type_aliases::Presence::Inactive {
+            continue;
+        }
+        let generics = match item {
+            syn::Item::Struct(item) => Some(&item.generics),
+            syn::Item::Enum(item) => Some(&item.generics),
+            syn::Item::Union(item) => Some(&item.generics),
+            syn::Item::Trait(item) => Some(&item.generics),
+            syn::Item::TraitAlias(item) => Some(&item.generics),
+            _ => None,
+        };
+        let _type_parameters = generics.and_then(type_aliases::generic_scope);
         match item {
             syn::Item::Struct(s) => {
                 let mut declaration = Decl::Struct {
@@ -634,6 +760,13 @@ fn lower_file_items_at_visited(
                 }
             }
             syn::Item::Type(t) => {
+                let ident = &t.ident;
+                let path: syn::Path = syn::parse_quote!(#ident);
+                // Only proven primitive aliases disappear; nominal declarations keep existing layout ownership.
+                if matches!(type_aliases::resolve(&path), Ok(Some(Typ::Named(name))) if crate::core_ir::rust_integer_type_name(&name).is_some())
+                {
+                    continue;
+                }
                 decls.push(Decl::Struct {
                     name: t.ident.to_string(),
                     fields: vec![],
@@ -724,10 +857,16 @@ fn lower_file_items_at_visited(
                             attrs: vec![],
                             items: items.clone(),
                         };
+                        let _aliases = type_aliases::current()
+                            .map(|frame| frame.module(&m.ident.to_string()).enter());
                         let inner =
                             lower_file_items_at_visited(&inner_file, base_dir, visited, depth + 1)?;
-                        let inner =
-                            unary_methods::prefix(inner, &m.ident.to_string(), &inner_file)?;
+                        access.merge_prefixed(&m.ident.to_string(), inner.access);
+                        let inner = unary_methods::prefix(
+                            inner.artifact,
+                            &m.ident.to_string(),
+                            &inner_file,
+                        )?;
                         crate::boundary_ir::merge_unary_method_bindings(
                             &mut unary_methods,
                             inner.unary_methods,
@@ -761,6 +900,8 @@ fn lower_file_items_at_visited(
                     .join()
                     .map_err(|_| "Rust external module parser panicked".to_string())??;
                 if let Some(inner) = parsed {
+                    access.merge(inner.access);
+                    let inner = inner.artifact;
                     crate::boundary_ir::merge_unary_method_bindings(
                         &mut unary_methods,
                         inner.unary_methods,
@@ -773,6 +914,8 @@ fn lower_file_items_at_visited(
     } else if let Some(name) = external_modules.first()
         && let Some(inner) = load_external_module(base_dir, name, visited, depth + 1)?
     {
+        access.merge(inner.access);
+        let inner = inner.artifact;
         crate::boundary_ir::merge_unary_method_bindings(&mut unary_methods, inner.unary_methods)?;
         decls.extend(inner.semantic.decls);
     }
@@ -786,7 +929,7 @@ fn lower_file_items_at_visited(
     atomics::normalize(&mut decls, file);
     let mut artifact = CompileArtifact::from_semantic(UnifiedModule::new(decls));
     artifact.unary_methods = unary_methods;
-    Ok(artifact)
+    Ok(LoweredRustArtifact { artifact, access })
 }
 
 fn load_external_module(
@@ -794,7 +937,7 @@ fn load_external_module(
     name: &str,
     visited: &mut HashSet<PathBuf>,
     depth: u32,
-) -> Result<Option<CompileArtifact>, String> {
+) -> Result<Option<LoweredRustArtifact>, String> {
     let Some(path) = [
         base_dir.join(format!("{name}.rs")),
         base_dir.join(name).join("mod.rs"),
@@ -811,9 +954,16 @@ fn load_external_module(
         .map_err(|error| format!("read Rust module {}: {error}", path.display()))?;
     let file = syn::parse_file(&source)
         .map_err(|error| format!("parse Rust module {}: {error}", path.display()))?;
+    let frame = type_aliases::Frame::root(type_aliases::Catalog::module_source(&file));
+    let _aliases = frame.enter();
     let artifact =
         lower_file_items_at_visited(&file, path.parent().unwrap_or(base_dir), visited, depth)?;
-    unary_methods::prefix(artifact, name, &file).map(Some)
+    let mut access = function_access::FunctionAccessFacts::default();
+    access.merge_prefixed(name, artifact.access);
+    Ok(Some(LoweredRustArtifact {
+        artifact: unary_methods::prefix(artifact.artifact, name, &file)?,
+        access,
+    }))
 }
 
 fn prefix_module_decls(mut decls: Vec<Decl>, module: &str, file: &syn::File) -> Vec<Decl> {
@@ -1089,26 +1239,41 @@ fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str, file: &syn::File, ro
     {
         return;
     }
-    let Some((target, params, ret)) = decls.iter().find_map(|d| match d {
+    let Some((target, params, ret, type_params, source_template)) = decls.iter().find_map(|d| match d {
         Decl::Function {
-            name, params, ret, ..
+            name, params, ret, type_params, body,
         } if name == full || name.ends_with(&format!("::{short}")) => {
-            Some((name.clone(), params.clone(), ret.clone()))
+            let owned = name == full && body.iter().any(|stmt|
+                matches!(stmt, Stmt::Expr(Expr::Unary { op, .. }) if op == crate::core_ir::rust_generics::TEMPLATE));
+            Some((name.clone(), params.clone(), ret.clone(), type_params.clone(), owned))
         }
         _ => None,
     }) else {
         return;
     };
     let args: Vec<Expr> = params.iter().map(|(n, _)| Expr::Ident(n.clone())).collect();
+    let callee = Expr::Ident(target);
+    let mut body = Vec::new();
+    if source_template && !type_params.is_empty() {
+        body.push(Stmt::Expr(Expr::Unary {
+            op: crate::core_ir::rust_generics::ALIAS.into(),
+            expr: Box::new(callee.clone()),
+        }));
+        body.push(Stmt::Expr(Expr::Unary {
+            op: crate::core_ir::rust_generics::TEMPLATE.into(),
+            expr: Box::new(Expr::UnitLit),
+        }));
+    }
+    body.push(Stmt::Return(Some(Expr::Call {
+        callee: Box::new(callee),
+        args,
+    })));
     decls.push(Decl::Function {
         name: short.to_string(),
         params,
         ret,
-        body: vec![Stmt::Return(Some(Expr::Call {
-            callee: Box::new(Expr::Ident(target)),
-            args,
-        }))],
-        type_params: vec![],
+        body,
+        type_params,
     });
 }
 
@@ -1118,6 +1283,9 @@ fn extract_boundary_module(file: &syn::File, module_id: &str) -> Option<Boundary
     let mut layout_specs: RustLayoutSpecs = HashMap::new();
 
     for item in &file.items {
+        if type_aliases::item_presence(item) == type_aliases::Presence::Inactive {
+            continue;
+        }
         if let syn::Item::Struct(s) = item
             && let Some(repr) = repr_from_attrs(&s.attrs)
         {
@@ -1135,6 +1303,9 @@ fn extract_boundary_module(file: &syn::File, module_id: &str) -> Option<Boundary
     }
 
     for item in &file.items {
+        if type_aliases::item_presence(item) == type_aliases::Presence::Inactive {
+            continue;
+        }
         if let syn::Item::Fn(f) = item
             && has_no_mangle(&f.attrs)
             && is_extern_c(&f.sig)
@@ -1233,6 +1404,23 @@ struct AbiType {
 fn abi_type_for(ty: &syn::Type, layout_specs: &RustLayoutSpecs, packed: bool) -> Option<AbiType> {
     match ty {
         syn::Type::Path(tp) => {
+            if tp.qself.is_none()
+                && let Some(Typ::Named(name)) = type_aliases::resolve(&tp.path).ok()?
+                && let Some(kind) = crate::core_ir::rust_integer_type_name(&name)
+            {
+                let (name, size) = match kind {
+                    "i8" => ("i8", 1),
+                    "u8" => ("u8", 1),
+                    "i16" => ("i16", 2),
+                    "u16" => ("u16", 2),
+                    "i32" => ("i32", 4),
+                    "u32" => ("u32", 4),
+                    "i64" | "isize" => ("i64", 8),
+                    "u64" | "usize" => ("u64", 8),
+                    _ => return None,
+                };
+                return Some(scalar_abi(name, size, size));
+            }
             if let Some(seg) = tp.path.segments.last() {
                 let ident = seg.ident.to_string();
                 match ident.as_str() {
@@ -1497,6 +1685,9 @@ fn primitive_root_bindings<'a>(items: impl Iterator<Item = &'a syn::Item>) -> Ha
     }
     let mut roots = HashSet::new();
     for item in items {
+        if type_aliases::item_presence(item) == type_aliases::Presence::Inactive {
+            continue;
+        }
         match item {
             syn::Item::Mod(value) => binding(&value.ident, &mut roots),
             syn::Item::Struct(value) => binding(&value.ident, &mut roots),
@@ -1635,12 +1826,14 @@ fn resolve_impl_type(
 }
 
 fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
+    let _type_parameters = type_aliases::generic_scope(&i.generics);
     let _primitive_roots = PrimitiveRootScope::new(primitive_root_generics(&i.generics), true);
     // Retain generic arguments so distinct impl receivers retain distinct identities.
     let self_type = compact_rust_tokens(&i.self_ty);
     let mut decls = Vec::new();
     for item in &i.items {
         if let syn::ImplItem::Fn(method) = item {
+            let _type_parameters = type_aliases::generic_scope(&method.sig.generics);
             let _primitive_roots =
                 PrimitiveRootScope::new(primitive_root_generics(&method.sig.generics), true);
             let f = method.clone();
@@ -1878,6 +2071,7 @@ fn retain_generic_scope(decl: &mut Decl, parameters: Vec<String>) {
 }
 
 fn lower_fn_with_types(f: syn::ItemFn, local_types: &mut HashMap<String, String>) -> Decl {
+    let _type_parameters = type_aliases::generic_scope(&f.sig.generics);
     let _primitive_roots = PrimitiveRootScope::new(primitive_root_generics(&f.sig.generics), true);
     let name = f.sig.ident.to_string();
     let params = f
@@ -1900,7 +2094,45 @@ fn lower_fn_with_types(f: syn::ItemFn, local_types: &mut HashMap<String, String>
         syn::ReturnType::Default => Typ::Void,
         syn::ReturnType::Type(_, ty) => map_type(ty),
     };
-    let body = lower_block_with_types(&f.block, local_types);
+    let mut body = lower_block_with_types(&f.block, local_types);
+    if !f.sig.generics.params.is_empty() {
+        body.insert(
+            0,
+            Stmt::Expr(Expr::Unary {
+                op: crate::core_ir::rust_generics::TEMPLATE.into(),
+                expr: Box::new(Expr::UnitLit),
+            }),
+        );
+    }
+    if f.sig.generics.where_clause.is_some()
+        || f.sig
+            .generics
+            .params
+            .iter()
+            .any(|parameter| match parameter {
+                syn::GenericParam::Type(parameter) => {
+                    !parameter.bounds.is_empty() || parameter.default.is_some()
+                }
+                _ => true,
+            })
+    {
+        body.insert(
+            0,
+            Stmt::Expr(if f.sig.generics.params.is_empty() {
+                Expr::Ident(
+                    crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                        "concrete where-clause obligations require constraint resolution".into(),
+                    )
+                    .symbol(),
+                )
+            } else {
+                Expr::Unary {
+                    op: crate::core_ir::rust_generics::CONSTRAINTS.into(),
+                    expr: Box::new(Expr::UnitLit),
+                }
+            }),
+        );
+    }
     let mut declaration = Decl::Function {
         name,
         params,
@@ -1967,6 +2199,118 @@ fn nominal_path_name(path: &syn::Path) -> String {
         .join("::")
 }
 
+fn generic_argument_type(
+    typ: &syn::Type,
+) -> Result<Typ, crate::core_ir::type_proofs::ResolutionFailure> {
+    use crate::core_ir::type_proofs::ResolutionFailure::Unsupported;
+    match typ {
+        syn::Type::Path(path) if path.qself.is_none() => {
+            let mapped = map_type(typ);
+            if let Some(failure) = crate::core_ir::type_proofs::failure_in_type(&mapped) {
+                return Err(failure);
+            }
+            for segment in &path.path.segments {
+                if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                    for argument in &arguments.args {
+                        match argument {
+                            syn::GenericArgument::Type(typ) => {
+                                generic_argument_type(typ)?;
+                            }
+                            _ => {
+                                return Err(Unsupported(
+                                    "generic type arguments require owned type identities".into(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            let owned = type_aliases::source_type_owned(&path.path)?;
+            let spelling = path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            let builtin = !ambiguous_primitive_root(&path.path)
+                && (matches!(
+                    spelling.as_str(),
+                    "bool"
+                        | "f32"
+                        | "f64"
+                        | "str"
+                        | "String"
+                        | "std::string::String"
+                        | "alloc::string::String"
+                        | "Vec"
+                        | "std::vec::Vec"
+                        | "alloc::vec::Vec"
+                ) || matches!(&mapped, Typ::Generic(_))
+                    || matches!(&mapped, Typ::Named(name) if crate::core_ir::rust_integer_type_name(name).is_some()));
+            if builtin {
+                let supplied =
+                    path.path
+                        .segments
+                        .last()
+                        .map_or(0, |segment| match &segment.arguments {
+                            syn::PathArguments::AngleBracketed(arguments) => arguments.args.len(),
+                            _ => 0,
+                        });
+                let expected = usize::from(matches!(mapped, Typ::Vector(_)));
+                if supplied != expected {
+                    return Err(crate::core_ir::type_proofs::ResolutionFailure::Invalid(
+                        format!(
+                            "type argument `{spelling}` expects {expected} type arguments, found {supplied}"
+                        ),
+                    ));
+                }
+            }
+            if !builtin && !owned {
+                return Err(Unsupported(format!(
+                    "explicit type argument `{}` is not owned by source",
+                    compact_rust_tokens(typ)
+                )));
+            }
+            Ok(mapped)
+        }
+        syn::Type::Reference(reference) => {
+            if reference
+                .lifetime
+                .as_ref()
+                .is_some_and(|lifetime| lifetime.ident != "static" && lifetime.ident != "_")
+            {
+                return Err(Unsupported(
+                    "explicit type argument lifetime is not resolved".into(),
+                ));
+            }
+            generic_argument_type(&reference.elem)?;
+            Ok(map_type(typ))
+        }
+        syn::Type::Array(array) => {
+            generic_argument_type(&array.elem)?;
+            if !matches!(&array.len, syn::Expr::Lit(literal) if matches!(literal.lit, syn::Lit::Int(_)))
+            {
+                return Err(Unsupported(
+                    "explicit array length requires const resolution".into(),
+                ));
+            }
+            Ok(map_type(typ))
+        }
+        syn::Type::Tuple(tuple) => {
+            for element in &tuple.elems {
+                generic_argument_type(element)?;
+            }
+            Ok(map_type(typ))
+        }
+        syn::Type::Paren(paren) => generic_argument_type(&paren.elem),
+        syn::Type::Group(group) => generic_argument_type(&group.elem),
+        _ => Err(Unsupported(
+            "explicit type argument requires a supported source type".into(),
+        )),
+    }
+}
+
 fn rust_integer_path(path: &syn::Path) -> Option<&str> {
     if path
         .segments
@@ -2011,8 +2355,7 @@ fn rust_integer_constant(path: &syn::Path, call_target: bool) -> Option<String> 
     let member = owner.segments.pop()?.into_value();
     let known_constant = matches!(member.arguments, syn::PathArguments::None)
         && matches!(member.ident.to_string().as_str(), "MIN" | "MAX" | "BITS");
-    let kind = rust_integer_path(&owner)?;
-    if ambiguous_primitive_root(&owner) {
+    if rust_integer_path(&owner).is_some() && ambiguous_primitive_root(&owner) {
         return Some(
             crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
                 "shadowed primitive root in `{}` requires namespace resolution",
@@ -2021,6 +2364,27 @@ fn rust_integer_constant(path: &syn::Path, call_target: bool) -> Option<String> 
             .symbol(),
         );
     }
+    let known_wrapping = call_target
+        && matches!(member.arguments, syn::PathArguments::None)
+        && crate::typecheck::rust_integers::wrapping_operator(&member.ident.to_string()).is_some();
+    let owner_type = type_aliases::resolve_value_owner(&owner);
+    let resolved = match owner_type {
+        Ok(Some(Typ::Named(name))) => Some(name),
+        Ok(Some(Typ::Generic(_))) => {
+            return Some(
+                crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                    "generic associated value requires monomorphization".into(),
+                )
+                .symbol(),
+            );
+        }
+        Err(proof) => return Some(proof.symbol()),
+        _ => None,
+    };
+    let kind = resolved
+        .as_deref()
+        .and_then(crate::core_ir::rust_integer_type_name)
+        .or_else(|| rust_integer_path(&owner))?;
     if owner.leading_colon.is_some() && owner.segments.len() == 1 {
         return Some(
             crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
@@ -2038,9 +2402,7 @@ fn rust_integer_constant(path: &syn::Path, call_target: bool) -> Option<String> 
             .symbol(),
         );
     }
-    let known_wrapping = call_target
-        && matches!(member.arguments, syn::PathArguments::None)
-        && crate::typecheck::rust_integers::wrapping_operator(&member.ident.to_string()).is_some();
+
     if !known_constant && !known_wrapping {
         return Some(
             crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
@@ -2051,6 +2413,48 @@ fn rust_integer_constant(path: &syn::Path, call_target: bool) -> Option<String> 
         );
     }
     Some(format!("#rust-integer-{kind}::{}", member.ident))
+}
+
+// Resolve explicit vector type arguments while their source lexical scope is still active.
+fn scoped_vector_path(
+    path: &syn::Path,
+) -> Result<syn::Path, crate::core_ir::type_proofs::ResolutionFailure> {
+    let mut result = path.clone();
+    let owner = path
+        .segments
+        .iter()
+        .map(|part| part.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    if !matches!(
+        owner.as_str(),
+        "Vec::new"
+            | "Vec::with_capacity"
+            | "std::vec::Vec::new"
+            | "std::vec::Vec::with_capacity"
+            | "alloc::vec::Vec::new"
+            | "alloc::vec::Vec::with_capacity"
+    ) {
+        return Ok(result);
+    }
+    for segment in &mut result.segments {
+        if let syn::PathArguments::AngleBracketed(arguments) = &mut segment.arguments {
+            for argument in &mut arguments.args {
+                if let syn::GenericArgument::Type(syn::Type::Path(ty)) = argument
+                    && ty.qself.is_none()
+                    && let Some(Typ::Named(name)) = type_aliases::resolve(&ty.path)?
+                    && let Some(kind) = crate::core_ir::rust_integer_type_name(&name)
+                {
+                    ty.path = syn::parse_str(kind).map_err(|_| {
+                        crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                            "unresolved primitive vector element".into(),
+                        )
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn rust_integer_literal(value: i64, suffix: &str) -> Expr {
@@ -2088,6 +2492,11 @@ fn map_type(ty: &syn::Type) -> Typ {
             .typ()
         }
         syn::Type::Path(tp) => {
+            match type_aliases::resolve(&tp.path) {
+                Ok(Some(typ)) => return typ,
+                Err(proof) => return proof.typ(),
+                Ok(None) => {}
+            }
             let last_segment = tp.path.segments.last();
             let last = last_segment.map(|s| s.ident.to_string());
             match last.as_deref() {
@@ -2206,6 +2615,7 @@ fn lower_match_arm_value(expr: &syn::Expr, local_types: &HashMap<String, String>
 }
 
 fn lower_block_value(block: &syn::Block, local_types: &HashMap<String, String>) -> Expr {
+    let _type_aliases = type_aliases::block_scope(block);
     let _primitive_roots = PrimitiveRootScope::for_block(block);
     let mut inner = local_types.clone();
     let mut prefix = block.clone();
@@ -2216,7 +2626,7 @@ fn lower_block_value(block: &syn::Block, local_types: &HashMap<String, String>) 
         },
         _ => None,
     };
-    let mut body = lower_block_inner_with_types(&prefix, false, &mut inner);
+    let mut body = lower_block_inner_with_types_mode(&prefix, false, &mut inner, false);
     let result = match tail {
         Some(syn::Expr::Return(value)) => {
             lower_return_expr(value.expr.as_deref(), &mut body, &mut inner);
@@ -2234,7 +2644,91 @@ fn lower_block_value(block: &syn::Block, local_types: &HashMap<String, String>) 
         Some(value) => Some(Box::new(lower_expr_with_types(&value, &mut inner))),
         None => None,
     };
-    Expr::Block { body, result }
+    let mut value = Expr::Block { body, result };
+    let references = block_import_references(block);
+    if !references.is_empty() {
+        let names = references
+            .keys()
+            .chain(references.values())
+            .cloned()
+            .collect();
+        crate::core_bindings::normalize_initializer_with_references(
+            &mut value,
+            &names,
+            &references,
+        );
+    }
+    value
+}
+
+/// Resolve block imports in the value namespace; type aliases remain in their own catalog.
+fn block_import_references(block: &syn::Block) -> HashMap<String, String> {
+    let mut leaves = HashMap::new();
+    for statement in &block.stmts {
+        let syn::Stmt::Item(item @ syn::Item::Use(_)) = statement else {
+            continue;
+        };
+        if type_aliases::item_presence(item) == type_aliases::Presence::Inactive {
+            continue;
+        }
+        let syn::Item::Use(item) = item else {
+            unreachable!()
+        };
+        imports::import_leaves(&item.tree, &[], item.leading_colon.is_some(), &mut leaves);
+    }
+    fn target(
+        name: &str,
+        leaves: &HashMap<String, imports::Import>,
+        visiting: &mut HashSet<String>,
+    ) -> Result<(Vec<String>, bool), crate::core_ir::type_proofs::ResolutionFailure> {
+        use crate::core_ir::type_proofs::ResolutionFailure;
+        if !visiting.insert(name.to_owned()) {
+            return Err(ResolutionFailure::Unsupported(format!(
+                "cyclic block callable import `{name}`"
+            )));
+        }
+        let (mut parts, mut absolute) =
+            leaves.get(name).and_then(Clone::clone).ok_or_else(|| {
+                ResolutionFailure::Unsupported(format!("ambiguous block callable import `{name}`"))
+            })?;
+        if !absolute && parts.len() > 1 {
+            // A projected path selects a module in the type namespace. A same-named
+            // value import must not redirect it through an unrelated function.
+            let prefix: syn::Path =
+                syn::parse_str(&parts[..parts.len() - 1].join("::")).map_err(|_| {
+                    ResolutionFailure::Unsupported("unresolved block import prefix".into())
+                })?;
+            if let Some(mut module) = type_aliases::source_module_path(&prefix)? {
+                module.push(parts.pop().unwrap());
+                parts = module;
+            }
+        } else if !absolute
+            && let Some(first) = parts.first()
+            && leaves.contains_key(first)
+        {
+            let (prefix, root) = target(first, leaves, visiting)?;
+            parts = prefix;
+            absolute = root;
+        }
+        visiting.remove(name);
+        Ok((parts, absolute))
+    }
+    leaves
+        .keys()
+        .filter_map(|name| {
+            let path: syn::Path = syn::parse_str(name).ok()?;
+            // The catalog checks source visibility and namespace proof before expansion.
+            let resolved = type_aliases::resolve(&path)
+                .and_then(|_| target(name, &leaves, &mut HashSet::new()));
+            let target = match resolved {
+                Err(failure) => failure.symbol(),
+                Ok((parts, absolute)) => {
+                    format!("{}{}", if absolute { "::" } else { "" }, parts.join("::"))
+                }
+            };
+            Some((name.clone(), target))
+        })
+        .collect()
 }
 
 fn lower_block_with_types(
@@ -2277,6 +2771,16 @@ fn lower_block_inner_with_types(
     wrap_implicit_return: bool,
     local_types: &mut HashMap<String, String>,
 ) -> Vec<Stmt> {
+    lower_block_inner_with_types_mode(block, wrap_implicit_return, local_types, true)
+}
+
+fn lower_block_inner_with_types_mode(
+    block: &syn::Block,
+    wrap_implicit_return: bool,
+    local_types: &mut HashMap<String, String>,
+    resolve_imports: bool,
+) -> Vec<Stmt> {
+    let _type_aliases = type_aliases::block_scope(block);
     let _primitive_roots = PrimitiveRootScope::for_block(block);
     let depth = BLOCK_DEPTH.with(|d| {
         let n = d.get();
@@ -2287,7 +2791,23 @@ fn lower_block_inner_with_types(
         BLOCK_DEPTH.with(|d| d.set(depth));
         return vec![];
     }
-    let out = lower_block_inner_with_types_go(block, wrap_implicit_return, local_types);
+    let mut out = lower_block_inner_with_types_go(block, wrap_implicit_return, local_types);
+    if resolve_imports {
+        let references = block_import_references(block);
+        if !references.is_empty() {
+            let names = references
+                .keys()
+                .chain(references.values())
+                .cloned()
+                .collect();
+            crate::core_bindings::normalize_function_with_references(
+                &mut [],
+                &mut out,
+                &names,
+                &references,
+            );
+        }
+    }
     BLOCK_DEPTH.with(|d| d.set(depth));
     out
 }
@@ -2981,7 +3501,32 @@ fn lower_expr_with_types_inner(
             _ => Expr::Ident(l.lit.to_token_stream().to_string()),
         },
         syn::Expr::Path(p) => {
-            let path = compact_rust_tokens(&p.path);
+            let scoped_path = match scoped_vector_path(&p.path) {
+                Ok(path) => path,
+                Err(proof) => return Expr::Ident(proof.symbol()),
+            };
+            if p.qself.is_none()
+                && let Some(last) = scoped_path.segments.last()
+                && let syn::PathArguments::AngleBracketed(arguments) = &last.arguments
+            {
+                let types = arguments.args.iter().map(|argument| match argument {
+                    syn::GenericArgument::Type(typ) => generic_argument_type(typ),
+                    _ => Err(crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                        "explicit lifetime and const arguments require generic constraint resolution".into(),
+                    )),
+                }).collect::<Result<Vec<_>, _>>();
+                let types = match types {
+                    Ok(types) => types,
+                    Err(failure) => return Expr::Ident(failure.symbol()),
+                };
+                let mut owner = scoped_path.clone();
+                owner.segments.last_mut().unwrap().arguments = syn::PathArguments::None;
+                return Expr::Unary {
+                    op: crate::core_ir::rust_generics::arguments(&types),
+                    expr: Box::new(Expr::Ident(compact_rust_tokens(&owner))),
+                };
+            }
+            let path = compact_rust_tokens(&scoped_path);
             Expr::Ident(if let Some(receiver) = &p.qself {
                 // Match the receiver/trait identity used for impl declarations, including UFCS.
                 format!("{}::{path}", compact_rust_tokens(&receiver.ty))
@@ -3466,6 +4011,381 @@ mod tests {
     use crate::boundary_ir::{BoundaryRepr, BoundaryTransfer};
 
     #[test]
+    fn block_value_imports_resolve_calls_without_losing_tail_bindings() {
+        let module = parse_rust_source(
+            "mod values{pub fn Byte()->i64{7}}type Byte=u8;fn main()->i64{{use values::Byte;let answer=Byte();if answer==7{Byte::wrapping_add(255,43) as i64}else{0}}}",
+        ).unwrap();
+        let mut calls = Vec::new();
+        for declaration in &module.decls {
+            if let Decl::Function { name, body, .. } = declaration {
+                if name == "main" {
+                    let mut expression = Expr::Block {
+                        body: body.clone(),
+                        result: None,
+                    };
+                    crate::core_opt::map_expr_mut(&mut expression, &mut |value| {
+                        if let Expr::Call { callee, .. } = value {
+                            if let Expr::Ident(name) = callee.as_ref() {
+                                calls.push(name.clone());
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        assert!(calls.iter().any(|name| name == "values::Byte"), "{calls:?}");
+        assert!(!calls.iter().any(|name| name == "Byte"), "{calls:?}");
+        assert!(
+            crate::typecheck::TypeChecker::new()
+                .typed_proof_nodes(&module.decls)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn conditional_source_function_calls_retain_unsupported_proof() {
+        let module = parse_rust_source(
+            "#[cfg(feature=\"unknown\")]fn helper()->i64{42}fn main()->i64{helper()}",
+        )
+        .unwrap();
+        let proofs = crate::typecheck::TypeChecker::new().typed_proof_nodes(&module.decls);
+        assert!(!proofs.is_empty(), "{module:?}");
+        assert!(
+            proofs.iter().all(|(_, proof)| !proof.is_invalid()),
+            "{proofs:?}"
+        );
+    }
+
+    #[test]
+    fn source_function_access_preserves_private_descendant_calls_and_local_values() {
+        for source in [
+            "mod hidden{fn helper()->i64{42}pub mod child{pub fn answer()->i64{crate::hidden::helper()}}}fn main()->i64{hidden::child::answer()}",
+            "fn helper()->i64{1}fn main()->i64{let helper=42;helper}",
+        ] {
+            let module = parse_rust_source(source).unwrap();
+            assert!(
+                crate::typecheck::TypeChecker::new()
+                    .typed_proof_nodes(&module.decls)
+                    .is_empty(),
+                "{module:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_crate_root_resolves_exact_function_paths_without_rebinding_module_units() {
+        let source = "mod shared{pub fn helper()->i64{42}}fn main()->i64{crate::shared::helper()}";
+        let mut root = parse_rust_source(source).unwrap();
+        let mut calls = Vec::new();
+        crate::core_opt::map_decl_exprs_mut(&mut root.decls, &mut |expr| {
+            if let Expr::Call { callee, .. } = expr
+                && let Expr::Ident(name) = callee.as_ref()
+            {
+                calls.push(name.clone());
+            }
+        });
+        assert_eq!(calls, ["shared::helper"]);
+        let isolated = parse_rust_source_unit(source, "module", Path::new("."), false).unwrap();
+        assert!(format!("{:?}", isolated.semantic).contains("crate::shared::helper"));
+    }
+
+    #[test]
+    fn lazily_parsed_module_calls_keep_dependency_paths_and_type_owner_proofs() {
+        let directory = std::env::temp_dir().join(format!("in-value-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("alpha.rs");
+        std::fs::write(&path, "pub fn answer()->i64{crate::shared::helper()}").unwrap();
+        let mut module = parse_rust_module_artifact(&path).unwrap().semantic;
+        let mut calls = Vec::new();
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            if let Expr::Call { callee, .. } = expr {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    calls.push(name.clone());
+                }
+            }
+        });
+        assert_eq!(calls, vec!["crate::shared::helper"]);
+        std::fs::write(&path, "type Unknown=crate::other::Value;type Cycle=Cycle;type Duplicate=u8;type Duplicate=u16;pub fn a()->i64{Unknown::ordinary()}pub fn b()->i64{Cycle::ordinary()}pub fn c()->i64{Duplicate::ordinary()}pub fn d()->i64{u64::rotate_left(1,2) as i64}").unwrap();
+        let mut module = parse_rust_module_artifact(&path).unwrap().semantic;
+        let mut proofs = Vec::new();
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            if let Expr::Call { callee, .. } = expr {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    if let Some(proof) = crate::core_ir::type_proofs::decode(name) {
+                        proofs.push(proof);
+                    }
+                }
+            }
+        });
+        assert_eq!(proofs.len(), 4, "{proofs:?}");
+        assert_eq!(proofs.iter().filter(|proof| proof.is_invalid()).count(), 2);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn block_callable_prefixes_use_module_not_value_namespace() {
+        for source in [
+            "mod values{pub fn answer()->i64{42}}mod functions{pub fn values(){}}fn main()->i64{{use functions::values;use values::answer as Second;Second()}}",
+            "mod values{pub fn answer()->i64{42}}fn main()->i64{{use values as First;use First as Alias;use Alias::answer as Second;Second()}}",
+        ] {
+            let module = parse_rust_source(source).unwrap();
+            let Decl::Function { body, .. } = module.decls.iter().find(|declaration| {
+                matches!(declaration, Decl::Function { name, .. } if name == "main")
+            }).unwrap() else { panic!("main") };
+            let mut expression = Expr::Block {
+                body: body.clone(),
+                result: None,
+            };
+            let mut calls = Vec::new();
+            crate::core_opt::map_expr_mut(&mut expression, &mut |value| {
+                if let Expr::Call { callee, .. } = value {
+                    if let Expr::Ident(name) = callee.as_ref() {
+                        calls.push(name.clone());
+                    }
+                }
+            });
+            assert_eq!(calls, vec!["values::answer"], "{source}");
+        }
+    }
+
+    #[test]
+    fn block_callable_import_chains_resolve_before_value_rewriting() {
+        let source = "mod values{pub fn answer()->i64{42}}fn First()->i64{7}fn main()->i64{use values::answer as First;use First as Second;Second()}";
+        let module = parse_rust_source(source).unwrap();
+        let Decl::Function { body, .. } = module
+            .decls
+            .iter()
+            .find(
+                |declaration| matches!(declaration, Decl::Function { name, .. } if name == "main"),
+            )
+            .unwrap()
+        else {
+            panic!("main")
+        };
+        let mut expression = Expr::Block {
+            body: body.clone(),
+            result: None,
+        };
+        let mut calls = Vec::new();
+        crate::core_opt::map_expr_mut(&mut expression, &mut |value| {
+            if let Expr::Call { callee, .. } = value {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    calls.push(name.clone());
+                }
+            }
+        });
+        assert_eq!(calls, vec!["values::answer"]);
+        let absolute: syn::Block = syn::parse_quote!({
+            use ::values::answer as First;
+            use First as Second;
+        });
+        assert_eq!(
+            block_import_references(&absolute)["Second"],
+            "::values::answer"
+        );
+        let cycle: syn::Block = syn::parse_quote!({
+            use First as Second;
+            use Second as First;
+        });
+        let references = block_import_references(&cycle);
+        assert!(
+            references
+                .values()
+                .all(|name| { crate::core_ir::type_proofs::decode(name).is_some() })
+        );
+        assert!(
+            crate::typecheck::TypeChecker::new()
+                .typed_proof_nodes(&module.decls)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn block_callable_imports_retain_private_target_failures() {
+        let module = parse_rust_source(
+            "mod values{fn Byte()->i64{7}}fn main()->i64{{use values::Byte;Byte()}}",
+        )
+        .unwrap();
+        let proofs = crate::typecheck::TypeChecker::new().typed_proof_nodes(&module.decls);
+        assert!(
+            proofs.values().any(|proof| proof.is_invalid()),
+            "{proofs:?}"
+        );
+    }
+
+    #[test]
+    fn block_import_rewriting_obeys_local_shadowing_and_nested_scope() {
+        let source: syn::Block = syn::parse_quote!({
+            use values::Byte;
+            let Byte = 9;
+            Byte
+        });
+        let value = lower_block_value(&source, &HashMap::new());
+        let Expr::Block {
+            body,
+            result: Some(result),
+        } = value
+        else {
+            panic!("block value")
+        };
+        let Stmt::Let(name, _, _) = &body[0] else {
+            panic!("local binding")
+        };
+        assert_eq!(result.as_ref(), &Expr::Ident(name.clone()));
+        assert_ne!(name, "Byte");
+        let sibling: syn::Block = syn::parse_quote!({ Byte() });
+        let sibling = lower_block_value(&sibling, &HashMap::new());
+        assert!(format!("{sibling:?}").contains("Byte"));
+        assert!(!format!("{sibling:?}").contains("values::Byte"));
+        let closure: syn::Block = syn::parse_quote!({
+            use values::Byte;
+            let callback = |Byte: i64| Byte;
+            callback(9)
+        });
+        let closure = lower_block_value(&closure, &HashMap::new());
+        let Expr::Block { body, .. } = closure else {
+            panic!("closure block")
+        };
+        let Stmt::Let(_, _, Expr::Closure { params, body, .. }) = &body[0] else {
+            panic!("closure binding")
+        };
+        assert_eq!(
+            body,
+            &vec![Stmt::Return(Some(Expr::Ident(params[0].0.clone())))]
+        );
+        assert_ne!(params[0].0, "Byte");
+    }
+
+    #[test]
+    fn known_cfg_aliases_and_value_namespace_imports_preserve_source_integer_facts() {
+        for source in [
+            "#[cfg(any())]type Byte=u16;#[cfg(not(any()))]type Byte=u8;fn main()->i64{if Byte::wrapping_add(255u8,1u8)==0u8{42}else{7}}",
+            "mod values{pub type Byte=u16;}#[cfg(any())]use values::Byte;type Byte=u8;fn main()->i64{if Byte::MAX==255u8{42}else{7}}",
+            "mod values{pub fn Byte()->i64{7}}use values::Byte;type Byte=u8;fn main()->i64{if Byte::wrapping_add(255u8,1u8)==0u8 && Byte()==7{42}else{7}}",
+            "mod values{pub fn Byte()->i64{7}}type Byte=u8;fn main()->i64{use crate::values::Byte;if Byte::MAX==255u8 && Byte()==7{42}else{7}}",
+        ] {
+            let module = parse_rust_source(source).unwrap();
+            let module =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &module);
+            let proofs = crate::typecheck::TypeChecker::new().typed_proof_nodes(&module.decls);
+            assert!(proofs.is_empty(), "{source}: {proofs:?}");
+        }
+        let module = parse_rust_source(
+            "#[cfg(any())]mod disabled{type A=A;}type Byte=u8;fn main()->Byte{Byte::MAX}",
+        )
+        .unwrap();
+        assert!(
+            !module
+                .decls
+                .iter()
+                .any(|decl| matches!(decl,Decl::Struct{name,..} if name.starts_with("disabled::")))
+        );
+    }
+
+    #[test]
+    fn external_module_imports_do_not_claim_an_independent_crate_root() {
+        let directory =
+            std::env::temp_dir().join(format!("in-alias-module-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("algorithm.rs"), "pub struct Algorithm;").unwrap();
+        let consumer = "use crate::Algorithm;pub fn from(value:Algorithm)->i64{42}";
+        let consumer_path = directory.join("consumer.rs");
+        std::fs::write(&consumer_path, consumer).unwrap();
+        let root = "mod algorithm;mod consumer;pub use algorithm::Algorithm;fn main()->i64{42}";
+        let artifact = parse_rust_artifact_source_with_dir(root, "root", &directory).unwrap();
+        let proofs =
+            crate::typecheck::TypeChecker::new().typed_proof_nodes(&artifact.semantic.decls);
+        assert!(!proofs.is_empty());
+        assert!(
+            proofs.values().all(|proof| !proof.is_invalid()),
+            "{proofs:?}"
+        );
+        let isolated = parse_rust_module_artifact(&consumer_path).unwrap();
+        let isolated_proofs =
+            crate::typecheck::TypeChecker::new().typed_proof_nodes(&isolated.semantic.decls);
+        assert!(
+            isolated_proofs
+                .values()
+                .any(|proof| proof.message().contains("crate root is outside")),
+            "{isolated_proofs:?}"
+        );
+        assert!(isolated_proofs.values().all(|proof| !proof.is_invalid()));
+        let rooted =
+            parse_rust_source("type A=crate::B;type B=A;fn main()->i64{let value:A;42}").unwrap();
+        assert!(
+            crate::typecheck::TypeChecker::new()
+                .typed_proof_nodes(&rooted.decls)
+                .values()
+                .any(|proof| proof.is_invalid())
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn primitive_aliases_share_annotation_and_value_identity_without_fake_structs() {
+        let module = parse_rust_source("type Byte=Next;type Next=u8;fn main()->Byte{let value:Byte;Byte::wrapping_add(Byte::MAX,43u8)}").unwrap();
+        assert!(
+            !module
+                .decls
+                .iter()
+                .any(|decl| matches!(decl,Decl::Struct{name,..} if name=="Byte"||name=="Next"))
+        );
+        let Decl::Function { ret, body, .. } = &module.decls[0] else {
+            panic!()
+        };
+        assert_eq!(ret, &Typ::Named("#rust-integer-u8".into()));
+        assert!(matches!(&body[0],Stmt::Declare(_,Typ::Named(name)) if name=="#rust-integer-u8"));
+        let mut calls = Vec::new();
+        crate::core_opt::map_decl_exprs_mut(&mut module.clone().decls, &mut |expr| {
+            if let Expr::Ident(name) = expr {
+                calls.push(name.clone());
+            }
+        });
+        assert!(
+            calls
+                .iter()
+                .any(|name| name == "#rust-integer-u8::wrapping_add")
+        );
+        assert!(calls.iter().any(|name| name == "#rust-integer-u8::MAX"));
+    }
+    #[test]
+    fn used_alias_cycles_stay_on_real_uninitialized_declarations() {
+        let module =
+            parse_rust_source("type A=B;type B=A;fn main()->i64{let unused:A;42}").unwrap();
+        let declaration = module
+            .decls
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Function { body, .. } => Some(&body[0]),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            matches!(declaration,Stmt::Declare(_,Typ::Named(name)) if matches!(crate::core_ir::type_proofs::decode(name),Some(crate::core_ir::type_proofs::ResolutionFailure::Invalid(_))))
+        );
+    }
+    #[test]
+    fn generic_vector_type_arguments_do_not_rebind_to_file_aliases_in_postpass() {
+        let module=parse_rust_source("type Byte=u8;fn generic<Byte>(){Vec::<Byte>::new();}fn concrete(){Vec::<Byte>::new();}").unwrap();
+        let mut identities = Vec::new();
+        crate::core_opt::map_decl_exprs_mut(&mut module.clone().decls, &mut |expr| {
+            if let Expr::Ident(name) = expr {
+                identities.push(name.clone());
+            }
+        });
+        assert!(
+            identities
+                .iter()
+                .any(|name| name.contains("Vec::<Byte>::new")),
+            "{identities:?}"
+        );
+        assert!(
+            !identities
+                .iter()
+                .any(|name| name.contains("Vec::<Byte>::new") && name.contains("u8"))
+        );
+    }
+    #[test]
     fn terminal_result_errors_do_not_add_void_returns() {
         let module = parse_rust_source("fn fail()->Result<i64,i64> { Err(1) }").unwrap();
         let Decl::Function { body, .. } = &module.decls[0] else {
@@ -3670,6 +4590,32 @@ fn main() -> Result<i64, i64> {
             Some(Stmt::Let(_, Some(Typ::Vector(elem)), Expr::ArrayLit(items)))
                 if **elem == Typ::Named("Item".into()) && items.len() == 1
         ));
+    }
+
+    #[test]
+    fn primitive_aliases_preserve_source_boundary_widths_and_signatures() {
+        let direct = parse_rust_artifact_source(
+            "#[repr(C)]struct Row{first:u8,second:u8}#[no_mangle]extern \"C\" fn byte(value:u8)->u8{value}",
+            "alias-boundary",
+        ).unwrap().boundary.unwrap();
+        let aliased = parse_rust_artifact_source(
+            "type Byte=Next;type Next=core::primitive::u8;#[repr(C)]struct Row{first:u8,second:Byte}#[no_mangle]extern \"C\" fn byte(value:Byte)->Byte{value}",
+            "alias-boundary",
+        ).unwrap().boundary.unwrap();
+        assert_eq!(direct.layout_hash, aliased.layout_hash);
+        assert_eq!(
+            direct.symbols[0].signature_hash,
+            aliased.symbols[0].signature_hash
+        );
+        let row = &aliased.layouts[0];
+        assert_eq!((row.size, row.align), (2, 1));
+        assert_eq!(
+            row.fields
+                .iter()
+                .map(|field| field.offset)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 
     #[test]
@@ -4345,7 +5291,7 @@ fn main() {
         }
     }
     #[test]
-    fn nested_nominal_prefixing_preserves_lexical_scope_and_crate_paths() {
+    fn nested_nominal_prefixing_resolves_only_known_root_paths() {
         let module = parse_rust_source("mod outer{pub struct Parent{value:i64} mod inner{fn invalid()->Parent{Parent{value:0}} fn absolute()->i64{crate::root()}}} fn root()->i64{42}").unwrap();
         let Decl::Function { ret, .. } = module
             .decls
@@ -4365,7 +5311,7 @@ fn main() {
             unreachable!()
         };
         assert!(
-            matches!(body.last(), Some(Stmt::Return(Some(Expr::Call{callee,..}))) if matches!(callee.as_ref(),Expr::Ident(name) if name=="crate::root")),
+            matches!(body.last(), Some(Stmt::Return(Some(Expr::Call{callee,..}))) if matches!(callee.as_ref(),Expr::Ident(name) if name=="root")),
             "{body:?}"
         );
     }

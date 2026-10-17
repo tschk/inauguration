@@ -53,6 +53,46 @@ pub(crate) fn decode(name: &str) -> Option<ResolutionFailure> {
         "malformed private Rust associated type proof".into(),
     ))
 }
+/// Pick a stable diagnostic while preserving definite invalidity over unsupported cases.
+pub(crate) fn prefer_failure(
+    left: Option<ResolutionFailure>,
+    right: Option<ResolutionFailure>,
+) -> Option<ResolutionFailure> {
+    match (left, right) {
+        (None, value) | (value, None) => value,
+        (Some(left), Some(right)) => {
+            if right.is_invalid() && !left.is_invalid()
+                || right.is_invalid() == left.is_invalid() && right.message() < left.message()
+            {
+                Some(right)
+            } else {
+                Some(left)
+            }
+        }
+    }
+}
+
+/// Inspect the same recursive private tuple/reference carriers as the presence scan.
+pub(crate) fn failure_in_type(value: &Typ) -> Option<ResolutionFailure> {
+    match value {
+        Typ::Named(name) => {
+            let mut failure = decode(name);
+            if let Some(reference) = super::rust_references::decode(name) {
+                failure = prefer_failure(failure, failure_in_type(&reference.referent));
+                failure = prefer_failure(failure, failure_in_type(&reference.runtime));
+            }
+            if let Some(fields) = super::tuples::fields(name) {
+                for (_, typ) in fields {
+                    failure = prefer_failure(failure, failure_in_type(&typ));
+                }
+            }
+            failure
+        }
+        Typ::Array(item) | Typ::Vector(item) => failure_in_type(item),
+        _ => None,
+    }
+}
+
 /// Allocation-free for ordinary scalar types; only existing encoded tuple/ref
 /// leaves need decoding. This presence scan is not type inference or validation.
 pub(crate) fn present(decls: &[super::Decl]) -> bool {
@@ -95,6 +135,13 @@ pub(crate) fn present(decls: &[super::Decl]) -> bool {
     }
     fn expr(value: &Expr) -> bool {
         match value {
+            Expr::Unary { op, .. }
+                if super::rust_generics::decode_arguments(op).is_some_and(|types| {
+                    super::rust_generics::argument_failure(&types).is_some()
+                }) =>
+            {
+                return true;
+            }
             Expr::Ident(name) if decode(name).is_some() => return true,
             Expr::StructInit { name, .. } if named(name) => return true,
             Expr::Closure {

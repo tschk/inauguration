@@ -93,6 +93,7 @@ pub(crate) fn qualify_module_decls(decls: &mut [Decl], module: &str) {
         }
         let type_name = |name: &str| resolve(name, &scope, root, &types).map(Typ::Named);
         let names = NominalNames {
+            generic_type: None,
             type_name: &type_name,
             value_name: &|_| None,
             constructors: true,
@@ -199,6 +200,7 @@ fn references(
         .collect()
 }
 struct NominalNames<'a> {
+    generic_type: Option<&'a dyn Fn(&str) -> Option<Typ>>,
     type_name: &'a dyn Fn(&str) -> Option<Typ>,
     value_name: &'a dyn Fn(&str) -> Option<String>,
     constructors: bool,
@@ -212,6 +214,7 @@ pub(crate) fn rewrite_nominal_names(
     resolve_value: &impl Fn(&str) -> Option<String>,
 ) {
     let names = NominalNames {
+        generic_type: None,
         type_name: &|name| resolve_type(name).map(Typ::Named),
         value_name: resolve_value,
         constructors: true,
@@ -225,6 +228,7 @@ pub(crate) fn rewrite_nominal_names(
 /// Declaration, member and value names are preserved.
 pub(crate) fn rewrite_named_types(decls: &mut [Decl], resolve_type: &impl Fn(&str) -> Option<Typ>) {
     let names = NominalNames {
+        generic_type: None,
         type_name: resolve_type,
         value_name: &|_| None,
         constructors: true,
@@ -240,6 +244,7 @@ pub(crate) fn rewrite_type_annotations(
     resolve_type: &impl Fn(&str) -> Option<Typ>,
 ) {
     let names = NominalNames {
+        generic_type: None,
         type_name: resolve_type,
         value_name: &|_| None,
         constructors: false,
@@ -248,8 +253,29 @@ pub(crate) fn rewrite_type_annotations(
         declaration(decl, &names, &HashSet::new());
     }
 }
+/// Substitute free generic type parameters using the shared annotation walker.
+/// The caller must clear the selected outer declaration's type_params first;
+/// generic parameters still declared on nested declarations continue to shadow bindings.
+pub(crate) fn substitute_type_parameters(decl: &mut Decl, bindings: &HashMap<String, Typ>) {
+    let generic_type = |name: &str| bindings.get(name).cloned();
+    let names = NominalNames {
+        generic_type: Some(&generic_type),
+        type_name: &|_| None,
+        value_name: &|_| None,
+        constructors: true,
+    };
+    declaration(decl, &names, &HashSet::new());
+}
+
 fn typ(value: &mut Typ, names: &NominalNames<'_>, generics: &HashSet<String>) {
     match value {
+        Typ::Generic(name) if !generics.contains(name) => {
+            if let Some(resolve) = names.generic_type
+                && let Some(target) = resolve(name)
+            {
+                *value = target;
+            }
+        }
         Typ::Named(name) if !generics.contains(name) => {
             if let Some(mut reference) = crate::core_ir::rust_references::decode(name) {
                 if let Some(target) = (names.type_name)(name) {
@@ -308,6 +334,14 @@ fn pattern(source: &mut String, names: &NominalNames<'_>, generics: &HashSet<Str
 }
 fn expr(value: &mut Expr, names: &NominalNames<'_>, generics: &HashSet<String>) {
     match value {
+        Expr::Unary { op, .. } => {
+            if let Some(mut arguments) = crate::core_ir::rust_generics::decode_arguments(op) {
+                for argument in &mut arguments {
+                    typ(argument, names, generics);
+                }
+                *op = crate::core_ir::rust_generics::arguments(&arguments);
+            }
+        }
         Expr::Ident(name) => {
             if let Some(target) = (names.value_name)(name) {
                 *name = target;
@@ -882,6 +916,7 @@ mod tests {
         pattern(
             &mut source,
             &NominalNames {
+                generic_type: None,
                 type_name: &|name| (name == "Pair").then(|| Typ::Named("dep::Pair".into())),
                 value_name: &|_| None,
                 constructors: true,
@@ -1175,5 +1210,110 @@ mod declaration_annotation_tests {
         assert!(
             matches!(&body[0], Stmt::Declare(name, Typ::Array(item)) if name == "Self::Output" && **item == Typ::Int)
         );
+    }
+}
+
+#[cfg(test)]
+mod generic_substitution_tests {
+    use super::*;
+    fn function(typ: Typ, type_params: Vec<String>) -> Decl {
+        Decl::Function {
+            name: "T".into(),
+            params: vec![("T".into(), typ.clone())],
+            ret: typ.clone(),
+            body: vec![
+                Stmt::Declare("declared".into(), typ.clone()),
+                Stmt::Let("local".into(), Some(typ), Expr::Ident("T".into())),
+            ],
+            type_params,
+        }
+    }
+    #[test]
+    fn generic_substitution_recurses_through_metadata_and_preserves_value_identity() {
+        use crate::core_ir::rust_references::{self, ReferenceType};
+        let generic = Typ::Generic("T".into());
+        let concrete = Typ::Named("#rust-integer-u16".into());
+        let shape = |leaf: Typ| {
+            crate::core_ir::tuples::typ(&[
+                Typ::Array(Box::new(leaf.clone())),
+                Typ::Vector(Box::new(rust_references::typ(ReferenceType {
+                    mutable: true,
+                    referent: leaf.clone(),
+                    runtime: leaf,
+                }))),
+                Typ::Named("T".into()),
+            ])
+        };
+        let mut actual = function(shape(generic), vec![]);
+        substitute_type_parameters(
+            &mut actual,
+            &HashMap::from([("T".into(), concrete.clone())]),
+        );
+        assert_eq!(actual, function(shape(concrete), vec![]));
+    }
+    #[test]
+    fn explicit_generic_argument_metadata_uses_existing_type_and_value_walkers() {
+        let mut actual = function(Typ::Int, vec![]);
+        let Decl::Function { body, .. } = &mut actual else {
+            panic!("function")
+        };
+        body.push(Stmt::Expr(Expr::Unary {
+            op: crate::core_ir::rust_generics::arguments(&[
+                Typ::Generic("T".into()),
+                Typ::Named("Row".into()),
+            ]),
+            expr: Box::new(Expr::Ident("callee".into())),
+        }));
+        substitute_type_parameters(&mut actual, &HashMap::from([("T".into(), Typ::Bool)]));
+        rewrite_named_types(std::slice::from_mut(&mut actual), &|name| {
+            (name == "Row").then(|| Typ::Named("module::Row".into()))
+        });
+        let Decl::Function { body, .. } = actual else {
+            panic!("function")
+        };
+        let Stmt::Expr(Expr::Unary { op, expr }) = body.last().unwrap() else {
+            panic!("metadata")
+        };
+        assert_eq!(
+            crate::core_ir::rust_generics::decode_arguments(op),
+            Some(vec![Typ::Bool, Typ::Named("module::Row".into())])
+        );
+        assert_eq!(expr.as_ref(), &Expr::Ident("callee".into()));
+    }
+
+    #[test]
+    fn declared_outer_and_nested_method_generics_shadow_substitution() {
+        let generic = Typ::Generic("T".into());
+        let bindings = HashMap::from([("T".into(), Typ::Int)]);
+        let mut outer = function(generic.clone(), vec!["T".into()]);
+        let original = outer.clone();
+        substitute_type_parameters(&mut outer, &bindings);
+        assert_eq!(outer, original);
+        let mut class = Decl::Class {
+            name: "T".into(),
+            fields: vec![("T".into(), generic.clone())],
+            methods: vec![
+                function(generic.clone(), vec!["T".into()]),
+                function(generic, vec![]),
+            ],
+            visibility: crate::core_ir::Visibility::Pub,
+            extends: None,
+            implements: vec![],
+            type_params: vec![],
+        };
+        substitute_type_parameters(&mut class, &bindings);
+        let Decl::Class {
+            name,
+            fields,
+            methods,
+            ..
+        } = class
+        else {
+            panic!("class")
+        };
+        assert_eq!(name, "T");
+        assert_eq!(fields, vec![("T".into(), Typ::Int)]);
+        assert_eq!(methods[0], original);
+        assert_eq!(methods[1], function(Typ::Int, vec![]));
     }
 }

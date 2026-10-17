@@ -191,14 +191,20 @@ impl CrateDb {
 
         // Parse via standard pipeline
         let resolved = ResolvedBuildParser::CoreIr(ParserId::Rust);
-        let mut parsed =
+        let artifact = if module_path == crate_name {
             crate::parser_registry::parse_artifact_with_resolved(resolved, &source_file)
-                .map_err(|e| {
-                    ArtifactResolveError::Invalid(format!("parse error {source_file:?}: {e}"))
-                })?
-                .ok_or_else(|| {
-                    ArtifactResolveError::Invalid(format!("no module from {source_file:?}"))
-                })?;
+        } else {
+            crate::compiler::rust_front::parse_rust_module_artifact(&source_file)
+                .map(Some)
+                .map_err(crate::parser_registry::ParserRegistryError::Msg)
+        };
+        let mut parsed = artifact
+            .map_err(|e| {
+                ArtifactResolveError::Invalid(format!("parse error {source_file:?}: {e}"))
+            })?
+            .ok_or_else(|| {
+                ArtifactResolveError::Invalid(format!("no module from {source_file:?}"))
+            })?;
         crate::core_bindings::qualify_module_artifact(&mut parsed, module_path)
             .map_err(ArtifactResolveError::Invalid)?;
 
@@ -332,6 +338,36 @@ mod tests {
         ] {
             assert!(db.resolve(name).is_err(), "{name}");
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lazy_module_imports_do_not_become_crate_root_cycles() {
+        let root = std::env::temp_dir().join(format!("crate_db_alias_{}", std::process::id()));
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), "pub struct Algorithm;").unwrap();
+        std::fs::write(
+            src.join("consumer.rs"),
+            "use crate::Algorithm;pub fn answer(value:Algorithm)->i64{42}",
+        )
+        .unwrap();
+        let mut db = CrateDb::new();
+        db.search_roots.clear();
+        db.register_crate("sample", root.clone());
+        let (_, _, artifact) = db.resolve_artifact("sample::consumer::answer").unwrap();
+        let proofs =
+            crate::typecheck::TypeChecker::new().typed_proof_nodes(&artifact.semantic.decls);
+        assert!(
+            proofs
+                .values()
+                .any(|proof| proof.message().contains("crate root is outside")),
+            "{proofs:?}"
+        );
+        assert!(
+            proofs.values().all(|proof| !proof.is_invalid()),
+            "{proofs:?}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

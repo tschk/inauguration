@@ -1,3 +1,5 @@
+mod rigid_values;
+mod rust_generics;
 pub(crate) mod rust_integers;
 mod type_proofs;
 #[path = "typecheck/vector_inference.rs"]
@@ -159,21 +161,7 @@ impl TypeChecker {
         }
 
         for decl in &module.decls {
-            match decl {
-                Decl::Function {
-                    name,
-                    params,
-                    ret,
-                    body,
-                    ..
-                } => {
-                    let mut env = globals.clone();
-                    env.extend(params.iter().cloned());
-                    self.check_stmts(name, ret, body, &facts, &mut env, &mut errors);
-                }
-                Decl::Class { .. } => {}
-                _ => {}
-            }
+            errors.extend(self.check_function_with_facts(decl, &facts, &globals));
         }
 
         if errors.is_empty() {
@@ -181,6 +169,30 @@ impl TypeChecker {
         } else {
             Err(errors)
         }
+    }
+
+    /// Check one function against already collected module facts and globals.
+    /// Module-level conformance and definite-initialization checks remain the caller's responsibility.
+    pub(super) fn check_function_with_facts(
+        &self,
+        decl: &Decl,
+        facts: &Facts,
+        globals: &HashMap<String, Typ>,
+    ) -> Vec<TypeError> {
+        let mut errors = Vec::new();
+        if let Decl::Function {
+            name,
+            params,
+            ret,
+            body,
+            ..
+        } = decl
+        {
+            let mut env = globals.clone();
+            env.extend(params.iter().cloned());
+            self.check_stmts(name, ret, body, facts, &mut env, &mut errors);
+        }
+        errors
     }
 
     /// Eligibility only for the new effectful-argument inline path. Reuse the
@@ -2289,6 +2301,22 @@ impl TypeChecker {
                 if matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=") {
                     let left = self.expr_type(lhs, facts, env);
                     let right = self.expr_type(rhs, facts, env);
+                    if left
+                        .as_ref()
+                        .is_some_and(crate::core_ir::rust_generics::is_rigid_type)
+                        || right
+                            .as_ref()
+                            .is_some_and(crate::core_ir::rust_generics::is_rigid_type)
+                    {
+                        errors.push(TypeError::TypeMismatch {
+                            context: format!(
+                                "comparison `{op}` requires a generic trait bound in `{fn_name}`"
+                            ),
+                            expected: Typ::Named("comparison trait bound".into()),
+                            got: left.clone().unwrap_or(Typ::Void),
+                        });
+                        return;
+                    }
                     if let Some(mismatch) = crate::core_ir::comparison_operand_mismatch(
                         op,
                         left.as_ref(),
@@ -2977,7 +3005,8 @@ impl TypeChecker {
 }
 
 fn is_concrete(typ: &Typ) -> bool {
-    !matches!(typ, Typ::Named(_) | Typ::Generic(_))
+    crate::core_ir::rust_generics::is_rigid_type(typ)
+        || !matches!(typ, Typ::Named(_) | Typ::Generic(_))
 }
 
 fn is_numeric(typ: &Typ) -> bool {
@@ -3351,6 +3380,7 @@ pub fn normalize_module_with_semantics(
         });
     }
     if parser_id == ParserId::Rust {
+        rust_generics::normalize(&mut normalized);
         TypeChecker::new().resolve_complements(&mut normalized);
         rust_integers::normalize(&TypeChecker::new(), &mut normalized, semantics);
         crate::lower_core::lower_inline_constants_with_semantics(&mut normalized.decls, semantics);
@@ -6531,5 +6561,64 @@ mod inline_function_proof_tests {
         let checked = TypeChecker::new().checked_inline_functions(&declarations);
         assert!(checked.contains("target"));
         assert!(!checked.contains("shadowed"));
+    }
+}
+
+#[cfg(test)]
+mod function_facts_check_tests {
+    use super::*;
+    #[test]
+    fn isolated_function_check_reuses_facts_globals_and_parameter_shadowing() {
+        let checker = TypeChecker::new();
+        let function = |name: &str, params: Vec<(String, Typ)>, value: Expr| Decl::Function {
+            name: name.into(),
+            params,
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(value))],
+            type_params: vec![],
+        };
+        let helper = function("helper", vec![], Expr::IntLit(42));
+        let valid = function(
+            "valid",
+            vec![("VALUE".into(), Typ::Int)],
+            Expr::Call {
+                callee: Box::new(Expr::Ident("helper".into())),
+                args: vec![],
+            },
+        );
+        let shadow = function(
+            "shadow",
+            vec![("VALUE".into(), Typ::Int)],
+            Expr::Ident("VALUE".into()),
+        );
+        let invalid = function("invalid", vec![], Expr::Ident("VALUE".into()));
+        let facts =
+            checker.collect_decl_facts(&[helper, valid.clone(), shadow.clone(), invalid.clone()]);
+        let globals = HashMap::from([("VALUE".into(), Typ::String)]);
+        assert!(
+            checker
+                .check_function_with_facts(&valid, &facts, &globals)
+                .is_empty()
+        );
+        assert!(
+            checker
+                .check_function_with_facts(&shadow, &facts, &globals)
+                .is_empty()
+        );
+        assert!(
+            !checker
+                .check_function_with_facts(&invalid, &facts, &globals)
+                .is_empty()
+        );
+        let nonfunction = Decl::Struct {
+            name: "Row".into(),
+            fields: vec![],
+            type_params: vec![],
+        };
+        assert!(
+            checker
+                .check_function_with_facts(&nonfunction, &facts, &globals)
+                .is_empty()
+        );
     }
 }

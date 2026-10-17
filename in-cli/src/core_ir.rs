@@ -1,5 +1,6 @@
 //! Cross-frontend core AST (v0). Bodies may be empty until a frontend fills statements.
 
+pub(crate) mod rust_generics;
 pub(crate) mod rust_references;
 pub(crate) mod tuples;
 pub(crate) mod type_proofs;

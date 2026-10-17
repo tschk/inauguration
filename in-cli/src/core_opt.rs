@@ -1589,6 +1589,89 @@ fn propagate_constants(decls: &mut [Decl]) {
     }
 }
 
+/// Resolve immutable local function values before direct-call validation.
+/// Only unannotated aliases of exact module functions are eligible; no scalar
+/// folding or annotated binding obligation is removed by this source pass.
+pub(crate) fn propagate_function_values(decls: &mut [Decl]) {
+    crate::core_bindings::normalize_decls(decls);
+    let globals: HashSet<_> = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let functions: HashSet<_> = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Function { name, .. } if !globals.contains(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    if functions.is_empty() {
+        return;
+    }
+    for body in fn_bodies_mut(decls) {
+        let mut aliases = HashMap::new();
+        let mut assigned = HashSet::new();
+        let mut observed = HashSet::new();
+        for statement in body.iter() {
+            if let Stmt::Let(name, None, Expr::Ident(target)) = statement {
+                if functions.contains(target) || aliases.contains_key(target) {
+                    aliases.insert(name.clone(), Expr::Ident(target.clone()));
+                }
+            }
+            collect_assigned_names(statement, &mut assigned);
+            let mut statement = statement.clone();
+            map_stmt_mut(&mut statement, &mut |expression| {
+                if let Expr::Closure { body, captures, .. } = expression {
+                    observed.extend(captures.iter().cloned());
+                    crate::core_bindings::reserve_body(body, &mut observed);
+                }
+                match expression {
+                    Expr::Unary { op, expr }
+                        if op == "&"
+                            || crate::core_ir::rust_references::value_kind(op).is_some() =>
+                    {
+                        crate::core_bindings::reserve_expr(expr, &mut observed);
+                    }
+                    Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW) => {
+                        if let Some(value) = args.first() {
+                            crate::core_bindings::reserve_expr(value, &mut observed);
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        }
+        aliases.retain(|name, _| !assigned.contains(name) && !observed.contains(name));
+        let aliases: HashMap<_, _> = aliases
+            .keys()
+            .filter_map(|name| {
+                let mut current = name.as_str();
+                let mut visited = HashSet::new();
+                while visited.insert(current) {
+                    let Expr::Ident(target) = aliases.get(current)? else {
+                        return None;
+                    };
+                    if functions.contains(target) {
+                        return Some((name.clone(), Expr::Ident(target.clone())));
+                    }
+                    current = target;
+                }
+                None
+            })
+            .collect();
+        if aliases.is_empty() {
+            continue;
+        }
+        for statement in body.iter_mut() {
+            *statement = replace_in_stmt(statement, &aliases);
+        }
+        body.retain(|statement| !matches!(statement, Stmt::Let(name, None, _) if aliases.contains_key(name)));
+    }
+}
+
 fn is_propagatable_const(e: &Expr) -> bool {
     matches!(
         e,
@@ -5876,5 +5959,142 @@ mod declaration_optimization_tests {
             );
             assert!(crate::core_ir_verifier::check_execution_contracts(&module).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod function_value_propagation_tests {
+    use super::*;
+    fn function(name: &str, params: Vec<(String, Typ)>, body: Vec<Stmt>) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params,
+            body,
+            ret: Typ::Int,
+            type_params: vec![],
+        }
+    }
+    fn call(name: &str) -> Expr {
+        Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args: vec![Expr::IntLit(42)],
+        }
+    }
+    fn fixture(body: Vec<Stmt>) -> Vec<Decl> {
+        vec![
+            function(
+                "identity",
+                vec![("value".into(), Typ::Int)],
+                vec![Stmt::Return(Some(Expr::Ident("value".into())))],
+            ),
+            function("main", vec![], body),
+        ]
+    }
+    #[test]
+    fn unannotated_function_value_alias_becomes_exact_direct_call() {
+        let mut decls = fixture(vec![
+            Stmt::Let("pick".into(), None, Expr::Ident("identity".into())),
+            Stmt::Return(Some(call("pick"))),
+        ]);
+        propagate_function_values(&mut decls);
+        let Decl::Function { body, .. } = &decls[1] else {
+            panic!("main")
+        };
+        assert_eq!(body, &vec![Stmt::Return(Some(call("identity")))]);
+    }
+    #[test]
+    fn numeric_casts_and_immutable_alias_chains_preserve_direct_targets() {
+        let mut decls = fixture(vec![
+            Stmt::Let("first".into(), None, Expr::Ident("identity".into())),
+            Stmt::Let("pick".into(), None, Expr::Ident("first".into())),
+            Stmt::Return(Some(Expr::Unary {
+                op: "int-cast-u8".into(),
+                expr: Box::new(call("pick")),
+            })),
+        ]);
+        propagate_function_values(&mut decls);
+        let Decl::Function { body, .. } = &decls[1] else {
+            panic!("main")
+        };
+        assert_eq!(
+            body,
+            &vec![Stmt::Return(Some(Expr::Unary {
+                op: "int-cast-u8".into(),
+                expr: Box::new(call("identity"))
+            }))]
+        );
+        let mut decls = fixture(vec![
+            Stmt::Let("first".into(), None, Expr::Ident("identity".into())),
+            Stmt::Let("pick".into(), None, Expr::Ident("first".into())),
+            Stmt::Assign("first".into(), Expr::IntLit(7)),
+            Stmt::Return(Some(call("pick"))),
+        ]);
+        propagate_function_values(&mut decls);
+        let Decl::Function { body, .. } = &decls[1] else {
+            panic!("main")
+        };
+        assert_eq!(body.len(), 4);
+    }
+
+    #[test]
+    fn assignments_annotations_and_borrows_preserve_alias_storage() {
+        for extra in [
+            Stmt::Assign("pick".into(), Expr::IntLit(7)),
+            Stmt::Expr(Expr::Call {
+                callee: Box::new(Expr::Ident(crate::core_ir::BORROW.into())),
+                args: vec![Expr::Ident("pick".into())],
+            }),
+        ] {
+            let mut decls = fixture(vec![
+                Stmt::Let("pick".into(), None, Expr::Ident("identity".into())),
+                extra,
+                Stmt::Return(Some(call("pick"))),
+            ]);
+            propagate_function_values(&mut decls);
+            let Decl::Function { body, .. } = &decls[1] else {
+                panic!("main")
+            };
+            assert!(matches!(&body[0], Stmt::Let(_, None, Expr::Ident(_))));
+        }
+        let mut decls = fixture(vec![
+            Stmt::Let(
+                "pick".into(),
+                Some(Typ::Int),
+                Expr::Ident("identity".into()),
+            ),
+            Stmt::Return(Some(call("pick"))),
+        ]);
+        let original = decls.clone();
+        propagate_function_values(&mut decls);
+        assert_eq!(decls, original);
+    }
+    #[test]
+    fn local_and_global_target_collisions_do_not_invent_function_proofs() {
+        let mut decls = fixture(vec![
+            Stmt::Let("identity".into(), None, Expr::IntLit(7)),
+            Stmt::Let("pick".into(), None, Expr::Ident("identity".into())),
+            Stmt::Return(Some(call("pick"))),
+        ]);
+        propagate_function_values(&mut decls);
+        let Decl::Function { body, .. } = &decls[1] else {
+            panic!("main")
+        };
+        assert_eq!(body.len(), 3);
+        let mut decls = fixture(vec![
+            Stmt::Let("pick".into(), None, Expr::Ident("identity".into())),
+            Stmt::Return(Some(call("pick"))),
+        ]);
+        decls.push(Decl::Global {
+            name: "identity".into(),
+            typ: Typ::Int,
+            init: Some(Box::new(Expr::IntLit(7))),
+            mutable: false,
+            constant_value: false,
+        });
+        propagate_function_values(&mut decls);
+        let Decl::Function { body, .. } = &decls[1] else {
+            panic!("main")
+        };
+        assert_eq!(body.len(), 2);
     }
 }

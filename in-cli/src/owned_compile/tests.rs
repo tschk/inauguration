@@ -3510,7 +3510,6 @@ fn owned_rust_jit_retains_compile_only_for_uninvocable_entries() {
         "struct Point { x: i64 } fn main() -> Point { return Point { x: 42 }; }",
         "fn main(value: i64) -> i64 { return value; }",
         "fn helper() -> i64 { return 42; }",
-        "type Result = i64; fn Result(value: i64) -> i64 { if value == 0 { return 42; } return Result(value - 1); } fn main() -> i64 { return Result(2); }",
     ] {
         let path = temp_path("rust-abi.rs");
         fs::write(&path, source).unwrap();
@@ -9428,6 +9427,10 @@ fn rust_associated_cycles_cannot_disappear_through_zero_argument_inlining() {
 #[test]
 fn rust_integer_source_errors_refuse_all_profiles_without_artifacts() {
     for source in [
+        "mod hidden{fn helper()->i64{42}}fn main()->i64{crate::hidden::helper()}",
+        "mod hidden{pub type helper=i64;fn helper()->i64{42}}fn main()->i64{crate::hidden::helper()}",
+        "fn Value(){}type Byte=Value;fn main()->i64{let value:Byte;42}",
+        "fn Value(){}type Byte=Value;fn main()->i64{if false{let value:Byte;}42}",
         "fn main()->i64{u8::wrapping_add(true,1);42}",
         "fn main()->i64{u8::wrapping_add(1,1.0);42}",
         "fn main(args:Vec<String>)->i64{u8::wrapping_add(\"x\",1);42}",
@@ -9465,6 +9468,371 @@ fn rust_integer_source_errors_refuse_all_profiles_without_artifacts() {
                     assert_eq!(report.artifact_path, None);
                     assert!(!out.exists());
                 }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_used_type_alias_cycles_refuse_before_optimization_without_artifacts() {
+    for (name, body) in [
+        ("live-declaration", "let value:A;42"),
+        ("cold-branch", "if false{let value:A;}42"),
+        ("lazy-and", "false && {let value:A;true};42"),
+        ("lazy-or", "true || {let value:A;false};42"),
+    ] {
+        let source = format!("type A=B;type B=A;fn main()->i64{{{body}}}");
+        let parsed = crate::compiler::rust_front::parse_rust_source(&source).unwrap();
+        assert!(
+            crate::typecheck::TypeChecker::new()
+                .typed_proof_functions(&parsed.decls)
+                .get("main")
+                .is_some_and(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+            "{name}: {parsed:?}"
+        );
+        assert!(crate::native_emit::c_backend::emit_c_module(&parsed).is_err());
+        let path = temp_path(&format!("type-alias-cycle-{name}.rs"));
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for entry in [None, Some("main")] {
+                for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                    let out = temp_path("type-alias-cycle.artifact");
+                    let mut request =
+                        default_request(path.clone(), target, entry, Some(out.clone()));
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(
+                        !report.success && !report.execution_started,
+                        "{name} {target:?} {entry:?} {profile:?}: {report:?}"
+                    );
+                    assert_eq!(
+                        report.reason_code.as_deref(),
+                        Some("rust-invalid-associated-type"),
+                        "{report:?}"
+                    );
+                    assert_eq!(report.eval_result, None);
+                    assert_eq!(report.eval_exit_code, None);
+                    assert_eq!(report.artifact_path, None);
+                    assert_eq!(report.executable_path, None);
+                    assert_eq!(report.abi_path, None);
+                    assert!(report.external_invocations.is_empty());
+                    assert!(!out.exists());
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_type_alias_cycle_in_an_explicitly_selected_helper_refuses_without_artifacts() {
+    let source = "type A=B;type B=A;fn bad()->i64{let value:A;77}fn main()->i64{42}";
+    let path = temp_path("type-alias-cycle-selected-helper.rs");
+    fs::write(&path, source).unwrap();
+    for target in [CompileTarget::Jit, CompileTarget::Native] {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let out = temp_path("type-alias-cycle-helper.artifact");
+            let mut request = default_request(path.clone(), target, Some("bad"), Some(out.clone()));
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                !report.success && !report.execution_started,
+                "{target:?} {profile:?}: {report:?}"
+            );
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("rust-invalid-associated-type")
+            );
+            assert_eq!(report.eval_result, None);
+            assert_eq!(report.artifact_path, None);
+            assert_eq!(report.executable_path, None);
+            assert_eq!(report.abi_path, None);
+            assert!(!out.exists());
+        }
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn rust_type_alias_cycles_preserve_entry_root_policy_and_concrete_alias_controls() {
+    for (name, source) in [
+        // Existing executable-root policy permits an invalid unused helper to
+        // disappear; selecting that same helper is covered by the refusal test.
+        (
+            "unused-cycle",
+            "type A=B;type B=A;fn bad()->i64{let value:A;77}fn main()->i64{42}",
+        ),
+        (
+            "concrete-chain",
+            "type A=B;type B=i64;fn main()->i64{let value:A;42}",
+        ),
+        (
+            "concrete-assignment",
+            "type A=B;type B=i64;fn main()->i64{let value:A;value=42;value}",
+        ),
+        (
+            "block-import-chain",
+            "mod values{pub fn answer()->i64{42}}fn main()->i64{use values::answer as First;use First as Second;Second()}",
+        ),
+        (
+            "block-import-chain-global-decoy",
+            "fn First()->i64{7}mod values{pub fn answer()->i64{42}}fn main()->i64{use values::answer as First;use First as Second;Second()}",
+        ),
+        (
+            "block-prefix-type-value-namespaces",
+            "mod values{pub fn answer()->i64{42}}mod functions{pub fn values(){}}fn main()->i64{{use functions::values;use values::answer as Second;Second()}}",
+        ),
+        (
+            "block-module-import-prefix",
+            "mod values{pub fn answer()->i64{42}}fn main()->i64{use values as V;use V::answer as Second;Second()}",
+        ),
+        (
+            "block-nested-module-import-prefix",
+            "mod parent{pub mod values{pub fn answer()->i64{42}}pub fn run()->i64{use self::values as V;use V::answer as Second;Second()}}fn main()->i64{parent::run()}",
+        ),
+        (
+            "separate-type-and-value-namespaces",
+            "type Result=i64;fn Result(value:i64)->i64{if value==0{return 42;}Result(value-1)}fn main()->i64{Result(2)}",
+        ),
+        (
+            "alias-cfg-control-0",
+            "#[cfg(any())]type Byte=u16;#[cfg(not(any()))]type Byte=u8;fn main()->i64{Byte::wrapping_add(255,43) as i64}",
+        ),
+        (
+            "alias-cfg-control-1",
+            "mod other{pub type Byte=u16;}#[cfg(any())]use other::Byte;type Byte=u8;fn main()->i64{Byte::wrapping_add(255,43) as i64}",
+        ),
+        (
+            "alias-cfg-control-2",
+            "#[cfg(any())]type Byte=Byte;type Byte=u8;fn main()->i64{Byte::wrapping_add(255,43) as i64}",
+        ),
+        (
+            "alias-cfg-control-3",
+            "mod values{pub fn Byte()->i64{7}}use values::Byte;type Byte=u8;fn main()->i64{if Byte()==7{Byte::wrapping_add(255,43) as i64}else{0}}",
+        ),
+        (
+            "alias-cfg-control-4",
+            "mod values{pub fn Byte()->i64{7}}type Byte=u8;fn main()->i64{{use values::Byte;if Byte()==7{Byte::wrapping_add(255,43) as i64}else{0}}}",
+        ),
+        (
+            "alias-cfg-control-5",
+            "#[cfg_attr(all(),cfg(any()))]type Byte=u16;#[cfg_attr(any(),cfg(any()))]type Byte=u8;fn main()->i64{Byte::wrapping_add(255,43) as i64}",
+        ),
+        (
+            "alias-cfg-control-6",
+            "fn u8(){}type Byte=u8;fn main()->i64{Byte::wrapping_add(255,43) as i64}",
+        ),
+    ] {
+        let path = temp_path(&format!("type-alias-control-{name}.rs"));
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.execution_started,
+                "{name} {profile:?}: {report:?}"
+            );
+            assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{report:?}");
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_external_module_calls_preserve_function_namespaces_across_profiles() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (name, files) in [
+        (
+            "direct-child",
+            vec![
+                ("main.rs", "mod child;fn main()->i64{child::helper()}"),
+                ("child.rs", "pub fn helper()->i64{42}"),
+            ],
+        ),
+        (
+            "module-member-names",
+            vec![
+                (
+                    "main.rs",
+                    "mod child;fn main()->i64{child::wrapping_add(child::MIN,22)}",
+                ),
+                (
+                    "child.rs",
+                    "pub const MIN:i64=20;pub fn wrapping_add(left:i64,right:i64)->i64{left+right}",
+                ),
+            ],
+        ),
+        (
+            "crate-sibling",
+            vec![
+                (
+                    "main.rs",
+                    "mod alpha;mod shared;fn main()->i64{alpha::answer()}",
+                ),
+                ("alpha.rs", "pub fn answer()->i64{crate::shared::helper()}"),
+                ("shared.rs", "pub fn helper()->i64{42}"),
+            ],
+        ),
+    ] {
+        let root = temp_path(&format!("rust-module-call-{name}"));
+        fs::create_dir_all(&root).unwrap();
+        for (file, source) in files {
+            fs::write(root.join(file), source).unwrap();
+        }
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                let out = root.join(format!("artifact-{profile:?}-{target:?}"));
+                let mut request = default_request(
+                    root.join("main.rs"),
+                    target,
+                    Some("main"),
+                    Some(out.clone()),
+                );
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{name} {profile:?} {target:?}: {report:?}");
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started, "{report:?}");
+                    assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{report:?}");
+                } else {
+                    let result = std::process::Command::new(&out).output().unwrap();
+                    assert_eq!(
+                        result.status.code(),
+                        Some(42),
+                        "{name} {profile:?}: {result:?}"
+                    );
+                }
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn rust_private_module_function_calls_refuse_after_root_binding() {
+    for (external, rooted) in [(false, true), (true, true), (false, false), (true, false)] {
+        let root = temp_path("rust-private-module-call");
+        fs::create_dir_all(&root).unwrap();
+        let source = if external {
+            fs::write(root.join("hidden.rs"), "fn helper()->i64{42}").unwrap();
+            "mod hidden;fn main()->i64{crate::hidden::helper()}"
+        } else {
+            "mod hidden{fn helper()->i64{42}}fn main()->i64{crate::hidden::helper()}"
+        };
+        let source = if rooted {
+            source.to_owned()
+        } else {
+            source.replace("crate::hidden", "hidden")
+        };
+        fs::write(root.join("main.rs"), source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                let out = root.join(format!("refused-{profile:?}-{target:?}"));
+                let mut request = default_request(
+                    root.join("main.rs"),
+                    target,
+                    Some("main"),
+                    Some(out.clone()),
+                );
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    !report.success && !report.execution_started,
+                    "external={external} {profile:?} {target:?}: {report:?}"
+                );
+                assert_eq!(report.eval_result, None);
+                assert!(!out.exists());
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn rust_explicit_generic_calls_preserve_concrete_kinds_and_scopes() {
+    for source in [
+        "type Byte=u8;fn choose<Byte>(value:Byte)->Byte{value}fn main()->i64{if choose::<u16>(65535u16)==65535u16 && Byte::MAX==255u8{42}else{7}}",
+        "fn choose<T>(value:T)->T{value}fn main()->i64{if choose::<bool>(true){choose::<i64>(42)}else{7}}",
+        "fn choose<T>(value:T)->T{value}fn outer<T>(value:T)->T{choose::<T>(value)}fn main()->i64{outer::<i64>(42)}",
+        "mod child{pub fn choose<T>(value:T)->T{value}}fn main()->i64{child::choose::<i64>(42)}",
+        "type Byte=u16;fn choose<T>(value:T)->T{value}fn main()->i64{type Byte=u8;choose::<Byte>(42u8) as i64}",
+        "mod values{pub fn choose<T>(value:T)->T{value}}use values::choose;fn main()->i64{choose::<u16>(42u16) as i64}",
+        "fn choose<T>(value:T)->T{value}fn main()->i64{let pick=choose::<i64>;pick(42)}",
+        "fn choose<T>(value:T)->T{value}fn main()->i64{let pick=choose::<u8>;let next=pick;next(42u8) as i64}",
+    ] {
+        let path = temp_path("rust-explicit-generic.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                let out = temp_path("rust-explicit-generic-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{source} {profile:?} {target:?}: {report:?}"
+                );
+                if target == CompileTarget::Jit {
+                    assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42)
+                    );
+                    fs::remove_file(&out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_explicit_generic_type_errors_cannot_disappear_in_cold_branches() {
+    for source in [
+        "fn choose<T>(value:T)->T{value}fn main()->i64{choose::<u8>(65535u16) as i64}",
+        "fn choose<T>(value:T)->T{value}fn main()->i64{if false{choose::<u8>(65535u16);}42}",
+        "fn choose<T>(value:T)->T{value}fn main()->i64{choose::<u8,u16>(42u8) as i64}",
+        "mod hidden{fn choose<T>(value:T)->T{value}}fn main()->i64{crate::hidden::choose::<i64>(42)}",
+        "fn choose<T>(value:T)->T{42u8}fn main()->i64{choose::<u8>(0u8) as i64}",
+        "fn choose<T>(value:T)->T{value+value}fn main()->i64{choose::<u16>(21u16) as i64}",
+        "type A=A;fn choose<T>()->i64{42}fn main()->i64{choose::<A>()}",
+        "fn choose<T>(value:T)->T{let ignored=value;value}fn main()->i64{choose::<u16>(42u16) as i64}",
+        "fn choose<T>()->i64{42}fn main()->i64{choose::<NoSuchType>()}",
+        "trait Allowed{}impl Allowed for u8{}struct Row;impl Row{fn choose<T:Allowed>(v:T)->T{v}}fn main()->i64{Row::choose::<u16>(42u16) as i64}",
+        "struct Row<T>(T);fn choose<T>()->i64{42}fn main()->i64{choose::<Row>()}",
+        "fn choose<T>()->i64{42}fn main()->i64{choose::<bool<u8>>()}",
+        "type A=(&NoSuchType,);fn choose<T>()->i64{42}fn main()->i64{choose::<A>()}",
+        "fn choose<T>(value:&T)->T{*value}fn main()->i64{choose::<u8>(&42u8) as i64}",
+        "type A=A;struct Row{value:A}fn choose<T>()->i64{42}fn main()->i64{choose::<Row>()}",
+        "fn choose<T>(value:&T)->T{*value}fn main()->i64{if false{choose::<u8>(&42u8);}42}",
+        "fn choose<T>(value:T)->T{value}fn main()->i64{choose::<u8>(42u16) as i64}",
+        "fn bad()->i64 where i64:Iterator{42}fn main()->i64{bad()}",
+    ] {
+        let path = temp_path("rust-explicit-generic-invalid.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                let out = temp_path("rust-explicit-generic-invalid-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    !report.success && !report.execution_started,
+                    "{source} {profile:?} {target:?}: {report:?}"
+                );
+                assert_eq!(report.eval_result, None);
+                assert!(!out.exists());
             }
         }
         fs::remove_file(path).unwrap();

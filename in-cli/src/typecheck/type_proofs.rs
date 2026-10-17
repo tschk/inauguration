@@ -2,22 +2,8 @@ use super::*;
 use crate::core_ir::type_proofs::{self, ResolutionFailure};
 use std::cell::RefCell;
 
-fn prefer(
-    left: Option<ResolutionFailure>,
-    right: Option<ResolutionFailure>,
-) -> Option<ResolutionFailure> {
-    match (left, right) {
-        (Some(left), Some(right))
-            if (!left.is_invalid() && right.is_invalid())
-                || (left.is_invalid() == right.is_invalid()
-                    && right.message() < left.message()) =>
-        {
-            Some(right)
-        }
-        (Some(left), _) => Some(left),
-        (None, right) => right,
-    }
-}
+use crate::core_ir::type_proofs::prefer_failure as prefer;
+
 impl Facts {
     fn type_proof(&self, typ: &Typ, active: &mut HashSet<String>) -> Option<ResolutionFailure> {
         match typ {

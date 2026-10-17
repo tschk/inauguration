@@ -1,78 +1,28 @@
 //! Rust-owned proof of unary trait implementations; never a basename lookup.
+use super::imports::import_leaves;
 use super::*;
 use crate::boundary_ir::UnaryMethodBindings;
 use crate::core_ir::rust_references;
 use std::collections::BTreeMap;
 
-type Import = Option<(Vec<String>, bool)>;
-
-fn import_leaves(
-    tree: &syn::UseTree,
-    prefix: &[String],
-    absolute: bool,
-    out: &mut BTreeMap<String, Import>,
-) {
-    let mut insert = |alias: String, path: Vec<String>| {
-        out.entry(alias)
-            .and_modify(|value| *value = None)
-            .or_insert(Some((path, absolute)));
-    };
-    match tree {
-        syn::UseTree::Path(value) => {
-            let mut path = prefix.to_vec();
-            path.push(value.ident.to_string());
-            import_leaves(&value.tree, &path, absolute, out);
-        }
-        syn::UseTree::Name(value) if value.ident == "self" => {
-            if let Some(alias) = prefix.last() {
-                insert(alias.clone(), prefix.to_vec());
-            }
-        }
-        syn::UseTree::Name(value) => {
-            let mut path = prefix.to_vec();
-            path.push(value.ident.to_string());
-            insert(value.ident.to_string(), path);
-        }
-        syn::UseTree::Rename(value) => {
-            let mut path = prefix.to_vec();
-            if value.ident != "self" {
-                path.push(value.ident.to_string());
-            }
-            insert(value.rename.to_string(), path);
-        }
-        syn::UseTree::Group(value) => {
-            for item in &value.items {
-                import_leaves(item, prefix, absolute, out);
-            }
-        }
-        syn::UseTree::Glob(_) => {} // A glob is not authoritative evidence for a standard trait.
-    }
-}
-
 fn standard_neg(path: &syn::Path, file: &syn::File) -> bool {
-    let mut imports = BTreeMap::new();
+    let mut imports = HashMap::new();
     let mut shadowed = HashSet::new();
     let mut external_aliases = BTreeMap::new();
-    fn has_glob(tree: &syn::UseTree) -> bool {
-        match tree {
-            syn::UseTree::Glob(_) => true,
-            syn::UseTree::Path(path) => has_glob(&path.tree),
-            syn::UseTree::Group(group) => group.items.iter().any(has_glob),
-            _ => false,
-        }
-    }
-    let glob_import = file
-        .items
-        .iter()
-        .any(|item| matches!(item, syn::Item::Use(value) if has_glob(&value.tree)));
+    let mut glob_import = false;
     for item in &file.items {
+        if type_aliases::item_presence(item) == type_aliases::Presence::Inactive {
+            continue;
+        }
         match item {
-            syn::Item::Use(value) => import_leaves(
-                &value.tree,
-                &[],
-                value.leading_colon.is_some(),
-                &mut imports,
-            ),
+            syn::Item::Use(value) => {
+                glob_import |= import_leaves(
+                    &value.tree,
+                    &[],
+                    value.leading_colon.is_some(),
+                    &mut imports,
+                );
+            }
             syn::Item::Struct(value) => {
                 shadowed.insert(value.ident.to_string());
             }
@@ -174,9 +124,13 @@ fn standard_neg(path: &syn::Path, file: &syn::File) -> bool {
 pub(super) fn collect(file: &syn::File) -> UnaryMethodBindings {
     let mut bindings = UnaryMethodBindings::new();
     for item in &file.items {
+        if type_aliases::item_presence(item) == type_aliases::Presence::Inactive {
+            continue;
+        }
         let syn::Item::Impl(implementation) = item else {
             continue;
         };
+        let _generic_scope = super::type_aliases::generic_scope(&implementation.generics);
         let Some((negative, trait_path, _)) = &implementation.trait_ else {
             continue;
         };
@@ -229,9 +183,13 @@ pub(super) fn collect(file: &syn::File) -> UnaryMethodBindings {
             && matches!(methods[0].sig.inputs.first(), Some(syn::FnArg::Receiver(value)) if value.reference.is_none() && value.colon_token.is_none())
             && match &methods[0].sig.output {
                 syn::ReturnType::Type(_, ret) => {
+                    let expected =
+                        resolve_impl_type(map_type(&outputs[0].ty), &receiver_type, implementation);
+                    let _method_scope =
+                        super::type_aliases::generic_scope(&methods[0].sig.generics);
                     match (
                         resolve_impl_type(map_type(ret), &receiver_type, implementation),
-                        resolve_impl_type(map_type(&outputs[0].ty), &receiver_type, implementation),
+                        expected,
                     ) {
                         (Ok(actual), Ok(expected)) => actual == expected,
                         _ => false,
@@ -318,6 +276,13 @@ mod collector_tests {
     fn neg(path: &str, prelude: &str) -> bool {
         standard_neg(&syn::parse_str(path).unwrap(), &parsed(prelude))
     }
+    #[test]
+    fn known_inactive_items_cannot_supply_or_shadow_neg_bindings() {
+        assert!(neg("std::ops::Neg", "#[cfg(any())] mod std {}"));
+        assert!(collect(&parsed("struct Row;#[cfg(any())]impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}" )).is_empty());
+        assert_eq!(collect(&parsed("struct Row;#[cfg(not(any()))]impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}" )).len(), 1);
+    }
+
     #[test]
     fn standard_trait_resolution_requires_unambiguous_scoped_imports() {
         for (path, prelude) in [

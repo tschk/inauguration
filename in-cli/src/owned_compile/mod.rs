@@ -212,7 +212,18 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     };
     let resolved = parser_registry::resolve_parser_id(primary_path, request.parser);
     let mut unary_methods = crate::boundary_ir::UnaryMethodBindings::new();
-    let mut module = match parser_registry::parse_artifact_with_resolved(resolved, primary_path) {
+    let primary_artifact = if is_multi
+        && matches!(
+            resolved,
+            parser_registry::ResolvedBuildParser::CoreIr(parser_registry::ParserId::Rust)
+        ) {
+        crate::compiler::rust_front::parse_rust_module_artifact(primary_path)
+            .map(Some)
+            .map_err(parser_registry::ParserRegistryError::Msg)
+    } else {
+        parser_registry::parse_artifact_with_resolved(resolved, primary_path)
+    };
+    let mut module = match primary_artifact {
         Ok(Some(artifact)) => {
             unary_methods = artifact.unary_methods;
             artifact.semantic
@@ -407,8 +418,17 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         for (source_path, _source_content) in &multi_sources[1..] {
             let path = std::path::Path::new(source_path);
             let resolved = parser_registry::resolve_parser_id(path, request.parser);
-            if let Some(extra) = match parser_registry::parse_artifact_with_resolved(resolved, path)
-            {
+            let artifact = if matches!(
+                resolved,
+                parser_registry::ResolvedBuildParser::CoreIr(parser_registry::ParserId::Rust)
+            ) {
+                crate::compiler::rust_front::parse_rust_module_artifact(path)
+                    .map(Some)
+                    .map_err(parser_registry::ParserRegistryError::Msg)
+            } else {
+                parser_registry::parse_artifact_with_resolved(resolved, path)
+            };
+            if let Some(extra) = match artifact {
                 Ok(artifact) => artifact,
                 Err(error) => {
                     let error = error.to_string();
