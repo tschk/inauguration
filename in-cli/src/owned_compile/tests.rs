@@ -8063,7 +8063,7 @@ fn python_augmented_rhs_preserves_lazy_branches_and_old_binding_order() {
 }
 
 #[test]
-fn canonical_xor_alias_executes_parameterized_integer_and_boolean_helpers() {
+fn canonical_bitwise_operators_execute_parameterized_helpers() {
     if !super::jit::host_supports_jit() {
         return;
     }
@@ -8072,24 +8072,106 @@ fn canonical_xor_alias_executes_parameterized_integer_and_boolean_helpers() {
         r#"{"icoreVersion":2,"decls":[{"kind":"function","name":"mix","params":[{"name":"left","type":"Int"},{"name":"right","type":"Int"}],"return":"Int","body":[{"kind":"return","value":{"kind":"binary","op":"xor","lhs":{"kind":"ident","name":"left"},"rhs":{"kind":"ident","name":"right"}}}]},{"kind":"function","name":"main","params":[],"return":"Int","body":[{"kind":"return","value":{"kind":"call","callee":"mix","args":[63,21]}}]}]}"#,
         r#"{"icoreVersion":2,"decls":[{"kind":"function","name":"mix","params":[{"name":"left","type":"Bool"},{"name":"right","type":"Bool"}],"return":"Bool","body":[{"kind":"return","value":{"kind":"binary","op":"xor","lhs":{"kind":"ident","name":"left"},"rhs":{"kind":"ident","name":"right"}}}]},{"kind":"function","name":"main","params":[],"return":"Int","body":[{"kind":"if","cond":{"kind":"call","callee":"mix","args":[true,false]},"then_body":[{"kind":"return","value":42}],"else_body":[{"kind":"return","value":7}]}]}]}"#,
     ] {
-        fs::write(&path, source).unwrap();
-        for profile in [
-            crate::emit_profile::EmitProfile::Default,
-            crate::emit_profile::EmitProfile::Lean,
-            crate::emit_profile::EmitProfile::Harden,
-        ] {
-            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
-            request.profile = profile;
-            let report = compile_owned(&request);
-            assert!(
-                report.success && report.execution_started,
-                "{profile:?}: {report:?}"
-            );
-            assert_eq!(
-                report.eval_result,
-                Some(EvalValue::Int(42)),
-                "{profile:?}: {report:?}"
-            );
+        let original: serde_json::Value = serde_json::from_str(source).unwrap();
+        let boolean = original["decls"][0]["return"] == "Bool";
+        for op in ["xor", "&", "|"] {
+            let cases = if boolean {
+                vec![
+                    (serde_json::json!([false, false]), 7),
+                    (serde_json::json!([false, true]), 42),
+                    (serde_json::json!([true, false]), 42),
+                    (serde_json::json!([true, true]), 7),
+                ]
+            } else {
+                vec![(
+                    match op {
+                        "&" => serde_json::json!([63, 42]),
+                        "|" => serde_json::json!([40, 2]),
+                        _ => serde_json::json!([63, 21]),
+                    },
+                    42,
+                )]
+            };
+            for (args, xor_expected) in cases {
+                let expected = if boolean {
+                    let left = args[0].as_bool().unwrap();
+                    let right = args[1].as_bool().unwrap();
+                    match (op, left, right) {
+                        ("&", true, true) => 42,
+                        ("&", _, _) => 7,
+                        ("|", false, false) => 7,
+                        ("|", _, _) => 42,
+                        _ => xor_expected,
+                    }
+                } else {
+                    42
+                };
+                let mut module = original.clone();
+                module["decls"][0]["body"][0]["value"]["op"] = op.into();
+                let field = if boolean { "cond" } else { "value" };
+                module["decls"][1]["body"][0][field]["args"] = args;
+                fs::write(&path, serde_json::to_string(&module).unwrap()).unwrap();
+                for profile in [
+                    crate::emit_profile::EmitProfile::Default,
+                    crate::emit_profile::EmitProfile::Lean,
+                    crate::emit_profile::EmitProfile::Harden,
+                ] {
+                    let mut request =
+                        default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(
+                        report.success && report.execution_started,
+                        "{op} {profile:?}: {report:?}"
+                    );
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(expected)),
+                        "{op} {profile:?}: {report:?}"
+                    );
+                }
+            }
+            if !boolean {
+                for invalid in ["String", "Mixed"] {
+                    let mut module = original.clone();
+                    module["decls"][0]["body"][0]["value"]["op"] = op.into();
+                    if invalid == "String" {
+                        module["decls"][0]["return"] = "String".into();
+                        for param in module["decls"][0]["params"].as_array_mut().unwrap() {
+                            param["type"] = "String".into();
+                        }
+                        module["decls"][1]["body"] =
+                            serde_json::json!([{"kind":"return","value":42}]);
+                    } else {
+                        module["decls"][0]["params"][1]["type"] = "Bool".into();
+                        module["decls"][1]["body"][0]["value"]["args"] =
+                            serde_json::json!([5, true]);
+                    }
+                    fs::write(&path, serde_json::to_string(&module).unwrap()).unwrap();
+                    for profile in [
+                        crate::emit_profile::EmitProfile::Default,
+                        crate::emit_profile::EmitProfile::Lean,
+                        crate::emit_profile::EmitProfile::Harden,
+                    ] {
+                        let mut request =
+                            default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+                        request.profile = profile;
+                        let report = compile_owned(&request);
+                        assert!(
+                            !report.success && !report.execution_started,
+                            "{op} {invalid} {profile:?}: {report:?}"
+                        );
+                        assert_eq!(report.eval_result, None);
+                        assert!(
+                            report
+                                .reason_code
+                                .as_deref()
+                                .is_some_and(|code| code.starts_with("verify-")),
+                            "{report:?}"
+                        );
+                    }
+                }
+            }
         }
     }
     fs::remove_file(path).unwrap();

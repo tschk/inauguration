@@ -97,6 +97,8 @@ mixed-type comparisons retain their existing refusal boundary.
 Core IR `xor` shares the native and typed MIR integer XOR implementation with
 `^`. Lua binary `~` uses this canonical operator with proven integer operands;
 Lua `^` retains its power refusal and is never interpreted as XOR.
+`.icore` also admits `&` and `|` with matching integer or Boolean operands;
+String and mixed-type operands fail verification before execution.
 
 Python scalar-name augmented assignments support `+=`, `-=`, `*=`, `&=`,
 `|=` and `^=` through the existing typed native operations. They read the old
