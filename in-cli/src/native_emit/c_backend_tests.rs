@@ -1422,6 +1422,61 @@ fn unsigned_c_projection_executes_high_bits_and_orders_operands_once() {
 }
 
 #[test]
+fn minimum_integer_literals_remain_signed_in_expressions_and_patterns() {
+    let module = UnifiedModule::new(vec![
+        Decl::Global {
+            name: "minimum".into(),
+            typ: Typ::Int,
+            init: Some(Box::new(Expr::IntLit(i64::MIN))),
+            mutable: false,
+            constant_value: false,
+        },
+        Decl::Function {
+            name: "negative".into(),
+            params: vec![],
+            ret: Typ::Bool,
+            body: vec![Stmt::Return(Some(Expr::Binary {
+                op: "<".into(),
+                lhs: Box::new(Expr::IntLit(i64::MIN)),
+                rhs: Box::new(Expr::IntLit(0)),
+            }))],
+            type_params: vec![],
+        },
+        Decl::Function {
+            name: "matched".into(),
+            params: vec![("value".into(), Typ::Int)],
+            ret: Typ::Int,
+            body: vec![Stmt::Match {
+                scrutinee: Expr::Ident("value".into()),
+                arms: vec![
+                    MatchArm {
+                        pattern: i64::MIN.to_string(),
+                        guard: None,
+                        body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                    },
+                    MatchArm {
+                        pattern: "_".into(),
+                        guard: None,
+                        body: vec![Stmt::Return(Some(Expr::IntLit(7)))],
+                    },
+                ],
+            }],
+            type_params: vec![],
+        },
+    ]);
+    let emitted = emit_c_module(&module).unwrap();
+    assert!(
+        !emitted.contains("INT64_C(-9223372036854775808)"),
+        "{emitted}"
+    );
+    assert!(emitted.contains("INT64_MIN"), "{emitted}");
+    assert_inferred_c_executes(
+        &module,
+        "if (!negative() || minimum>=0 || matched(INT64_MIN)!=42 || matched(0)!=7) return 7; return 42;",
+    );
+}
+
+#[test]
 fn unsigned_global_initializers_require_folding_before_c_projection() {
     for (op, expected) in [
         ("udiv", i64::MAX),
@@ -2640,4 +2695,39 @@ fn declaration_has_no_initializer_and_later_assignment_executes() {
     assert!(!emitted.contains("value = 0"), "{emitted}");
     assert!(!emitted.contains("value = 7"), "{emitted}");
     assert_inferred_c_executes(&module, "return (int)answer();");
+}
+
+#[test]
+fn integer_callees_discovered_during_preparation_refuse_raw_emission() {
+    for source in [
+        "fn main(){let value=u64::MAX;if false{value();}}",
+        "fn main(){if false{({u64::MAX})();}}",
+        "fn main(){if false{(if true{u64::MAX}else{0u64})();}}",
+        "fn make()->u64{u64::MAX}fn main(){if false{make()();}}",
+    ] {
+        let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        assert!(!crate::core_ir::type_proofs::present(&module.decls));
+        assert!(emit_c_module(&module).is_err(), "{source}");
+        assert!(
+            crate::native_emit::inisa::emit_sci_inisa(&module, "main").is_err(),
+            "{source}"
+        );
+        assert!(
+            crate::native_emit::lower::lower_module(
+                &module,
+                "main",
+                crate::native_emit::NativeLinkage::Executable
+            )
+            .is_err(),
+            "{source}"
+        );
+        assert!(
+            crate::native_emit::x86_64_lower::lower_module(&module, "main").is_err(),
+            "{source}"
+        );
+        assert!(
+            crate::native_emit::thumb_lower::lower_module(&module, "main").is_err(),
+            "{source}"
+        );
+    }
 }

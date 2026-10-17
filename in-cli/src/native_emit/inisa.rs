@@ -140,6 +140,7 @@ fn compile(module: &UnifiedModule, entry: &str) -> Result<Program, String> {
     }
     let prepared = crate::lower_core::prepared_native_module(module);
     let module = prepared.as_ref();
+    crate::core_ir_verifier::check_execution_contracts(module)?;
     let mut fn_index = std::collections::HashMap::new();
     let mut decls: Vec<&Decl> = Vec::new();
     for d in &module.decls {

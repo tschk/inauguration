@@ -8,8 +8,20 @@ use std::collections::{HashMap, HashSet};
 struct Kind {
     bits: u8,
     signed: bool,
+    source: bool,
 }
 impl Kind {
+    fn same_width(self, other: Self) -> bool {
+        self.bits == other.bits && self.signed == other.signed
+    }
+    fn prefer_source(self, other: Self) -> Self {
+        if !self.source && other.source {
+            other
+        } else {
+            self
+        }
+    }
+
     fn parse(name: &str, semantics: IntegerSemantics) -> Option<Self> {
         let (bits, signed) = match name {
             "isize" => (
@@ -30,9 +42,16 @@ impl Kind {
             ),
             name => core_ir::integer_spec(name)?,
         };
-        Some(Self { bits, signed })
+        Some(Self {
+            bits,
+            signed,
+            source: true,
+        })
     }
     fn typ(self) -> Typ {
+        if !self.source {
+            return Typ::Int;
+        }
         Typ::Named(format!(
             "#rust-integer-{}{}",
             if self.signed { "i" } else { "u" },
@@ -70,8 +89,67 @@ impl Kind {
         }
     }
 }
+fn same_kinds(left: Option<Kind>, right: Option<Kind>) -> bool {
+    left.zip(right)
+        .is_some_and(|(left, right)| left.same_width(right))
+}
+fn kind_mismatch(actual: Kind, expected: Kind) -> core_ir::type_proofs::ResolutionFailure {
+    let message = format!(
+        "incompatible Rust integer kinds: expected {}{}, found {}{}",
+        if expected.signed { "i" } else { "u" },
+        expected.bits,
+        if actual.signed { "i" } else { "u" },
+        actual.bits,
+    );
+    if actual.source && expected.source {
+        core_ir::type_proofs::ResolutionFailure::Invalid(message)
+    } else {
+        core_ir::type_proofs::ResolutionFailure::Unsupported(message)
+    }
+}
+
+/// Only private, already-resolved primitive owners carry integer constants.
+fn primitive_constant(name: &str, semantics: IntegerSemantics) -> Option<(Kind, i64)> {
+    let (owner, member) = name.rsplit_once("::")?;
+    let kind = Kind::parse(core_ir::rust_integer_type_name(owner)?, semantics)?;
+    let value = match member {
+        "BITS" => {
+            return Some((
+                Kind {
+                    bits: 32,
+                    signed: false,
+                    source: true,
+                },
+                i64::from(kind.bits),
+            ));
+        }
+        "MIN" if !kind.signed => 0,
+        "MIN" => -(i64::MAX >> (64 - kind.bits)) - 1,
+        "MAX" if kind.signed => i64::MAX >> (64 - kind.bits),
+        "MAX" => (u64::MAX >> (64 - kind.bits)) as i64,
+        _ => return None,
+    };
+    Some((kind, value))
+}
+
 fn invalid() -> Expr {
     Expr::Ident("#unsupported-rust-integer-semantics".into())
+}
+// Collapsing an unsupported integer operation must retain a child source error.
+// Prefer Invalid over Unsupported; within each category retain traversal order.
+fn invalid_preserving_proof(expr: &mut Expr) -> Expr {
+    let mut selected: Option<(bool, String)> = None;
+    crate::core_opt::map_expr_mut(expr, &mut |child| {
+        if let Expr::Ident(name) = child
+            && let Some(proof) = core_ir::type_proofs::decode(name)
+            && selected
+                .as_ref()
+                .is_none_or(|(invalid, _)| !invalid && proof.is_invalid())
+        {
+            selected = Some((proof.is_invalid(), name.clone()));
+        }
+    });
+    selected.map_or_else(invalid, |(_, name)| Expr::Ident(name))
 }
 fn typ_kind(typ: &Typ, semantics: IntegerSemantics) -> Option<Kind> {
     let Typ::Named(name) = typ else { return None };
@@ -301,9 +379,15 @@ impl Pass<'_> {
         let values = self.const_env.as_ref();
         crate::core_opt::map_expr(expr.clone(), &mut |expr| {
             let expr = if let Expr::Ident(name) = &expr {
-                values
-                    .and_then(|values| values.get(name))
-                    .map(|value| Expr::IntLit(*value))
+                primitive_constant(name, self.semantics)
+                    .filter(|(kind, _)| kind.supported(self.semantics))
+                    .map(|(_, value)| Expr::IntLit(value))
+                    .or_else(|| {
+                        values
+                            .and_then(|values| values.get(name))
+                            .copied()
+                            .map(Expr::IntLit)
+                    })
                     .unwrap_or(expr)
             } else {
                 expr
@@ -425,10 +509,9 @@ impl Pass<'_> {
             {
                 self.hint(expr, env)
             }
-            Expr::Ident(name) => self
-                .inferred
-                .get(name)
-                .copied()
+            Expr::Ident(name) => primitive_constant(name, self.semantics)
+                .map(|(kind, _)| kind)
+                .or_else(|| self.inferred.get(name).copied())
                 .or_else(|| env.get(name).and_then(|typ| typ_kind(typ, self.semantics))),
             _ => self
                 .checker
@@ -453,6 +536,7 @@ impl Pass<'_> {
                         64
                     },
                     signed: true,
+                    source: false,
                 }),
                 env,
                 ret,
@@ -538,6 +622,22 @@ impl Pass<'_> {
         }
         self.expression(expr, self.expected(expected), env, ret)
     }
+    fn opaque_callee(&self, value: &Expr) -> bool {
+        match value {
+            Expr::Ident(name) => self.opaque.contains(name),
+            Expr::Block {
+                result: Some(result),
+                ..
+            } => self.opaque_callee(result),
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => self.opaque_callee(then_expr) || self.opaque_callee(else_expr),
+            _ => false,
+        }
+    }
+
     fn expression(
         &mut self,
         expr: &mut Expr,
@@ -546,20 +646,29 @@ impl Pass<'_> {
         ret: Option<Kind>,
     ) -> Option<Kind> {
         let mut bad = false;
+        let mut mismatch = None;
         let kind = match expr {
             Expr::Ident(name) => {
-                let known = env
-                    .get(name)
-                    .and_then(|typ| typ_kind(typ, self.semantics))
-                    .or_else(|| self.inferred.get(name).copied());
-                if known.is_none()
-                    && self.flexible.contains(name)
-                    && !self.opaque.contains(name)
-                    && let Some(expected) = expected
-                {
-                    self.inferred.insert(name.clone(), expected);
+                if let Some((kind, value)) = primitive_constant(name, self.semantics) {
+                    if self.rewrite {
+                        *expr = kind.cast(Expr::IntLit(value));
+                    }
+                    Some(kind)
+                } else {
+                    let known =
+                        self.inferred.get(name).copied().or_else(|| {
+                            env.get(name).and_then(|typ| typ_kind(typ, self.semantics))
+                        });
+                    if self.flexible.contains(name)
+                        && !self.opaque.contains(name)
+                        && let Some(expected) = expected
+                    {
+                        let selected =
+                            known.map_or(expected, |known| known.prefer_source(expected));
+                        self.inferred.insert(name.clone(), selected);
+                    }
+                    self.inferred.get(name).copied().or(known)
                 }
-                known.or_else(|| self.inferred.get(name).copied())
             }
             Expr::Unary { op, expr: value } if op.starts_with("rust-integer-value-") => {
                 let kind = op
@@ -582,6 +691,7 @@ impl Pass<'_> {
                     self.rewrite.then_some(Kind {
                         bits: 32,
                         signed: true,
+                        source: false,
                     })
                 });
                 if self.rewrite
@@ -657,24 +767,28 @@ impl Pass<'_> {
                 let operator = op.clone();
                 let comparison = matches!(operator.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=");
                 let shift = matches!(operator.as_str(), "<<" | ">>" | "lshr");
-                let peer = self
-                    .hint(lhs, env)
-                    .or_else(|| if shift { None } else { self.hint(rhs, env) })
-                    .or(if comparison { None } else { expected })
-                    .or_else(|| {
-                        if self.opaque_int(lhs, env) || (!shift && self.opaque_int(rhs, env)) {
-                            Some(Kind {
-                                bits: if self.semantics == IntegerSemantics::Word32 {
-                                    32
-                                } else {
-                                    64
-                                },
-                                signed: true,
-                            })
-                        } else {
-                            None
-                        }
-                    });
+                let mut peer = self.hint(lhs, env);
+                if !shift && let Some(right) = self.hint(rhs, env) {
+                    peer = Some(peer.map_or(right, |left| left.prefer_source(right)));
+                }
+                if !comparison && let Some(expected) = expected {
+                    peer = Some(peer.map_or(expected, |peer| peer.prefer_source(expected)));
+                }
+                let peer = peer.or_else(|| {
+                    if self.opaque_int(lhs, env) || (!shift && self.opaque_int(rhs, env)) {
+                        Some(Kind {
+                            bits: if self.semantics == IntegerSemantics::Word32 {
+                                32
+                            } else {
+                                64
+                            },
+                            signed: true,
+                            source: false,
+                        })
+                    } else {
+                        None
+                    }
+                });
                 let left = self.expression(lhs, peer, env, ret);
                 let right =
                     self.expression(rhs, if shift { None } else { peer.or(left) }, env, ret);
@@ -694,8 +808,11 @@ impl Pass<'_> {
                         bad |= !(0..i64::from(kind.bits)).contains(&count);
                     }
                 }
-                if !shift && left.is_some() && right.is_some() {
-                    bad |= left != right;
+                if !shift && left.is_some() && right.is_some() && !same_kinds(left, right) {
+                    bad = true;
+                    mismatch = left
+                        .zip(right)
+                        .map(|(left, right)| kind_mismatch(left, right));
                 }
                 if self.rewrite
                     && let Some(kind) = kind
@@ -789,7 +906,12 @@ impl Pass<'_> {
                     let kind = receiver_kind.or(target);
                     // Wrapping methods do not implicitly coerce an opaque
                     // canonical-Int argument into a Rust primitive width.
-                    bad |= kind.is_none() || argument_kind != kind;
+                    bad |= !same_kinds(argument_kind, kind);
+                    if !same_kinds(argument_kind, kind) {
+                        mismatch = argument_kind
+                            .zip(kind)
+                            .map(|(actual, expected)| kind_mismatch(actual, expected));
+                    }
                     if self.rewrite
                         && let Some(kind) = kind
                     {
@@ -883,7 +1005,7 @@ impl Pass<'_> {
                 };
                 // The callee may itself contain executable blocks or closures.
                 // Traverse it once before arguments, matching source evaluation.
-                self.expression(callee, None, env, ret);
+                let callee_kind = self.expression(callee, None, env, ret);
                 let atomic = if let Expr::Ident(name) = callee.as_ref() {
                     crate::core_atomic::operation(name)
                         .and_then(|(kind, _)| Kind::parse(kind.suffix(), self.semantics))
@@ -914,6 +1036,20 @@ impl Pass<'_> {
                         ret,
                     );
                 }
+                if self.rewrite
+                    && let Some(kind) = callee_kind
+                {
+                    let proof = if !kind.source && self.opaque_callee(callee) {
+                        core_ir::type_proofs::ResolutionFailure::Unsupported(
+                            "opaque canonical callee has no proven callable type".into(),
+                        )
+                    } else {
+                        core_ir::type_proofs::ResolutionFailure::Invalid(
+                            "integer value is not callable".into(),
+                        )
+                    };
+                    **callee = Expr::Ident(proof.symbol());
+                }
                 signature
                     .as_ref()
                     .and_then(|(_, typ)| typ_kind(typ, self.semantics))
@@ -933,8 +1069,11 @@ impl Pass<'_> {
                 self.expression(cond, None, env, ret);
                 let left = self.expression(then_expr, expected, &mut env.clone(), ret);
                 let right = self.expression(else_expr, expected.or(left), &mut env.clone(), ret);
-                if left.is_some() && right.is_some() {
-                    bad |= left != right;
+                if left.is_some() && right.is_some() && !same_kinds(left, right) {
+                    bad = true;
+                    mismatch = left
+                        .zip(right)
+                        .map(|(left, right)| kind_mismatch(left, right));
                 }
                 left.or(right)
             }
@@ -1010,8 +1149,11 @@ impl Pass<'_> {
                         self.expression(guard, None, &mut inner, ret);
                     }
                     let value = self.expression(&mut arm.value, kind, &mut inner, ret);
-                    if kind.is_some() && value.is_some() {
-                        bad |= kind != value;
+                    if kind.is_some() && value.is_some() && !same_kinds(kind, value) {
+                        bad = true;
+                        mismatch = kind
+                            .zip(value)
+                            .map(|(expected, actual)| kind_mismatch(actual, expected));
                     }
                     kind = kind.or(value);
                 }
@@ -1025,11 +1167,25 @@ impl Pass<'_> {
             }
         };
         bad |= kind.is_some_and(|kind| !kind.supported(self.semantics));
-        if let (Some(actual), Some(expected)) = (kind, expected) {
-            bad |= actual != expected;
+        if let Some((actual, expected)) = kind
+            .zip(expected)
+            .filter(|(actual, expected)| !actual.same_width(*expected))
+        {
+            mismatch = Some(kind_mismatch(actual, expected));
         }
-        if bad && self.rewrite {
-            *expr = invalid();
+        if self.rewrite
+            && let Some(proof) = mismatch
+        {
+            let preserved = invalid_preserving_proof(expr);
+            *expr = if !proof.is_invalid()
+                && matches!(&preserved, Expr::Ident(name) if core_ir::type_proofs::decode(name).is_some_and(|proof| proof.is_invalid()))
+            {
+                preserved
+            } else {
+                Expr::Ident(proof.symbol())
+            };
+        } else if bad && self.rewrite {
+            *expr = invalid_preserving_proof(expr);
         }
         kind
     }
@@ -1091,7 +1247,15 @@ impl Pass<'_> {
                             }
                         }
                     }
-                    if let Some(kind) = expected.or(kind) {
+                    let selected = if self.flexible.contains(name) && !self.opaque.contains(name) {
+                        match (expected, kind) {
+                            (Some(expected), Some(actual)) => Some(expected.prefer_source(actual)),
+                            _ => expected.or(kind),
+                        }
+                    } else {
+                        expected.or(kind)
+                    };
+                    if let Some(kind) = selected {
                         if self.rewrite && annotation.is_none() {
                             *annotation = Some(kind.typ());
                         }
@@ -1105,11 +1269,26 @@ impl Pass<'_> {
                     }
                 }
                 Stmt::Assign(name, value) => {
-                    let typ = env
-                        .get(name)
-                        .cloned()
-                        .or_else(|| self.inferred.get(name).map(|kind| kind.typ()));
-                    self.value(value, typ.as_ref(), env, ret);
+                    let expected =
+                        self.inferred.get(name).copied().or_else(|| {
+                            env.get(name).and_then(|typ| typ_kind(typ, self.semantics))
+                        });
+                    let actual = if expected.is_some() {
+                        self.expression(value, expected, env, ret)
+                    } else {
+                        let typ = env.get(name).cloned();
+                        self.value(value, typ.as_ref(), env, ret)
+                    };
+                    if !self.rewrite
+                        && self.flexible.contains(name)
+                        && !self.opaque.contains(name)
+                        && let Some(actual) = actual
+                    {
+                        self.inferred.insert(
+                            name.clone(),
+                            expected.map_or(actual, |expected| expected.prefer_source(actual)),
+                        );
+                    }
                     if self.rewrite && self.const_env.is_some() {
                         let value = self.constant(value);
                         if let Some(constants) = &mut self.const_env {
@@ -1262,6 +1441,10 @@ fn decl_has_metadata(value: &Decl) -> bool {
         }
     }
     fn expr(value: &Expr) -> bool {
+        if matches!(value, Expr::Ident(name) if primitive_constant(name, IntegerSemantics::Word64).is_some())
+        {
+            return true;
+        }
         if matches!(value, Expr::Unary { op, expr } if op == core_ir::RUST_DECL_ORIGIN && matches!(expr.as_ref(), Expr::UnitLit))
         {
             return true;
@@ -1457,6 +1640,343 @@ mod tests {
         normalize(&checker, &mut module, semantics);
         module
     }
+    #[test]
+    fn canonical_width_constraints_do_not_become_source_errors() {
+        let source = include_str!("../../tests/fixtures/rust_integer_inference_selfhost.rs");
+        let module = resolved(source, IntegerSemantics::Word64);
+        let proofs = TypeChecker::new().typed_proof_nodes(&module.decls);
+        assert!(
+            proofs.values().all(|proof| !proof.is_invalid()),
+            "{proofs:?}"
+        );
+        let module = resolved(
+            "fn next(at:usize)->usize{at+1}fn main()->i64{let mut at=0;at=next(at);42}",
+            IntegerSemantics::Word64,
+        );
+        assert!(
+            TypeChecker::new()
+                .typed_proof_nodes(&module.decls)
+                .values()
+                .all(|proof| !proof.is_invalid())
+        );
+        let module = resolved(
+            "fn next(at:usize)->usize{at+1}fn main()->i64{let mut opening=1;let delimiter=opening+1;let mut at=delimiter;at=next(at);if at==3usize{42}else{7}}",
+            IntegerSemantics::Word64,
+        );
+        assert!(
+            TypeChecker::new()
+                .typed_proof_nodes(&module.decls)
+                .is_empty(),
+            "{module:?}"
+        );
+        let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+        assert!(report.ok, "{report:?}");
+        let source = Kind::parse("u64", IntegerSemantics::Word64).unwrap();
+        let weak = Kind {
+            source: false,
+            ..source
+        };
+        assert_ne!(weak, source);
+        assert_eq!(weak.typ(), Typ::Int);
+        assert_eq!(typ_kind(&weak.typ(), IntegerSemantics::Word64), None);
+        assert_eq!(
+            typ_kind(&source.typ(), IntegerSemantics::Word64),
+            Some(source)
+        );
+        assert!(weak.same_width(source));
+        assert_eq!(weak.prefer_source(source), source);
+        assert_eq!(source.prefer_source(weak), source);
+        assert!(
+            !kind_mismatch(
+                source,
+                Kind {
+                    bits: 64,
+                    signed: true,
+                    source: false
+                }
+            )
+            .is_invalid()
+        );
+        assert!(
+            kind_mismatch(
+                source,
+                Kind::parse("i64", IntegerSemantics::Word64).unwrap()
+            )
+            .is_invalid()
+        );
+    }
+
+    #[test]
+    fn source_mismatches_and_unsuffixed_integer_callees_remain_invalid() {
+        for source in [
+            "fn main()->i64{if false{let value:i64=u8::MAX;}42}",
+            "fn main()->i64{if false{let value=1u8+2u16;}42}",
+            "fn main()->i64{if false{42();}42}",
+            "fn main()->i64{let value=42;if false{value();}42}",
+        ] {
+            let module = resolved(source, IntegerSemantics::Word64);
+            let proofs = TypeChecker::new().typed_proof_nodes(&module.decls);
+            assert!(
+                proofs.values().any(|proof| proof.is_invalid()),
+                "{source}: {proofs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn opaque_canonical_callback_carriers_are_not_proven_integer_callees() {
+        let mut module = UnifiedModule::new(vec![Decl::Function {
+            name: "invoke".into(),
+            params: vec![("callback".into(), Typ::Int)],
+            ret: Typ::Int,
+            body: vec![
+                Stmt::Let(
+                    "value".into(),
+                    Some(Typ::Int),
+                    Expr::Ident("callback".into()),
+                ),
+                Stmt::Return(Some(Expr::Call {
+                    callee: Box::new(Expr::Ident("value".into())),
+                    args: vec![],
+                })),
+                Stmt::Expr(Expr::Unary {
+                    op: core_ir::RUST_DECL_ORIGIN.into(),
+                    expr: Box::new(Expr::UnitLit),
+                }),
+            ],
+            type_params: vec![],
+        }]);
+        normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+        let proofs = TypeChecker::new().typed_proof_nodes(&module.decls);
+        assert!(
+            proofs.values().all(|proof| !proof.is_invalid()),
+            "{proofs:?}"
+        );
+    }
+
+    fn constant_module(value: Expr, ret: Typ) -> UnifiedModule {
+        UnifiedModule::new(vec![Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret,
+            body: vec![Stmt::Return(Some(value))],
+            type_params: vec![],
+        }])
+    }
+    fn constant_path(kind: &str, member: &str) -> Expr {
+        Expr::Ident(format!("#rust-integer-{kind}::{member}"))
+    }
+    fn return_value(module: &UnifiedModule) -> &Expr {
+        let Decl::Function { body, .. } = &module.decls[0] else {
+            panic!("function")
+        };
+        let Stmt::Return(Some(value)) = &body[0] else {
+            panic!("return")
+        };
+        value
+    }
+    #[test]
+    fn private_primitive_constants_preserve_target_width_and_consume_metadata() {
+        for (name, minimum, maximum, bits) in [
+            ("i8", -128, 127, 8),
+            ("u8", 0, 255, 8),
+            ("i16", -32768, 32767, 16),
+            ("u16", 0, 65535, 16),
+            ("i32", -2147483648, 2147483647, 32),
+            ("u32", 0, 4294967295, 32),
+            ("i64", i64::MIN, i64::MAX, 64),
+            ("u64", 0, -1, 64),
+        ] {
+            for semantics in [IntegerSemantics::Word32, IntegerSemantics::Word64] {
+                for (member, expected) in [("MIN", minimum), ("MAX", maximum), ("BITS", bits)] {
+                    let mut module = constant_module(constant_path(name, member), Typ::Int);
+                    assert!(has_metadata(&module));
+                    normalize(&TypeChecker::new(), &mut module, semantics);
+                    let value =
+                        crate::core_opt::map_expr(return_value(&module).clone(), &mut |value| {
+                            crate::core_opt::fold_expr_with_semantics(value, semantics)
+                        });
+                    if semantics == IntegerSemantics::Word32 && bits == 64 && member != "BITS" {
+                        assert_eq!(value, invalid(), "{name}::{member}");
+                    } else {
+                        let expected = semantics.normalize_word(expected).unwrap();
+                        assert_eq!(
+                            value,
+                            Expr::IntLit(expected),
+                            "{name}::{member} {semantics:?}"
+                        );
+                    }
+                    assert!(!has_metadata(&module));
+                    let once = module.clone();
+                    normalize(&TypeChecker::new(), &mut module, semantics);
+                    assert_eq!(module, once);
+                }
+            }
+        }
+        for semantics in [IntegerSemantics::Word32, IntegerSemantics::Word64] {
+            let bits = if semantics == IntegerSemantics::Word32 {
+                32
+            } else {
+                64
+            };
+            let signed_max = if bits == 32 {
+                i64::from(i32::MAX)
+            } else {
+                i64::MAX
+            };
+            for (kind, member, expected) in [
+                ("isize", "MIN", -signed_max - 1),
+                ("isize", "MAX", signed_max),
+                ("usize", "MIN", 0),
+                ("usize", "MAX", if bits == 32 { 4294967295 } else { -1 }),
+                ("isize", "BITS", bits),
+                ("usize", "BITS", bits),
+            ] {
+                assert_eq!(
+                    primitive_constant(&format!("#rust-integer-{kind}::{member}"), semantics)
+                        .unwrap()
+                        .1,
+                    expected
+                );
+            }
+        }
+        for path in [
+            "u64::MAX",
+            "domain::u64::MAX",
+            "#rust-integer-u64::OTHER",
+            "#rust-integer-i128::MAX",
+        ] {
+            assert!(
+                primitive_constant(path, IntegerSemantics::Word64).is_none(),
+                "{path}"
+            );
+        }
+    }
+    #[test]
+    fn primitive_constant_kinds_drive_unsigned_operations_and_reject_mismatches() {
+        let unsigned = Expr::Binary {
+            op: ">".into(),
+            lhs: Box::new(constant_path("u64", "MAX")),
+            rhs: Box::new(Expr::Unary {
+                op: "rust-integer-literal-u64".into(),
+                expr: Box::new(Expr::IntLit(0)),
+            }),
+        };
+        let mut module = constant_module(unsigned, Typ::Bool);
+        normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+        let value = crate::core_opt::map_expr(
+            return_value(&module).clone(),
+            &mut crate::core_opt::fold_expr,
+        );
+        assert_eq!(value, Expr::BoolLit(true));
+        let mut module = constant_module(
+            Expr::Binary {
+                op: ">>".into(),
+                lhs: Box::new(constant_path("u64", "MAX")),
+                rhs: Box::new(Expr::IntLit(1)),
+            },
+            Typ::Named("#rust-integer-u64".into()),
+        );
+        normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+        assert!(
+            matches!(return_value(&module), Expr::Binary { op, .. } if op == "lshr"),
+            "{:?}",
+            return_value(&module)
+        );
+        let value = crate::core_opt::map_expr(
+            return_value(&module).clone(),
+            &mut crate::core_opt::fold_expr,
+        );
+        assert_eq!(value, Expr::IntLit(i64::MAX));
+        for value in [constant_path("u8", "MAX"), constant_path("u64", "BITS")] {
+            let mut module = constant_module(value, Typ::Named("#rust-integer-i8".into()));
+            normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+            assert!(
+                matches!(return_value(&module), Expr::Ident(name) if core_ir::type_proofs::decode(name).is_some_and(|proof| proof.is_invalid()))
+            );
+        }
+        let mut module = UnifiedModule::new(vec![Decl::Global {
+            name: "VALUE".into(),
+            typ: Typ::Named("#rust-integer-u8".into()),
+            init: Some(Box::new(Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(constant_path("u8", "MAX")),
+                rhs: Box::new(Expr::Unary {
+                    op: "rust-integer-literal-u8".into(),
+                    expr: Box::new(Expr::IntLit(1)),
+                }),
+            })),
+            mutable: false,
+            constant_value: true,
+        }]);
+        normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+        assert!(
+            matches!(&module.decls[0], Decl::Global { init: Some(value), .. } if value.as_ref()==&invalid())
+        );
+    }
+
+    #[test]
+    fn collapsed_integer_errors_preserve_invalid_child_proofs_first() {
+        use core_ir::type_proofs::ResolutionFailure;
+        let unsupported = ResolutionFailure::Unsupported("unsupported child".into()).symbol();
+        let first = ResolutionFailure::Invalid("first invalid child".into()).symbol();
+        let second = ResolutionFailure::Invalid("second invalid child".into()).symbol();
+        let mut expr = Expr::Call {
+            callee: Box::new(Expr::Ident(unsupported)),
+            args: vec![Expr::Ident(first.clone()), Expr::Ident(second)],
+        };
+        assert_eq!(invalid_preserving_proof(&mut expr), Expr::Ident(first));
+        let unsupported = ResolutionFailure::Unsupported("only unsupported child".into()).symbol();
+        let mut expr = Expr::Unary {
+            op: "-".into(),
+            expr: Box::new(Expr::Ident(unsupported.clone())),
+        };
+        assert_eq!(
+            invalid_preserving_proof(&mut expr),
+            Expr::Ident(unsupported)
+        );
+        assert_eq!(invalid_preserving_proof(&mut Expr::IntLit(42)), invalid());
+    }
+
+    #[test]
+    fn integer_kind_mismatches_remain_invalid_in_dead_code() {
+        for source in [
+            "fn main()->i64{if false{let value:i64=u8::MAX;}42}",
+            "fn main()->i64{if false{let value:i8=u64::BITS;}42}",
+            "fn main()->i64{if false{let value=u8::MAX+1u16;}42}",
+            "fn main()->i64{if false{let value=u8::MAX==1u16;}42}",
+            "fn main()->i64{if false{let value=(u8::MAX+1u16).wrapping_add(1u8);}42}",
+        ] {
+            let module = resolved(source, IntegerSemantics::Word64);
+            assert!(core_ir::type_proofs::present(&module.decls));
+            assert!(crate::core_ir_verifier::check_execution_contracts(&module).is_err());
+        }
+    }
+
+    #[test]
+    fn integer_value_callees_keep_invalid_proofs_before_dead_code_elimination() {
+        for source in [
+            "fn main(){let value=u64::MAX;if false{value();}}",
+            "fn main(){if false{({u64::MAX})();}}",
+            "fn main(){if false{(if true{u64::MAX}else{0u64})();}}",
+            "fn make()->u64{u64::MAX}fn main(){if false{make()();}}",
+        ] {
+            let module = resolved(source, IntegerSemantics::Word64);
+            assert!(core_ir::type_proofs::present(&module.decls), "{source}");
+            assert!(
+                crate::core_ir_verifier::check_execution_contracts(&module).is_err(),
+                "{source}"
+            );
+        }
+        for source in [
+            "fn make()->u64{u64::MAX}fn main()->u64{make()}",
+            "fn main()->u64{let make=||u64::MAX;make()}",
+        ] {
+            let module = resolved(source, IntegerSemantics::Word64);
+            assert!(!core_ir::type_proofs::present(&module.decls), "{source}");
+        }
+    }
+
     #[test]
     fn rust_origin_selects_void_global_shift_helper_and_is_consumed() {
         let source = "struct Row{bits:u64} static mut ROW:Row=Row{bits:0x8000000000000000u64}; fn change(){unsafe{ROW.bits>>=\"x\".len();}} fn main()->i64{change();unsafe{if ROW.bits==0x4000000000000000u64{42}else{7}}}";

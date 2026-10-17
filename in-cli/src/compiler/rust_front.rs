@@ -79,6 +79,22 @@ fn lower_file_items_at(file: &syn::File, base_dir: &Path) -> Result<CompileArtif
         })
         .collect();
     rewrite_global_references(&mut module.decls, &references, file);
+    crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+        if let Expr::Call { callee, .. } = expr
+            && let Expr::Ident(name) = callee.as_ref()
+            && name.rsplit_once("::").is_some_and(|(owner, member)| {
+                crate::core_ir::rust_integer_type_name(owner).is_some()
+                    && matches!(member, "MIN" | "MAX" | "BITS")
+            })
+        {
+            **callee = Expr::Ident(
+                crate::core_ir::type_proofs::ResolutionFailure::Invalid(format!(
+                    "integer constant `{name}` is not callable"
+                ))
+                .symbol(),
+            );
+        }
+    });
     register_explicit_vector_constructors(module);
     refuse_static_array_value_uses(module);
     crate::typecheck::rust_integers::mark_declaration_origins(&mut module.decls);
@@ -453,6 +469,23 @@ fn reject_integer_primitive_shadowing(items: &[syn::Item]) -> Result<(), String>
     }
     for item in items {
         match item {
+            syn::Item::ExternCrate(value) => {
+                let alias = value
+                    .rename
+                    .as_ref()
+                    .map(|(_, name)| name)
+                    .unwrap_or(&value.ident);
+                check_name(alias)?;
+                // shortcut: external aliases need crate identity resolution before primitive folding.
+                if (alias == "std" || alias == "core")
+                    && value.ident != "std"
+                    && value.ident != "core"
+                {
+                    return Err(format!(
+                        "rust front: external primitive root `{alias}` requires crate identity resolution"
+                    ));
+                }
+            }
             syn::Item::Use(value) => {
                 fn imported(tree: &syn::UseTree, prefix: &str) -> Vec<(String, String)> {
                     match tree {
@@ -554,6 +587,8 @@ fn lower_file_items_at_visited(
     if depth > 8 {
         return Err("rust front: module nest limit".into());
     }
+    let _primitive_roots =
+        PrimitiveRootScope::new(primitive_root_bindings(file.items.iter()), false);
     reject_integer_primitive_shadowing(&file.items)?;
     let mut decls = Vec::new();
     let mut unary_methods = unary_methods::collect(file);
@@ -635,6 +670,8 @@ fn lower_file_items_at_visited(
                 }
             }
             syn::Item::Trait(tr) => {
+                let _primitive_roots =
+                    PrimitiveRootScope::new(primitive_root_generics(&tr.generics), true);
                 for item in &tr.items {
                     if let syn::TraitItem::Fn(method) = item {
                         if let Some(block) = &method.default {
@@ -1401,6 +1438,105 @@ fn rust_struct_fields(fields: &syn::Fields) -> Vec<(String, Typ)> {
     }
 }
 
+thread_local! {
+    static PRIMITIVE_ROOT_SHADOWS: std::cell::RefCell<HashSet<String>> = std::cell::RefCell::new(HashSet::new());
+}
+
+struct PrimitiveRootScope(HashSet<String>);
+impl PrimitiveRootScope {
+    fn for_block(block: &syn::Block) -> Self {
+        Self::new(
+            primitive_root_bindings(block.stmts.iter().filter_map(|statement| {
+                if let syn::Stmt::Item(item) = statement {
+                    Some(item)
+                } else {
+                    None
+                }
+            })),
+            true,
+        )
+    }
+
+    fn new(mut bindings: HashSet<String>, inherit: bool) -> Self {
+        Self(PRIMITIVE_ROOT_SHADOWS.with(|roots| {
+            let mut roots = roots.borrow_mut();
+            if inherit {
+                bindings.extend(roots.iter().cloned());
+            }
+            std::mem::replace(&mut *roots, bindings)
+        }))
+    }
+}
+impl Drop for PrimitiveRootScope {
+    fn drop(&mut self) {
+        PRIMITIVE_ROOT_SHADOWS.with(|roots| *roots.borrow_mut() = std::mem::take(&mut self.0));
+    }
+}
+
+// Like the Neg root proof, unresolved imports/globs cannot establish an external identity.
+fn primitive_root_bindings<'a>(items: impl Iterator<Item = &'a syn::Item>) -> HashSet<String> {
+    fn binding(name: &syn::Ident, roots: &mut HashSet<String>) {
+        if name == "std" || name == "core" {
+            roots.insert(name.to_string());
+        }
+    }
+    fn imported(tree: &syn::UseTree, roots: &mut HashSet<String>) {
+        match tree {
+            syn::UseTree::Path(path) => imported(&path.tree, roots),
+            syn::UseTree::Name(name) => binding(&name.ident, roots),
+            syn::UseTree::Rename(name) => binding(&name.rename, roots),
+            syn::UseTree::Group(group) => {
+                for tree in &group.items {
+                    imported(tree, roots);
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                roots.extend(["std".into(), "core".into()]);
+            }
+        }
+    }
+    let mut roots = HashSet::new();
+    for item in items {
+        match item {
+            syn::Item::Mod(value) => binding(&value.ident, &mut roots),
+            syn::Item::Struct(value) => binding(&value.ident, &mut roots),
+            syn::Item::Enum(value) => binding(&value.ident, &mut roots),
+            syn::Item::Union(value) => binding(&value.ident, &mut roots),
+            syn::Item::Type(value) => binding(&value.ident, &mut roots),
+            syn::Item::Trait(value) => binding(&value.ident, &mut roots),
+            syn::Item::TraitAlias(value) => binding(&value.ident, &mut roots),
+            syn::Item::Use(value) => imported(&value.tree, &mut roots),
+            syn::Item::ExternCrate(value) => {
+                let alias = value
+                    .rename
+                    .as_ref()
+                    .map(|(_, alias)| alias)
+                    .unwrap_or(&value.ident);
+                if alias != &value.ident || (value.ident != "std" && value.ident != "core") {
+                    binding(alias, &mut roots);
+                }
+            }
+            _ => {}
+        }
+    }
+    roots
+}
+
+fn primitive_root_generics(generics: &syn::Generics) -> HashSet<String> {
+    generics
+        .type_params()
+        .filter(|parameter| parameter.ident == "std" || parameter.ident == "core")
+        .map(|parameter| parameter.ident.to_string())
+        .collect()
+}
+
+fn ambiguous_primitive_root(path: &syn::Path) -> bool {
+    path.leading_colon.is_none()
+        && path.segments.first().is_some_and(|root| {
+            PRIMITIVE_ROOT_SHADOWS.with(|roots| roots.borrow().contains(&root.ident.to_string()))
+        })
+}
+
 fn compact_rust_tokens(value: &impl ToTokens) -> String {
     value
         .to_token_stream()
@@ -1499,11 +1635,14 @@ fn resolve_impl_type(
 }
 
 fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
+    let _primitive_roots = PrimitiveRootScope::new(primitive_root_generics(&i.generics), true);
     // Retain generic arguments so distinct impl receivers retain distinct identities.
     let self_type = compact_rust_tokens(&i.self_ty);
     let mut decls = Vec::new();
     for item in &i.items {
         if let syn::ImplItem::Fn(method) = item {
+            let _primitive_roots =
+                PrimitiveRootScope::new(primitive_root_generics(&method.sig.generics), true);
             let f = method.clone();
             let method_name = if let Some((_, trait_path, _)) = &i.trait_ {
                 // Trait methods occupy their receiver/trait namespace, never the free-function namespace.
@@ -1622,6 +1761,12 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
             let resolved = resolve_impl_type(Typ::Named(format!("Self::{head}")), &self_proof, i);
             return Some(match resolved {
                 Ok(Typ::Named(owner))
+                    if crate::core_ir::rust_integer_type_name(&owner).is_some()
+                        && matches!(member, "MIN" | "MAX" | "BITS") =>
+                {
+                    format!("{owner}::{member}")
+                }
+                Ok(Typ::Named(owner))
                     if crate::core_ir::rust_references::decode(&owner).is_none()
                         && crate::core_ir::rust_integer_type_name(&owner).is_none()
                         && crate::core_ir::integer_type_name(&owner).is_none()
@@ -1731,6 +1876,7 @@ fn retain_generic_scope(decl: &mut Decl, parameters: Vec<String>) {
 }
 
 fn lower_fn_with_types(f: syn::ItemFn, local_types: &mut HashMap<String, String>) -> Decl {
+    let _primitive_roots = PrimitiveRootScope::new(primitive_root_generics(&f.sig.generics), true);
     let name = f.sig.ident.to_string();
     let params = f
         .sig
@@ -1858,6 +2004,53 @@ fn rust_integer_path(path: &syn::Path) -> Option<&str> {
     }
 }
 
+fn rust_integer_constant(path: &syn::Path, call_target: bool) -> Option<String> {
+    let mut owner = path.clone();
+    let member = owner.segments.pop()?.into_value();
+    let known_constant = matches!(member.arguments, syn::PathArguments::None)
+        && matches!(member.ident.to_string().as_str(), "MIN" | "MAX" | "BITS");
+    let kind = rust_integer_path(&owner)?;
+    if ambiguous_primitive_root(&owner) {
+        return Some(
+            crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
+                "shadowed primitive root in `{}` requires namespace resolution",
+                compact_rust_tokens(path)
+            ))
+            .symbol(),
+        );
+    }
+    if call_target && !known_constant {
+        return None;
+    }
+    if owner.leading_colon.is_some() && owner.segments.len() == 1 {
+        return Some(
+            crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
+                "absolute path `{}` does not resolve a primitive owner",
+                compact_rust_tokens(path)
+            ))
+            .symbol(),
+        );
+    }
+    if matches!(kind, "i128" | "u128") {
+        return Some(
+            crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
+                "integer constant owner `{kind}` exceeds supported native width"
+            ))
+            .symbol(),
+        );
+    }
+    if !known_constant {
+        return Some(
+            crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
+                "unresolved primitive associated value `{}`",
+                compact_rust_tokens(path)
+            ))
+            .symbol(),
+        );
+    }
+    Some(format!("#rust-integer-{kind}::{}", member.ident))
+}
+
 fn rust_integer_literal(value: i64, suffix: &str) -> Expr {
     Expr::Unary {
         op: if suffix.is_empty() {
@@ -1872,6 +2065,26 @@ fn rust_integer_literal(value: i64, suffix: &str) -> Expr {
 fn map_type(ty: &syn::Type) -> Typ {
     match ty {
         syn::Type::Path(tp) if tp.qself.is_some() => Typ::Named(ty.to_token_stream().to_string()),
+        syn::Type::Path(tp)
+            if rust_integer_path(&tp.path).is_some()
+                && tp.path.leading_colon.is_some()
+                && tp.path.segments.len() == 1 =>
+        {
+            crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
+                "absolute path `{}` does not resolve a primitive owner",
+                compact_rust_tokens(&tp.path)
+            ))
+            .typ()
+        }
+        syn::Type::Path(tp)
+            if rust_integer_path(&tp.path).is_some() && ambiguous_primitive_root(&tp.path) =>
+        {
+            crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
+                "shadowed primitive root in `{}` requires namespace resolution",
+                compact_rust_tokens(&tp.path)
+            ))
+            .typ()
+        }
         syn::Type::Path(tp) => {
             let last_segment = tp.path.segments.last();
             let last = last_segment.map(|s| s.ident.to_string());
@@ -1991,6 +2204,7 @@ fn lower_match_arm_value(expr: &syn::Expr, local_types: &HashMap<String, String>
 }
 
 fn lower_block_value(block: &syn::Block, local_types: &HashMap<String, String>) -> Expr {
+    let _primitive_roots = PrimitiveRootScope::for_block(block);
     let mut inner = local_types.clone();
     let mut prefix = block.clone();
     let tail = match prefix.stmts.last() {
@@ -2061,6 +2275,7 @@ fn lower_block_inner_with_types(
     wrap_implicit_return: bool,
     local_types: &mut HashMap<String, String>,
 ) -> Vec<Stmt> {
+    let _primitive_roots = PrimitiveRootScope::for_block(block);
     let depth = BLOCK_DEPTH.with(|d| {
         let n = d.get();
         d.set(n.saturating_add(1));
@@ -2656,6 +2871,14 @@ thread_local! {
 }
 
 fn lower_expr_with_types(expr: &syn::Expr, local_types: &mut HashMap<String, String>) -> Expr {
+    lower_expr_in_position(expr, local_types, false)
+}
+
+fn lower_expr_in_position(
+    expr: &syn::Expr,
+    local_types: &mut HashMap<String, String>,
+    call_target: bool,
+) -> Expr {
     // Transparent syntax wrappers do not consume structural recursion budget.
     let mut expr = expr;
     loop {
@@ -2677,7 +2900,7 @@ fn lower_expr_with_types(expr: &syn::Expr, local_types: &mut HashMap<String, Str
             args: Vec::new(),
         };
     }
-    let out = lower_expr_with_types_inner(expr, local_types);
+    let out = lower_expr_with_types_inner(expr, local_types, call_target);
     EXPR_DEPTH.with(|d| d.set(depth));
     out
 }
@@ -2685,6 +2908,7 @@ fn lower_expr_with_types(expr: &syn::Expr, local_types: &mut HashMap<String, Str
 fn lower_expr_with_types_inner(
     expr: &syn::Expr,
     local_types: &mut HashMap<String, String>,
+    call_target: bool,
 ) -> Expr {
     match expr {
         syn::Expr::Lit(l) => match &l.lit {
@@ -2760,7 +2984,7 @@ fn lower_expr_with_types_inner(
                 // Match the receiver/trait identity used for impl declarations, including UFCS.
                 format!("{}::{path}", compact_rust_tokens(&receiver.ty))
             } else {
-                path
+                rust_integer_constant(&p.path, call_target).unwrap_or(path)
             })
         }
         syn::Expr::Reference(r) => Expr::Unary {
@@ -2911,7 +3135,7 @@ fn lower_expr_with_types_inner(
             }
         }
         syn::Expr::Call(c) => {
-            let callee = lower_expr_with_types(&c.func, local_types);
+            let callee = lower_expr_in_position(&c.func, local_types, true);
             let args: Vec<Expr> = c
                 .args
                 .iter()
@@ -5100,5 +5324,180 @@ mod associated_value_path_tests {
                 .any(|name| crate::core_ir::type_proofs::decode(name).is_some()),
             "{names:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod primitive_constant_tests {
+    use super::*;
+    #[test]
+    fn exact_primitive_paths_and_associated_owners_keep_integer_metadata() {
+        for source in [
+            "fn main()->u64{u64::MAX}",
+            "fn main()->u64{core::primitive::u64::MAX}",
+            "fn main()->u64{std::primitive::u64::MAX}",
+            "fn main()->u64{::core::primitive::u64::MAX}",
+            "fn main()->u64{::std::primitive::u64::MAX}",
+            "struct Row{} trait Other{type Output;fn make()->u64;} impl Other for Row{type Output=u64;fn make()->u64{Self::Output::MAX}}",
+        ] {
+            let mut module = parse_rust_source(source).unwrap();
+            let mut found = false;
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                found |= matches!(expr, Expr::Ident(name) if name == "#rust-integer-u64::MAX");
+            });
+            assert!(found, "{source}");
+        }
+        let path: syn::Path = syn::parse_str("domain::u64::MAX").unwrap();
+        assert!(rust_integer_constant(&path, false).is_none());
+        let path: syn::Path = syn::parse_str("::u64::MAX").unwrap();
+        assert!(
+            crate::core_ir::type_proofs::decode(&rust_integer_constant(&path, false).unwrap())
+                .is_some()
+        );
+    }
+    #[test]
+    fn external_primitive_root_aliases_require_crate_identity() {
+        for source in [
+            "extern crate alloc as std;fn main()->u8{::std::primitive::u8::MAX}",
+            "extern crate alloc as core;fn main()->u8{::core::primitive::u8::MAX}",
+        ] {
+            assert!(
+                parse_rust_source(source)
+                    .unwrap_err()
+                    .contains("crate identity resolution")
+            );
+        }
+        assert!(
+            parse_rust_source("extern crate std;fn main()->u8{::std::primitive::u8::MAX}").is_ok()
+        );
+    }
+    #[test]
+    fn absolute_bare_primitive_type_paths_keep_resolution_proofs() {
+        for source in [
+            "fn main()->::u8{u8::MAX}",
+            "fn main()->i64{let value: ::u8=u8::MAX;if value==255u8{42}else{7}}",
+        ] {
+            let module = parse_rust_source(source).unwrap();
+            assert!(crate::core_ir::type_proofs::present(&module.decls));
+        }
+    }
+    #[test]
+    fn relative_primitive_roots_require_unshadowed_lexical_identity() {
+        for source in [
+            "mod std{}fn main()->u8{std::primitive::u8::MAX}",
+            "mod core{}fn main()->u8{core::primitive::u8::MAX}",
+            "mod other{}use other as std;fn main()->u8{std::primitive::u8::MAX}",
+            "fn main()->u8{mod core{}core::primitive::u8::MAX}",
+            "fn main()->u8{mod other{}use other as std;std::primitive::u8::MAX}",
+            "fn entry<core>()->u8{core::primitive::u8::MAX}",
+            "fn main()->u8{let value={mod core{}core::primitive::u8::MAX};value}",
+            "fn main()->u8{{mod std{}std::primitive::u8::MAX}}",
+            "fn main()->u8{if true{mod core{}core::primitive::u8::MAX}else{0u8}}",
+            "fn main()->u8{unsafe{mod std{}std::primitive::u8::MAX}}",
+            "fn main()->u8{let value={mod other{}use other as std;std::primitive::u8::MAX};value}",
+            "static VALUE:u8={mod core{}core::primitive::u8::MAX};fn main()->u8{VALUE}",
+            "mod std{}struct Row;trait Build{type Output;fn make()->i64;}impl Build for Row{type Output=std::primitive::u8;fn make()->i64{Self::Output::MAX as i64}}",
+        ] {
+            let module = parse_rust_source(source).unwrap();
+            let proofs = crate::typecheck::TypeChecker::new().typed_proof_nodes(&module.decls);
+            assert!(!proofs.is_empty(), "{source}");
+            assert!(
+                proofs.values().all(|proof| !proof.is_invalid()),
+                "{proofs:?}"
+            );
+            assert!(
+                proofs
+                    .values()
+                    .all(|proof| proof.message().contains("shadowed primitive root")),
+                "{proofs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_primitive_roots_and_unrelated_scopes_remain_available() {
+        for source in [
+            "mod std{}fn main()->u8{::std::primitive::u8::MAX}",
+            "mod core{}fn main()->u8{::core::primitive::u8::MAX}",
+            "fn main()->u8{mod core{}::core::primitive::u8::MAX}",
+            "fn main()->u8{let value={mod core{}::core::primitive::u8::MAX};value}",
+            "fn main()->u8{if true{mod std{}::std::primitive::u8::MAX}else{0u8}}",
+            "mod std{}mod child{pub fn entry()->u8{std::primitive::u8::MAX}}fn main()->u8{child::entry()}",
+            "fn main()->u8{{mod std{}let ignored=::std::primitive::u8::MAX;}std::primitive::u8::MAX}",
+        ] {
+            let module = parse_rust_source(source).unwrap();
+            assert!(
+                crate::typecheck::TypeChecker::new()
+                    .typed_proof_nodes(&module.decls)
+                    .is_empty(),
+                "{source}"
+            );
+            let mut view = module.decls.clone();
+            let mut found = false;
+            crate::core_opt::map_decl_exprs_mut(&mut view, &mut |expr| {
+                found |= matches!(expr,Expr::Ident(name) if name=="#rust-integer-u8::MAX");
+            });
+            assert!(found, "{source}");
+        }
+        let module = parse_rust_source("mod std{}fn ambiguous()->u8{std::primitive::u8::MAX}fn main()->u8{::std::primitive::u8::MAX}").unwrap();
+        let proofs = crate::typecheck::TypeChecker::new().typed_proof_nodes(&module.decls);
+        assert!(proofs.contains_key("ambiguous"));
+        assert!(!proofs.contains_key("main"));
+    }
+
+    #[test]
+    fn unknown_primitive_values_refuse_without_reclassifying_method_callees() {
+        for path in [
+            "u64::NOT_A_CONSTANT",
+            "u64::wrapping_add",
+            "core::primitive::i8::unknown",
+            "std::primitive::u32::from",
+        ] {
+            let expression: syn::Expr = syn::parse_str(path).unwrap();
+            let value = lower_expr_with_types(&expression, &mut HashMap::new());
+            assert!(
+                matches!(value, Expr::Ident(name) if matches!(crate::core_ir::type_proofs::decode(&name), Some(crate::core_ir::type_proofs::ResolutionFailure::Unsupported(_)))),
+                "{path}"
+            );
+            for source in [format!("{path}(1,2)"), format!("(({path}))(1,2)")] {
+                let expression: syn::Expr = syn::parse_str(&source).unwrap();
+                let call = lower_expr_with_types(&expression, &mut HashMap::new());
+                assert!(
+                    matches!(call, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name) if name==path)),
+                    "{source}"
+                );
+            }
+        }
+        let expression: syn::Expr = syn::parse_str("u64::MAX").unwrap();
+        assert_eq!(
+            lower_expr_with_types(&expression, &mut HashMap::new()),
+            Expr::Ident("#rust-integer-u64::MAX".into())
+        );
+        for path in ["domain::u64::OTHER", "some::u64::MAX"] {
+            let path: syn::Path = syn::parse_str(path).unwrap();
+            assert!(rust_integer_constant(&path, false).is_none());
+        }
+    }
+
+    #[test]
+    fn calling_a_primitive_constant_retains_invalid_proof_in_dead_code() {
+        for source in [
+            "fn main(){if false{u64::MAX();}}",
+            "struct Row{} trait Other{type Output;fn make();} impl Other for Row{type Output=u64;fn make(){if false{Self::Output::MAX();}}}",
+        ] {
+            let mut module = parse_rust_source(source).unwrap();
+            let mut invalid = false;
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                if let Expr::Ident(name) = expr {
+                    invalid |= crate::core_ir::type_proofs::decode(name).is_some_and(|proof| {
+                        matches!(
+                            proof,
+                            crate::core_ir::type_proofs::ResolutionFailure::Invalid(_)
+                        )
+                    });
+                }
+            });
+            assert!(invalid, "{source}");
+        }
     }
 }

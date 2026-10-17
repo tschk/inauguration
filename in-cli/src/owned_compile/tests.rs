@@ -3529,6 +3529,49 @@ fn owned_rust_jit_retains_compile_only_for_uninvocable_entries() {
 }
 
 #[test]
+fn owned_rust_integer_inference_executes_backward_unsigned_constraints() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("rust-integer-inference-unsigned.rs");
+    fs::write(&path, "fn next(at:usize)->usize{at+1}fn main()->i64{let opening=1;let delimiter=opening+1;let mut at=delimiter;at=next(at);if at==3usize{42}else{7}}")
+        .unwrap();
+    for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+        let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(report.success, "{profile:?}: {report:?}");
+        assert!(report.execution_started, "{profile:?}: {report:?}");
+        assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{report:?}");
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn owned_rust_integer_inference_keeps_valid_selfhost_compile_only() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("rust-integer-inference-selfhost.rs");
+    fs::write(
+        &path,
+        include_str!("../../tests/fixtures/rust_integer_inference_selfhost.rs"),
+    )
+    .unwrap();
+    for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+        let mut request = default_request(path.clone(), CompileTarget::Jit, None, None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(report.success, "{profile:?}: {report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("jit-compiled-only"));
+        assert!(!report.execution_started);
+        assert_eq!(report.eval_exit_code, None);
+        assert_eq!(report.eval_result, None);
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
     if !native_backend::native_subset_host_available() {
         return;
@@ -9376,6 +9419,41 @@ fn rust_associated_cycles_cannot_disappear_through_zero_argument_inlining() {
                     report.reason_code.as_deref(),
                     Some("rust-invalid-associated-type")
                 );
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_integer_constant_errors_refuse_all_profiles_without_artifacts() {
+    for source in [
+        "fn main()->i64{if false{let value=u8::MAX+1u16;}42}",
+        "fn main()->i64{if false{let value=u8::MAX==1u16;}42}",
+        "fn main()->i64{if false{let value:i64=u8::MAX;}42}",
+        "fn main()->i64{if false{let value:i8=u64::BITS;}42}",
+        "fn main()->i64{let value=u64::MAX;if false{value();}42}",
+        "fn main()->i64{if false{({u64::MAX})();}42}",
+    ] {
+        let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        assert!(crate::native_emit::c_backend::emit_c_module(&parsed).is_err());
+        let path = temp_path("integer-constant-invalid.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("integer-constant-invalid.artifact");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    !report.success,
+                    "{source} {target:?} {profile:?}: {report:?}"
+                );
+                assert!(!report.execution_started);
+                assert_eq!(report.eval_result, None);
+                assert_eq!(report.artifact_path, None);
+                assert!(!out.exists());
             }
         }
         fs::remove_file(path).unwrap();

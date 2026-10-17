@@ -6,6 +6,16 @@ use inauguration::{core_opt, in_lang_parse::parse_in_source, native_emit::inisa}
 fn native_rust_assignments_preserve_values_order_and_integer_kinds() {
     use inauguration::emit_profile::EmitProfile;
     for source in [
+        "fn main()->i64{if u8::BITS==8u32 && i16::BITS==16u32 && u64::BITS==64u32{42}else{7}}",
+        "struct Row;trait Build{type Output;fn bits()->u32;}impl Build for Row{type Output=u64;fn bits()->u32{Self::Output::BITS}}fn main()->i64{if <Row as Build>::bits()==64u32{42}else{7}}",
+        "fn main()->i64{if i8::MIN == -128i8 && i16::MAX == 32767i16{42}else{7}}",
+        "fn main()->i64{if u8::MAX == 255u8 && u16::MIN == 0u16 && u32::MAX == 4294967295u32{42}else{7}}",
+        "fn main()->i64{if i64::MIN == -9223372036854775808i64 && u64::MAX == 18446744073709551615u64 && u64::MAX > 0u64{42}else{7}}",
+        "fn main()->i64{if isize::MIN < 0isize && isize::MAX > 0isize && usize::MIN == 0usize && usize::MAX > 0usize{42}else{7}}",
+        "struct Row;trait Build{type Output;fn make()->Self::Output;}impl Build for Row{type Output=i32;fn make()->Self::Output{Self::Output::MIN}}fn main()->i64{if <Row as Build>::make() == -2147483648i32{42}else{7}}",
+        "struct Row;trait Build{type Output;fn make()->Self::Output;}impl Build for Row{type Output=u64;fn make()->Self::Output{Self::Output::MAX}}fn main()->i64{if <Row as Build>::make() == 18446744073709551615u64{42}else{7}}",
+        "struct Row;trait Build{type Actual;type Output;fn make()->Self::Output;}impl Build for Row{type Actual=u32;type Output=Self::Actual;fn make()->Self::Output{Self::Output::MAX}}fn main()->i64{if <Row as Build>::make() == 4294967295u32{42}else{7}}",
+        "fn main()->i64{if core::primitive::i16::MIN == -32768i16 && std::primitive::u16::MAX == 65535u16{42}else{7}}",
         "struct Row{x:i64}struct Boxed{x:i64}impl Boxed{fn identity(self)->Self{self}}impl std::ops::Neg for Row{type Output=Boxed;fn neg(self)->Self::Output{let value:Self::Output=Boxed{x:42};Self::Output::identity(value)}}fn main()->i64{(-Row{x:1}).x}",
         "struct Row{x:i64}struct Boxed{x:i64}impl Boxed{fn identity(self)->Self{self}}impl std::ops::Neg for Row{type Output=Boxed;fn neg(self)->Self::Output{let value:Boxed=Boxed{x:42};Boxed::identity(value)}}fn main()->i64{(-Row{x:1}).x}",
         "struct Row{x:i64}struct Boxed{x:i64}impl Boxed{fn identity(self)->Self{self}}impl std::ops::Neg for Row{type Output=Boxed;fn neg(self)->Self::Output{let value:Self::Output=Boxed{x:42};value.identity()}}fn main()->i64{(-Row{x:1}).x}",

@@ -617,6 +617,7 @@ pub fn lower_module_with_jobs(
     crate::core_ir_verifier::check_execution_contracts(module)?;
     let prepared = crate::lower_core::prepared_native_module(module);
     let module = prepared.as_ref();
+    crate::core_ir_verifier::check_execution_contracts(module)?;
     // Clear any stale external refs from previous invocations
     TL_EXTERNAL_REFS.with(|refs| refs.borrow_mut().clear());
     TL_ERROR_SLOT_REFS.with(|refs| refs.borrow_mut().clear());

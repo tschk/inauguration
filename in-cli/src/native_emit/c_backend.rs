@@ -29,6 +29,14 @@ fn ctype(typ: &Typ) -> String {
     }
 }
 
+fn integer_literal(value: i64) -> String {
+    if value == i64::MIN {
+        "INT64_MIN".into()
+    } else {
+        format!("INT64_C({value})")
+    }
+}
+
 fn signed_word_from_bits(bits: &str) -> String {
     format!("{bits} <= INT64_MAX ? (int64_t){bits} : -INT64_C(1) - (int64_t)(UINT64_MAX - {bits})")
 }
@@ -73,6 +81,7 @@ fn sanitize_comment(s: &str) -> String {
 pub fn emit_c_module(module: &UnifiedModule) -> Result<String, String> {
     crate::core_ir_verifier::check_execution_contracts(module)?;
     let mut prepared = crate::lower_core::prepared_native_module(module);
+    crate::core_ir_verifier::check_execution_contracts(prepared.as_ref())?;
     check_module_limits(prepared.as_ref())?;
     // Hoisted declarations require unique lexical names, even on the borrowed fast path.
     crate::core_bindings::normalize_decls(&mut prepared.to_mut().decls);
@@ -538,7 +547,7 @@ impl Ctx {
             Expr::MatchValue { .. } => unreachable!("match values rejected by C backend scan"),
             Expr::Block { .. } => unreachable!("block values rejected by C backend scan"),
             Expr::UnitLit => unreachable!("unit values refused by C backend scan"),
-            Expr::IntLit(n) => format!("INT64_C({})", n),
+            Expr::IntLit(n) => integer_literal(*n),
             Expr::FloatLit(f) => {
                 let bits = f.0;
                 if bits.is_finite() {
@@ -1489,7 +1498,10 @@ fn match_arm_cond_and_binds(scrutinee: &str, pattern: &str, typ: &str) -> (Strin
         return (format!("(!({}))", scrutinee), vec![]);
     }
     if let Ok(n) = p.parse::<i64>() {
-        return (format!("(({}) == INT64_C({}))", scrutinee, n), vec![]);
+        return (
+            format!("(({}) == {})", scrutinee, integer_literal(n)),
+            vec![],
+        );
     }
     // Ident binding: always matches, bind name = scrutinee.
     if is_simple_ident(p) {

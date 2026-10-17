@@ -440,6 +440,7 @@ fn lower_module_impl(
     };
     let prepared = crate::lower_core::prepared_native_module_with_semantics(module, semantics);
     let module = prepared.as_ref();
+    crate::core_ir_verifier::check_execution_contracts(module)?;
     crate::core_ir_verifier::check_nonvoid_completion(module)?;
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
