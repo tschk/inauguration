@@ -2902,6 +2902,14 @@ pub fn typecheck_resolved(
     typecheck_executable(module)
 }
 
+/// Numeric C-family normalization is independent of full frontend typechecking support.
+pub fn uses_family_normalization(parser_id: ParserId) -> bool {
+    matches!(
+        parser_id,
+        ParserId::C | ParserId::Cpp | ParserId::ObjC | ParserId::ObjCpp
+    ) || uses_family_typecheck(parser_id)
+}
+
 pub fn uses_family_typecheck(parser_id: ParserId) -> bool {
     if let Some(row) = crate::language_support::language_support_for_parser(parser_id.as_str()) {
         return row.can_typecheck();
@@ -3722,6 +3730,28 @@ mod tests {
             let verified = crate::core_ir_verifier::verify_for_entry(&module, "main");
             assert!(verified.ok, "{verified:?}: {source}");
         }
+    }
+
+    #[test]
+    fn c_family_normalization_does_not_expand_typecheck_capabilities() {
+        for parser in [ParserId::C, ParserId::Cpp, ParserId::ObjC, ParserId::ObjCpp] {
+            assert!(uses_family_normalization(parser));
+        }
+        assert!(!uses_family_typecheck(ParserId::ObjC));
+        assert!(
+            !crate::language_support::language_support_for_parser("objc")
+                .unwrap()
+                .can_typecheck()
+        );
+        assert!(uses_family_typecheck(ParserId::ObjCpp));
+        assert_eq!(
+            uses_family_normalization(ParserId::Go),
+            uses_family_typecheck(ParserId::Go)
+        );
+        assert_eq!(
+            uses_family_normalization(ParserId::FSharp),
+            uses_family_typecheck(ParserId::FSharp)
+        );
     }
 
     #[test]

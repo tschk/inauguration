@@ -8518,3 +8518,127 @@ fn lua_return_inference_refuses_unowned_operator_semantics_before_execution() {
     }
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn objective_c_free_functions_normalize_numeric_values_without_runtime_support() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("objc-numeric.m");
+    for source in [
+        "int shift(_Bool value,int count){return value<<count;}int main(){return shift(1,1)+40;}",
+        "int shift(int value,_Bool count){return value<<count;}int main(){return shift(21,1);}",
+        "int shift(_Bool value,_Bool count){return value<<count;}int main(){return shift(1,1)+40;}",
+        "int calculate(_Bool value){return value+41;}int main(){return calculate(1);}",
+    ] {
+        fs::write(&path, source).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.execution_started,
+                "{source} {profile:?}: {report:?}"
+            );
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(42)),
+                "{source} {profile:?}: {report:?}"
+            );
+        }
+    }
+    for source in [
+        "int main(){return objc_runtime_missing();}",
+        "int main(){return [receiver performAction];}",
+    ] {
+        fs::write(&path, source).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                !report.success && !report.execution_started && report.eval_result.is_none(),
+                "{source} {profile:?}: {report:?}"
+            );
+            assert!(
+                report
+                    .reason_code
+                    .as_deref()
+                    .is_some_and(|code| code.starts_with("verify-")),
+                "{report:?}"
+            );
+        }
+    }
+    fs::remove_file(path).unwrap();
+    let generic = temp_path("strict-bool-shift.in");
+    fs::write(&generic,"fn shift(value:Bool,count:Int)->Int{return value<<count;}fn main()->Int{return shift(true,1);}").unwrap();
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        let mut request = default_request(generic.clone(), CompileTarget::Jit, Some("main"), None);
+        request.profile = profile;
+        let report = compile_owned(&request);
+        assert!(
+            !report.success && !report.execution_started && report.eval_result.is_none(),
+            "{profile:?}: {report:?}"
+        );
+        assert_eq!(report.reason_code.as_deref(), Some("verify-type-mismatch"));
+    }
+    fs::remove_file(generic).unwrap();
+}
+
+#[test]
+fn objective_c_numeric_normalization_preserves_word32_artifact_target() {
+    let path = temp_path("objc-word32.m");
+    fs::write(
+        &path,
+        "int shift(_Bool value,_Bool count){return value<<count;}int main(){return shift(1,1)+40;}",
+    )
+    .unwrap();
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        let output = temp_path("objc-word32.o");
+        let mut request = default_request(
+            path.clone(),
+            CompileTarget::Native,
+            Some("main"),
+            Some(output.clone()),
+        );
+        request.profile = profile;
+        request.linkage = NativeLinkage::StaticLib;
+        request.target_triple = Some("i386-unknown-none".into());
+        let report = compile_owned(&request);
+        assert!(
+            report.success && !report.execution_started,
+            "{profile:?}: {report:?}"
+        );
+        let bytes = fs::read(&output).unwrap();
+        assert_eq!(&bytes[..4], b"\x7fELF");
+        assert_eq!(bytes[4], 1, "ELF32 class");
+        assert_eq!(
+            u16::from_le_bytes(bytes[16..18].try_into().unwrap()),
+            1,
+            "relocatable object"
+        );
+        assert_eq!(
+            u16::from_le_bytes(bytes[18..20].try_into().unwrap()),
+            3,
+            "i386 machine"
+        );
+        fs::remove_file(output).unwrap();
+    }
+    fs::remove_file(path).unwrap();
+}

@@ -161,7 +161,7 @@ pub fn coverage_for_path(path: &Path, parser: ParserCli, entry: Option<&str>) ->
     let functions_in_source = count_functions(&module);
     crate::lower_core::desugar_module(&mut module);
     if let parser_registry::ResolvedBuildParser::CoreIr(parser_id) = resolved
-        && crate::typecheck::uses_family_typecheck(parser_id)
+        && crate::typecheck::uses_family_normalization(parser_id)
     {
         module = crate::typecheck::normalize_module(parser_id, &module);
     }
@@ -302,6 +302,24 @@ mod tests {
         assert!(report.degradations.is_empty());
         assert!(report.blockers.is_empty());
         assert_eq!(report.lowered_fraction(), Some(1.0));
+    }
+
+    #[test]
+    fn objective_c_numeric_promotions_match_native_builds() {
+        if !host_supports_native_subset() {
+            return;
+        }
+        let path = temp_source(
+            "numeric.m",
+            "int main(void) { _Bool value = 1; return (value << 5) + 10; }\n",
+        );
+        let report = coverage_for_path(&path, ParserCli::Auto, None);
+        fs::remove_file(&path).unwrap();
+
+        assert_eq!(report.status, CoverageStatus::FullyLowered, "{report:?}");
+        assert_eq!(report.functions_analyzed, 1, "{report:?}");
+        assert_eq!(report.functions_lowered, 1, "{report:?}");
+        assert!(report.blockers.is_empty(), "{report:?}");
     }
 
     #[test]

@@ -447,7 +447,7 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     // Desugaring and optimization must evaluate constants in the same target word.
     crate::lower_core::desugar_module_with_semantics(&mut module, integer_semantics);
     if let parser_registry::ResolvedBuildParser::CoreIr(parser_id) = resolved
-        && crate::typecheck::uses_family_typecheck(parser_id)
+        && crate::typecheck::uses_family_normalization(parser_id)
     {
         module = crate::typecheck::normalize_module_with_semantics(
             parser_id,

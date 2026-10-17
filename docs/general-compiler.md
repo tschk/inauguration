@@ -45,6 +45,10 @@ integer operands for word shifts. It uses unsigned shifts with masked counts
 and explicit sign extension for arithmetic right shifts. Each operand evaluates
 once in source order. Global shift initializers must fold before projection.
 
+Objective-C free C functions use the existing C-family numeric normalization
+before native verification. This covers integer promotions without adding
+Objective-C message dispatch, a runtime, or full frontend typechecking.
+
 The component `Compiler` API emits executables through the same owned native
 emitter used by the CLI. It reports parse errors and unsupported artifact kinds
 instead of fabricating a successful placeholder. Host macOS AArch64 emission
