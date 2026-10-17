@@ -2591,7 +2591,11 @@ fn scalar_expr_type_with_bindings(
                 .or_else(|| crate::core_ir_verifier::intrinsic_return_type(name).cloned()),
             _ => None,
         },
-        Expr::Unary { op, expr } if op == "-" || op == "vector-clone" => {
+        Expr::Unary { op, expr }
+            if op == "-"
+                || op == "vector-clone"
+                || crate::core_ir::array_copy::count(op).is_some() =>
+        {
             let typ = scalar_expr_type_with_bindings(expr, ctx, bindings);
             if op == "-" && typ.as_ref().is_some_and(|typ| typ.canonical() == Typ::Bool) {
                 Some(Typ::Int)
@@ -4394,6 +4398,9 @@ fn lower_unary_expr(
         let value = crate::core_ir::integer_cast_expr(value, op).unwrap();
         return lower_expr_into(emitter, ctx, &value, target_reg, pending_calls);
     }
+    if let Some(count) = crate::core_ir::array_copy::count(op) {
+        return lower_array_copy(emitter, ctx, target_reg, expr, count, pending_calls);
+    }
     if op == "vector-clone"
         && !matches!(scalar_expr_type(expr, ctx), Some(Typ::Vector(item)) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
     {
@@ -4659,10 +4666,134 @@ fn lower_array_elem_read(
     Ok(())
 }
 
-fn lower_heap_array(
+/// The x86 owned Array value is a pointer to [len, capacity, word payload...].
+fn lower_array_copy(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
-    offsets: &[u32],
+    target: u8,
+    source: &Expr,
+    count: usize,
+    pending_calls: &mut Vec<PendingCall>,
+) -> Result<(), String> {
+    if x86_64::is_32bit() || ctx.is_interrupt {
+        return Err("x86_64-lower: array copy requires the 64-bit hosted ABI".into());
+    }
+    if !scalar_expr_type(source, ctx).is_some_and(|typ| {
+        crate::core_ir::array_copy::valid_operand(
+            &crate::core_ir::array_copy::operation(count),
+            &typ,
+        )
+    }) {
+        return Err("x86_64-lower: array copy requires scalar Array elements".into());
+    }
+    let bytes = count
+        .checked_add(2)
+        .and_then(|words| words.checked_mul(8))
+        .filter(|bytes| *bytes <= i64::MAX as usize)
+        .ok_or("x86_64-lower: array copy allocation overflow")?;
+    let payload_bytes = bytes - 16;
+    let mut saved = Vec::new();
+    for reg in [RAX, RCX, RDX, RSI, RDI, 8, 9, 10, 11] {
+        if reg != target {
+            saved.push((reg, ctx.alloc_slot()));
+        }
+    }
+    let source_slot = ctx.alloc_slot();
+    let result_slot = ctx.alloc_slot();
+    if result_slot > u16::MAX as u32 {
+        return Err("x86_64-lower: array copy spill frame is too large".into());
+    }
+    for &(reg, slot) in &saved {
+        emitter.emit_insns(&x86_64::str64(reg, slot as u16));
+    }
+    lower_expr_into(emitter, ctx, source, RAX, pending_calls)?;
+    emitter.emit_insns(&x86_64::str64(RAX, source_slot as u16));
+    if count != 0 {
+        emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+        let null = emitter.len();
+        emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
+        emitter.emit_insns(&x86_64::mov_rr(RDX, RAX));
+        emitter.emit_insns(&x86_64::load_i64(RCX, 7));
+        emitter.emit_insns(&x86_64::and_rr(RDX, RCX));
+        emitter.emit_insns(&x86_64::test_rr(RDX, RDX));
+        let unaligned = emitter.len();
+        emitter.emit_insns(&x86_64::jcc_near(0x05, 0));
+        emitter.emit_insns(&x86_64::mov_r_m(RDX, RAX, 0));
+        emitter.emit_insns(&x86_64::load_i64(RCX, count as i64));
+        emitter.emit_insns(&x86_64::cmp_rr(RDX, RCX));
+        let enough = emitter.len();
+        emitter.emit_insns(&x86_64::jcc_near(0x03, 0));
+        emitter.patch_u32(null + 2, emitter.len() - null - 6);
+        emitter.patch_u32(unaligned + 2, emitter.len() - unaligned - 6);
+        if ctx.runtime_error_slot
+            || !matches!(
+                ctx.ret_typ.canonical(),
+                Typ::String | Typ::Array(_) | Typ::Vector(_) | Typ::Named(_)
+            )
+        {
+            emit_failure_return(emitter, ctx)?;
+        } else {
+            // Native aggregate returns have no JIT error page or error-value ABI.
+            // Terminate rather than return an invalid pointer that a caller could read.
+            emitter.emit_insns(&x86_64::mov_rr(11, x86_64::REG_SP));
+            emitter.emit_insns(&x86_64::load_i64(10, -16));
+            emitter.emit_insns(&x86_64::and_rr(x86_64::REG_SP, 10));
+            emitter.emit_insns(&x86_64::sub_rsp_i8(16));
+            let site = emitter.len();
+            emitter.emit_insns(&x86_64::call_rel32(0));
+            pending_calls.push(PendingCall {
+                site,
+                target: "abort".into(),
+            });
+            emitter.emit_insns(&[0x0F, 0x0B]);
+        }
+        emitter.patch_u32(enough + 2, emitter.len() - enough - 6);
+    }
+    if ctx.runtime_error_slot {
+        emitter.emit_insns(&x86_64::mov_rr(RDI, 15));
+        emitter.emit_insns(&x86_64::ldr64(RSI, source_slot as u16));
+        emitter.emit_insns(&x86_64::add_rmi8(RSI, 16));
+        emitter.emit_insns(&x86_64::load_i64(RDX, count as i64));
+        emit_aligned_host_call(
+            emitter,
+            crate::jit_runtime::clone_array as *const () as *const u8,
+        );
+    } else {
+        lower_array_allocation(emitter, ctx, count, pending_calls)?;
+        emitter.emit_insns(&x86_64::str64(RAX, result_slot as u16));
+        if count != 0 {
+            emitter.emit_insns(&x86_64::mov_rr(RDI, RAX));
+            emitter.emit_insns(&x86_64::add_rmi8(RDI, 16));
+            emitter.emit_insns(&x86_64::ldr64(RSI, source_slot as u16));
+            emitter.emit_insns(&x86_64::add_rmi8(RSI, 16));
+            emitter.emit_insns(&x86_64::load_i64(RDX, payload_bytes as i64));
+            emitter.emit_insns(&x86_64::mov_rr(11, x86_64::REG_SP));
+            emitter.emit_insns(&x86_64::load_i64(10, -16));
+            emitter.emit_insns(&x86_64::and_rr(x86_64::REG_SP, 10));
+            emitter.emit_insns(&x86_64::sub_rsp_i8(16));
+            emitter.emit_insns(&x86_64::mov_m_r(x86_64::REG_SP, 0, 11));
+            let site = emitter.len();
+            emitter.emit_insns(&x86_64::call_rel32(0));
+            pending_calls.push(PendingCall {
+                site,
+                target: "memcpy".into(),
+            });
+            emitter.emit_insns(&x86_64::mov_r_m(x86_64::REG_SP, x86_64::REG_SP, 0));
+        }
+        emitter.emit_insns(&x86_64::ldr64(RAX, result_slot as u16));
+    }
+    emitter.emit_insns(&x86_64::str64(RAX, result_slot as u16));
+    for &(reg, slot) in &saved {
+        emitter.emit_insns(&x86_64::ldr64(reg, slot as u16));
+    }
+    emitter.emit_insns(&x86_64::ldr64(target, result_slot as u16));
+    Ok(())
+}
+
+fn lower_array_allocation(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    count: usize,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
     if x86_64::is_32bit() || ctx.is_interrupt {
@@ -4670,14 +4801,13 @@ fn lower_heap_array(
     }
     if ctx.runtime_error_slot {
         emitter.emit_insns(&x86_64::mov_rr(RDI, 15));
-        emitter.emit_insns(&x86_64::load_i64(RSI, offsets.len() as i64));
+        emitter.emit_insns(&x86_64::load_i64(RSI, count as i64));
         emitter.emit_insns(&x86_64::load_i64(
             RAX,
             crate::jit_runtime::allocate_array as *const () as i64,
         ));
     } else {
-        let bytes = offsets
-            .len()
+        let bytes = count
             .checked_add(2)
             .and_then(|n| n.checked_mul(8))
             .ok_or("x86_64-lower: array allocation overflow")?;
@@ -4711,9 +4841,19 @@ fn lower_heap_array(
         emitter.patch_u32(allocated + 2, emitter.len() - allocated - 6);
     }
     emitter.emit_insns(&x86_64::mov_r_m(x86_64::REG_SP, x86_64::REG_SP, 0));
-    emitter.emit_insns(&x86_64::load_i64(RDX, offsets.len() as i64));
+    emitter.emit_insns(&x86_64::load_i64(RDX, count as i64));
     emitter.emit_insns(&x86_64::mov_m_r(RAX, 0, RDX));
     emitter.emit_insns(&x86_64::mov_m_r(RAX, 8, RDX));
+    Ok(())
+}
+
+fn lower_heap_array(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    offsets: &[u32],
+    pending_calls: &mut Vec<PendingCall>,
+) -> Result<(), String> {
+    lower_array_allocation(emitter, ctx, offsets.len(), pending_calls)?;
     for (index, offset) in offsets.iter().enumerate() {
         emitter.emit_insns(&x86_64::ldr64(RDX, *offset as u16));
         emitter.emit_insns(&x86_64::mov_m_r(RAX, 16 + index as i32 * 8, RDX));
@@ -6866,5 +7006,162 @@ mod declaration_storage_tests {
         )
         .unwrap();
         assert!(!emitter.bytes.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scalar_array_copy_tests {
+    use super::*;
+    fn module(count: usize) -> UnifiedModule {
+        UnifiedModule::new(vec![Decl::Function {
+            name: "copy".into(),
+            params: vec![("source".into(), Typ::Array(Box::new(Typ::Int)))],
+            ret: Typ::Array(Box::new(Typ::Int)),
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Unary {
+                op: crate::core_ir::array_copy::operation(count),
+                expr: Box::new(Expr::Ident("source".into())),
+            }))],
+        }])
+    }
+    #[test]
+    fn native_array_copy_uses_owned_allocator_and_payload_copy_imports() {
+        for count in [0, 2] {
+            let result = lower_native_module(&module(count), "copy").unwrap();
+            assert!(result.extern_calls.iter().any(|(name, _)| name == "malloc"));
+            assert!(result.extern_calls.iter().any(|(name, _)| name == "abort"));
+            assert_eq!(
+                result
+                    .extern_calls
+                    .iter()
+                    .filter(|(name, _)| name == "memcpy")
+                    .count(),
+                usize::from(count != 0)
+            );
+        }
+        assert!(
+            lower_native_module(&module(usize::MAX), "copy")
+                .err()
+                .expect("overflow must refuse lowering")
+                .contains("overflow")
+        );
+        let mut invalid = module(2);
+        let Decl::Function { params, ret, .. } = &mut invalid.decls[0] else {
+            panic!("copy")
+        };
+        params[0].1 = Typ::Vector(Box::new(Typ::Int));
+        *ret = params[0].1.clone();
+        assert!(lower_native_module(&invalid, "copy").is_err());
+    }
+    #[test]
+    fn empty_literal_can_copy_zero_elements_into_contextual_scalar_array() {
+        let mut empty = module(0);
+        let Decl::Function { body, .. } = &mut empty.decls[0] else {
+            panic!("copy")
+        };
+        let Stmt::Return(Some(Expr::Unary { expr, .. })) = &mut body[0] else {
+            panic!("copy value")
+        };
+        **expr = Expr::ArrayLit(vec![]);
+        assert!(lower_native_module(&empty, "copy").is_ok());
+        assert!(lower_module(&empty, "copy").is_ok());
+        let Decl::Function { body, .. } = &mut empty.decls[0] else {
+            panic!("copy")
+        };
+        let Stmt::Return(Some(Expr::Unary { op, .. })) = &mut body[0] else {
+            panic!("copy value")
+        };
+        *op = crate::core_ir::array_copy::operation(1);
+        assert!(lower_native_module(&empty, "copy").is_err());
+    }
+
+    #[cfg(all(unix, target_arch = "x86_64"))]
+    #[test]
+    fn jit_scalar_array_copy_is_independent_bounded_and_fresh_when_empty() {
+        for (element, payload) in [
+            (Typ::Int, [20_u64, 22]),
+            (Typ::Bool, [1, 0]),
+            (Typ::Float, [(-0.0_f64).to_bits(), 1.5_f64.to_bits()]),
+        ] {
+            for count in [0, 2] {
+                let mut input = module(count);
+                let Decl::Function { params, ret, .. } = &mut input.decls[0] else {
+                    panic!("copy")
+                };
+                params[0].1 = Typ::Array(Box::new(element.clone()));
+                *ret = params[0].1.clone();
+                let result = lower_module(&input, "copy").unwrap();
+                let exports = result
+                    .exports
+                    .iter()
+                    .map(|(name, offset)| (name.clone(), *offset, 0))
+                    .collect::<Vec<_>>();
+                let relocations = result
+                    .relocations
+                    .iter()
+                    .map(|site| (*site, result.codegen_base))
+                    .collect::<Vec<_>>();
+                let mut runtime = crate::jit_runtime::JitRuntime::new();
+                runtime
+                    .load_with_data_relocations(
+                        &result.code,
+                        &exports,
+                        &relocations,
+                        &result.data,
+                        &result.global_relocs,
+                        &result.data_relocations,
+                    )
+                    .unwrap();
+                let source = [3_u64, 3, payload[0], payload[1], 99];
+                let pointer = unsafe { runtime.invoke("copy", &[source.as_ptr() as i64]) }.unwrap()
+                    as *mut u64;
+                assert!(!pointer.is_null());
+                assert_ne!(pointer.cast_const(), source.as_ptr());
+                unsafe {
+                    assert_eq!(*pointer, count as u64);
+                    assert_eq!(*pointer.add(1), count as u64);
+                    if count != 0 {
+                        assert_eq!(*pointer.add(2), payload[0]);
+                        assert_eq!(*pointer.add(3), payload[1]);
+                        *pointer.add(2) = 7;
+                    }
+                }
+                assert_eq!(source, [3, 3, payload[0], payload[1], 99]);
+                if count == 0 {
+                    let empty = unsafe { runtime.invoke("copy", &[0]) }.unwrap() as *const u64;
+                    assert!(!empty.is_null());
+                    assert_ne!(empty, pointer.cast_const());
+                    assert_eq!(unsafe { *empty }, 0);
+                }
+            }
+        }
+        let mut bounded = module(2);
+        let Decl::Function { ret, body, .. } = &mut bounded.decls[0] else {
+            panic!("copy")
+        };
+        *ret = Typ::Int;
+        let Stmt::Return(Some(copy)) = body.pop().unwrap() else {
+            panic!("copy return")
+        };
+        body.push(Stmt::Let(
+            "copy".into(),
+            Some(Typ::Array(Box::new(Typ::Int))),
+            copy,
+        ));
+        body.push(Stmt::Return(Some(Expr::IntLit(42))));
+        let result = lower_module(&bounded, "copy").unwrap();
+        let exports = result
+            .exports
+            .iter()
+            .map(|(name, offset)| (name.clone(), *offset, 0))
+            .collect::<Vec<_>>();
+        let mut runtime = crate::jit_runtime::JitRuntime::new();
+        runtime.load(&result.code, &exports, &[]).unwrap();
+        let short = [1_u64, 1, 20];
+        assert_eq!(
+            unsafe { runtime.invoke("copy", &[short.as_ptr() as i64]) },
+            Some(1)
+        );
+        assert_eq!(unsafe { runtime.invoke("copy", &[0]) }, Some(1));
     }
 }

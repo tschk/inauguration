@@ -1647,6 +1647,25 @@ pub(crate) fn lower_array_expr_into_regs(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Expr::Unary { op, expr: source } = expr
+        && let Some(count) = crate::core_ir::array_copy::count(op)
+    {
+        if !matches!(lower_expr::native_expr_type(source,ctx,functions),Some(Typ::Array(actual)) if actual.canonical()==elem.canonical() || (count==0 && actual.canonical()==Typ::Void))
+        {
+            return Err("native-lower: array copy destination element type mismatch".into());
+        }
+        return lower_expr::lower_array_copy(
+            emitter,
+            ctx,
+            source,
+            count,
+            0,
+            true,
+            functions,
+            pending_calls,
+            fn_name,
+        );
+    }
     if matches!(elem.canonical(), Typ::Named(_)) {
         super::lower_util::record_array_fields(elem, ctx.structs)?;
     }
@@ -1699,7 +1718,11 @@ pub(crate) fn lower_array_expr_into_regs(
         );
     }
     let record = super::lower_util::record_array_fields(elem, ctx.structs)?;
-    if !is_native_scalar_type(elem) && record.is_none() {
+    if !is_native_scalar_type(elem)
+        && record.is_none()
+        && !(elem.canonical() == Typ::Void
+            && matches!(expr,Expr::ArrayLit(items) if items.is_empty()))
+    {
         return Err(format!(
             "native-lower: unsupported array element type `{elem:?}` in `{fn_name}`"
         ));

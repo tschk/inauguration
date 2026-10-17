@@ -345,11 +345,13 @@ fn refuse_static_array_value_uses(module: &mut UnifiedModule) {
         .filter_map(|decl| match decl {
             Decl::Global {
                 name,
-                typ: typ @ Typ::Array(_),
+                typ,
                 mutable,
                 constant_value: false,
                 ..
-            } => Some((name.clone(), (*mutable, typ.clone()))),
+            } if matches!(typ.canonical(), Typ::Array(_)) => {
+                Some((name.clone(), (*mutable, typ.canonical())))
+            }
             _ => None,
         })
         .collect();
@@ -1787,6 +1789,12 @@ fn resolve_impl_type(
                 {
                     return Ok(Typ::Generic(name));
                 }
+                if let Some(array) = crate::core_ir::rust_arrays::decode(&name) {
+                    return Ok(crate::core_ir::rust_arrays::typ(
+                        resolve(array.element, owner, implementation, active)?,
+                        array.length,
+                    ));
+                }
                 if let Some(mut reference) = crate::core_ir::rust_references::decode(&name) {
                     reference.referent =
                         resolve(reference.referent, owner, implementation, active)?;
@@ -1837,6 +1845,8 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
             let _primitive_roots =
                 PrimitiveRootScope::new(primitive_root_generics(&method.sig.generics), true);
             let f = method.clone();
+            let signature_locals = signature_length_locals(&f.sig);
+            let _length_shadows = LengthShadowScope::new(&signature_locals);
             let method_name = if let Some((_, trait_path, _)) = &i.trait_ {
                 // Trait methods occupy their receiver/trait namespace, never the free-function namespace.
                 format!(
@@ -1891,6 +1901,7 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
             // Add self type to local types for method dispatch
             for (pname, pty) in &params {
                 local_types.insert(pname.clone(), type_to_string(pty));
+                local_types.insert(format!("{LENGTH_LOCAL}{pname}"), String::new());
             }
             let body = lower_block_with_types(&f.block, &mut local_types);
             let mut declaration = Decl::Function {
@@ -2074,6 +2085,8 @@ fn lower_fn_with_types(f: syn::ItemFn, local_types: &mut HashMap<String, String>
     let _type_parameters = type_aliases::generic_scope(&f.sig.generics);
     let _primitive_roots = PrimitiveRootScope::new(primitive_root_generics(&f.sig.generics), true);
     let name = f.sig.ident.to_string();
+    let signature_locals = signature_length_locals(&f.sig);
+    let _length_shadows = LengthShadowScope::new(&signature_locals);
     let params = f
         .sig
         .inputs
@@ -2085,6 +2098,7 @@ fn lower_fn_with_types(f: syn::ItemFn, local_types: &mut HashMap<String, String>
                 // Track parameter types for method dispatch
                 let ty = map_type(&pat_ty.ty);
                 local_types.insert(pname.clone(), type_to_string(&ty));
+                local_types.insert(format!("{LENGTH_LOCAL}{pname}"), String::new());
                 (pname, ty)
             }
             syn::FnArg::Receiver(_) => ("self".to_string(), Typ::Named("Self".to_string())),
@@ -2571,12 +2585,106 @@ fn map_type(ty: &syn::Type) -> Typ {
                 )
             }
         }
-        syn::Type::Array(array) => Typ::Array(Box::new(map_type(&array.elem))),
+        syn::Type::Array(array) => match fixed_array_length(&array.len) {
+            Ok(Some(length)) => crate::core_ir::rust_arrays::typ(map_type(&array.elem), length),
+            Ok(None) => crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                "fixed array length requires owned usize constant resolution".into(),
+            )
+            .typ(),
+            Err(failure) => failure.typ(),
+        },
         syn::Type::Tuple(t) => {
             crate::core_ir::tuples::typ(&t.elems.iter().map(map_type).collect::<Vec<_>>())
         }
         _ => Typ::Named(ty.to_token_stream().to_string()),
     }
+}
+
+const LENGTH_LOCAL: &str = "#rust-length-local:";
+thread_local! {
+    static LENGTH_SHADOWS: std::cell::RefCell<HashSet<String>> = std::cell::RefCell::new(HashSet::new());
+}
+fn signature_length_locals(signature: &syn::Signature) -> HashMap<String, String> {
+    signature
+        .inputs
+        .iter()
+        .fold(HashMap::new(), |mut locals, argument| match argument {
+            syn::FnArg::Typed(argument) => length_pattern_locals(&argument.pat, &locals),
+            syn::FnArg::Receiver(_) => {
+                locals.insert(format!("{LENGTH_LOCAL}self"), String::new());
+                locals
+            }
+        })
+}
+fn length_pattern_locals(
+    pattern: &syn::Pat,
+    locals: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    fn add(pattern: &syn::Pat, locals: &mut HashMap<String, String>) {
+        match pattern {
+            syn::Pat::Ident(value) => {
+                locals.insert(format!("{LENGTH_LOCAL}{}", value.ident), String::new());
+                if let Some((_, pattern)) = &value.subpat {
+                    add(pattern, locals);
+                }
+            }
+            syn::Pat::Tuple(value) => {
+                for item in &value.elems {
+                    add(item, locals);
+                }
+            }
+            syn::Pat::TupleStruct(value) => {
+                for item in &value.elems {
+                    add(item, locals);
+                }
+            }
+            syn::Pat::Struct(value) => {
+                for field in &value.fields {
+                    add(&field.pat, locals);
+                }
+            }
+            syn::Pat::Slice(value) => {
+                for item in &value.elems {
+                    add(item, locals);
+                }
+            }
+            syn::Pat::Or(value) => {
+                for item in &value.cases {
+                    add(item, locals);
+                }
+            }
+            syn::Pat::Reference(value) => add(&value.pat, locals),
+            syn::Pat::Type(value) => add(&value.pat, locals),
+            syn::Pat::Paren(value) => add(&value.pat, locals),
+            _ => {}
+        }
+    }
+    let mut inner = locals.clone();
+    add(pattern, &mut inner);
+    inner
+}
+struct LengthShadowScope(HashSet<String>);
+impl LengthShadowScope {
+    fn new(locals: &HashMap<String, String>) -> Self {
+        let names = locals
+            .keys()
+            .filter_map(|name| name.strip_prefix(LENGTH_LOCAL).map(str::to_string))
+            .collect();
+        Self(LENGTH_SHADOWS.with(|slot| slot.replace(names)))
+    }
+}
+impl Drop for LengthShadowScope {
+    fn drop(&mut self) {
+        LENGTH_SHADOWS.with(|slot| {
+            slot.replace(std::mem::take(&mut self.0));
+        });
+    }
+}
+fn fixed_array_length(
+    expression: &syn::Expr,
+) -> Result<Option<usize>, crate::core_ir::type_proofs::ResolutionFailure> {
+    let shadows = LENGTH_SHADOWS.with(|shadows| shadows.borrow().clone());
+    type_aliases::usize_length(expression, &shadows)
 }
 
 fn vector_value_initializer(expr: &syn::Expr) -> bool {
@@ -2941,13 +3049,18 @@ fn lower_block_inner_with_types_go(
                         } else {
                             lower_expr_with_types(&init.expr, local_types)
                         };
-                        out.push(Stmt::Let(name.clone(), local_decl_type(&local.pat), value));
+                        out.push(Stmt::Let(
+                            name.clone(),
+                            local_decl_type(&local.pat, local_types),
+                            value,
+                        ));
                         if matches!(init.expr.as_ref(), syn::Expr::Try(_)) {
                             out.push(Stmt::Propagate);
                         }
                         // A new binding must not inherit an earlier receiver type hint.
                         for name in names {
                             local_types.remove(&name);
+                            local_types.insert(format!("{LENGTH_LOCAL}{name}"), String::new());
                         }
                         lower_tuple_let_bindings(&local.pat, Expr::Ident(name), &mut out);
                         continue;
@@ -2961,7 +3074,7 @@ fn lower_block_inner_with_types_go(
                     };
                     // Infer type from annotation or constructor
                     if is_simple {
-                        if let Some(ty) = local_decl_type(&local.pat) {
+                        if let Some(ty) = local_decl_type(&local.pat, local_types) {
                             // ponytail: convert Typ to string name for method dispatch
                             let type_str = type_to_string(&ty);
                             local_types.insert(name.clone(), type_str);
@@ -2982,16 +3095,15 @@ fn lower_block_inner_with_types_go(
                         }
                     }
                     if let syn::Expr::Try(try_expr) = init.expr.as_ref() {
-                        out.push(Stmt::Let(
-                            name,
-                            local_decl_type(&local.pat),
-                            lower_expr_with_types(&try_expr.expr, local_types),
-                        ));
+                        let typ = local_decl_type(&local.pat, local_types);
+                        let value = lower_expr_with_types(&try_expr.expr, local_types);
+                        local_types.insert(format!("{LENGTH_LOCAL}{name}"), String::new());
+                        out.push(Stmt::Let(name, typ, value));
                         out.push(Stmt::Propagate);
                         continue;
                     }
                     let expr = lower_expr_with_types(&init.expr, local_types);
-                    let local_ty = local_decl_type(&local.pat).or_else(|| {
+                    let local_ty = local_decl_type(&local.pat, local_types).or_else(|| {
                         matches!(
                             &expr,
                             Expr::Call { callee, .. }
@@ -3011,6 +3123,7 @@ fn lower_block_inner_with_types_go(
                     {
                         local_types.insert(name.clone(), type_to_string(typ));
                     }
+                    local_types.insert(format!("{LENGTH_LOCAL}{name}"), String::new());
                     out.push(Stmt::Let(name, local_ty, expr));
                 } else if let syn::Pat::Type(typed) = &local.pat
                     && let syn::Pat::Ident(binding) = typed.pat.as_ref()
@@ -3018,8 +3131,10 @@ fn lower_block_inner_with_types_go(
                     && binding.subpat.is_none()
                 {
                     let name = binding.ident.to_string();
+                    let _length_shadows = LengthShadowScope::new(local_types);
                     let typ = map_type(&typed.ty);
                     local_types.insert(name.clone(), type_to_string(&typ));
+                    local_types.insert(format!("{LENGTH_LOCAL}{name}"), String::new());
                     out.push(Stmt::Declare(name, typ));
                 } else {
                     out.push(Stmt::Expr(Expr::Call {
@@ -3140,7 +3255,7 @@ fn lower_match_with_types(
         .iter()
         .map(|arm| {
             let mut body = Vec::new();
-            let mut inner = local_types.clone();
+            let mut inner = length_pattern_locals(&arm.pat, local_types);
             let guard = arm
                 .guard
                 .as_ref()
@@ -3186,8 +3301,11 @@ fn lower_if_with_types(
         // `if let Pat = Expr { ... } else { ... }`
         // Lower to: let _pat = Expr; match _pat { Pat => ..., _ => else }
         let scrutinee = lower_expr_with_types(&expr_let.expr, local_types);
-        let then_body =
-            lower_block_inner_with_types(&eif.then_branch, tail, &mut local_types.clone());
+        let then_body = lower_block_inner_with_types(
+            &eif.then_branch,
+            tail,
+            &mut length_pattern_locals(&expr_let.pat, local_types),
+        );
         let else_body = eif
             .else_branch
             .as_ref()
@@ -3243,7 +3361,8 @@ fn lower_expr_stmt(
         }
         syn::Expr::If(eif) => lower_if_with_types(eif, false, out, local_types),
         syn::Expr::ForLoop(f) => {
-            let body = lower_block_no_implicit_return_with_types(&f.body, local_types);
+            let mut inner = length_pattern_locals(&f.pat, local_types);
+            let body = lower_block_no_implicit_return_with_types(&f.body, &mut inner);
             out.push(Stmt::Loop {
                 kind: LoopKind::For {
                     binding: match f.pat.as_ref() {
@@ -3379,11 +3498,12 @@ fn assign_lhs_name(lhs: &syn::Expr) -> Option<String> {
     }
 }
 
-fn local_decl_type(pat: &syn::Pat) -> Option<Typ> {
+fn local_decl_type(pat: &syn::Pat, locals: &HashMap<String, String>) -> Option<Typ> {
+    let _length_shadows = LengthShadowScope::new(locals);
     match pat {
         syn::Pat::Type(pt) => Some(map_type(&pt.ty)),
         syn::Pat::Ident(_) => None,
-        syn::Pat::Reference(r) => local_decl_type(&r.pat),
+        syn::Pat::Reference(r) => local_decl_type(&r.pat, locals),
         _ => None,
     }
 }
@@ -3401,6 +3521,7 @@ fn lower_expr_in_position(
     local_types: &mut HashMap<String, String>,
     call_target: bool,
 ) -> Expr {
+    let _length_shadows = LengthShadowScope::new(local_types);
     // Transparent syntax wrappers do not consume structural recursion budget.
     let mut expr = expr;
     loop {
@@ -3550,12 +3671,15 @@ fn lower_expr_with_types_inner(
         },
         syn::Expr::Paren(p) => lower_expr_with_types(&p.expr, local_types),
         syn::Expr::Tuple(tuple) if tuple.elems.is_empty() => Expr::UnitLit,
-        syn::Expr::Array(array) => Expr::ArrayLit(
-            array
-                .elems
-                .iter()
-                .map(|item| lower_expr_with_types(item, local_types))
-                .collect(),
+        syn::Expr::Array(array) => crate::core_ir::rust_arrays::value(
+            Expr::ArrayLit(
+                array
+                    .elems
+                    .iter()
+                    .map(|item| lower_expr_with_types(item, local_types))
+                    .collect(),
+            ),
+            array.elems.len(),
         ),
         syn::Expr::Macro(mac) if mac.mac.path.is_ident("vec") => {
             syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
@@ -3658,9 +3782,10 @@ fn lower_expr_with_types_inner(
                 .iter()
                 .map(|input| {
                     let name = pattern_name(input).unwrap_or_else(|| "_".to_string());
-                    let typ =
-                        local_decl_type(input).unwrap_or_else(|| Typ::Generic("_".to_string()));
+                    let typ = local_decl_type(input, &closure_types)
+                        .unwrap_or_else(|| Typ::Generic("_".to_string()));
                     closure_types.insert(name.clone(), type_to_string(&typ));
+                    closure_types.insert(format!("{LENGTH_LOCAL}{name}"), String::new());
                     (name, typ)
                 })
                 .collect();
@@ -3866,12 +3991,28 @@ fn lower_expr_with_types_inner(
         }
         syn::Expr::Block(value) => lower_block_value(&value.block, local_types),
         syn::Expr::Unsafe(value) => lower_block_value(&value.block, local_types),
-        syn::Expr::Repeat(repeat) => Expr::Call {
-            callee: Box::new(Expr::Ident(crate::core_ir::ARRAY_REPEAT.into())),
-            args: vec![
-                lower_expr_with_types(&repeat.expr, local_types),
-                lower_expr_with_types(&repeat.len, local_types),
-            ],
+        syn::Expr::Repeat(repeat) => match fixed_array_length(&repeat.len) {
+            Ok(Some(length)) => crate::core_ir::rust_arrays::value(
+                Expr::Call {
+                    callee: Box::new(Expr::Ident(crate::core_ir::ARRAY_REPEAT.into())),
+                    args: vec![
+                        lower_expr_with_types(&repeat.expr, local_types),
+                        Expr::IntLit(length as i64),
+                    ],
+                },
+                length,
+            ),
+            Ok(None) => Expr::Unary {
+                op: crate::core_ir::rust_arrays::PENDING_REPEAT.into(),
+                expr: Box::new(Expr::Call {
+                    callee: Box::new(Expr::Ident(crate::core_ir::ARRAY_REPEAT.into())),
+                    args: vec![
+                        lower_expr_with_types(&repeat.expr, local_types),
+                        lower_expr_with_types(&repeat.len, local_types),
+                    ],
+                }),
+            },
+            Err(failure) => Expr::Ident(failure.symbol()),
         },
         syn::Expr::Range(range) => {
             let inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));
@@ -3907,13 +4048,16 @@ fn lower_expr_with_types_inner(
             arms: value
                 .arms
                 .iter()
-                .map(|arm| MatchValueArm {
-                    pattern: arm.pat.to_token_stream().to_string(),
-                    guard: arm
-                        .guard
-                        .as_ref()
-                        .map(|(_, value)| lower_expr_with_types(value, &mut local_types.clone())),
-                    value: lower_match_arm_value(&arm.body, local_types),
+                .map(|arm| {
+                    let mut inner = length_pattern_locals(&arm.pat, local_types);
+                    MatchValueArm {
+                        pattern: arm.pat.to_token_stream().to_string(),
+                        guard: arm
+                            .guard
+                            .as_ref()
+                            .map(|(_, value)| lower_expr_with_types(value, &mut inner)),
+                        value: lower_match_arm_value(&arm.body, &inner),
+                    }
                 })
                 .collect(),
         },
@@ -4546,9 +4690,11 @@ fn main() -> Result<i64, i64> {
         let Decl::Function { ret, body, .. } = &module.decls[0] else {
             panic!("main must be a function");
         };
-        assert_eq!(*ret, Typ::Array(Box::new(Typ::String)));
+        assert_eq!(*ret, crate::core_ir::rust_arrays::typ(Typ::String, 1));
         assert!(
-            matches!(body.last(), Some(Stmt::Return(Some(Expr::ArrayLit(items)))) if items.len() == 1)
+            matches!(body.last(), Some(Stmt::Return(Some(Expr::Unary { op, expr })))
+            if crate::core_ir::rust_arrays::value_length(op) == Some(1)
+                && matches!(expr.as_ref(), Expr::ArrayLit(items) if items.len() == 1))
         );
     }
 
@@ -5791,7 +5937,10 @@ mod generic_provenance_tests {
         assert_eq!(type_params, &["T"]);
         assert_eq!(params[0].1, Typ::Generic("T".into()));
         assert_eq!(params[1].1, Typ::Vector(Box::new(Typ::Generic("T".into()))));
-        assert_eq!(params[2].1, Typ::Array(Box::new(Typ::Generic("T".into()))));
+        assert_eq!(
+            params[2].1,
+            crate::core_ir::rust_arrays::typ(Typ::Generic("T".into()), 2)
+        );
         assert_eq!(
             crate::core_ir::tuples::fields(match &params[3].1 {
                 Typ::Named(name) => name,
@@ -6447,5 +6596,115 @@ mod primitive_constant_tests {
             });
             assert!(invalid, "{source}");
         }
+    }
+}
+
+#[cfg(test)]
+mod fixed_array_metadata_tests {
+    use super::*;
+    #[test]
+    fn fixed_types_and_values_keep_lengths_without_claiming_vectors() {
+        let module = parse_rust_source("fn array(v:[u8;3])->[u8;0]{[]} fn vector()->Vec<u8>{vec![1u8,2u8]} fn repeated()->[u8;2]{[1u8;2]}").unwrap();
+        let function = |name: &str| {
+            module
+                .decls
+                .iter()
+                .find(|decl| matches!(decl,Decl::Function{name:actual,..} if actual==name))
+                .unwrap()
+        };
+        let Decl::Function {
+            params, ret, body, ..
+        } = function("array")
+        else {
+            panic!()
+        };
+        assert_eq!(
+            params[0].1,
+            crate::core_ir::rust_arrays::typ(Typ::Named("#rust-integer-u8".into()), 3)
+        );
+        assert_eq!(
+            ret,
+            &crate::core_ir::rust_arrays::typ(Typ::Named("#rust-integer-u8".into()), 0)
+        );
+        assert!(
+            matches!(body.last(),Some(Stmt::Return(Some(Expr::Unary{op,expr}))) if crate::core_ir::rust_arrays::value_length(op)==Some(0) && matches!(expr.as_ref(),Expr::ArrayLit(items) if items.is_empty()))
+        );
+        let Decl::Function { ret, body, .. } = function("vector") else {
+            panic!()
+        };
+        assert!(matches!(ret, Typ::Vector(_)));
+        assert!(matches!(
+            body.last(),
+            Some(Stmt::Return(Some(Expr::ArrayLit(_))))
+        ));
+        let Decl::Function { body, .. } = function("repeated") else {
+            panic!()
+        };
+        assert!(
+            matches!(body.last(),Some(Stmt::Return(Some(Expr::Unary{op,expr}))) if crate::core_ir::rust_arrays::value_length(op)==Some(2) && matches!(expr.as_ref(),Expr::Call{callee,args} if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::ARRAY_REPEAT) && args.len()==2))
+        );
+    }
+    #[test]
+    fn unresolved_array_lengths_are_explicit_proofs() {
+        let typ = map_type(&syn::parse_quote!([u8; N]));
+        assert!(matches!(
+            crate::core_ir::type_proofs::failure_in_type(&typ),
+            Some(crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                _
+            ))
+        ));
+        let typ = map_type(&syn::parse_quote!([u8; 3u8]));
+        assert!(matches!(
+            crate::core_ir::type_proofs::failure_in_type(&typ),
+            Some(crate::core_ir::type_proofs::ResolutionFailure::Invalid(_))
+        ));
+    }
+    #[test]
+    fn fixed_array_counts_use_source_constants_without_runtime_local_capture() {
+        let artifact = parse_rust_artifact_source("const COUNT:usize=1+2;fn values()->[i64;COUNT]{[7;COUNT]}fn shadow()->i64{let COUNT=3;let values=[7;COUNT];42}", "counts").unwrap();
+        let values = artifact
+            .semantic
+            .decls
+            .iter()
+            .find(|decl| matches!(decl,Decl::Function{name,..} if name=="values"))
+            .unwrap();
+        let Decl::Function { ret, body, .. } = values else {
+            unreachable!()
+        };
+        assert_eq!(
+            match ret {
+                Typ::Named(name) =>
+                    crate::core_ir::rust_arrays::decode(name).map(|array| array.length),
+                _ => None,
+            },
+            Some(3)
+        );
+        assert!(
+            matches!(body.last(),Some(Stmt::Return(Some(Expr::Unary{op,..}))) if crate::core_ir::rust_arrays::value_length(op)==Some(3))
+        );
+        let shadow = artifact
+            .semantic
+            .decls
+            .iter()
+            .find(|decl| matches!(decl,Decl::Function{name,..} if name=="shadow"))
+            .unwrap();
+        let mut shadow = shadow.clone();
+        let mut failure = None;
+        if let Decl::Function { body, .. } = &mut shadow {
+            for stmt in body {
+                crate::core_opt::map_stmt_exprs_mut(stmt, &mut |expr| {
+                    if let Expr::Ident(name) = expr {
+                        failure = crate::core_ir::type_proofs::prefer_failure(
+                            failure.take(),
+                            crate::core_ir::type_proofs::decode(name),
+                        );
+                    }
+                });
+            }
+        }
+        assert!(matches!(
+            failure,
+            Some(crate::core_ir::type_proofs::ResolutionFailure::Invalid(_))
+        ));
     }
 }

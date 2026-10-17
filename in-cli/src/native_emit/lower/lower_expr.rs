@@ -479,7 +479,7 @@ pub(crate) fn lower_index(
             | Expr::Index { .. }
             | Expr::Conditional { .. }
             | Expr::Block { .. }
-    ) || matches!(base, Expr::Unary {op, ..} if op == "vector-clone")
+    ) || matches!(base, Expr::Unary {op, ..} if op == "vector-clone" || crate::core_ir::array_copy::count(op).is_some())
         || matches!(base, Expr::Ident(name) if !ctx.locals.contains_key(name) && matches!(ctx.global_types.get(name).map(Typ::canonical), Some(Typ::Array(_))))
     {
         let ptr_slot = ctx.acquire_binop_temp(fn_name)?;
@@ -852,6 +852,198 @@ pub(crate) fn lower_field(
     }
 }
 
+// Array returns escape their frame and use the owning materializer. A copy source
+// instead borrows inline storage only until the immediate clone finishes.
+fn lower_array_copy_source(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    expr: &Expr,
+    elem: &Typ,
+    functions: &HashMap<String, FunctionInfo>,
+    pending_calls: &mut Vec<PendingCall>,
+    fn_name: &str,
+) -> Result<(), String> {
+    if matches!(
+        expr,
+        Expr::Block { .. } | Expr::Conditional { .. } | Expr::MatchValue { .. }
+    ) {
+        return lower_value_control(
+            emitter,
+            ctx,
+            expr,
+            functions,
+            pending_calls,
+            fn_name,
+            |emitter, ctx, value, pending_calls| {
+                lower_array_copy_source(
+                    emitter,
+                    ctx,
+                    value,
+                    elem,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )
+            },
+        );
+    }
+    if let Expr::Ident(name) = expr
+        && let Some(LocalSlot::Array {
+            elem: actual,
+            offsets,
+        }) = ctx.locals.get(name)
+    {
+        if actual.canonical() != elem.canonical()
+            || offsets
+                .windows(2)
+                .any(|pair| pair[0].checked_add(8) != Some(pair[1]))
+        {
+            return Err(
+                "native-lower: array copy needs contiguous matching inline elements".into(),
+            );
+        }
+        if let Some(offset) = offsets.first() {
+            emitter.emit_u32(aarch64::add_imm64(0, aarch64::REG_SP, 0));
+            emitter.emit_insns(&aarch64::load_i64(15, i64::from(*offset)));
+            emitter.emit_u32(aarch64::add_reg64(0, 0, 15));
+        } else {
+            emitter.emit_insns(&aarch64::load_i64(0, 0));
+        }
+        emitter.emit_insns(&aarch64::load_i64(1, offsets.len() as i64));
+        return Ok(());
+    }
+    super::lower_stmt::lower_array_expr_into_regs(
+        emitter,
+        ctx,
+        expr,
+        elem,
+        functions,
+        pending_calls,
+        fn_name,
+    )
+}
+
+/// Materialize one checked scalar Array prefix, preserving surrounding operand registers.
+pub(crate) fn lower_array_copy(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    expr: &Expr,
+    count: usize,
+    rd: u8,
+    descriptor: bool,
+    functions: &HashMap<String, FunctionInfo>,
+    pending_calls: &mut Vec<PendingCall>,
+    fn_name: &str,
+) -> Result<(), String> {
+    let Some(Typ::Array(elem)) = native_expr_type(expr, ctx, functions) else {
+        return Err("native-lower: array copy requires an Array".into());
+    };
+    if !matches!(elem.canonical(), Typ::Int | Typ::Float | Typ::Bool)
+        && !(count == 0 && elem.canonical() == Typ::Void)
+    {
+        return Err("native-lower: array copy requires scalar elements".into());
+    }
+    count
+        .checked_add(2)
+        .and_then(|words| words.checked_mul(8))
+        .and_then(|bytes| i64::try_from(bytes).ok())
+        .ok_or("native-lower: array copy allocation overflow")?;
+    if rd > 17 || (descriptor && rd > 16) {
+        return Err("native-lower: array copy result register is unsupported".into());
+    }
+    let base = ctx.acquire_scalar_array_spills(fn_name)?;
+    let result = (|| {
+        for reg in 0..19u8 {
+            if reg != rd && !(descriptor && reg == rd + 1) {
+                emitter.emit_u32(aarch64::str64(
+                    reg,
+                    aarch64::REG_SP,
+                    ctx.scalar_array_spills[base + reg as usize],
+                ));
+            }
+        }
+        lower_array_copy_source(emitter, ctx, expr, &elem, functions, pending_calls, fn_name)?;
+        if count != 0 {
+            emitter.emit_insns(&aarch64::load_i64(15, count as i64));
+            emitter.emit_u32(aarch64::cmp_reg64(1, 15));
+            let short = emitter.emit_insn(aarch64::b_cond(3, 0));
+            emitter.emit_u32(aarch64::cmp_reg64(0, 31));
+            let null = emitter.emit_insn(aarch64::b_cond(0, 0));
+            emitter.emit_insns(&aarch64::load_i64(15, 7));
+            emitter.emit_u32(aarch64::and_reg64(15, 0, 15));
+            emitter.emit_u32(aarch64::cmp_reg64(15, 31));
+            let unaligned = emitter.emit_insn(aarch64::b_cond(1, 0));
+            let sufficient = emitter.emit_insn(aarch64::b(0));
+            let failed = emitter.len();
+            emitter.patch_u32(short, aarch64::b_cond(3, failed as i32 - short as i32));
+            emitter.patch_u32(null, aarch64::b_cond(0, failed as i32 - null as i32));
+            emitter.patch_u32(
+                unaligned,
+                aarch64::b_cond(1, failed as i32 - unaligned as i32),
+            );
+            super::lower_stmt::emit_error_slot_adr(emitter, fn_name)?;
+            emitter.emit_insns(&aarch64::load_i64(0, 1));
+            emitter.emit_u32(aarch64::str64(0, 27, 8));
+            emitter.emit_u32(aarch64::str64(0, 27, 16));
+            emitter.emit_u32(aarch64::strb(0, 27, 0));
+            super::lower_stmt::emit_error_exit(emitter, ctx);
+            emitter.patch_u32(
+                sufficient,
+                aarch64::b(emitter.len() as i32 - sufficient as i32),
+            );
+        }
+        emitter.emit_insns(&aarch64::load_i64(1, count as i64));
+        if super::TL_NATIVE_MODE.with(|mode| *mode.borrow()) {
+            let target = if count == 0 {
+                // Empty copies still own a distinct allocation; vector clone canonicalizes empties.
+                emitter.emit_insns(&aarch64::load_i64(0, 1));
+                crate::inrt::INRT_VECTOR_ALLOC
+            } else {
+                emitter.emit_u32(aarch64::mov_reg64(2, 1));
+                crate::inrt::INRT_VECTOR_CLONE
+            };
+            let site = emitter.len();
+            emitter.emit_u32(aarch64::bl(0));
+            ctx.pending_inrt_calls.push(super::PendingInrtCall {
+                site,
+                target: target.into(),
+            });
+            if count == 0 {
+                emitter.emit_insns(&aarch64::load_i64(1, 0));
+            }
+        } else {
+            emitter.emit_u32(aarch64::mov_reg64(2, 1));
+            emitter.emit_u32(aarch64::mov_reg64(1, 0));
+            emitter.emit_u32(aarch64::mov_reg64(0, 27));
+            emitter.emit_insns(&aarch64::load_i64(
+                15,
+                crate::jit_runtime::clone_array as *const () as i64,
+            ));
+            emitter.emit_u32(0xD63F_0000 | (15 << 5));
+            emitter.emit_u32(aarch64::ldr64(1, 0, 0));
+            emitter.emit_u32(aarch64::add_imm64(0, 0, 16));
+        }
+        if descriptor && rd != 0 {
+            emitter.emit_u32(aarch64::mov_reg64(rd + 1, 1));
+        }
+        if rd != 0 {
+            emitter.emit_u32(aarch64::mov_reg64(rd, 0));
+        }
+        for reg in 0..19u8 {
+            if reg != rd && !(descriptor && reg == rd + 1) {
+                emitter.emit_u32(aarch64::ldr64(
+                    reg,
+                    aarch64::REG_SP,
+                    ctx.scalar_array_spills[base + reg as usize],
+                ));
+            }
+        }
+        Ok(())
+    })();
+    ctx.release_scalar_array_spills();
+    result
+}
+
 pub(crate) fn lower_unary(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -862,6 +1054,19 @@ pub(crate) fn lower_unary(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Some(count) = crate::core_ir::array_copy::count(op) {
+        return lower_array_copy(
+            emitter,
+            ctx,
+            expr,
+            count,
+            rd,
+            false,
+            functions,
+            pending_calls,
+            fn_name,
+        );
+    }
     if op == "!"
         && native_expr_type(expr, ctx, functions).is_some_and(|typ| typ.canonical() == Typ::Float)
     {
@@ -1454,7 +1659,11 @@ fn native_expr_type_with_bindings(
                 .or_else(|| crate::core_ir_verifier::intrinsic_return_type(name).cloned()),
             _ => None,
         },
-        Expr::Unary { op, expr } if op == "-" || op == "vector-clone" => {
+        Expr::Unary { op, expr }
+            if op == "-"
+                || op == "vector-clone"
+                || crate::core_ir::array_copy::count(op).is_some() =>
+        {
             let typ = native_expr_type_with_bindings(expr, ctx, functions, bindings);
             if op == "-" && typ.as_ref().is_some_and(|typ| typ.canonical() == Typ::Bool) {
                 Some(Typ::Int)
@@ -1806,6 +2015,192 @@ mod record_index_place_tests {
 #[cfg(test)]
 mod scalar_array_preservation_tests {
     use super::*;
+
+    #[test]
+    fn array_copy_preserves_live_registers_and_checks_source_length() {
+        for (rd, descriptor) in [(0u8, true), (7u8, false), (7u8, true)] {
+            let structs = HashMap::new();
+            let strings = HashMap::new();
+            let globals = HashMap::new();
+            let types = HashMap::new();
+            let mut runtime = Vec::new();
+            let mut pending_strings = Vec::new();
+            let params = vec![("source".into(), Typ::Array(Box::new(Typ::Int)))];
+            let mut ctx = LowerCtx::new(
+                &params,
+                &structs,
+                &strings,
+                &globals,
+                &types,
+                &mut runtime,
+                &mut pending_strings,
+                "test",
+            )
+            .unwrap();
+            for _ in 0..19 {
+                let slot = ctx.alloc_slot();
+                ctx.scalar_array_spills.push(slot);
+            }
+            let mut emitter = CodeEmitter::new();
+            let mut calls = vec![];
+            lower_array_copy(
+                &mut emitter,
+                &mut ctx,
+                &Expr::Ident("source".into()),
+                2,
+                rd,
+                descriptor,
+                &HashMap::new(),
+                &mut calls,
+                "test",
+            )
+            .unwrap();
+            let words: Vec<u32> = emitter
+                .bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| u32::from_le_bytes(*bytes))
+                .collect();
+            for reg in 0..19u8 {
+                if reg != rd && !(descriptor && reg == rd + 1) {
+                    assert!(words.contains(&aarch64::str64(
+                        reg,
+                        aarch64::REG_SP,
+                        ctx.scalar_array_spills[reg as usize]
+                    )));
+                    assert!(words.contains(&aarch64::ldr64(
+                        reg,
+                        aarch64::REG_SP,
+                        ctx.scalar_array_spills[reg as usize]
+                    )));
+                }
+            }
+            let compare = words
+                .iter()
+                .position(|word| *word == aarch64::cmp_reg64(1, 15))
+                .unwrap();
+            let clone = words
+                .iter()
+                .position(|word| *word == (0xD63F_0000 | (15 << 5)))
+                .unwrap();
+            assert!(
+                compare < clone,
+                "length is checked before allocation/payload copying"
+            );
+            assert!(
+                words[compare + 1] & 0xff00_001f == 0x5400_0003,
+                "unsigned short-source refusal branch"
+            );
+            let pointer_check = words
+                .iter()
+                .position(|word| *word == aarch64::cmp_reg64(0, 31))
+                .unwrap();
+            assert!(pointer_check < clone, "null payloads refuse before copying");
+            let alignment_check = words
+                .iter()
+                .position(|word| *word == aarch64::and_reg64(15, 0, 15))
+                .unwrap();
+            assert!(
+                alignment_check < clone,
+                "unaligned payloads refuse before copying"
+            );
+            assert_eq!(ctx.scalar_array_depth, 0);
+            let mut empty = CodeEmitter::new();
+            lower_array_copy(
+                &mut empty,
+                &mut ctx,
+                &Expr::ArrayLit(vec![]),
+                0,
+                rd,
+                descriptor,
+                &HashMap::new(),
+                &mut calls,
+                "test",
+            )
+            .unwrap();
+            let empty_words: Vec<u32> = empty
+                .bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| u32::from_le_bytes(*bytes))
+                .collect();
+            assert!(
+                empty_words.contains(&(0xD63F_0000 | (15 << 5))),
+                "zero-length copies still allocate fresh storage"
+            );
+            assert_eq!(ctx.scalar_array_depth, 0);
+            let offsets = vec![ctx.alloc_slot(), ctx.alloc_slot()];
+            ctx.locals.insert(
+                "inline".into(),
+                LocalSlot::Array {
+                    elem: Typ::Int,
+                    offsets: offsets.clone(),
+                },
+            );
+            let mut inline = CodeEmitter::new();
+            lower_array_copy(
+                &mut inline,
+                &mut ctx,
+                &Expr::Ident("inline".into()),
+                0,
+                rd,
+                descriptor,
+                &HashMap::new(),
+                &mut calls,
+                "test",
+            )
+            .unwrap();
+            let inline_words: Vec<u32> = inline
+                .bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| u32::from_le_bytes(*bytes))
+                .collect();
+            for offset in offsets {
+                for reg in 0..19 {
+                    assert!(
+                        !inline_words.contains(&aarch64::ldr64(reg, aarch64::REG_SP, offset)),
+                        "zero copy must not read inline payload"
+                    );
+                }
+            }
+            assert_eq!(ctx.scalar_array_depth, 0);
+            let mut native_empty = CodeEmitter::new();
+            let previous = super::super::TL_NATIVE_MODE.with(|mode| mode.replace(true));
+            let previous_error = super::super::TL_ERROR_SLOT_MODE
+                .with(|mode| mode.replace(super::super::ErrorSlotMode::Unsupported));
+            let lowered = lower_array_copy(
+                &mut native_empty,
+                &mut ctx,
+                &Expr::ArrayLit(vec![]),
+                0,
+                rd,
+                descriptor,
+                &HashMap::new(),
+                &mut calls,
+                "test",
+            );
+            super::super::TL_NATIVE_MODE.with(|mode| *mode.borrow_mut() = previous);
+            super::super::TL_ERROR_SLOT_MODE.with(|mode| *mode.borrow_mut() = previous_error);
+            lowered.expect("zero copies need no writable error slot");
+            assert_eq!(
+                ctx.pending_inrt_calls.last().unwrap().target,
+                crate::inrt::INRT_VECTOR_ALLOC
+            );
+            assert!(
+                native_empty
+                    .bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|bytes| u32::from_le_bytes(*bytes) == aarch64::movz64(1, 0, 0)),
+                "empty allocation has zero logical length"
+            );
+        }
+    }
 
     #[test]
     fn scalar_array_literal_restores_other_gp_registers_and_releases_depth() {

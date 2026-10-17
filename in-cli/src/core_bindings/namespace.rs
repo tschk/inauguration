@@ -277,6 +277,15 @@ fn typ(value: &mut Typ, names: &NominalNames<'_>, generics: &HashSet<String>) {
             }
         }
         Typ::Named(name) if !generics.contains(name) => {
+            if let Some(mut array) = crate::core_ir::rust_arrays::decode(name) {
+                if let Some(target) = (names.type_name)(name) {
+                    *value = target;
+                    return;
+                }
+                typ(&mut array.element, names, generics);
+                *value = crate::core_ir::rust_arrays::typ(array.element, array.length);
+                return;
+            }
             if let Some(mut reference) = crate::core_ir::rust_references::decode(name) {
                 if let Some(target) = (names.type_name)(name) {
                     *value = target;

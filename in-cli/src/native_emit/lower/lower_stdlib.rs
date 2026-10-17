@@ -766,6 +766,24 @@ fn lower_array_len(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Expr::Unary { op, expr } = source
+        && let Some(count) = crate::core_ir::array_copy::count(op)
+    {
+        // Preserve allocation/effects exactly once even though the result length is known.
+        super::lower_expr::lower_array_copy(
+            emitter,
+            ctx,
+            expr,
+            count,
+            rd,
+            false,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        emitter.emit_insns(&aarch64::load_i64(rd, count as i64));
+        return Ok(());
+    }
     if let Expr::Ident(name) = source
         && !ctx.locals.contains_key(name)
         && matches!(

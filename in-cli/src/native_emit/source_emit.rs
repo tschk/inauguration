@@ -15,7 +15,7 @@ const MAX_EMIT_NODES: usize = 100_000;
 pub fn emit_source_module(module: &UnifiedModule, lang: SourceLang) -> Result<String, String> {
     crate::core_ir_verifier::check_execution_contracts(module)?;
     // Soft DoS guard: truncate emission rather than hang (lossy printers).
-    if !module_within_limits(module, lang) {
+    if !module_within_limits(module, lang)? {
         return Ok(format!(
             "// emit aborted: Core IR exceeds size/depth limits or uses unsupported operations\n// lang={lang:?}\n"
         ));
@@ -642,22 +642,30 @@ fn export_go(name: &str) -> String {
     }
 }
 
-fn module_within_limits(module: &UnifiedModule, lang: SourceLang) -> bool {
-    let mut nodes = 0usize;
-    for d in &module.decls {
-        if !count_decl(d, 0, &mut nodes, lang) {
-            return false;
-        }
-    }
-    true
+#[derive(Default)]
+struct EmitBudget {
+    nodes: usize,
+    array_copy: bool,
 }
 
-fn count_decl(d: &Decl, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool {
+fn module_within_limits(module: &UnifiedModule, lang: SourceLang) -> Result<bool, String> {
+    let mut budget = EmitBudget::default();
+    let valid = module
+        .decls
+        .iter()
+        .all(|decl| count_decl(decl, 0, &mut budget, lang));
+    if budget.array_copy {
+        return Err("source-emit: array value copy is not represented by this source sink".into());
+    }
+    Ok(valid)
+}
+
+fn count_decl(d: &Decl, depth: u32, nodes: &mut EmitBudget, lang: SourceLang) -> bool {
     if depth > MAX_EMIT_DEPTH {
         return false;
     }
-    *nodes += 1;
-    if *nodes > MAX_EMIT_NODES {
+    nodes.nodes += 1;
+    if nodes.nodes > MAX_EMIT_NODES {
         return false;
     }
     match d {
@@ -670,16 +678,16 @@ fn count_decl(d: &Decl, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool
     }
 }
 
-fn count_stmts(stmts: &[Stmt], depth: u32, nodes: &mut usize, lang: SourceLang) -> bool {
+fn count_stmts(stmts: &[Stmt], depth: u32, nodes: &mut EmitBudget, lang: SourceLang) -> bool {
     stmts.iter().all(|s| count_stmt(s, depth, nodes, lang))
 }
 
-fn count_stmt(s: &Stmt, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool {
+fn count_stmt(s: &Stmt, depth: u32, nodes: &mut EmitBudget, lang: SourceLang) -> bool {
     if depth > MAX_EMIT_DEPTH {
         return false;
     }
-    *nodes += 1;
-    if *nodes > MAX_EMIT_NODES {
+    nodes.nodes += 1;
+    if nodes.nodes > MAX_EMIT_NODES {
         return false;
     }
     match s {
@@ -730,12 +738,12 @@ fn count_stmt(s: &Stmt, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool
     }
 }
 
-fn count_expr(e: &Expr, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool {
+fn count_expr(e: &Expr, depth: u32, nodes: &mut EmitBudget, lang: SourceLang) -> bool {
     if depth > MAX_EMIT_DEPTH {
         return false;
     }
-    *nodes += 1;
-    if *nodes > MAX_EMIT_NODES {
+    nodes.nodes += 1;
+    if nodes.nodes > MAX_EMIT_NODES {
         return false;
     }
     match e {
@@ -758,7 +766,13 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize, lang: SourceLang) -> bool
                     .as_deref()
                     .is_none_or(|result| count_expr(result, depth + 1, nodes, lang))
         }
-        Expr::Unary { expr, .. } => count_expr(expr, depth + 1, nodes, lang),
+        Expr::Unary { op, expr } => {
+            if op.starts_with("array-copy") {
+                nodes.array_copy = true;
+                return false;
+            }
+            count_expr(expr, depth + 1, nodes, lang)
+        }
         Expr::Binary { op, lhs, rhs } => {
             // These sinks cannot yet preserve unsigned word/failure semantics.
             !matches!(op.as_str(), "udiv" | "urem" | "lshr")
@@ -992,6 +1006,33 @@ mod declaration_source_tests {
         assert!(go.contains("var value int64"), "{go}");
         for source in [rust, go] {
             assert!(!source.contains("value = 7"), "{source}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod array_copy_source_tests {
+    use super::*;
+    #[test]
+    fn array_copy_is_refused_instead_of_printing_an_unknown_unary_operator() {
+        for operation in [
+            crate::core_ir::array_copy::operation(2),
+            "array-copy:01".into(),
+        ] {
+            let array = Typ::Array(Box::new(Typ::Int));
+            let module = UnifiedModule::new(vec![Decl::Function {
+                name: "copy".into(),
+                params: vec![("source".into(), array.clone())],
+                ret: array,
+                body: vec![Stmt::Return(Some(Expr::Unary {
+                    op: operation,
+                    expr: Box::new(Expr::Ident("source".into())),
+                }))],
+                type_params: vec![],
+            }]);
+            for lang in [SourceLang::Rust, SourceLang::Go] {
+                assert!(emit_source_module(&module, lang).is_err(), "{lang:?}");
+            }
         }
     }
 }

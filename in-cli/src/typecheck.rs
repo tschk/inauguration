@@ -1,4 +1,5 @@
 mod rigid_values;
+mod rust_arrays;
 mod rust_generics;
 pub(crate) mod rust_integers;
 mod type_proofs;
@@ -90,6 +91,23 @@ fn resolved_closure_type(typ: &Typ) -> bool {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResolvePolicy {
+    Ordinary,
+    CValues,
+    RustFixedArrays,
+    RustArrayInference,
+    RustArrayValidate,
+}
+impl ResolvePolicy {
+    fn arrays(self) -> bool {
+        matches!(
+            self,
+            Self::RustFixedArrays | Self::RustArrayInference | Self::RustArrayValidate
+        )
+    }
+}
+
 pub(crate) struct Facts {
     functions: HashMap<String, (Vec<(String, Typ)>, Typ)>,
     structs: HashMap<String, Vec<(String, Typ)>>,
@@ -97,6 +115,7 @@ pub(crate) struct Facts {
     unary_methods: Option<crate::boundary_ir::UnaryMethodBindings>,
     unary_method_errors: std::cell::RefCell<Vec<String>>,
     require_resolved_inline_values: bool,
+    array_constraints: std::cell::RefCell<rust_arrays::Constraints>,
 }
 
 impl Facts {
@@ -236,11 +255,11 @@ impl TypeChecker {
 
     /// Resolve type-dependent complement into the canonical boolean or integer operator.
     pub(crate) fn resolve_complements(&self, module: &mut UnifiedModule) {
-        let _ = self.resolve_typed_operators(module, false, None, None);
+        let _ = self.resolve_typed_operators(module, ResolvePolicy::Ordinary, None, None);
     }
 
     fn resolve_c_value_promotions(&self, module: &mut UnifiedModule) {
-        let _ = self.resolve_typed_operators(module, true, None, None);
+        let _ = self.resolve_typed_operators(module, ResolvePolicy::CValues, None, None);
     }
 
     pub(crate) fn resolve_closure_calls(
@@ -260,7 +279,8 @@ impl TypeChecker {
                     _ => None,
                 })
                 .collect();
-            let _ = self.resolve_typed_operators(module, false, Some(closures), None);
+            let _ =
+                self.resolve_typed_operators(module, ResolvePolicy::Ordinary, Some(closures), None);
             let parameters_changed = closure_inference::infer(self, module, closures);
             let returns_changed = module.decls.iter().any(|decl| match decl {
                 Decl::Function { name, ret, .. } => {
@@ -288,7 +308,8 @@ impl TypeChecker {
         if !has_origin {
             return Ok(());
         }
-        let errors = self.resolve_typed_operators(module, false, None, Some(bindings));
+        let errors =
+            self.resolve_typed_operators(module, ResolvePolicy::Ordinary, None, Some(bindings));
         if errors.is_empty() {
             Ok(())
         } else {
@@ -299,7 +320,7 @@ impl TypeChecker {
     fn resolve_typed_operators(
         &self,
         module: &mut UnifiedModule,
-        promote_c_bool: bool,
+        policy: ResolvePolicy,
         closures: Option<&HashMap<String, String>>,
         unary_methods: Option<&crate::boundary_ir::UnaryMethodBindings>,
     ) -> Vec<String> {
@@ -336,9 +357,37 @@ impl TypeChecker {
                         let mut env = globals.clone();
                         env.extend(params.iter().cloned());
                         let initial = env.clone();
-                        self.resolve_typed_body(body, &facts, &mut env, Some(ret), promote_c_bool);
+                        if policy.arrays() {
+                            *facts.array_constraints.borrow_mut() = Default::default();
+                            for (name, typ) in &initial {
+                                facts.array_constraints.borrow_mut().bind(name, typ);
+                            }
+                            loop {
+                                facts.array_constraints.borrow_mut().reset_changed();
+                                self.resolve_typed_body(
+                                    body,
+                                    &facts,
+                                    &mut initial.clone(),
+                                    Some(ret),
+                                    ResolvePolicy::RustArrayInference,
+                                );
+                                if !facts.array_constraints.borrow().changed() {
+                                    break;
+                                }
+                            }
+                        }
+                        self.resolve_typed_body(body, &facts, &mut env, Some(ret), policy);
+                        if policy.arrays() {
+                            let proof = facts.array_constraints.borrow().failure();
+                            if let Some(proof) = proof.filter(|proof| {
+                                policy == ResolvePolicy::RustFixedArrays || proof.is_invalid()
+                            }) {
+                                body.insert(0, Stmt::Expr(Expr::Ident(proof.symbol())));
+                            }
+                        }
                         if closure_phase {
-                            if matches!(ret, Typ::Generic(name) if name == "_")
+                            if !policy.arrays()
+                                && matches!(ret, Typ::Generic(name) if name == "_")
                                 && params.iter().all(|(_, typ)| resolved_closure_type(typ))
                                 && let Some(inferred) =
                                     self.infer_closure_return(body, &facts, &initial)
@@ -355,8 +404,53 @@ impl TypeChecker {
                         init: Some(expr),
                         ..
                     } if !closure_phase => {
-                        self.resolve_typed_expr(expr, &facts, &globals, promote_c_bool, None);
-                        if promote_c_bool {
+                        if policy.arrays() {
+                            *facts.array_constraints.borrow_mut() = Default::default();
+                            for (name, typ) in &globals {
+                                facts.array_constraints.borrow_mut().bind(name, typ);
+                            }
+                            loop {
+                                facts.array_constraints.borrow_mut().reset_changed();
+                                self.resolve_typed_expr(
+                                    expr,
+                                    &facts,
+                                    &globals,
+                                    ResolvePolicy::RustArrayInference,
+                                    None,
+                                );
+                                self.finish_typed_value(
+                                    ResolvePolicy::RustArrayInference,
+                                    expr,
+                                    Some(typ),
+                                    &facts,
+                                    &globals,
+                                );
+                                if !facts.array_constraints.borrow().changed() {
+                                    break;
+                                }
+                            }
+                        }
+                        // Global initializers are folded as owned constant value graphs before data layout.
+                        let initializer_policy = if policy == ResolvePolicy::RustFixedArrays {
+                            ResolvePolicy::RustArrayValidate
+                        } else {
+                            policy
+                        };
+                        self.resolve_typed_expr(expr, &facts, &globals, initializer_policy, None);
+                        self.finish_typed_value(
+                            initializer_policy,
+                            expr,
+                            Some(typ),
+                            &facts,
+                            &globals,
+                        );
+                        if policy.arrays() {
+                            let proof = facts.array_constraints.borrow().failure();
+                            if let Some(proof) = proof.filter(|proof| proof.is_invalid()) {
+                                **expr = Expr::Ident(proof.symbol());
+                            }
+                        }
+                        if policy == ResolvePolicy::CValues {
                             self.resolve_c_value(expr, typ, &facts, &globals);
                         }
                     }
@@ -368,12 +462,7 @@ impl TypeChecker {
         crate::core_ir::tuples::register(module);
         let mut errors = facts.unary_method_errors.into_inner();
         if module.decls.len() != old_len {
-            errors.extend(self.resolve_typed_operators(
-                module,
-                promote_c_bool,
-                closures,
-                unary_methods,
-            ));
+            errors.extend(self.resolve_typed_operators(module, policy, closures, unary_methods));
         }
         errors
     }
@@ -708,15 +797,85 @@ impl TypeChecker {
         true
     }
 
+    fn resolve_policy_vector_allocation(
+        &self,
+        policy: ResolvePolicy,
+        expr: &mut Expr,
+        expected: &Typ,
+        facts: &Facts,
+    ) -> bool {
+        !policy.arrays() && self.resolve_vector_allocation(expr, expected, facts)
+    }
+
+    fn finish_typed_value(
+        &self,
+        policy: ResolvePolicy,
+        expr: &mut Expr,
+        expected: Option<&Typ>,
+        facts: &Facts,
+        env: &HashMap<String, Typ>,
+    ) -> Option<Typ> {
+        if policy.arrays() {
+            // Propagate destination constraints through value results using the
+            // existing scope walker. No second source-body traversal is maintained.
+            if policy != ResolvePolicy::RustFixedArrays {
+                match expr {
+                    Expr::Block { body, result } => {
+                        let mut inner = env.clone();
+                        self.resolve_typed_body(body, facts, &mut inner, None, policy);
+                        if let Some(result) = result {
+                            self.finish_typed_value(policy, result, expected, facts, &inner);
+                        }
+                    }
+                    Expr::Conditional {
+                        then_expr,
+                        else_expr,
+                        ..
+                    } => {
+                        for value in [then_expr, else_expr] {
+                            if !crate::core_ir::expr_diverges(value) {
+                                self.finish_typed_value(policy, value, expected, facts, env);
+                            }
+                        }
+                    }
+                    Expr::MatchValue { scrutinee, arms } => {
+                        let typ = self.expr_type(scrutinee, facts, env);
+                        for arm in arms {
+                            let inner = typ
+                                .as_ref()
+                                .and_then(|typ| {
+                                    self.pattern_environment(&arm.pattern, typ, facts, env)
+                                })
+                                .unwrap_or_else(|| env.clone());
+                            if !crate::core_ir::expr_diverges(&arm.value) {
+                                self.finish_typed_value(
+                                    policy,
+                                    &mut arm.value,
+                                    expected,
+                                    facts,
+                                    &inner,
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            rust_arrays::finish_value(self, expr, expected, facts, env, policy)
+        } else {
+            self.expr_type(expr, facts, env)
+        }
+    }
+
     fn resolve_typed_expr(
         &self,
         expr: &mut Expr,
         facts: &Facts,
         env: &HashMap<String, Typ>,
-        promote_c_bool: bool,
+        policy: ResolvePolicy,
         return_type: Option<&Typ>,
     ) -> Option<CIntegerKind> {
-        let mut c_kind = if promote_c_bool {
+        let mut c_kind = if policy == ResolvePolicy::CValues {
             let typ = match expr {
                 Expr::Binary { .. }
                 | Expr::Unary { .. }
@@ -735,7 +894,7 @@ impl TypeChecker {
         {
             for (name, value) in fields {
                 if let Some((_, expected)) = schema.iter().find(|(field, _)| field == name) {
-                    self.resolve_vector_allocation(value, expected, facts);
+                    self.resolve_policy_vector_allocation(policy, value, expected, facts);
                 }
             }
         }
@@ -744,11 +903,11 @@ impl TypeChecker {
             && let Some((params, _)) = facts.functions.get(name)
         {
             for (arg, (_, expected)) in args.iter_mut().zip(params) {
-                self.resolve_vector_allocation(arg, expected, facts);
+                self.resolve_policy_vector_allocation(policy, arg, expected, facts);
             }
         }
         if let Expr::MatchValue { scrutinee, arms } = expr {
-            self.resolve_typed_expr(scrutinee, facts, env, promote_c_bool, return_type);
+            self.resolve_typed_expr(scrutinee, facts, env, policy, return_type);
             let typ = self.expr_type(scrutinee, facts, env);
             for arm in arms {
                 let inner = typ
@@ -756,23 +915,16 @@ impl TypeChecker {
                     .and_then(|typ| self.pattern_environment(&arm.pattern, typ, facts, env));
                 if let Some(inner) = inner {
                     if let Some(guard) = &mut arm.guard {
-                        self.resolve_typed_expr(guard, facts, &inner, promote_c_bool, return_type);
+                        self.resolve_typed_expr(guard, facts, &inner, policy, return_type);
                     }
-                    self.resolve_typed_expr(
-                        &mut arm.value,
-                        facts,
-                        &inner,
-                        promote_c_bool,
-                        return_type,
-                    );
+                    self.resolve_typed_expr(&mut arm.value, facts, &inner, policy, return_type);
                 }
             }
         } else if let Expr::Block { body, result } = expr {
             let mut inner = env.clone();
-            self.resolve_typed_body(body, facts, &mut inner, return_type, promote_c_bool);
+            self.resolve_typed_body(body, facts, &mut inner, return_type, policy);
             if let Some(result) = result {
-                c_kind =
-                    self.resolve_typed_expr(result, facts, &inner, promote_c_bool, return_type);
+                c_kind = self.resolve_typed_expr(result, facts, &inner, policy, return_type);
             }
         } else if let Expr::Closure {
             params, ret, body, ..
@@ -780,63 +932,73 @@ impl TypeChecker {
         {
             let mut inner = env.clone();
             inner.extend(params.iter().cloned());
+            if policy.arrays() {
+                for (name, typ) in params.iter() {
+                    facts.array_constraints.borrow_mut().bind(name, typ);
+                }
+            }
             let initial = inner.clone();
-            self.resolve_typed_body(body, facts, &mut inner, Some(ret), promote_c_bool);
-            if matches!(ret, Typ::Generic(name) if name == "_")
+            self.resolve_typed_body(body, facts, &mut inner, Some(ret), policy);
+            if !policy.arrays()
+                && matches!(ret, Typ::Generic(name) if name == "_")
                 && params.iter().all(|(_, typ)| resolved_closure_type(typ))
                 && let Some(inferred) = self.infer_closure_return(body, facts, &initial)
             {
                 *ret = inferred;
             }
         } else if let Expr::Binary { op, lhs, rhs } = expr {
-            c_operands[0] = self.resolve_typed_expr(lhs, facts, env, promote_c_bool, return_type);
-            c_operands[1] = self.resolve_typed_expr(rhs, facts, env, promote_c_bool, return_type);
-            if matches!(op.as_str(), "lua-bitand" | "lua-bitor" | "lua-bitxor") {
-                if self.expr_type(lhs, facts, env) != Some(Typ::Int)
-                    || self.expr_type(rhs, facts, env) != Some(Typ::Int)
-                {
-                    *expr = Expr::Ident("#unsupported-lua-bitwise-operands".into());
-                    return None;
+            c_operands[0] = self.resolve_typed_expr(lhs, facts, env, policy, return_type);
+            c_operands[1] = self.resolve_typed_expr(rhs, facts, env, policy, return_type);
+            if !policy.arrays() {
+                if matches!(op.as_str(), "lua-bitand" | "lua-bitor" | "lua-bitxor") {
+                    if self.expr_type(lhs, facts, env) != Some(Typ::Int)
+                        || self.expr_type(rhs, facts, env) != Some(Typ::Int)
+                    {
+                        *expr = Expr::Ident("#unsupported-lua-bitwise-operands".into());
+                        return None;
+                    }
+                    *op = match op.as_str() {
+                        "lua-bitand" => "&",
+                        "lua-bitor" => "|",
+                        _ => "xor",
+                    }
+                    .into();
                 }
-                *op = match op.as_str() {
-                    "lua-bitand" => "&",
-                    "lua-bitor" => "|",
-                    _ => "xor",
+                if op == "lua-add" {
+                    let left = self.expr_type(lhs, facts, env);
+                    let right = self.expr_type(rhs, facts, env);
+                    if !matches!(
+                        (&left, &right),
+                        (Some(Typ::Int), Some(Typ::Int)) | (Some(Typ::Float), Some(Typ::Float))
+                    ) {
+                        *expr = Expr::Ident("#unsupported-lua-numeric-addition".into());
+                        return None;
+                    }
+                    *op = "+".into();
                 }
-                .into();
-            }
-            if op == "lua-add" {
-                let left = self.expr_type(lhs, facts, env);
-                let right = self.expr_type(rhs, facts, env);
-                if !matches!(
-                    (&left, &right),
-                    (Some(Typ::Int), Some(Typ::Int)) | (Some(Typ::Float), Some(Typ::Float))
-                ) {
-                    *expr = Expr::Ident("#unsupported-lua-numeric-addition".into());
-                    return None;
+                if op == "lua-div" {
+                    // Lua integer division produces Float; retain only proven Float operands.
+                    if self.expr_type(lhs, facts, env) != Some(Typ::Float)
+                        || self.expr_type(rhs, facts, env) != Some(Typ::Float)
+                    {
+                        *expr = Expr::Ident("#unsupported-lua-integer-division".into());
+                        return None;
+                    }
+                    *op = "/".into();
                 }
-                *op = "+".into();
-            }
-            if op == "lua-div" {
-                // Lua integer division produces Float; retain only proven Float operands.
-                if self.expr_type(lhs, facts, env) != Some(Typ::Float)
-                    || self.expr_type(rhs, facts, env) != Some(Typ::Float)
-                {
-                    *expr = Expr::Ident("#unsupported-lua-integer-division".into());
-                    return None;
+                if policy == ResolvePolicy::CValues {
+                    c_kind = match op.as_str() {
+                        "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => {
+                            Some(CIntegerKind::I32)
+                        }
+                        "<<" | ">>" => c_operands[0],
+                        _ => CIntegerKind::common(c_operands[0], c_operands[1]),
+                    };
                 }
-                *op = "/".into();
-            }
-            if promote_c_bool {
-                c_kind = match op.as_str() {
-                    "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||" => Some(CIntegerKind::I32),
-                    "<<" | ">>" => c_operands[0],
-                    _ => CIntegerKind::common(c_operands[0], c_operands[1]),
-                };
             }
         } else if let Expr::Unary { op, expr } = expr {
-            let inner = self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
-            if promote_c_bool && matches!(op.as_str(), "-" | "~" | "+") {
+            let inner = self.resolve_typed_expr(expr, facts, env, policy, return_type);
+            if policy == ResolvePolicy::CValues && matches!(op.as_str(), "-" | "~" | "+") {
                 c_kind = inner;
             }
         } else if let Expr::Conditional {
@@ -845,16 +1007,45 @@ impl TypeChecker {
             else_expr,
         } = expr
         {
-            self.resolve_typed_expr(cond, facts, env, promote_c_bool, return_type);
-            let left = self.resolve_typed_expr(then_expr, facts, env, promote_c_bool, return_type);
-            let right = self.resolve_typed_expr(else_expr, facts, env, promote_c_bool, return_type);
-            if promote_c_bool {
+            self.resolve_typed_expr(cond, facts, env, policy, return_type);
+            let left = self.resolve_typed_expr(then_expr, facts, env, policy, return_type);
+            let right = self.resolve_typed_expr(else_expr, facts, env, policy, return_type);
+            if policy == ResolvePolicy::CValues {
                 c_kind = CIntegerKind::common(left, right);
             }
         } else {
             crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
-                self.resolve_typed_expr(child, facts, env, promote_c_bool, return_type);
+                self.resolve_typed_expr(child, facts, env, policy, return_type);
             });
+        }
+        if policy.arrays() {
+            if let Expr::Call { callee, args } = expr
+                && let Expr::Ident(name) = callee.as_ref()
+                && let Some((params, _)) = facts.functions.get(name)
+            {
+                for (arg, (_, expected)) in args.iter_mut().zip(params) {
+                    self.finish_typed_value(policy, arg, Some(expected), facts, env);
+                }
+            }
+            if let Expr::StructInit { name, fields } = expr {
+                let schema = facts
+                    .structs
+                    .get(name)
+                    .cloned()
+                    .or_else(|| crate::core_ir::tuples::fields(name));
+                if let Some(schema) = schema {
+                    for (name, value) in fields {
+                        if let Some((_, expected)) = schema.iter().find(|(field, _)| field == name)
+                        {
+                            self.finish_typed_value(policy, value, Some(expected), facts, env);
+                        }
+                    }
+                }
+            }
+            rust_arrays::check_join(self, expr, facts, env, policy);
+        }
+        if policy.arrays() {
+            return c_kind;
         }
         if let Expr::Call { callee, args } = expr
             && matches!(callee.as_ref(), Expr::Ident(name) if matches!(name.as_str(), "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new") && !facts.functions.contains_key(name))
@@ -1195,7 +1386,7 @@ impl TypeChecker {
                 _ => {}
             }
         }
-        if promote_c_bool
+        if policy == ResolvePolicy::CValues
             && let Expr::Unary { op, expr: inner } = expr
             && matches!(
                 op.as_str(),
@@ -1205,7 +1396,7 @@ impl TypeChecker {
             *expr = *std::mem::replace(inner, Box::new(Expr::UnitLit));
             return c_kind;
         }
-        if promote_c_bool
+        if policy == ResolvePolicy::CValues
             && let Expr::Call { callee, args } = expr
             && matches!(callee.as_ref(), Expr::Ident(name) if name == "c-numeric-cast")
         {
@@ -1232,7 +1423,7 @@ impl TypeChecker {
             }
             return c_kind;
         }
-        if promote_c_bool {
+        if policy == ResolvePolicy::CValues {
             match expr {
                 Expr::StructInit { name, fields } => {
                     if let Some(schema) = facts.structs.get(name) {
@@ -1320,8 +1511,8 @@ impl TypeChecker {
             && let Some((params, _)) = facts.functions.get(name)
         {
             for (arg, (_, expected)) in args.iter_mut().zip(params) {
-                if self.resolve_vector_allocation(arg, expected, facts) {
-                    self.resolve_typed_expr(arg, facts, env, promote_c_bool, return_type);
+                if self.resolve_policy_vector_allocation(policy, arg, expected, facts) {
+                    self.resolve_typed_expr(arg, facts, env, policy, return_type);
                 }
             }
         }
@@ -1334,7 +1525,7 @@ impl TypeChecker {
                 _ => {} // Verification refuses an unresolved operand type.
             }
         }
-        if promote_c_bool
+        if policy == ResolvePolicy::CValues
             && let Expr::Unary { op, expr: inner } = expr
             && op == "+"
         {
@@ -1345,7 +1536,7 @@ impl TypeChecker {
                 *expr = *std::mem::replace(inner, Box::new(Expr::UnitLit));
             }
         }
-        if promote_c_bool {
+        if policy == ResolvePolicy::CValues {
             let floating = matches!(&*expr, Expr::Binary { lhs, rhs, .. } if [lhs, rhs].iter().any(|operand| self.expr_type(operand, facts, env) == Some(Typ::Float)));
             if !floating {
                 resolve_c_unsigned_expression(expr, c_kind, c_operands);
@@ -1360,19 +1551,61 @@ impl TypeChecker {
         facts: &Facts,
         env: &mut HashMap<String, Typ>,
         return_type: Option<&Typ>,
-        promote_c_bool: bool,
+        policy: ResolvePolicy,
     ) {
-        vector_inference::infer(self, body, facts, env, return_type);
+        if !policy.arrays() {
+            vector_inference::infer(self, body, facts, env, return_type);
+        }
         for stmt in body {
             match stmt {
                 Stmt::Declare(name, typ) => {
+                    if policy.arrays() {
+                        facts.array_constraints.borrow_mut().bind(name, typ);
+                    }
                     env.insert(name.clone(), typ.clone());
                 }
                 Stmt::Let(name, typ, expr) => {
-                    if let Some(expected) = typ.as_ref() {
-                        self.resolve_vector_allocation(expr, expected, facts);
+                    if policy.arrays() {
+                        if let Some(annotation) = typ.as_ref() {
+                            facts.array_constraints.borrow_mut().bind(name, annotation);
+                        }
+                        self.resolve_typed_expr(expr, facts, env, policy, return_type);
+                        let expected = facts
+                            .array_constraints
+                            .borrow()
+                            .get(name)
+                            .or_else(|| typ.clone());
+                        let inferred =
+                            self.finish_typed_value(policy, expr, expected.as_ref(), facts, env);
+                        if let Some(inferred) = inferred {
+                            facts.array_constraints.borrow_mut().bind(name, &inferred);
+                            let explicit_other_type = typ.as_ref().filter(|typ| {
+                                !matches!(typ, Typ::Named(name) if crate::core_ir::rust_arrays::decode(name).is_some())
+                            });
+                            let selected = explicit_other_type.cloned().unwrap_or_else(|| {
+                                facts
+                                    .array_constraints
+                                    .borrow()
+                                    .get(name)
+                                    .unwrap_or(inferred)
+                            });
+                            if policy != ResolvePolicy::RustArrayInference
+                                && crate::core_ir::rust_arrays::decode(match &selected {
+                                    Typ::Named(name) => name,
+                                    _ => "",
+                                })
+                                .is_some()
+                            {
+                                *typ = Some(selected.clone());
+                            }
+                            env.insert(name.clone(), selected);
+                        }
+                        continue;
                     }
-                    self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
+                    if let Some(expected) = typ.as_ref() {
+                        self.resolve_policy_vector_allocation(policy, expr, expected, facts);
+                    }
+                    self.resolve_typed_expr(expr, facts, env, policy, return_type);
                     if let Some(Typ::Vector(item)) = typ.as_mut()
                         && matches!(item.as_ref(), Typ::Generic(name) if name == "_")
                         && let Some(Typ::Array(element) | Typ::Vector(element)) =
@@ -1392,7 +1625,9 @@ impl TypeChecker {
                     {
                         *typ = Some(inferred);
                     }
-                    if promote_c_bool && let Some(typ) = typ.as_ref() {
+                    if policy == ResolvePolicy::CValues
+                        && let Some(typ) = typ.as_ref()
+                    {
                         self.resolve_c_value(expr, typ, facts, env);
                     }
                     if let Some(typ) = typ.clone().or_else(|| self.expr_type(expr, facts, env)) {
@@ -1404,31 +1639,65 @@ impl TypeChecker {
                     }
                 }
                 Stmt::Assign(name, expr) => {
-                    if let Some(expected) = env.get(name) {
-                        self.resolve_vector_allocation(expr, expected, facts);
+                    if policy.arrays() {
+                        if let Some(original) = env.get(name) {
+                            facts.array_constraints.borrow_mut().bind(name, original);
+                        }
+                        self.resolve_typed_expr(expr, facts, env, policy, return_type);
+                        let expected = facts
+                            .array_constraints
+                            .borrow()
+                            .get(name)
+                            .or_else(|| env.get(name).cloned());
+                        if let Some(inferred) =
+                            self.finish_typed_value(policy, expr, expected.as_ref(), facts, env)
+                        {
+                            facts.array_constraints.borrow_mut().bind(name, &inferred);
+                        }
+                        continue;
                     }
-                    self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
-                    if promote_c_bool && let Some(typ) = env.get(name) {
+                    if let Some(expected) = env.get(name) {
+                        self.resolve_policy_vector_allocation(policy, expr, expected, facts);
+                    }
+                    self.resolve_typed_expr(expr, facts, env, policy, return_type);
+                    self.finish_typed_value(policy, expr, env.get(name), facts, env);
+                    if policy == ResolvePolicy::CValues
+                        && let Some(typ) = env.get(name)
+                    {
                         self.resolve_c_value(expr, typ, facts, env);
                     }
                 }
                 Stmt::Return(Some(expr)) => {
                     if let Some(expected) = return_type {
-                        self.resolve_vector_allocation(expr, expected, facts);
+                        self.resolve_policy_vector_allocation(policy, expr, expected, facts);
                     }
-                    self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
-                    if promote_c_bool && let Some(typ) = return_type {
+                    self.resolve_typed_expr(expr, facts, env, policy, return_type);
+                    self.finish_typed_value(policy, expr, return_type, facts, env);
+                    if policy == ResolvePolicy::CValues
+                        && let Some(typ) = return_type
+                    {
                         self.resolve_c_value(expr, typ, facts, env);
                     }
                 }
                 Stmt::Expr(expr) | Stmt::Throw(expr) => {
-                    self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
+                    self.resolve_typed_expr(expr, facts, env, policy, return_type);
                 }
                 Stmt::IndexAssign { base, index, value } => {
                     for expr in [&mut *base, &mut *index, &mut *value] {
-                        self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
+                        self.resolve_typed_expr(expr, facts, env, policy, return_type);
                     }
-                    if promote_c_bool
+                    if policy.arrays() {
+                        let expected = self.expr_type(
+                            &Expr::Index {
+                                base: Box::new(base.clone()),
+                                index: Box::new(index.clone()),
+                            },
+                            facts,
+                            env,
+                        );
+                        self.finish_typed_value(policy, value, expected.as_ref(), facts, env);
+                    }
+                    if policy == ResolvePolicy::CValues
                         && let Some(typ) = self.expr_type(
                             &Expr::Index {
                                 base: Box::new(base.clone()),
@@ -1450,12 +1719,23 @@ impl TypeChecker {
                         facts,
                         env,
                     ) {
-                        self.resolve_vector_allocation(value, &expected, facts);
+                        self.resolve_policy_vector_allocation(policy, value, &expected, facts);
                     }
                     for expr in [&mut *base, &mut *value] {
-                        self.resolve_typed_expr(expr, facts, env, promote_c_bool, return_type);
+                        self.resolve_typed_expr(expr, facts, env, policy, return_type);
                     }
-                    if promote_c_bool
+                    if policy.arrays() {
+                        let expected = self.expr_type(
+                            &Expr::Field {
+                                base: Box::new(base.clone()),
+                                name: name.clone(),
+                            },
+                            facts,
+                            env,
+                        );
+                        self.finish_typed_value(policy, value, expected.as_ref(), facts, env);
+                    }
+                    if policy == ResolvePolicy::CValues
                         && let Some(typ) = self.expr_type(
                             &Expr::Field {
                                 base: Box::new(base.clone()),
@@ -1473,8 +1753,8 @@ impl TypeChecker {
                     then_body,
                     else_body,
                 } => {
-                    self.resolve_typed_expr(cond, facts, env, promote_c_bool, return_type);
-                    if promote_c_bool {
+                    self.resolve_typed_expr(cond, facts, env, policy, return_type);
+                    if policy == ResolvePolicy::CValues {
                         self.resolve_c_value(cond, &Typ::Bool, facts, env);
                     }
                     self.resolve_typed_body(
@@ -1482,33 +1762,27 @@ impl TypeChecker {
                         facts,
                         &mut env.clone(),
                         return_type,
-                        promote_c_bool,
+                        policy,
                     );
                     self.resolve_typed_body(
                         else_body,
                         facts,
                         &mut env.clone(),
                         return_type,
-                        promote_c_bool,
+                        policy,
                     );
                 }
                 Stmt::Loop { cond, body, .. } => {
                     if let Some(cond) = cond {
-                        self.resolve_typed_expr(cond, facts, env, promote_c_bool, return_type);
-                        if promote_c_bool {
+                        self.resolve_typed_expr(cond, facts, env, policy, return_type);
+                        if policy == ResolvePolicy::CValues {
                             self.resolve_c_value(cond, &Typ::Bool, facts, env);
                         }
                     }
-                    self.resolve_typed_body(
-                        body,
-                        facts,
-                        &mut env.clone(),
-                        return_type,
-                        promote_c_bool,
-                    );
+                    self.resolve_typed_body(body, facts, &mut env.clone(), return_type, policy);
                 }
                 Stmt::Match { scrutinee, arms } => {
-                    self.resolve_typed_expr(scrutinee, facts, env, promote_c_bool, return_type);
+                    self.resolve_typed_expr(scrutinee, facts, env, policy, return_type);
                     let typ = self
                         .expr_type(scrutinee, facts, env)
                         .unwrap_or(Typ::Named("Any".into()));
@@ -1517,31 +1791,19 @@ impl TypeChecker {
                             .pattern_environment(&arm.pattern, &typ, facts, env)
                             .unwrap_or_else(|| env.clone());
                         if let Some(guard) = &mut arm.guard {
-                            self.resolve_typed_expr(
-                                guard,
-                                facts,
-                                &inner,
-                                promote_c_bool,
-                                return_type,
-                            );
+                            self.resolve_typed_expr(guard, facts, &inner, policy, return_type);
                         }
                         self.resolve_typed_body(
                             &mut arm.body,
                             facts,
                             &mut inner,
                             return_type,
-                            promote_c_bool,
+                            policy,
                         );
                     }
                 }
                 Stmt::Try { body, catches } => {
-                    self.resolve_typed_body(
-                        body,
-                        facts,
-                        &mut env.clone(),
-                        return_type,
-                        promote_c_bool,
-                    );
+                    self.resolve_typed_body(body, facts, &mut env.clone(), return_type, policy);
                     for catch in catches {
                         let mut inner = self
                             .pattern_environment(
@@ -1556,7 +1818,7 @@ impl TypeChecker {
                             facts,
                             &mut inner,
                             return_type,
-                            promote_c_bool,
+                            policy,
                         );
                     }
                 }
@@ -1575,9 +1837,40 @@ impl TypeChecker {
         facts: &Facts,
         constants: &HashMap<String, Typ>,
     ) -> bool {
+        self.constant_value_type_failure(value, facts, constants)
+            .is_none()
+    }
+
+    pub(crate) fn constant_value_type_failure(
+        &self,
+        value: &Expr,
+        facts: &Facts,
+        constants: &HashMap<String, Typ>,
+    ) -> Option<crate::core_ir::type_proofs::ResolutionFailure> {
+        use crate::core_ir::type_proofs::ResolutionFailure;
         let mut errors = Vec::new();
         self.check_expr("#inline-constant", value, facts, constants, &mut errors);
-        errors.is_empty()
+        if errors.is_empty() {
+            return None;
+        }
+        let primitive = |typ: &Typ| {
+            matches!(
+                typ.canonical(),
+                Typ::Int | Typ::Bool | Typ::Float | Typ::String | Typ::Void
+            )
+        };
+        let invalid = errors.iter().any(|error| {
+            matches!(error,
+            TypeError::TypeMismatch { expected, got, .. }
+            | TypeError::ReturnTypeMismatch { expected, got, .. }
+                if primitive(expected) && primitive(got))
+        });
+        let reason = "constant expression types could not be validated".into();
+        Some(if invalid {
+            ResolutionFailure::Invalid(reason)
+        } else {
+            ResolutionFailure::Unsupported(reason)
+        })
     }
 
     pub(crate) fn collect_decl_facts(&self, decls: &[Decl]) -> Facts {
@@ -1637,6 +1930,7 @@ impl TypeChecker {
             unary_methods: None,
             unary_method_errors: std::cell::RefCell::new(Vec::new()),
             require_resolved_inline_values: false,
+            array_constraints: Default::default(),
         }
     }
 
@@ -2202,6 +2496,17 @@ impl TypeChecker {
                         got: Typ::Void,
                     });
                 }
+                if op.starts_with("array-copy")
+                    && !self
+                        .expr_type(inner, facts, env)
+                        .is_some_and(|typ| crate::core_ir::array_copy::valid_operand(op, &typ))
+                {
+                    errors.push(TypeError::TypeMismatch {
+                        context: format!("array copy in `{fn_name}`"),
+                        expected: Typ::Named("scalar array with a canonical copy count".into()),
+                        got: self.expr_type(inner, facts, env).unwrap_or(Typ::Void),
+                    });
+                }
                 if op == "vector-clone"
                     && !matches!(self.expr_type(inner, facts, env), Some(Typ::Vector(item)) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
                 {
@@ -2701,24 +3006,37 @@ impl TypeChecker {
         match expr {
             Expr::MatchValue { scrutinee, arms } => {
                 let typ = self.expr_type(scrutinee, facts, env)?;
-                crate::core_ir::match_value_type(
-                    arms,
-                    arms.iter().map(|arm| {
+                let types: Vec<_> = arms
+                    .iter()
+                    .map(|arm| {
                         let inner = self.pattern_environment(&arm.pattern, &typ, facts, env)?;
                         self.expr_type(&arm.value, facts, &inner)
-                    }),
-                )
+                    })
+                    .collect();
+                let live: Vec<_> = arms
+                    .iter()
+                    .zip(&types)
+                    .filter(|(arm, _)| !crate::core_ir::expr_diverges(&arm.value))
+                    .map(|(_, typ)| typ.clone())
+                    .collect();
+                rust_arrays::join_types(&live)
+                    .or_else(|| crate::core_ir::match_value_type(arms, types))
             }
             Expr::Conditional {
-                cond: _,
                 then_expr,
                 else_expr,
-            } => crate::core_ir::conditional_type(
-                then_expr,
-                self.expr_type(then_expr, facts, env),
-                else_expr,
-                self.expr_type(else_expr, facts, env),
-            ),
+                ..
+            } => {
+                let left = self.expr_type(then_expr, facts, env);
+                let right = self.expr_type(else_expr, facts, env);
+                let live: Vec<_> = [(then_expr, left.clone()), (else_expr, right.clone())]
+                    .into_iter()
+                    .filter(|(expr, _)| !crate::core_ir::expr_diverges(expr))
+                    .map(|(_, typ)| typ)
+                    .collect();
+                rust_arrays::join_types(&live)
+                    .or_else(|| crate::core_ir::conditional_type(then_expr, left, else_expr, right))
+            }
             Expr::Block { body, result } => {
                 let mut inner = env.clone();
                 for stmt in body {
@@ -2748,7 +3066,13 @@ impl TypeChecker {
             Expr::BoolLit(_) => Some(Typ::Bool),
             Expr::Ident(name) => env
                 .get(name)
-                .cloned()
+                .map(|original| {
+                    facts
+                        .array_constraints
+                        .borrow()
+                        .get(name)
+                        .unwrap_or_else(|| original.clone())
+                })
                 .or_else(|| facts.functions.contains_key(name).then_some(Typ::Int))
                 .or_else(|| is_builtin_fn(name).then(|| builtin_return_type(name))),
             Expr::StructInit { name, .. } => Some(Typ::Named(name.clone())),
@@ -2782,13 +3106,31 @@ impl TypeChecker {
                     .find_map(|item| self.expr_type(item, facts, env));
                 Some(Typ::Array(Box::new(item_typ.unwrap_or(Typ::Void))))
             }
-            Expr::Index { base, .. } => {
-                if let Some(Typ::Array(item) | Typ::Vector(item)) = self.expr_type(base, facts, env)
-                {
-                    Some(*item)
-                } else {
-                    None
+            Expr::Index { base, .. } => match self.expr_type(base, facts, env)? {
+                Typ::Array(item) | Typ::Vector(item) => Some(*item),
+                Typ::Named(name) => {
+                    crate::core_ir::rust_arrays::decode(&name).map(|array| array.element)
                 }
+                _ => None,
+            },
+            Expr::Unary { op, expr } if crate::core_ir::rust_arrays::value_length(op).is_some() => {
+                let length = crate::core_ir::rust_arrays::value_length(op)?;
+                let element = match expr.as_ref() {
+                    Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::ARRAY_REPEAT) => {
+                        rust_arrays::source_element_type(self, args.first()?, facts, env)?
+                    }
+                    Expr::ArrayLit(items) => items
+                        .first()
+                        .and_then(|item| rust_arrays::source_element_type(self, item, facts, env))
+                        .unwrap_or(Typ::Void),
+                    _ => {
+                        let Typ::Array(element) = self.expr_type(expr, facts, env)? else {
+                            return None;
+                        };
+                        *element
+                    }
+                };
+                Some(crate::core_ir::rust_arrays::typ(element, length))
             }
             Expr::Unary { op, expr, .. }
                 if crate::core_ir::rust_references::value_kind(op).is_some() =>
@@ -3380,7 +3722,9 @@ pub fn normalize_module_with_semantics(
         });
     }
     if parser_id == ParserId::Rust {
+        rust_arrays::validate(&TypeChecker::new(), &mut normalized);
         rust_generics::normalize(&mut normalized);
+        rust_arrays::normalize(&TypeChecker::new(), &mut normalized);
         TypeChecker::new().resolve_complements(&mut normalized);
         rust_integers::normalize(&TypeChecker::new(), &mut normalized, semantics);
         crate::lower_core::lower_inline_constants_with_semantics(&mut normalized.decls, semantics);
@@ -5772,7 +6116,7 @@ mod tests {
         ];
         for (index, (value, expected)) in cases.into_iter().enumerate() {
             let mut body = vec![Stmt::Let(format!("array{index}"), None, value)];
-            checker.resolve_typed_body(&mut body, &facts, &mut env, None, false);
+            checker.resolve_typed_body(&mut body, &facts, &mut env, None, ResolvePolicy::Ordinary);
             let Stmt::Let(_, actual, _) = &body[0] else {
                 panic!("expected binding")
             };
@@ -5811,7 +6155,13 @@ mod tests {
             Stmt::Let("flag".into(), None, Expr::BoolLit(true)),
             Stmt::Let("integer".into(), Some(Typ::Int), Expr::BoolLit(true)),
         ];
-        checker.resolve_typed_body(&mut body, &facts, &mut HashMap::new(), None, true);
+        checker.resolve_typed_body(
+            &mut body,
+            &facts,
+            &mut HashMap::new(),
+            None,
+            ResolvePolicy::CValues,
+        );
         for stmt in &body[..2] {
             assert!(matches!(stmt, Stmt::Let(_, Some(typ), _) if typ == &explicit));
         }

@@ -42,7 +42,9 @@ fn contains(typ: &Typ, generic: bool, facts: &Facts, active: &mut HashSet<String
             if !active.insert(name.clone()) {
                 return false;
             }
-            let found = if let Some(reference) = rust_references::decode(name) {
+            let found = if let Some(array) = crate::core_ir::rust_arrays::decode(name) {
+                contains(&array.element, generic, facts, active)
+            } else if let Some(reference) = rust_references::decode(name) {
                 contains(&reference.referent, generic, facts, active)
             } else if let Some(fields) = crate::core_ir::tuples::fields(name) {
                 fields
@@ -72,8 +74,12 @@ impl Check<'_> {
     fn indexed_type(typ: Typ) -> Option<Typ> {
         match typ {
             Typ::Array(item) | Typ::Vector(item) => Some(*item),
-            Typ::Named(name) => rust_references::decode(&name)
-                .and_then(|reference| Self::indexed_type(reference.referent)),
+            Typ::Named(name) => crate::core_ir::rust_arrays::decode(&name)
+                .map(|array| array.element)
+                .or_else(|| {
+                    rust_references::decode(&name)
+                        .and_then(|reference| Self::indexed_type(reference.referent))
+                }),
             _ => None,
         }
     }

@@ -77,6 +77,9 @@ pub(crate) fn failure_in_type(value: &Typ) -> Option<ResolutionFailure> {
     match value {
         Typ::Named(name) => {
             let mut failure = decode(name);
+            if let Some(array) = super::rust_arrays::decode(name) {
+                failure = prefer_failure(failure, failure_in_type(&array.element));
+            }
             if let Some(reference) = super::rust_references::decode(name) {
                 failure = prefer_failure(failure, failure_in_type(&reference.referent));
                 failure = prefer_failure(failure, failure_in_type(&reference.runtime));
@@ -93,62 +96,95 @@ pub(crate) fn failure_in_type(value: &Typ) -> Option<ResolutionFailure> {
     }
 }
 
-/// Allocation-free for ordinary scalar types; only existing encoded tuple/ref
-/// leaves need decoding. This presence scan is not type inference or validation.
+/// Select the retained metadata family without allocating or cloning an AST.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetadataKind {
+    TypeFailures,
+    RustFixedArrays,
+}
+
 pub(crate) fn present(decls: &[super::Decl]) -> bool {
+    metadata_present(decls, MetadataKind::TypeFailures)
+}
+
+/// Shared immutable presence traversal; encoded carriers decode only on their
+/// existing prefixes, while ordinary modules never clone the AST.
+pub(crate) fn metadata_present(decls: &[super::Decl], mode: MetadataKind) -> bool {
     use super::{Decl, Expr, Stmt};
-    fn named(name: &str) -> bool {
-        decode(name).is_some()
-            || super::rust_references::decode(name)
-                .is_some_and(|reference| typ(&reference.referent) || typ(&reference.runtime))
+    fn named(name: &str, mode: MetadataKind) -> bool {
+        (mode == MetadataKind::TypeFailures && decode(name).is_some())
+            || super::rust_arrays::decode(name).is_some_and(|array| {
+                mode == MetadataKind::RustFixedArrays || typ(&array.element, mode)
+            })
+            || super::rust_references::decode(name).is_some_and(|reference| {
+                typ(&reference.referent, mode) || typ(&reference.runtime, mode)
+            })
             || super::tuples::fields(name)
-                .is_some_and(|fields| fields.iter().any(|(_, value)| typ(value)))
+                .is_some_and(|fields| fields.iter().any(|(_, value)| typ(value, mode)))
     }
-    fn typ(value: &Typ) -> bool {
+    fn typ(value: &Typ, mode: MetadataKind) -> bool {
         match value {
-            Typ::Named(name) => named(name),
-            Typ::Array(item) | Typ::Vector(item) => typ(item),
+            Typ::Named(name) => named(name, mode),
+            Typ::Array(item) | Typ::Vector(item) => typ(item, mode),
             _ => false,
         }
     }
-    fn pattern(source: &str) -> bool {
+    fn pattern(source: &str, mode: MetadataKind) -> bool {
         // Ordinary patterns have no type annotations. Decode only a possible
         // private nominal carrier; do not parse every scalar match in the fastpath.
-        if ![STEM, LEGACY, "in-tuple-", "#rust-reference-type:"]
-            .iter()
-            .any(|prefix| source.contains(prefix))
+        if ![
+            STEM,
+            LEGACY,
+            "in-tuple-",
+            "#rust-reference-type:",
+            "#rust-fixed-array:",
+        ]
+        .iter()
+        .any(|prefix| source.contains(prefix))
         {
             return false;
         }
-        fn walk(value: &super::MatchPattern) -> bool {
+        fn walk(value: &super::MatchPattern, mode: MetadataKind) -> bool {
             match value {
                 super::MatchPattern::StructPat { name, fields } => {
-                    named(name) || fields.iter().any(|(_, value)| walk(value))
+                    named(name, mode) || fields.iter().any(|(_, value)| walk(value, mode))
                 }
                 super::MatchPattern::TuplePat(items) | super::MatchPattern::ArrayPat(items) => {
-                    items.iter().any(walk)
+                    items.iter().any(|value| walk(value, mode))
                 }
                 _ => false,
             }
         }
-        super::MatchPattern::parse(source).is_ok_and(|value| walk(&value))
+        super::MatchPattern::parse(source).is_ok_and(|value| walk(&value, mode))
     }
-    fn expr(value: &Expr) -> bool {
+    fn expr(value: &Expr, mode: MetadataKind) -> bool {
         match value {
             Expr::Unary { op, .. }
-                if super::rust_generics::decode_arguments(op).is_some_and(|types| {
-                    super::rust_generics::argument_failure(&types).is_some()
-                }) =>
+                if mode == MetadataKind::RustFixedArrays
+                    && (super::rust_arrays::value_length(op).is_some()
+                        || op == super::rust_arrays::PENDING_REPEAT) =>
             {
                 return true;
             }
-            Expr::Ident(name) if decode(name).is_some() => return true,
-            Expr::StructInit { name, .. } if named(name) => return true,
+            Expr::Unary { op, .. }
+                if super::rust_generics::decode_arguments(op)
+                    .is_some_and(|types| types.iter().any(|value| typ(value, mode))) =>
+            {
+                return true;
+            }
+            Expr::Ident(name) if mode == MetadataKind::TypeFailures && decode(name).is_some() => {
+                return true;
+            }
+            Expr::StructInit { name, .. } if named(name, mode) => return true,
             Expr::Closure {
                 params, ret, body, ..
-            } => return params.iter().any(|(_, value)| typ(value)) || typ(ret) || statements(body),
-            Expr::Block { body, .. } if statements(body) => return true,
-            Expr::MatchValue { arms, .. } if arms.iter().any(|arm| pattern(&arm.pattern)) => {
+            } => {
+                return params.iter().any(|(_, value)| typ(value, mode))
+                    || typ(ret, mode)
+                    || statements(body, mode);
+            }
+            Expr::Block { body, .. } if statements(body, mode) => return true,
+            Expr::MatchValue { arms, .. } if arms.iter().any(|arm| pattern(&arm.pattern, mode)) => {
                 return true;
             }
             _ => {}
@@ -156,40 +192,46 @@ pub(crate) fn present(decls: &[super::Decl]) -> bool {
         let mut found = false;
         super::for_each_expr_child(value, &mut |value| {
             if !found {
-                found = expr(value);
+                found = expr(value, mode);
             }
         });
         found
     }
-    fn statements(body: &[Stmt]) -> bool {
+    fn statements(body: &[Stmt], mode: MetadataKind) -> bool {
         body.iter().any(|stmt| match stmt {
-            Stmt::Declare(_, annotation) => typ(annotation),
-            Stmt::Let(_, annotation, value) => annotation.as_ref().is_some_and(typ) || expr(value),
+            Stmt::Declare(_, annotation) => typ(annotation, mode),
+            Stmt::Let(_, annotation, value) => {
+                annotation.as_ref().is_some_and(|value| typ(value, mode)) || expr(value, mode)
+            }
             Stmt::Assign(_, value)
             | Stmt::Expr(value)
             | Stmt::Throw(value)
-            | Stmt::Return(Some(value)) => expr(value),
-            Stmt::IndexAssign { base, index, value } => expr(base) || expr(index) || expr(value),
-            Stmt::FieldAssign { base, value, .. } => expr(base) || expr(value),
+            | Stmt::Return(Some(value)) => expr(value, mode),
+            Stmt::IndexAssign { base, index, value } => {
+                expr(base, mode) || expr(index, mode) || expr(value, mode)
+            }
+            Stmt::FieldAssign { base, value, .. } => expr(base, mode) || expr(value, mode),
             Stmt::If {
                 cond,
                 then_body,
                 else_body,
-            } => expr(cond) || statements(then_body) || statements(else_body),
-            Stmt::Loop { cond, body, .. } => cond.as_ref().is_some_and(expr) || statements(body),
+            } => expr(cond, mode) || statements(then_body, mode) || statements(else_body, mode),
+            Stmt::Loop { cond, body, .. } => {
+                cond.as_ref().is_some_and(|value| expr(value, mode)) || statements(body, mode)
+            }
             Stmt::Match { scrutinee, arms } => {
-                expr(scrutinee)
+                expr(scrutinee, mode)
                     || arms.iter().any(|arm| {
-                        pattern(&arm.pattern)
-                            || arm.guard.as_ref().is_some_and(expr)
-                            || statements(&arm.body)
+                        pattern(&arm.pattern, mode)
+                            || arm.guard.as_ref().is_some_and(|value| expr(value, mode))
+                            || statements(&arm.body, mode)
                     })
             }
             Stmt::Try { body, catches } => {
-                statements(body)
+                statements(body, mode)
                     || catches
                         .iter()
-                        .any(|arm| pattern(&arm.pattern) || statements(&arm.body))
+                        .any(|arm| pattern(&arm.pattern, mode) || statements(&arm.body, mode))
             }
             Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Propagate => false,
         })
@@ -197,17 +239,21 @@ pub(crate) fn present(decls: &[super::Decl]) -> bool {
     decls.iter().any(|decl| match decl {
         Decl::Function {
             params, ret, body, ..
-        } => params.iter().any(|(_, value)| typ(value)) || typ(ret) || statements(body),
+        } => {
+            params.iter().any(|(_, value)| typ(value, mode))
+                || typ(ret, mode)
+                || statements(body, mode)
+        }
         Decl::Global {
             typ: value, init, ..
-        } => typ(value) || init.as_ref().is_some_and(|value| expr(value)),
-        Decl::Struct { fields, .. } => fields.iter().any(|(_, value)| typ(value)),
+        } => typ(value, mode) || init.as_ref().is_some_and(|value| expr(value, mode)),
+        Decl::Struct { fields, .. } => fields.iter().any(|(_, value)| typ(value, mode)),
         Decl::Class {
             fields, methods, ..
-        } => fields.iter().any(|(_, value)| typ(value)) || present(methods),
-        Decl::Interface { methods, .. } => methods
-            .iter()
-            .any(|method| typ(&method.ret) || method.params.iter().any(|(_, value)| typ(value))),
+        } => fields.iter().any(|(_, value)| typ(value, mode)) || metadata_present(methods, mode),
+        Decl::Interface { methods, .. } => methods.iter().any(|method| {
+            typ(&method.ret, mode) || method.params.iter().any(|(_, value)| typ(value, mode))
+        }),
         Decl::Component { .. } => false,
     })
 }

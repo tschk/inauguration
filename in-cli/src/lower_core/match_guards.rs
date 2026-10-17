@@ -14,7 +14,9 @@ pub(crate) fn prepared_native_module_with_semantics(
     semantics: crate::integer_semantics::IntegerSemantics,
 ) -> Cow<'_, UnifiedModule> {
     let original = module;
-    let normalized = crate::typecheck::rust_integers::has_metadata(module).then(|| {
+    let normalized = (crate::typecheck::rust_integers::has_metadata(module)
+        || crate::core_ir::rust_arrays::has_metadata(module))
+    .then(|| {
         crate::typecheck::normalize_module_with_semantics(
             crate::parser_registry::ParserId::Rust,
             module,

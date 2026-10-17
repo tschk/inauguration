@@ -259,8 +259,10 @@ fn contains_generic(typ: &Typ) -> bool {
         Typ::Generic(_) => true,
         Typ::Array(item) | Typ::Vector(item) => contains_generic(item),
         Typ::Named(name) => {
-            crate::core_ir::rust_references::decode(name)
-                .is_some_and(|reference| contains_generic(&reference.referent))
+            crate::core_ir::rust_arrays::decode(name)
+                .is_some_and(|array| contains_generic(&array.element))
+                || crate::core_ir::rust_references::decode(name)
+                    .is_some_and(|reference| contains_generic(&reference.referent))
                 || crate::core_ir::tuples::fields(name)
                     .is_some_and(|fields| fields.iter().any(|(_, typ)| contains_generic(typ)))
         }

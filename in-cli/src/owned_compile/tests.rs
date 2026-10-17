@@ -4166,9 +4166,10 @@ fn owned_rust_noninlined_range_call_retains_its_array_abi() {
     ));
     fs::remove_file(path).unwrap();
     assert!(report.success, "{report:?}");
-    assert_eq!(report.reason_code.as_deref(), Some("jit-compiled-only"));
-    assert_eq!(report.eval_result, None);
-    assert_eq!(report.eval_exit_code, None);
+    assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
+    assert!(report.execution_started);
+    assert_eq!(report.eval_result, Some(EvalValue::Int(30)));
+    assert_eq!(report.eval_exit_code, Some(30));
 }
 
 #[test]
@@ -9875,4 +9876,310 @@ fn rust_explicit_generic_type_errors_cannot_disappear_in_cold_branches() {
         }
         fs::remove_file(path).unwrap();
     }
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn rust_fixed_array_copies_preserve_values_and_effects() {
+    for (name, source) in [
+        (
+            "local-i64",
+            "fn main()->i64{let a=[20i64,22i64];let mut b=a;b[0]=0;a[0]+a[1]}",
+        ),
+        (
+            "assignment-i64",
+            "fn main()->i64{let a=[20i64,22i64];let mut b=[0i64,0i64];b=a;b[0]=0;a[0]+a[1]}",
+        ),
+        (
+            "assignment-inferred",
+            "fn main()->i64{let a=[20i64,22i64];let mut b=[0,0];b=a;b[0]=0;a[0]+a[1]}",
+        ),
+        (
+            "explicit-u8",
+            "fn main()->i64{let a=[20u8,22u8];let mut b=a;b[0]=0u8;(a[0] as i64)+(a[1] as i64)}",
+        ),
+        (
+            "bool-copy",
+            "fn main()->i64{let a=[true,false];let mut b=a;b[0]=false;if a[0] && !a[1]{42}else{7}}",
+        ),
+        (
+            "float-copy",
+            "fn main()->i64{let a=[20.5f64,21.5f64];let mut b=a;b[0]=0.0f64;(a[0]+a[1]) as i64}",
+        ),
+        (
+            "nested-shadow",
+            "fn main()->i64{let a=[20i64,22i64];{let a=[1u8,2u8];let mut b=a;b[0]=0u8;if a[0]!=1u8{return 7;}}let mut b=a;b[0]=0;a[0]+a[1]}",
+        ),
+        (
+            "rhs-block-once",
+            "fn main()->i64{let mut trace=0i64;let a=[20i64,22i64];let mut b={trace=trace+1;a};b[0]=0;if trace==1{a[0]+a[1]}else{7}}",
+        ),
+        (
+            "conditional-alias",
+            "fn main()->i64{let a=[20i64,22i64];let mut b=if true{a}else{a};b[0]=0;a[0]+a[1]}",
+        ),
+        (
+            "match-alias",
+            "fn main()->i64{let a=[20i64,22i64];let mut b=match 1i64{0=>a,_=>a};b[0]=0;a[0]+a[1]}",
+        ),
+        (
+            "returned-array",
+            "fn values()->[i64;2]{[20i64,22i64]}fn main()->i64{let a=values();let mut b=a;b[0]=0;a[0]+a[1]}",
+        ),
+        (
+            "byvalue-argument",
+            "fn take(mut items:[i64;2])->i64{items[0]=0;items[1]}fn main()->i64{let a=[20i64,22i64];let seen=take(a);if seen==22{a[0]+a[1]}else{7}}",
+        ),
+        (
+            "empty-bool-copy",
+            "fn main()->i64{let a:[bool;0]=[];let b=a;if a.len()==0 && b.len()==0{42}else{7}}",
+        ),
+        (
+            "constant-repeat-copy",
+            "const N:usize=2;fn main()->i64{let a=[21i64;N];let mut b=a;b[0]=0;a[0]+a[1]}",
+        ),
+    ] {
+        let path = temp_path("rust-fixed-array-copy.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                let out = temp_path("rust-fixed-array-copy-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{name} {profile:?} {target:?}: {report:?}"
+                );
+                assert!(report.external_invocations.is_empty(), "{name}: {report:?}");
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started, "{name}: {report:?}");
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(42)),
+                        "{name} {profile:?}: {report:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        report.executable_path.as_deref(),
+                        Some(out.to_string_lossy().as_ref()),
+                        "{name}: {report:?}"
+                    );
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{name} {profile:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_fixed_array_type_errors_refuse_before_optimization() {
+    for (name, source) in [
+        (
+            "cold-wrong-length-call",
+            "fn accept(items:[i64;2])->i64{items[0]}fn main()->i64{if false{accept([1i64]);}42}",
+        ),
+        (
+            "conditional-lengths",
+            "fn main()->i64{let ignored=if true{[1i64]}else{[2i64,3i64]};42}",
+        ),
+        (
+            "match-lengths",
+            "fn main()->i64{let ignored=match 0i64{0=>[1i64],_=>[2i64,3i64]};42}",
+        ),
+        (
+            "conditional-explicit-widths",
+            "fn main()->i64{let ignored=if true{[1u8]}else{[2u16]};42}",
+        ),
+        (
+            "mixed-literal-live",
+            "fn main()->i64{let ignored=[1u8,2u16];42}",
+        ),
+        (
+            "mixed-literal-cold",
+            "fn main()->i64{if false{let ignored=[1u8,2u16];}42}",
+        ),
+        (
+            "inferred-range-backprop",
+            "fn main()->i64{let a=[300];let b:[u8;1]=a;42}",
+        ),
+        (
+            "cold-wrong-length-local",
+            "fn main()->i64{if false{let ignored:[i64;2]=[1i64];}42}",
+        ),
+    ] {
+        let path = temp_path("rust-fixed-array-invalid.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                for entry in [None, Some("main")] {
+                    let out = temp_path("rust-fixed-array-invalid-out");
+                    let mut request =
+                        default_request(path.clone(), target, entry, Some(out.clone()));
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(
+                        !report.success && !report.execution_started,
+                        "{name} {profile:?} {target:?} {entry:?}: {report:?}"
+                    );
+                    assert_eq!(report.eval_result, None);
+                    assert_eq!(report.eval_exit_code, None);
+                    assert_eq!(report.artifact_path, None);
+                    assert_eq!(report.executable_path, None);
+                    assert_eq!(report.abi_path, None);
+                    assert!(report.external_invocations.is_empty(), "{name}: {report:?}");
+                    assert!(!out.exists(), "{name}: refused build left {out:?}");
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn rust_fixed_array_external_constants_keep_copy_semantics() {
+    let directory = temp_path("fixed-array-external");
+    fs::create_dir(&directory).unwrap();
+    let source = directory.join("main.rs");
+    fs::write(
+        directory.join("values.rs"),
+        "pub const N:usize={let mut n=0;while n<2{n+=1;}n};",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "mod values;use values::N;fn main()->i64{let a=[21i64;N];let mut b=a;b[0]=0;a[0]+a[1]}",
+    )
+    .unwrap();
+    for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            let out = directory.join(format!("program-{profile:?}-{target:?}"));
+            let mut request =
+                default_request(source.clone(), target, Some("main"), Some(out.clone()));
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.degradations.is_empty(),
+                "{profile:?} {target:?}: {report:?}"
+            );
+            assert!(report.external_invocations.is_empty(), "{report:?}");
+            if target == CompileTarget::Jit {
+                assert!(report.execution_started, "{report:?}");
+                assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{report:?}");
+            } else {
+                assert_eq!(
+                    std::process::Command::new(&out).status().unwrap().code(),
+                    Some(42),
+                    "{report:?}"
+                );
+            }
+        }
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn rust_empty_fixed_arrays_link_with_native_callers() {
+    let directory = temp_path("empty-array-native-caller");
+    fs::create_dir(&directory).unwrap();
+    let source = directory.join("empty.rs");
+    let caller = directory.join("caller.c");
+    fs::write(&source, "fn empty()->[i64;0]{let a:[i64;0]=[];let b=a;b}").unwrap();
+    fs::write(
+        &caller,
+        r#"
+#include <stdint.h>
+struct Array { uint64_t *data; uint64_t length; };
+extern struct Array empty(void);
+int main(void) {
+    struct Array first=empty(), second=empty();
+    return first.data && second.data && first.data!=second.data
+        && first.length==0 && second.length==0 ? 0 : 1;
+}
+"#,
+    )
+    .unwrap();
+    for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+        let object = directory.join(format!("empty-{profile:?}.o"));
+        let executable = directory.join(format!("caller-{profile:?}"));
+        let mut request = default_request(
+            source.clone(),
+            CompileTarget::Native,
+            Some("empty"),
+            Some(object.clone()),
+        );
+        request.profile = profile;
+        request.linkage = NativeLinkage::StaticLib;
+        let report = compile_owned(&request);
+        assert!(
+            report.success && report.external_invocations.is_empty(),
+            "{report:?}"
+        );
+        let linked = std::process::Command::new("clang")
+            .arg(&caller)
+            .arg(&object)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(linked.status.success(), "{linked:?}");
+        assert_eq!(
+            std::process::Command::new(&executable)
+                .status()
+                .unwrap()
+                .code(),
+            Some(0)
+        );
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn rust_fixed_array_external_count_errors_survive_unused_functions() {
+    let directory = temp_path("fixed-array-external-invalid");
+    fs::create_dir(&directory).unwrap();
+    let source = directory.join("main.rs");
+    fs::write(directory.join("values.rs"), "pub const N:u8=3;").unwrap();
+    fs::write(
+        &source,
+        "mod values;fn unused()->i64{let a=[7;values::N];42}fn main()->i64{42}",
+    )
+    .unwrap();
+    for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for entry in [None, Some("main")] {
+                let out = directory.join(format!("program-{profile:?}-{target:?}-{entry:?}"));
+                let mut request = default_request(source.clone(), target, entry, Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    !report.success && !report.execution_started,
+                    "{profile:?} {target:?} {entry:?}: {report:?}"
+                );
+                assert_eq!(report.eval_result, None);
+                assert_eq!(report.eval_exit_code, None);
+                assert_eq!(report.artifact_path, None);
+                assert_eq!(report.executable_path, None);
+                assert_eq!(report.abi_path, None);
+                assert!(report.external_invocations.is_empty(), "{report:?}");
+                assert!(!out.exists(), "{report:?}");
+            }
+        }
+    }
+    fs::remove_dir_all(directory).unwrap();
 }

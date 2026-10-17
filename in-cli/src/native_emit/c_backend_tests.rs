@@ -2731,3 +2731,313 @@ fn integer_callees_discovered_during_preparation_refuse_raw_emission() {
         );
     }
 }
+
+fn scalar_array_copy_module() -> UnifiedModule {
+    fn copy(name: &str, element: Typ, count: usize, source: Expr) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params: vec![("source".into(), Typ::Array(Box::new(element.clone())))],
+            ret: Typ::Array(Box::new(element)),
+            body: vec![Stmt::Return(Some(Expr::Unary {
+                op: crate::core_ir::array_copy::operation(count),
+                expr: Box::new(source),
+            }))],
+            type_params: vec![],
+        }
+    }
+    let source = || Expr::Ident("source".into());
+    let integer_array = Typ::Array(Box::new(Typ::Int));
+    UnifiedModule::new(vec![
+        // Deliberately reserve the helper's first generated name.
+        Decl::Global {
+            name: "__array_copy_0".into(),
+            typ: Typ::Int,
+            init: Some(Box::new(Expr::IntLit(42))),
+            mutable: false,
+            constant_value: false,
+        },
+        Decl::Global {
+            name: "calls".into(),
+            typ: Typ::Int,
+            init: Some(Box::new(Expr::IntLit(0))),
+            mutable: true,
+            constant_value: false,
+        },
+        copy("integers", Typ::Int, 2, source()),
+        copy("booleans", Typ::Bool, 2, source()),
+        copy("floats", Typ::Float, 2, source()),
+        copy("empty", Typ::Int, 0, source()),
+        copy(
+            "prefix",
+            Typ::Int,
+            1,
+            Expr::ArrayLit(vec![Expr::IntLit(42), Expr::IntLit(99)]),
+        ),
+        Decl::Function {
+            name: "empty_literal".into(),
+            params: vec![],
+            ret: Typ::Array(Box::new(Typ::Void)),
+            body: vec![Stmt::Return(Some(Expr::Unary {
+                op: crate::core_ir::array_copy::operation(0),
+                expr: Box::new(Expr::ArrayLit(vec![])),
+            }))],
+            type_params: vec![],
+        },
+        copy("overflow", Typ::Int, usize::MAX, source()),
+        copy(
+            "nested",
+            Typ::Int,
+            2,
+            Expr::Unary {
+                op: crate::core_ir::array_copy::operation(2),
+                expr: Box::new(source()),
+            },
+        ),
+        Decl::Function {
+            name: "producer".into(),
+            params: vec![("source".into(), integer_array.clone())],
+            ret: integer_array.clone(),
+            body: vec![
+                Stmt::Assign(
+                    "calls".into(),
+                    Expr::Binary {
+                        op: "+".into(),
+                        lhs: Box::new(Expr::Ident("calls".into())),
+                        rhs: Box::new(Expr::IntLit(1)),
+                    },
+                ),
+                Stmt::Return(Some(source())),
+            ],
+            type_params: vec![],
+        },
+        copy(
+            "effects",
+            Typ::Int,
+            2,
+            Expr::Call {
+                callee: Box::new(Expr::Ident("producer".into())),
+                args: vec![source()],
+            },
+        ),
+        Decl::Function {
+            name: "lazy".into(),
+            params: vec![("source".into(), integer_array)],
+            ret: Typ::Int,
+            body: vec![
+                Stmt::If {
+                    cond: Expr::Binary {
+                        op: "&&".into(),
+                        lhs: Box::new(Expr::BoolLit(false)),
+                        rhs: Box::new(Expr::Binary {
+                            op: "==".into(),
+                            lhs: Box::new(Expr::Index {
+                                base: Box::new(Expr::Unary {
+                                    op: crate::core_ir::array_copy::operation(2),
+                                    expr: Box::new(Expr::Call {
+                                        callee: Box::new(Expr::Ident("producer".into())),
+                                        args: vec![source()],
+                                    }),
+                                }),
+                                index: Box::new(Expr::IntLit(0)),
+                            }),
+                            rhs: Box::new(Expr::IntLit(0)),
+                        }),
+                    },
+                    then_body: vec![Stmt::Return(Some(Expr::IntLit(7)))],
+                    else_body: vec![],
+                },
+                Stmt::Return(Some(Expr::Ident("calls".into()))),
+            ],
+            type_params: vec![],
+        },
+    ])
+}
+
+#[test]
+fn scalar_array_copy_projects_independent_storage_and_scalar_layouts() {
+    let module = scalar_array_copy_module();
+    let emitted = emit_c_module(&module).unwrap();
+    assert!(emitted.contains("sizeof(uint8_t)"), "{emitted}");
+    assert!(emitted.contains("sizeof(double)"), "{emitted}");
+    assert!(emitted.contains("memcpy(destination, source, bytes)"));
+    assert!(emitted.contains("count > SIZE_MAX / element_size"));
+    assert!(!emitted.contains("static void *__array_copy_0("));
+    assert_inferred_c_executes(
+        &module,
+        r#"
+        int64_t source[2]={20,22};
+        int64_t *copy=integers(source);
+        if(copy==source)return 7;
+        copy[0]=40;
+        if(source[0]+copy[1]!=42)return 8;
+        free(copy);
+        uint8_t flags[2]={1,0};uint8_t *bits=booleans(flags);
+        bits[0]=0;if(flags[0]!=1||bits[1]!=0)return 9;free(bits);
+        double values[2]={20.5,21.5};double *numbers=floats(values);
+        numbers[0]=40.5;if(values[0]+numbers[1]!=42.0)return 10;free(numbers);
+        if(__array_copy_0!=42)return 11;
+        return 42;
+    "#,
+    );
+}
+
+#[test]
+fn scalar_array_copy_executes_once_and_preserves_float_bits_under_ubsan() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let emitted = emit_c_module(&scalar_array_copy_module()).unwrap();
+    let directory = temp_array_copy_c_directory();
+    let source = directory.join("copy.c");
+    let binary = directory.join("copy");
+    std::fs::write(
+        &source,
+        format!(
+            r#"{emitted}
+int main(void) {{
+    int64_t source[2]={{20,22}};
+    calls=0;int64_t *copy=effects(source);
+    if(calls!=1||copy==source)return 2;
+    copy[0]=40;if(source[0]+copy[1]!=42)return 3;free(copy);
+    if(lazy(source)!=1||calls!=1)return 4;
+    int64_t *nested_copy=nested(source);
+    nested_copy[0]=40;if(source[0]+nested_copy[1]!=42)return 5;free(nested_copy);
+    uint64_t expected[2]={{UINT64_C(0x8000000000000000),UINT64_C(0x7ff8000000000042)}};
+    double original[2];memcpy(original,expected,sizeof(expected));
+    double *floating=floats(original);
+    if(memcmp(floating,expected,sizeof(expected))!=0)return 6;
+    floating[0]=3.5;if(memcmp(original,expected,sizeof(expected))!=0)return 7;free(floating);
+    uint8_t flags[2]={{1,0}};uint8_t *boolean=booleans(flags);
+    boolean[0]=0;if(flags[0]!=1)return 8;free(boolean);
+    int64_t *first=empty(NULL);int64_t *second=empty(NULL);
+    if(first==NULL||second==NULL||first==second)return 9;free(first);free(second);
+    void *untyped=empty_literal();if(untyped==NULL)return 10;free(untyped);
+    int64_t *prefix_copy=prefix(source);if(prefix_copy[0]!=42)return 11;free(prefix_copy);
+    return 42;
+}}
+"#
+        ),
+    )
+    .unwrap();
+    build_array_copy_c(&source, &binary);
+    let result = Command::new(&binary).output().unwrap();
+    assert_eq!(result.status.code(), Some(42), "{result:?}");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+fn temp_array_copy_c_directory() -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "inauguration-c-array-copy-{}-{stamp}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    directory
+}
+
+fn build_array_copy_c(source: &std::path::Path, binary: &std::path::Path) {
+    let build = std::process::Command::new("clang")
+        .args([
+            "-std=gnu11",
+            "-O2",
+            "-fsanitize=undefined",
+            "-fno-sanitize-recover=undefined",
+        ])
+        .arg(source)
+        .arg("-o")
+        .arg(binary)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}: {}",
+        source.display(),
+        String::from_utf8_lossy(&build.stderr)
+    );
+}
+
+#[test]
+fn scalar_array_copy_overflow_and_allocation_failure_abort_before_reading() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let emitted = emit_c_module(&scalar_array_copy_module()).unwrap();
+    let directory = temp_array_copy_c_directory();
+    for (name, prefix, suffix) in [
+        ("overflow", "", "int main(void){overflow(NULL);return 42;}"),
+        (
+            "allocation",
+            "#define malloc array_copy_failed_malloc\n",
+            "\n#undef malloc\nvoid *array_copy_failed_malloc(size_t size){(void)size;return NULL;}\nint main(void){int64_t values[2]={20,22};integers(values);return 42;}",
+        ),
+    ] {
+        let source = directory.join(format!("{name}.c"));
+        let binary = directory.join(name);
+        std::fs::write(&source, format!("{prefix}{emitted}\n{suffix}\n")).unwrap();
+        build_array_copy_c(&source, &binary);
+        let result = Command::new(&binary).output().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(result.status.signal(), Some(6), "{name}: {result:?}");
+        }
+        #[cfg(not(unix))]
+        assert!(!result.status.success(), "{name}: {result:?}");
+        assert!(
+            result.stderr.is_empty(),
+            "{name}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn scalar_array_copy_refuses_malformed_counts_and_unchecked_operands() {
+    for operation in [
+        "array-copy",
+        "array-copy:01",
+        "array-copy:-1",
+        "array-copy:+1",
+        "array-copy:x",
+    ] {
+        let mut module = scalar_array_copy_module();
+        let Decl::Function { body, .. } = &mut module.decls[2] else {
+            panic!("function")
+        };
+        let Stmt::Return(Some(Expr::Unary { op, .. })) = &mut body[0] else {
+            panic!("copy")
+        };
+        *op = operation.into();
+        assert!(emit_c_module(&module).is_err(), "{operation}");
+    }
+    for operand in [
+        Expr::IntLit(42),
+        Expr::BoolLit(true),
+        Expr::FloatLit(crate::core_ir::FloatVal(1.0)),
+        Expr::StringLit("text".into()),
+        Expr::ArrayLit(vec![Expr::IntLit(1)]),
+        Expr::ArrayLit(vec![
+            Expr::StringLit("a".into()),
+            Expr::StringLit("b".into()),
+        ]),
+        Expr::ArrayLit(vec![Expr::IntLit(1), Expr::StringLit("b".into())]),
+    ] {
+        let mut module = scalar_array_copy_module();
+        let Decl::Function { body, .. } = &mut module.decls[2] else {
+            panic!("function")
+        };
+        let Stmt::Return(Some(Expr::Unary { expr, .. })) = &mut body[0] else {
+            panic!("copy")
+        };
+        **expr = operand.clone();
+        assert!(emit_c_module(&module).is_err(), "{operand:?}");
+    }
+}

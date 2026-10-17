@@ -254,6 +254,9 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         }
         Expr::Block { .. } => Err("c-backend: block values require owned native lowering".into()),
         Expr::Unary { op, expr } => {
+            if op.starts_with("array-copy") && crate::core_ir::array_copy::count(op).is_none() {
+                return Err("c-backend: malformed array copy operation".into());
+            }
             if op == "vector-clone" {
                 return Err("c-backend: vector clone requires owned native lowering".into());
             }

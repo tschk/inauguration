@@ -126,6 +126,7 @@ enum Binding {
     Nominal(syn::Generics),
     Generic,
     Value,
+    Constant(Rc<(syn::Type, syn::Expr)>),
     Conditional,
     UnknownImport,
     Duplicate,
@@ -136,6 +137,7 @@ struct Scope {
     imports: HashMap<String, Vec<Binding>>,
     values: HashMap<String, Binding>,
     active_types: HashSet<String>,
+    active_values: HashSet<String>,
     glob: bool,
     conditional: bool,
 }
@@ -205,7 +207,10 @@ impl Scope {
                     Binding::Nominal(item.generics.clone()),
                 )),
                 syn::Item::Fn(item) => Some((item.sig.ident.to_string(), Binding::Value)),
-                syn::Item::Const(item) => Some((item.ident.to_string(), Binding::Value)),
+                syn::Item::Const(item) => Some((
+                    item.ident.to_string(),
+                    Binding::Constant(Rc::new(((*item.ty).clone(), (*item.expr).clone()))),
+                )),
                 syn::Item::Static(item) => Some((item.ident.to_string(), Binding::Value)),
                 syn::Item::Use(item) => {
                     let mut leaves = HashMap::new();
@@ -259,14 +264,26 @@ impl Scope {
                     syn::Item::Static(item) => &item.vis,
                     _ => continue,
                 };
-                let value_only = matches!(&binding, Binding::Value);
+                let value_only = matches!(&binding, Binding::Value | Binding::Constant(..));
                 let binding = if presence == Presence::Conditional {
                     Binding::Conditional
                 } else {
                     Binding::Visible(Box::new(binding), visibility.clone())
                 };
                 if value_only {
-                    scope.values.insert(name, binding);
+                    let duplicate =
+                        presence == Presence::Active && !scope.active_values.insert(name.clone());
+                    scope
+                        .values
+                        .entry(name)
+                        .and_modify(|previous| {
+                            *previous = if duplicate || matches!(previous, Binding::Duplicate) {
+                                Binding::Duplicate
+                            } else {
+                                Binding::Conditional
+                            };
+                        })
+                        .or_insert(binding);
                 } else {
                     scope.insert(name, binding);
                 }
@@ -431,9 +448,9 @@ fn structural_obligations(value: Resolved) -> Vec<NominalObligation> {
     match value.visibility().0 {
         Resolved::Nominal(obligations) => obligations,
         Resolved::Type(_) => vec![],
-        Resolved::Value => vec![NominalObligation::Failure(Failure::Invalid(
-            "structural source alias names a value instead of a type".into(),
-        ))],
+        Resolved::Value | Resolved::Constant(_) => vec![NominalObligation::Failure(
+            Failure::Invalid("structural source alias names a value instead of a type".into()),
+        )],
         Resolved::Missing | Resolved::Module(_) => vec![NominalObligation::Failure(unsupported(
             "structural source alias child type is unresolved",
         ))],
@@ -442,12 +459,18 @@ fn structural_obligations(value: Resolved) -> Vec<NominalObligation> {
         ))],
     }
 }
+struct SourceConstant {
+    syntax: Rc<(syn::Type, syn::Expr)>,
+    declared: Frame,
+    key: Key,
+}
 enum Resolved {
     Visible(Box<Resolved>, Extent),
     Type(Typ),
     Module(Vec<String>),
     Nominal(Vec<NominalObligation>),
     Value,
+    Constant(SourceConstant),
     Missing,
 }
 impl Resolved {
@@ -575,6 +598,7 @@ struct LookupContext {
     alias_target: bool,
     source_qualified: bool,
     ordinary_value_owner: bool,
+    constant_value: bool,
     nominal_arguments: usize,
     unsupported_nominal_arguments: bool,
 }
@@ -612,6 +636,7 @@ fn path_type(
             alias_target,
             source_qualified: false,
             ordinary_value_owner: false,
+            constant_value: false,
             nominal_arguments: path
                 .segments
                 .last()
@@ -640,6 +665,7 @@ fn scope_binding(
     declared: &Frame,
     depth: usize,
     active: &mut HashSet<Key>,
+    constant_value: bool,
 ) -> Result<(Option<Binding>, Option<Binding>), Failure> {
     let mut typ = scope.bindings.get(name).cloned();
     let mut value = scope.values.get(name).cloned();
@@ -677,6 +703,7 @@ fn scope_binding(
                 alias_target: true,
                 source_qualified: false,
                 ordinary_value_owner: false,
+                constant_value,
                 nominal_arguments: 0,
                 unsupported_nominal_arguments: false,
             },
@@ -688,7 +715,7 @@ fn scope_binding(
                 "source import `{name}` widens target visibility"
             )));
         }
-        if matches!(target, Resolved::Value) {
+        if matches!(target, Resolved::Value | Resolved::Constant(_)) {
             value = Some(import.clone());
         } else if matches!(target, Resolved::Missing) {
             if typ.is_none() {
@@ -728,7 +755,7 @@ fn resolve_parts(
     };
     if first == "crate" {
         if !frame.catalog.owns_crate_root {
-            if context.ordinary_value_owner {
+            if context.ordinary_value_owner || context.constant_value {
                 return Ok(Resolved::Missing);
             }
             return Err(unsupported(
@@ -776,7 +803,7 @@ fn resolve_parts(
     }
     if absolute {
         if !matches!(first.as_str(), "std" | "core") {
-            if context.ordinary_value_owner {
+            if context.ordinary_value_owner || context.constant_value {
                 return Ok(Resolved::Missing);
             }
             return Err(unsupported(
@@ -800,11 +827,23 @@ fn resolve_parts(
     for (index, scope) in frame.locals.iter().enumerate().rev() {
         let mut declared = frame.clone();
         declared.locals.truncate(index + 1);
-        let (typ, value) = scope_binding(scope, first, &declared, index + 1, active)?;
+        let (typ, value) = scope_binding(
+            scope,
+            first,
+            &declared,
+            index + 1,
+            active,
+            context.constant_value && parts.len() == 1,
+        )?;
         if value_only.is_none() {
             value_only = value.map(|binding| (binding, index + 1));
         }
-        if let Some(binding) = typ {
+        if context.constant_value && parts.len() == 1 {
+            if let Some(binding) = value_only.clone() {
+                selected = Some(binding);
+                break;
+            }
+        } else if let Some(binding) = typ {
             selected = Some((binding, index + 1));
             break;
         }
@@ -812,10 +851,21 @@ fn resolve_parts(
     if selected.is_none() {
         let mut declared = frame.clone();
         declared.locals.clear();
-        let (typ, value) = scope_binding(module, first, &declared, 0, active)?;
-        selected = typ.map(|binding| (binding, 0));
-        if value_only.is_none() {
-            value_only = value.map(|binding| (binding, 0));
+        let (typ, value) = scope_binding(
+            module,
+            first,
+            &declared,
+            0,
+            active,
+            context.constant_value && parts.len() == 1,
+        )?;
+        if context.constant_value && parts.len() == 1 {
+            selected = value.map(|binding| (binding, 0));
+        } else {
+            selected = typ.map(|binding| (binding, 0));
+            if value_only.is_none() {
+                value_only = value.map(|binding| (binding, 0));
+            }
         }
     }
     if selected.is_none() && parts.len() == 1 && value_only.is_some() {
@@ -842,7 +892,7 @@ fn resolve_parts(
         };
         let carries_visibility = matches!(
             &binding,
-            Binding::Alias(..) | Binding::Nominal(..) | Binding::Value
+            Binding::Alias(..) | Binding::Nominal(..) | Binding::Value | Binding::Constant(..)
         ) || (parts.len() == 1
             && matches!(&binding, Binding::Import(..) | Binding::Module(..)));
         let key = (frame.module.clone(), depth, first.clone());
@@ -860,6 +910,14 @@ fn resolve_parts(
             )),
             Binding::UnknownImport => Err(unsupported("import namespace is not proven by source")),
             Binding::Value => Ok(Resolved::Value),
+            Binding::Constant(syntax) if parts.len() == 1 && !generic => {
+                Ok(Resolved::Constant(SourceConstant {
+                    syntax,
+                    declared: declared.clone(),
+                    key: key.clone(),
+                }))
+            }
+            Binding::Constant(..) => Ok(Resolved::Missing),
             Binding::Duplicate => Err(Failure::Invalid(format!(
                 "duplicate type binding `{first}`"
             ))),
@@ -877,7 +935,9 @@ fn resolve_parts(
                 )]))
             }
             Binding::Nominal(..) => Ok(Resolved::Missing),
-            Binding::External if context.ordinary_value_owner => Ok(Resolved::Missing),
+            Binding::External if context.ordinary_value_owner || context.constant_value => {
+                Ok(Resolved::Missing)
+            }
             Binding::External => Err(unsupported(
                 "external artifact alias identity is not owned by this source",
             )),
@@ -914,6 +974,7 @@ fn resolve_parts(
                         alias_target: true,
                         source_qualified: false,
                         ordinary_value_owner: false,
+                        constant_value: context.constant_value && parts.len() == 1,
                         nominal_arguments: context.nominal_arguments,
                         unsupported_nominal_arguments: context.unsupported_nominal_arguments,
                     },
@@ -969,7 +1030,7 @@ fn resolve_parts(
                     )))
                 } else {
                     match rhs_type(&ty, &declared, active)?.visibility().0 {
-                        Resolved::Value => Err(Failure::Invalid(format!(
+                        Resolved::Value | Resolved::Constant(_) => Err(Failure::Invalid(format!(
                             "source alias `{first}` names a value instead of a type"
                         ))),
                         Resolved::Missing => Err(unsupported(format!(
@@ -1033,9 +1094,11 @@ pub(super) fn resolve_in(frame: &Frame, path: &syn::Path) -> Result<Option<Typ>,
         .0
     {
         Resolved::Type(typ) => Ok(Some(typ)),
-        Resolved::Nominal(_) | Resolved::Value | Resolved::Missing | Resolved::Module(_) => {
-            Ok(None)
-        }
+        Resolved::Nominal(_)
+        | Resolved::Value
+        | Resolved::Constant(_)
+        | Resolved::Missing
+        | Resolved::Module(_) => Ok(None),
         Resolved::Visible(..) => Err(unsupported("nested source visibility result")),
     }
 }
@@ -1079,6 +1142,7 @@ pub(super) fn resolve_value_owner(path: &syn::Path) -> Result<Option<Typ>, Failu
             alias_target: false,
             source_qualified: false,
             ordinary_value_owner: true,
+            constant_value: false,
             nominal_arguments: 0,
             unsupported_nominal_arguments: false,
         },
@@ -1086,6 +1150,333 @@ pub(super) fn resolve_value_owner(path: &syn::Path) -> Result<Option<Typ>, Failu
     match result.visibility().0 {
         Resolved::Type(typ) => Ok(Some(typ)),
         _ => Ok(None),
+    }
+}
+
+thread_local! {
+    static LENGTH_QUERY_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Preserve exact source constant types until the complete count is checked as usize.
+/// Namespace ownership and lexical locals are resolved before the existing bounded
+/// constant evaluator runs; no source declaration is rewritten by this query.
+pub(super) fn usize_length(
+    expression: &syn::Expr,
+    shadows: &HashSet<String>,
+) -> Result<Option<usize>, Failure> {
+    use crate::core_ir::{Decl, Expr, Stmt, UnifiedModule};
+    use crate::integer_semantics::IntegerSemantics;
+    struct QueryDepth;
+    impl Drop for QueryDepth {
+        fn drop(&mut self) {
+            LENGTH_QUERY_DEPTH.with(|depth| depth.set(depth.get() - 1));
+        }
+    }
+    if LENGTH_QUERY_DEPTH.with(|depth| depth.get() >= 64) {
+        return Err(unsupported(
+            "fixed-array length source nesting limit exceeded",
+        ));
+    }
+    LENGTH_QUERY_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    let _query_depth = QueryDepth;
+    struct Constants {
+        declarations: Vec<Decl>,
+        names: HashMap<Key, String>,
+        active: HashSet<Key>,
+        fuel: usize,
+        unresolved: bool,
+    }
+    impl Constants {
+        fn expression(
+            &mut self,
+            source: &syn::Expr,
+            frame: Option<&Frame>,
+            shadows: &HashSet<String>,
+            depth: usize,
+        ) -> Result<Expr, Failure> {
+            if depth >= 64 || self.fuel == 0 {
+                return Err(unsupported(
+                    "fixed-array length constant resolution limit exceeded",
+                ));
+            }
+            self.fuel -= 1;
+            let _scope = frame.map(Frame::enter);
+            // Outer runtime bindings never become locals inside a constant initializer.
+            let _length_shadows = super::LengthShadowScope::new(&HashMap::new());
+            let mut value = super::lower_expr_with_types(source, &mut HashMap::new());
+            let mut names = HashSet::new();
+            crate::core_bindings::reserve_expr(&value, &mut names);
+            crate::core_bindings::normalize_initializer_with_references(
+                &mut value,
+                &names,
+                &HashMap::new(),
+            );
+            let mut callees = HashSet::new();
+            crate::core_opt::map_expr_mut(&mut value, &mut |expr| {
+                if let Expr::Call { callee, .. } = expr
+                    && let Expr::Ident(name) = callee.as_ref()
+                {
+                    callees.insert(name.clone());
+                }
+            });
+            self.unresolved |= callees.iter().any(|name| {
+                !matches!(
+                    name.as_str(),
+                    crate::core_ir::INLINE_CONST | crate::core_ir::ARRAY_REPEAT
+                )
+            });
+            let mut failure = None;
+            crate::core_opt::map_expr_mut(&mut value, &mut |expr| {
+                let Expr::Ident(name) = expr else { return };
+                if name.starts_with("in-local-") || callees.contains(name) {
+                    return;
+                }
+                let Ok(path) = syn::parse_str::<syn::ExprPath>(name) else {
+                    return;
+                };
+                let result = self.reference(&path, frame, shadows, depth);
+                match result {
+                    Ok(Some(name)) => *expr = Expr::Ident(name),
+                    Ok(None) => self.unresolved = true,
+                    Err(error) => {
+                        failure =
+                            crate::core_ir::type_proofs::prefer_failure(failure.take(), Some(error))
+                    }
+                }
+            });
+            if let Some(failure) = failure {
+                return Err(failure);
+            }
+            Ok(value)
+        }
+        fn reference(
+            &mut self,
+            value: &syn::ExprPath,
+            frame: Option<&Frame>,
+            shadows: &HashSet<String>,
+            depth: usize,
+        ) -> Result<Option<String>, Failure> {
+            if self.fuel == 0 {
+                return Err(unsupported(
+                    "fixed-array length constant resolution limit exceeded",
+                ));
+            }
+            self.fuel -= 1;
+            if value.qself.is_some()
+                || value
+                    .path
+                    .segments
+                    .iter()
+                    .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+            {
+                return Ok(None);
+            }
+            if value.path.leading_colon.is_none()
+                && value.path.segments.len() == 1
+                && shadows.contains(&value.path.segments[0].ident.to_string())
+            {
+                return Err(Failure::Invalid(
+                    "fixed-array length refers to a runtime local value".into(),
+                ));
+            }
+            let Some(frame) = frame else { return Ok(None) };
+            let parts = value
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            let resolved = resolve_parts(
+                &parts,
+                value.path.leading_colon.is_some(),
+                false,
+                frame,
+                &frame.module,
+                &mut HashSet::new(),
+                LookupContext {
+                    alias_target: false,
+                    source_qualified: false,
+                    ordinary_value_owner: false,
+                    constant_value: true,
+                    nominal_arguments: 0,
+                    unsupported_nominal_arguments: false,
+                },
+            )?
+            .visibility()
+            .0;
+            let Resolved::Constant(constant) = resolved else {
+                return if matches!(resolved, Resolved::Value) {
+                    Err(Failure::Invalid(
+                        "fixed-array length requires a constant value".into(),
+                    ))
+                } else {
+                    Ok(None)
+                };
+            };
+            if let Some(name) = self.names.get(&constant.key) {
+                return Ok(Some(name.clone()));
+            }
+            if !self.active.insert(constant.key.clone()) {
+                return Err(Failure::Invalid(
+                    "cyclic fixed-array length constant".into(),
+                ));
+            }
+            let result = (|| {
+                let _scope = constant.declared.enter();
+                let typ = super::map_type(&constant.syntax.0);
+                if let Some(failure) = crate::core_ir::type_proofs::failure_in_type(&typ) {
+                    return Err(failure);
+                }
+                let init = self.expression(
+                    &constant.syntax.1,
+                    Some(&constant.declared),
+                    &HashSet::new(),
+                    depth + 1,
+                )?;
+                let name = format!("#array-length-constant-{}", self.declarations.len());
+                self.declarations.push(Decl::Global {
+                    name: name.clone(),
+                    typ,
+                    init: Some(Box::new(init)),
+                    mutable: false,
+                    constant_value: true,
+                });
+                self.names.insert(constant.key.clone(), name.clone());
+                Ok(Some(name))
+            })();
+            self.active.remove(&constant.key);
+            result
+        }
+    }
+    let mut constants = Constants {
+        declarations: vec![],
+        names: HashMap::new(),
+        active: HashSet::new(),
+        fuel: 16384,
+        unresolved: false,
+    };
+    let value = constants.expression(expression, current().as_ref(), shadows, 0)?;
+    let checker = crate::typecheck::TypeChecker::new();
+    let env = constants
+        .declarations
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global { name, typ, .. } => Some((name.clone(), typ.clone())),
+            _ => None,
+        })
+        .collect();
+    let facts = checker.collect_decl_facts(&constants.declarations);
+    match checker.expr_type(&value, &facts, &env) {
+        Some(typ)
+            if matches!(
+                typ.canonical(),
+                Typ::Bool | Typ::Float | Typ::String | Typ::Array(_) | Typ::Vector(_) | Typ::Void
+            ) =>
+        {
+            return Err(Failure::Invalid(
+                "fixed-array length must have usize type".into(),
+            ));
+        }
+        _ => {}
+    }
+    constants.declarations.push(Decl::Function {
+        name: "#array-length".into(),
+        params: vec![],
+        ret: Typ::Named("#rust-integer-usize".into()),
+        body: vec![Stmt::Return(Some(Expr::Call {
+            callee: Box::new(Expr::Ident(crate::core_ir::INLINE_CONST.into())),
+            args: vec![value],
+        }))],
+        type_params: vec![],
+    });
+    let constants_unresolved = constants.unresolved;
+    let mut module = UnifiedModule::new(constants.declarations);
+    let semantics = IntegerSemantics::Word64;
+    crate::typecheck::rust_integers::normalize(&checker, &mut module, semantics);
+    let proof = checker
+        .typed_proof_nodes(&module.decls)
+        .into_values()
+        .fold(None, |left, right| {
+            crate::core_ir::type_proofs::prefer_failure(left, Some(right))
+        });
+    if let Some(proof) = proof {
+        return Err(proof);
+    }
+    if constants_unresolved {
+        return Ok(None);
+    }
+    for declaration in &module.decls {
+        let value = match declaration {
+            Decl::Global {
+                init: Some(value), ..
+            } => value.as_ref(),
+            Decl::Function { body, .. } => {
+                let [Stmt::Return(Some(value))] = body.as_slice() else {
+                    return Ok(None);
+                };
+                value
+            }
+            _ => continue,
+        };
+        let mut value = value.clone();
+        crate::core_opt::map_expr_mut(&mut value, &mut |expr| {
+            if let Expr::Call { callee, args } = expr
+                && matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::INLINE_CONST)
+                && let [value] = args.as_slice()
+            {
+                *expr = value.clone();
+            }
+        });
+        // Evaluation can discard cold branches, but their source types still matter.
+        if let Some(failure) = checker.constant_value_type_failure(&value, &facts, &env) {
+            return Err(failure);
+        }
+    }
+    // Declarations are topologically ordered by the source binder. Memoize
+    // evaluated values before shared folding, avoiding repeated A+A DAG walks.
+    let mut values: HashMap<String, Expr> = HashMap::new();
+    for declaration in &mut module.decls {
+        let Decl::Global {
+            name,
+            init: Some(init),
+            ..
+        } = declaration
+        else {
+            continue;
+        };
+        crate::core_opt::map_expr_mut(init, &mut |expr| {
+            if let Expr::Ident(name) = expr
+                && let Some(value) = values.get(name)
+            {
+                *expr = value.clone();
+            }
+        });
+        let value = match crate::lower_core::evaluate_pure_constant(init, semantics) {
+            Ok(Some(value)) => value,
+            Ok(None) => return Ok(None),
+            Err(crate::lower_core::ConstantEvalError::Arithmetic) => {
+                return Err(Failure::Invalid(
+                    "fixed-array length constant arithmetic failed".into(),
+                ));
+            }
+        };
+        values.insert(name.clone(), value.clone());
+        **init = value;
+    }
+    crate::lower_core::fold_static_initializers_with_semantics(&mut module.decls, semantics);
+    crate::lower_core::lower_named_constants_with_semantics(&mut module.decls, semantics);
+    let Some(Decl::Function { body, .. }) = module.decls.last() else {
+        return Ok(None);
+    };
+    let [Stmt::Return(Some(value))] = body.as_slice() else {
+        return Ok(None);
+    };
+    match crate::lower_core::evaluate_pure_constant(value, semantics) {
+        Ok(Some(Expr::IntLit(length))) => Ok(usize::try_from(length as u64).ok()),
+        Ok(_) => Ok(None),
+        Err(crate::lower_core::ConstantEvalError::Arithmetic) => Err(Failure::Invalid(
+            "fixed-array length constant arithmetic failed".into(),
+        )),
     }
 }
 
@@ -1609,5 +2000,112 @@ mod tests {
         assert_eq!(query(&root, "Decoy").unwrap(), None);
         assert!(matches!(query(&root, "::u8"), Err(Failure::Unsupported(_))));
         integer(&root, "::core::primitive::u8", "u8");
+    }
+    #[test]
+    fn source_usize_lengths_follow_owned_constants_and_lexical_definition_scope() {
+        let root = frame(
+            "const A:usize=1;const COUNT:usize=A+2;mod sizes{pub const A:usize=2;pub const COUNT:usize=A+1;}use sizes as alias;use sizes::COUNT as Imported;type Size=usize;const TYPED:Size=3;const BYTE:u8=3;const CAST:usize=BYTE as usize;",
+        );
+        let _scope = root.enter();
+        for source in [
+            "COUNT",
+            "alias::COUNT",
+            "Imported",
+            "TYPED",
+            "CAST",
+            "BYTE as usize",
+            "1+2",
+            "{let a=1;a+2}",
+            "if true{3}else{2}",
+            "if true{3}else{1/0}",
+            "if true{3}else{usize::MAX+1}",
+            "{let mut i=0;while i<3{i+=1;}i}",
+        ] {
+            assert_eq!(
+                usize_length(&syn::parse_str(source).unwrap(), &HashSet::new()),
+                Ok(Some(3)),
+                "{source}"
+            );
+        }
+    }
+    #[test]
+    fn source_usize_lengths_preserve_invalidity_and_defer_unknowns() {
+        let root = frame(
+            "const BYTE:u8=3;const A:usize=B;const B:usize=A;#[cfg(feature=\"x\")]const MAYBE:usize=3;const DUP:usize=1;const DUP:usize=2;",
+        );
+        let _scope = root.enter();
+        for source in [
+            "BYTE",
+            "A",
+            "DUP",
+            "3u8",
+            "1-2",
+            "1/0",
+            "if true { 3 } else { false }",
+            "if 1 { 3 } else { 3 }",
+        ] {
+            assert!(
+                matches!(
+                    usize_length(&syn::parse_str(source).unwrap(), &HashSet::new()),
+                    Err(Failure::Invalid(_))
+                ),
+                "{source}"
+            );
+        }
+        assert!(matches!(
+            usize_length(&syn::parse_quote!(MAYBE), &HashSet::new()),
+            Err(Failure::Unsupported(_))
+        ));
+        assert_eq!(
+            usize_length(&syn::parse_quote!(UNKNOWN), &HashSet::new()),
+            Ok(None)
+        );
+        assert_eq!(
+            usize_length(
+                &syn::parse_quote!(if true { 3 } else { UNKNOWN }),
+                &HashSet::new()
+            ),
+            Ok(None)
+        );
+        assert!(matches!(
+            usize_length(&syn::parse_quote!(BYTE), &HashSet::from(["BYTE".into()])),
+            Err(Failure::Invalid(_))
+        ));
+    }
+    #[test]
+    fn source_usize_lengths_defer_missing_nominal_schemas() {
+        let root = frame("struct Pair{x:usize}const P:Pair=Pair{x:3};");
+        let _scope = root.enter();
+        assert!(matches!(
+            usize_length(&syn::parse_quote!(P.x), &HashSet::new()),
+            Err(Failure::Unsupported(_))
+        ));
+    }
+    #[test]
+    fn source_usize_constant_dags_are_memoized_and_depth_is_bounded() {
+        let mut source = "const C0:usize=0;".to_string();
+        for index in 1..24 {
+            source.push_str(&format!(
+                "const C{index}:usize=C{}+C{};",
+                index - 1,
+                index - 1
+            ));
+        }
+        let root = frame(&source);
+        let _scope = root.enter();
+        assert_eq!(
+            usize_length(&syn::parse_quote!(C23), &HashSet::new()),
+            Ok(Some(0))
+        );
+        let mut source = "const D0:usize=0;".to_string();
+        for index in 1..72 {
+            source.push_str(&format!("const D{index}:usize=D{};", index - 1));
+        }
+        let deep = frame(&source);
+        let _scope = deep.enter();
+        assert!(matches!(
+            usize_length(&syn::parse_quote!(D71), &HashSet::new()),
+            Err(Failure::Unsupported(_))
+        ));
     }
 }

@@ -397,6 +397,28 @@ struct Pass<'a> {
     const_env: Option<HashMap<String, i64>>,
 }
 impl Pass<'_> {
+    fn validate_constant(&self, value: &mut Expr) {
+        if self.rewrite
+            && matches!(
+                crate::lower_core::evaluate_pure_constant(value, self.semantics),
+                Err(crate::lower_core::ConstantEvalError::Arithmetic)
+            )
+        {
+            let previous = invalid_preserving_proof(value);
+            let previous = match previous {
+                Expr::Ident(name) => core_ir::type_proofs::decode(&name),
+                _ => None,
+            };
+            if let Some(failure) = core_ir::type_proofs::prefer_failure(
+                previous,
+                Some(core_ir::type_proofs::ResolutionFailure::Invalid(
+                    "constant integer arithmetic failed".into(),
+                )),
+            ) {
+                *value = Expr::Ident(failure.symbol());
+            }
+        }
+    }
     fn expected(&self, typ: Option<&Typ>) -> Option<Kind> {
         typ.and_then(|typ| typ_kind(typ, self.semantics))
     }
@@ -587,11 +609,16 @@ impl Pass<'_> {
         }
         if let Some(typ @ (Typ::Array(item) | Typ::Vector(item))) = expected {
             match expr {
+                Expr::Unary { op, expr } if crate::core_ir::array_copy::count(op).is_some() => {
+                    self.value(expr, Some(typ), env, ret);
+                    return None;
+                }
                 Expr::Call { callee, args } if matches!(callee.as_ref(),Expr::Ident(name) if name == core_ir::INLINE_CONST) =>
                 {
                     if let [value] = args.as_mut_slice() {
                         let outer = self.const_env.replace(HashMap::new());
                         self.value(value, Some(typ), env, ret);
+                        self.validate_constant(value);
                         self.const_env = outer;
                     }
                     return None;
@@ -876,7 +903,9 @@ impl Pass<'_> {
                     && let Some(kind) = kind
                 {
                     let constants = (self.constant(lhs), self.constant(rhs));
-                    if let (Some(left), Some(right)) = constants {
+                    if self.const_env.is_none()
+                        && let (Some(left), Some(right)) = constants
+                    {
                         bad |= constant_overflow(
                             kind,
                             &operator,
@@ -884,12 +913,12 @@ impl Pass<'_> {
                             &Expr::IntLit(right),
                         );
                     }
-                    let checked_unknown = self.const_env.is_some()
-                        && (constants.0.is_none() || constants.1.is_none())
+                    // Constant control flow selects which arithmetic is evaluated.
+                    let checked_constant = self.const_env.is_some()
                         && matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%" | "<<" | ">>");
                     if !kind.supported(self.semantics) {
                         bad = true;
-                    } else if checked_unknown {
+                    } else if checked_constant {
                         *expr = Expr::Unary {
                             op: format!(
                                 "rust-checked-integer-{}{}",
@@ -932,6 +961,7 @@ impl Pass<'_> {
                 if let [value] = args.as_mut_slice() {
                     let outer = self.const_env.replace(HashMap::new());
                     let kind = self.expression(value, expected, env, ret);
+                    self.validate_constant(value);
                     self.const_env = outer;
                     kind
                 } else {
@@ -1752,6 +1782,7 @@ pub(crate) fn normalize(
                 pass.rewrite = true;
                 pass.const_env = Some(HashMap::new());
                 pass.value(value, Some(typ), &mut globals.clone(), None);
+                pass.validate_constant(value);
                 if unsupported_type(typ, &facts, semantics, &mut HashSet::new()) {
                     **value = invalid();
                 }
@@ -1773,6 +1804,7 @@ mod tests {
     fn resolved(source: &str, semantics: IntegerSemantics) -> UnifiedModule {
         let mut module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
         let checker = TypeChecker::new();
+        super::super::rust_arrays::normalize(&checker, &mut module);
         checker.resolve_complements(&mut module);
         normalize(&checker, &mut module, semantics);
         module
@@ -2185,7 +2217,9 @@ mod tests {
         }]);
         normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
         assert!(
-            matches!(&module.decls[0], Decl::Global { init: Some(value), .. } if value.as_ref()==&invalid())
+            matches!(&module.decls[0], Decl::Global { init: Some(value), .. }
+                if matches!(value.as_ref(), Expr::Ident(name)
+                    if core_ir::type_proofs::decode(name).is_some_and(|proof| proof.is_invalid())))
         );
     }
 
@@ -2487,11 +2521,21 @@ mod tests {
             ("fn main()->u8{const{let x:u8=255;x+1}}", true),
             ("fn main()->u8{const{let mut x:u8=254;x=255;x+1}}", true),
             ("fn main()->u8{const{let x:u8=254;x+1}}", false),
+            (
+                "fn main()->u8{const{let x:u8=255;if true{x+1}else{42}}}",
+                true,
+            ),
+            (
+                "fn main()->u8{const{let x:u8=255;if false{x+1}else{42}}}",
+                false,
+            ),
         ] {
             let mut module = resolved(source, IntegerSemantics::Word64);
             let mut rejected = false;
             crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
-                rejected |= matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+                rejected |= matches!(expr,Expr::Ident(name)
+                    if name.starts_with("#unsupported-rust-integer")
+                        || core_ir::type_proofs::decode(name).is_some_and(|proof| proof.is_invalid()));
             });
             assert_eq!(rejected, overflow, "{source}: {module:?}");
         }

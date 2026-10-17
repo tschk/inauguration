@@ -827,7 +827,8 @@ fn refuses_unresolved_fixed_array_map_collect_to_aggregate_vec() {
 
     let error = lower_module(&module, "main", NativeLinkage::Executable).unwrap_err();
     assert!(
-        error.contains("unresolved private compiler operation"),
+        error.contains("source-type-proof")
+            && error.contains("fixed-array element compatibility requires source type resolution"),
         "{error}"
     );
 }

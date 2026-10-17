@@ -981,6 +981,26 @@ pub(crate) fn lower_array_call_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
+    if let Expr::Unary { op, expr: source } = arg
+        && let Some(count) = crate::core_ir::array_copy::count(op)
+    {
+        if !matches!(super::lower_expr::native_expr_type(source,ctx,functions),Some(Typ::Array(actual)) if actual.canonical()==elem.canonical() || (count==0&&actual.canonical()==Typ::Void))
+        {
+            return Err("native-lower: array copy argument element type mismatch".into());
+        }
+        super::lower_expr::lower_array_copy(
+            emitter,
+            ctx,
+            source,
+            count,
+            reg,
+            true,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        return Ok(reg + 2);
+    }
     if matches!(
         arg,
         Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }

@@ -1533,15 +1533,16 @@ fn native_staging_plan(
                 .map_or(0, |fields| fields.len()))
         }
         fn value(&self, expr: &Expr, expected: Option<&Typ>) -> Result<usize, String> {
-            // Typed array/vector destinations use their existing materializers.
-            // Only scalar literal value lowering acquires a preservation frame.
+            // Scalar literals preserve surrounding registers only in scalar contexts.
+            // Allocating copies preserve them for typed destinations as well.
             let scalar_literal = matches!(expr, Expr::ArrayLit(items) if !items.is_empty())
                 && !matches!(
                     expected.map(Typ::canonical),
                     Some(Typ::Array(_) | Typ::Vector(_))
                 );
             let depth = self.array_depth.get();
-            if scalar_literal {
+            let allocating_copy = matches!(expr,Expr::Unary{op,..} if crate::core_ir::array_copy::count(op).is_some());
+            if scalar_literal || allocating_copy {
                 let next = depth
                     .checked_add(1)
                     .ok_or("native-lower: scalar array spill depth overflow")?;
@@ -1554,6 +1555,12 @@ fn native_staging_plan(
         }
         fn value_inner(&self, expr: &Expr, expected: Option<&Typ>) -> Result<usize, String> {
             match expr {
+                Expr::Unary { op, expr: source }
+                    if crate::core_ir::array_copy::count(op).is_some() =>
+                {
+                    let typ = lower_expr::native_expr_type(source, self.ctx, self.functions);
+                    self.value(source, typ.as_ref())
+                }
                 Expr::ArrayLit(items) => {
                     // An explicit Array destination does not use Vec staging. For
                     // ambiguous literals retain the previous conservative Vec plan.
@@ -1873,6 +1880,27 @@ mod record_array_plan_tests {
             index: Expr::IntLit(0),
             value,
         }
+    }
+
+    #[test]
+    fn allocating_array_copies_reserve_nested_preservation_even_for_typed_destinations() {
+        let typ = Typ::Array(Box::new(Typ::Int));
+        let copy = |value| Expr::Unary {
+            op: crate::core_ir::array_copy::operation(1),
+            expr: Box::new(value),
+        };
+        let nested = copy(copy(Expr::Ident("source".into())));
+        let body = [
+            Stmt::Let("result".into(), Some(typ.clone()), nested),
+            Stmt::Expr(copy(Expr::Ident("source".into()))),
+        ];
+        let planned = plan(&body, &[("source".into(), typ)]);
+        assert_eq!(
+            planned.scalar_array_depth, 2,
+            "nested allocations need independent register preservation; sequential copies reuse it"
+        );
+        assert_eq!(planned.record, 0);
+        assert_eq!(planned.vector, 0);
     }
 
     #[test]

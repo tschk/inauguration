@@ -16,8 +16,9 @@ impl Facts {
                 if !active.insert(name.clone()) {
                     return None;
                 }
-                let result = if let Some(reference) = crate::core_ir::rust_references::decode(name)
-                {
+                let result = if let Some(array) = crate::core_ir::rust_arrays::decode(name) {
+                    self.type_proof(&array.element, active)
+                } else if let Some(reference) = crate::core_ir::rust_references::decode(name) {
                     prefer(
                         self.type_proof(&reference.referent, active),
                         self.type_proof(&reference.runtime, active),

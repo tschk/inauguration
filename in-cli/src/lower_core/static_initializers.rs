@@ -234,6 +234,7 @@ struct Eval<'a> {
     fuel: usize,
     depth: usize,
     strict: bool,
+    invalid_arithmetic: bool,
     semantics: IntegerSemantics,
 }
 impl Eval<'_> {
@@ -403,7 +404,9 @@ impl Eval<'_> {
                                 | ">>"
                                 | "shr"
                         ) {
-                            return self.semantics.fold_binary(op, *lhs, *rhs);
+                            let result = self.semantics.fold_binary(op, *lhs, *rhs);
+                            self.invalid_arithmetic |= result.is_none();
+                            return result;
                         }
                     }
                 }
@@ -446,12 +449,27 @@ impl Eval<'_> {
                     } else {
                         crate::typecheck::rust_integers::fold_checked_integer
                     };
-                    return evaluate(kind, operator, lhs, rhs, self.semantics);
+                    let result = evaluate(kind, operator, lhs, rhs, self.semantics);
+                    if crate::core_ir::integer_spec(kind).is_some_and(|(bits, _)| {
+                        bits <= if self.semantics == IntegerSemantics::Word32 {
+                            32
+                        } else {
+                            64
+                        }
+                    }) && matches!(
+                        operator,
+                        "+" | "-" | "*" | "/" | "%" | "udiv" | "urem" | "<<" | ">>" | "lshr"
+                    ) {
+                        self.invalid_arithmetic |= result.is_none();
+                    }
+                    return result;
                 }
                 let value = self.expr(expr, env)?;
                 if self.strict && matches!(op.as_str(), "-" | "neg") {
                     if let Expr::IntLit(value) = value {
-                        return self.semantics.fold_unary(op, value);
+                        let result = self.semantics.fold_unary(op, value);
+                        self.invalid_arithmetic |= result.is_none();
+                        return result;
                     }
                 }
                 Expr::Unary {
@@ -688,6 +706,39 @@ fn lower_inline_constants(decls: &mut [Decl]) {
     lower_inline_constants_with_semantics(decls, IntegerSemantics::Word64);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConstantEvalError {
+    Arithmetic,
+}
+
+/// Evaluate a closed value, classifying arithmetic failures only on reached paths.
+pub(crate) fn evaluate_pure_constant(
+    expr: &Expr,
+    semantics: IntegerSemantics,
+) -> Result<Option<Expr>, ConstantEvalError> {
+    let globals = HashMap::new();
+    let functions = HashSet::new();
+    if !const_syntax(expr, &globals, &functions, &HashSet::new(), 0, &mut 65536) {
+        return Ok(None);
+    }
+    let mut evaluator = Eval {
+        globals: &globals,
+        functions: &functions,
+        active: HashSet::new(),
+        fuel: 65536,
+        depth: 0,
+        strict: true,
+        invalid_arithmetic: false,
+        semantics,
+    };
+    let value = evaluator.expr(expr, &mut HashMap::new());
+    if evaluator.invalid_arithmetic {
+        Err(ConstantEvalError::Arithmetic)
+    } else {
+        Ok(value)
+    }
+}
+
 pub(crate) fn lower_inline_constants_with_semantics(
     decls: &mut [Decl],
     semantics: IntegerSemantics,
@@ -756,6 +807,7 @@ pub(crate) fn lower_inline_constants_with_semantics(
                 fuel: 65536,
                 depth: 0,
                 strict: true,
+                invalid_arithmetic: false,
                 semantics,
             };
             if let Some(value) = eval.expr(expr, &mut HashMap::new()) {
@@ -770,7 +822,7 @@ pub(super) fn fold_static_initializers(decls: &mut [Decl]) {
     fold_static_initializers_with_semantics(decls, IntegerSemantics::Word64);
 }
 
-pub(super) fn fold_static_initializers_with_semantics(
+pub(crate) fn fold_static_initializers_with_semantics(
     decls: &mut [Decl],
     semantics: IntegerSemantics,
 ) {
@@ -819,6 +871,7 @@ pub(super) fn fold_static_initializers_with_semantics(
                 fuel: 65536,
                 depth: 0,
                 strict: false,
+                invalid_arithmetic: false,
                 semantics,
             };
             if let Some(value) = eval.expr(init, &mut HashMap::new()) {
@@ -898,6 +951,7 @@ mod tests {
                 fuel: 65536,
                 depth: 0,
                 strict: true,
+                invalid_arithmetic: false,
                 semantics,
             }
             .expr(&expression, &mut HashMap::new());
@@ -917,6 +971,7 @@ mod tests {
                 fuel: 65536,
                 depth: 0,
                 strict,
+                invalid_arithmetic: false,
                 semantics: IntegerSemantics::Word32,
             };
             let repeat = |count| Expr::Call {
@@ -953,6 +1008,7 @@ mod tests {
                 fuel: 65536,
                 depth: 0,
                 strict,
+                invalid_arithmetic: false,
                 semantics: IntegerSemantics::Word32,
             };
             let expr = Expr::Binary {
@@ -990,6 +1046,7 @@ mod tests {
             fuel,
             depth: 0,
             strict: true,
+            invalid_arithmetic: false,
             semantics: IntegerSemantics::Word64,
         }
         .expr(expr, &mut HashMap::new())
@@ -1174,6 +1231,70 @@ mod tests {
             );
             assert_eq!(evaluate_inline(&expression, 65536), Some(Expr::IntLit(42)));
         }
+    }
+
+    #[test]
+    fn pure_constant_evaluation_preserves_local_state_and_refuses_open_values() {
+        let value = Expr::Block {
+            body: vec![
+                Stmt::Let("i".into(), Some(Typ::Int), Expr::IntLit(0)),
+                Stmt::Loop {
+                    kind: crate::core_ir::LoopKind::While,
+                    cond: Some(Expr::Binary {
+                        op: "<".into(),
+                        lhs: Box::new(Expr::Ident("i".into())),
+                        rhs: Box::new(Expr::IntLit(3)),
+                    }),
+                    body: vec![Stmt::Assign(
+                        "i".into(),
+                        Expr::Binary {
+                            op: "+".into(),
+                            lhs: Box::new(Expr::Ident("i".into())),
+                            rhs: Box::new(Expr::IntLit(1)),
+                        },
+                    )],
+                },
+            ],
+            result: Some(Box::new(Expr::Ident("i".into()))),
+        };
+        assert_eq!(
+            evaluate_pure_constant(&value, IntegerSemantics::Word64),
+            Ok(Some(Expr::IntLit(3)))
+        );
+        assert_eq!(
+            evaluate_pure_constant(&Expr::Ident("external".into()), IntegerSemantics::Word64),
+            Ok(None)
+        );
+        let unbounded = Expr::Block {
+            body: vec![Stmt::Loop {
+                kind: crate::core_ir::LoopKind::While,
+                cond: Some(Expr::BoolLit(true)),
+                body: vec![],
+            }],
+            result: None,
+        };
+        assert_eq!(
+            evaluate_pure_constant(&unbounded, IntegerSemantics::Word64),
+            Ok(None)
+        );
+        let bad = Expr::Binary {
+            op: "/".into(),
+            lhs: Box::new(Expr::IntLit(1)),
+            rhs: Box::new(Expr::IntLit(0)),
+        };
+        assert_eq!(
+            evaluate_pure_constant(&bad, IntegerSemantics::Word64),
+            Err(ConstantEvalError::Arithmetic)
+        );
+        let selected = Expr::Conditional {
+            cond: Box::new(Expr::BoolLit(true)),
+            then_expr: Box::new(Expr::IntLit(3)),
+            else_expr: Box::new(bad),
+        };
+        assert_eq!(
+            evaluate_pure_constant(&selected, IntegerSemantics::Word64),
+            Ok(Some(Expr::IntLit(3)))
+        );
     }
 
     #[test]
@@ -1512,6 +1633,7 @@ mod tests {
                 fuel: 65536,
                 depth: 0,
                 strict: false,
+                invalid_arithmetic: false,
                 semantics: IntegerSemantics::Word64,
             };
             assert!(eval.expr(init, &mut empty).is_none(), "{source}");

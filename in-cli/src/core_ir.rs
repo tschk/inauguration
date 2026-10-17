@@ -1,5 +1,7 @@
 //! Cross-frontend core AST (v0). Bodies may be empty until a frontend fills statements.
 
+pub(crate) mod array_copy;
+pub(crate) mod rust_arrays;
 pub(crate) mod rust_generics;
 pub(crate) mod rust_references;
 pub(crate) mod tuples;
@@ -198,6 +200,11 @@ impl Typ {
         {
             return reference.runtime.canonical();
         }
+        if let Typ::Named(name) = self
+            && let Some(array) = rust_arrays::decode(name)
+        {
+            return Typ::Array(Box::new(array.element.canonical()));
+        }
         match self {
             Typ::Named(name)
                 if integer_type_name(name).is_some() || rust_integer_type_name(name).is_some() =>
@@ -224,7 +231,8 @@ impl Typ {
         match self {
             Typ::Named(name)
                 if rust_integer_type_name(name).is_some()
-                    || rust_references::decode(name).is_some() =>
+                    || rust_references::decode(name).is_some()
+                    || rust_arrays::decode(name).is_some() =>
             {
                 self.clone()
             }
@@ -262,6 +270,13 @@ impl Typ {
     /// Literals acquire their sequence layout from the typed destination.
     pub(crate) fn accepts_sequence_literal(&self, expr: &Expr, actual: &Typ) -> bool {
         match expr {
+            Expr::Unary { op, .. }
+                if array_copy::count(op) == Some(0)
+                    && actual.canonical() == Typ::Array(Box::new(Typ::Void)) =>
+            {
+                return matches!(self.canonical(), Typ::Array(element)
+                    if matches!(*element, Typ::Int | Typ::Float | Typ::Bool));
+            }
             Expr::MatchValue { arms, .. } => {
                 return !arms.is_empty()
                     && arms.iter().all(|arm| {

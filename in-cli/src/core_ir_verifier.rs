@@ -1743,6 +1743,17 @@ fn check_expr_with_array_borrow(
                     "unit is not a numeric or Bool operand".into(),
                 ));
             }
+            if op.starts_with("array-copy")
+                && !expr_type(expr, facts, env)
+                    .is_some_and(|typ| crate::core_ir::array_copy::valid_operand(op, &typ))
+            {
+                return Err((
+                    "type-mismatch".into(),
+                    format!(
+                        "array copy in `{fn_name}` requires a scalar array and canonical count"
+                    ),
+                ));
+            }
             if op == "vector-clone"
                 && !matches!(expr_type(expr, facts, env), Some(Typ::Vector(item)) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
             {

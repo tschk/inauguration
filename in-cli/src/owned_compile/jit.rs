@@ -465,6 +465,8 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
     }
     let internal_type = |typ: &Typ| {
         scalar(typ)
+            || matches!(typ.canonical(), Typ::Array(item)
+            if matches!(item.canonical(), Typ::Int | Typ::Bool | Typ::Float))
             || matches!(typ.canonical(), Typ::Vector(item)
             if matches!(item.canonical(), Typ::Int | Typ::Bool | Typ::Float | Typ::String))
     };
@@ -711,6 +713,11 @@ mod tests {
                 "fn work(items: Vec<i64>) -> i64 { items[0] = 20; return items[0]; } fn main() -> i64 { return work(vec![0]); }",
                 true,
             ),
+            (
+                "fn work(mut items:[i64;2])->i64{items[0]=0;items[1]}fn main()->i64{work([20i64,22i64])}",
+                true,
+            ),
+            ("fn main()->[i64;2]{[20i64,22i64]}", false),
             ("fn main() -> Vec<i64> { return vec![20]; }", false),
             (
                 "struct Item { x: i64 } fn work(items: Vec<Item>) -> i64 { return 20; } fn main() -> i64 { return work(vec![Item { x: 20 }]); }",

@@ -208,7 +208,7 @@ pub(crate) fn expr_has_effects(e: &Expr) -> bool {
                 | Expr::Block { .. }
                 | Expr::Conditional { .. }
                 | Expr::MatchValue { .. }
-        ) || matches!(n, Expr::Unary {op, ..} if op == "vector-clone")
+        ) || matches!(n, Expr::Unary {op, ..} if op == "vector-clone" || crate::core_ir::array_copy::count(op).is_some())
             || matches!(n, Expr::Binary {op, ..} if matches!(op.as_str(), "/" | "%" | "div" | "mod" | "udiv" | "urem"))
         {
             has = true;
@@ -6096,5 +6096,23 @@ mod function_value_propagation_tests {
             panic!("main")
         };
         assert_eq!(body.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod array_copy_effect_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_array_storage_cannot_be_duplicated_or_discarded_as_a_pure_value() {
+        for length in [0, 2] {
+            let copy = Expr::Unary {
+                op: crate::core_ir::array_copy::operation(length),
+                expr: Box::new(Expr::Ident("source".into())),
+            };
+            assert!(expr_has_effects(&copy));
+            assert!(!is_propagatable_const(&copy));
+        }
+        assert!(!expr_has_effects(&Expr::Ident("source".into())));
     }
 }

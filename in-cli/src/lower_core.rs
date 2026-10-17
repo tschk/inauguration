@@ -11,7 +11,10 @@ mod static_initializers;
 #[path = "lower_core/value_spills.rs"]
 mod value_spills;
 pub(crate) use constant_values::lower_named_constants_with_semantics;
-pub(crate) use static_initializers::lower_inline_constants_with_semantics;
+pub(crate) use static_initializers::{
+    ConstantEvalError, evaluate_pure_constant, fold_static_initializers_with_semantics,
+    lower_inline_constants_with_semantics,
+};
 #[path = "lower_core/match_guards.rs"]
 mod match_guards;
 pub(crate) use match_guards::{
@@ -94,7 +97,9 @@ pub fn desugar_module_with_semantics(
     module: &mut UnifiedModule,
     semantics: crate::integer_semantics::IntegerSemantics,
 ) {
-    if crate::typecheck::rust_integers::has_metadata(module) {
+    if crate::typecheck::rust_integers::has_metadata(module)
+        || crate::core_ir::rust_arrays::has_metadata(module)
+    {
         *module = crate::typecheck::normalize_module_with_semantics(
             crate::parser_registry::ParserId::Rust,
             module,

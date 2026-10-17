@@ -3834,6 +3834,356 @@ fn main()->Int{#print(argument());#print_int(7);#print("\n");return print("ignor
     }
 
     #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn scalar_array_copy_executes_independently_in_all_host_profiles() {
+        use crate::core_ir::{Decl, Expr, FloatVal, Stmt, Typ, UnifiedModule};
+        use crate::emit_profile::EmitProfile;
+        fn ident(name: &str) -> Expr {
+            Expr::Ident(name.into())
+        }
+        fn index(name: &str, at: i64) -> Expr {
+            Expr::Index {
+                base: Box::new(ident(name)),
+                index: Box::new(Expr::IntLit(at)),
+            }
+        }
+        fn binary(op: &str, left: Expr, right: Expr) -> Expr {
+            Expr::Binary {
+                op: op.into(),
+                lhs: Box::new(left),
+                rhs: Box::new(right),
+            }
+        }
+        fn call(name: &str, args: Vec<Expr>) -> Expr {
+            Expr::Call {
+                callee: Box::new(ident(name)),
+                args,
+            }
+        }
+        fn copy(count: usize, source: Expr) -> Expr {
+            Expr::Unary {
+                op: crate::core_ir::array_copy::operation(count),
+                expr: Box::new(source),
+            }
+        }
+        fn function(name: &str, params: Vec<(String, Typ)>, ret: Typ, body: Vec<Stmt>) -> Decl {
+            Decl::Function {
+                name: name.into(),
+                params,
+                ret,
+                body,
+                type_params: vec![],
+            }
+        }
+        fn answer(condition: Expr) -> Stmt {
+            Stmt::Return(Some(Expr::Conditional {
+                cond: Box::new(condition),
+                then_expr: Box::new(Expr::IntLit(42)),
+                else_expr: Box::new(Expr::IntLit(7)),
+            }))
+        }
+        fn trace(digit: i64) -> Stmt {
+            Stmt::Assign(
+                "trace".into(),
+                binary(
+                    "+",
+                    binary("*", ident("trace"), Expr::IntLit(10)),
+                    Expr::IntLit(digit),
+                ),
+            )
+        }
+        fn global() -> Decl {
+            Decl::Global {
+                name: "trace".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(Expr::IntLit(0))),
+                mutable: true,
+                constant_value: false,
+            }
+        }
+        let mut cases = Vec::new();
+        for (element, values, changed) in [
+            (
+                Typ::Int,
+                vec![Expr::IntLit(20), Expr::IntLit(22), Expr::IntLit(99)],
+                Expr::IntLit(0),
+            ),
+            (
+                Typ::Float,
+                vec![
+                    Expr::FloatLit(FloatVal(20.5)),
+                    Expr::FloatLit(FloatVal(21.5)),
+                    Expr::FloatLit(FloatVal(99.0)),
+                ],
+                Expr::FloatLit(FloatVal(0.0)),
+            ),
+            (
+                Typ::Bool,
+                vec![
+                    Expr::BoolLit(true),
+                    Expr::BoolLit(false),
+                    Expr::BoolLit(true),
+                ],
+                Expr::BoolLit(false),
+            ),
+        ] {
+            let array = Typ::Array(Box::new(element));
+            let condition = binary(
+                "&&",
+                binary("==", index("source", 0), values[0].clone()),
+                binary(
+                    "&&",
+                    binary("==", index("source", 1), values[1].clone()),
+                    binary(
+                        "==",
+                        call("array-len", vec![ident("copied")]),
+                        Expr::IntLit(2),
+                    ),
+                ),
+            );
+            let condition = binary(
+                "&&",
+                condition,
+                binary(
+                    "&&",
+                    binary("==", ident("first_copy"), values[0].clone()),
+                    binary("==", index("copied", 1), values[1].clone()),
+                ),
+            );
+            cases.push((
+                "scalar independence/prefix",
+                UnifiedModule::new(vec![function(
+                    "main",
+                    vec![],
+                    Typ::Int,
+                    vec![
+                        Stmt::Let("source".into(), Some(array.clone()), Expr::ArrayLit(values)),
+                        Stmt::Let("copied".into(), Some(array), copy(2, ident("source"))),
+                        Stmt::Let("first_copy".into(), None, index("copied", 0)),
+                        Stmt::IndexAssign {
+                            base: ident("copied"),
+                            index: Expr::IntLit(0),
+                            value: changed,
+                        },
+                        answer(condition),
+                    ],
+                )]),
+                vec![],
+                42,
+            ));
+        }
+        let array = Typ::Array(Box::new(Typ::Int));
+        cases.push((
+            "reassignment once/lazy",
+            UnifiedModule::new(vec![
+                global(),
+                function(
+                    "make",
+                    vec![],
+                    array.clone(),
+                    vec![
+                        trace(1),
+                        Stmt::Return(Some(Expr::ArrayLit(vec![
+                            Expr::IntLit(20),
+                            Expr::IntLit(22),
+                        ]))),
+                    ],
+                ),
+                function(
+                    "main",
+                    vec![],
+                    Typ::Int,
+                    vec![
+                        Stmt::Let(
+                            "copied".into(),
+                            Some(array.clone()),
+                            copy(2, call("make", vec![])),
+                        ),
+                        Stmt::Assign("copied".into(), copy(2, call("make", vec![]))),
+                        Stmt::Let(
+                            "lazy".into(),
+                            Some(array.clone()),
+                            Expr::Conditional {
+                                cond: Box::new(Expr::BoolLit(false)),
+                                then_expr: Box::new(copy(2, call("make", vec![]))),
+                                else_expr: Box::new(ident("copied")),
+                            },
+                        ),
+                        answer(binary(
+                            "&&",
+                            binary("==", ident("trace"), Expr::IntLit(11)),
+                            binary(
+                                "==",
+                                binary("+", index("lazy", 0), index("lazy", 1)),
+                                Expr::IntLit(42),
+                            ),
+                        )),
+                    ],
+                ),
+            ]),
+            vec![],
+            42,
+        ));
+        cases.push((
+            "returned nested/argument order",
+            UnifiedModule::new(vec![
+                global(),
+                function(
+                    "prefix",
+                    vec![],
+                    Typ::Int,
+                    vec![trace(1), Stmt::Return(Some(Expr::IntLit(20)))],
+                ),
+                function(
+                    "make",
+                    vec![],
+                    array.clone(),
+                    vec![
+                        trace(2),
+                        Stmt::Return(Some(Expr::ArrayLit(vec![Expr::IntLit(22)]))),
+                    ],
+                ),
+                function(
+                    "suffix",
+                    vec![],
+                    Typ::Int,
+                    vec![trace(3), Stmt::Return(Some(Expr::IntLit(0)))],
+                ),
+                function(
+                    "copied",
+                    vec![],
+                    array.clone(),
+                    vec![Stmt::Return(Some(copy(1, copy(1, call("make", vec![])))))],
+                ),
+                function(
+                    "accept",
+                    vec![
+                        ("prefix".into(), Typ::Int),
+                        ("items".into(), array.clone()),
+                        ("suffix".into(), Typ::Int),
+                    ],
+                    Typ::Int,
+                    vec![Stmt::Return(Some(binary(
+                        "+",
+                        binary("+", ident("prefix"), index("items", 0)),
+                        ident("suffix"),
+                    )))],
+                ),
+                function(
+                    "main",
+                    vec![],
+                    Typ::Int,
+                    vec![
+                        Stmt::Let(
+                            "answer".into(),
+                            None,
+                            call(
+                                "accept",
+                                vec![
+                                    call("prefix", vec![]),
+                                    call("copied", vec![]),
+                                    call("suffix", vec![]),
+                                ],
+                            ),
+                        ),
+                        answer(binary(
+                            "&&",
+                            binary("==", ident("answer"), Expr::IntLit(42)),
+                            binary("==", ident("trace"), Expr::IntLit(123)),
+                        )),
+                    ],
+                ),
+            ]),
+            vec![],
+            42,
+        ));
+        cases.push((
+            "empty evaluates source once",
+            UnifiedModule::new(vec![
+                global(),
+                function(
+                    "main",
+                    vec![],
+                    Typ::Int,
+                    vec![
+                        Stmt::Let(
+                            "empty".into(),
+                            Some(array.clone()),
+                            copy(
+                                0,
+                                Expr::Block {
+                                    body: vec![trace(1)],
+                                    result: Some(Box::new(Expr::ArrayLit(vec![]))),
+                                },
+                            ),
+                        ),
+                        answer(binary(
+                            "&&",
+                            binary("==", ident("trace"), Expr::IntLit(1)),
+                            binary(
+                                "==",
+                                call("array-len", vec![ident("empty")]),
+                                Expr::IntLit(0),
+                            ),
+                        )),
+                    ],
+                ),
+            ]),
+            vec![],
+            42,
+        ));
+        cases.push((
+            "short source refuses before continuation",
+            UnifiedModule::new(vec![function(
+                "main",
+                vec![],
+                Typ::Int,
+                vec![
+                    Stmt::Let(
+                        "bad".into(),
+                        Some(array.clone()),
+                        copy(2, Expr::ArrayLit(vec![Expr::IntLit(20)])),
+                    ),
+                    Stmt::Return(Some(Expr::IntLit(42))),
+                ],
+            )]),
+            vec![],
+            1,
+        ));
+        cases.push((
+            "null source refuses before continuation",
+            UnifiedModule::new(vec![function(
+                "main",
+                vec![("source".into(), array.clone())],
+                Typ::Int,
+                vec![
+                    Stmt::Let("bad".into(), Some(array), copy(2, ident("source"))),
+                    Stmt::Return(Some(Expr::IntLit(42))),
+                ],
+            )]),
+            vec![0, 0],
+            1,
+        ));
+        let mut forged_null = cases.last().unwrap().clone();
+        forged_null.0 = "null source with forged nonzero length refuses";
+        forged_null.2 = vec![0, 2];
+        cases.push(forged_null);
+        let mut unaligned = cases.last().unwrap().clone();
+        unaligned.0 = "unaligned source refuses before reading";
+        unaligned.2 = vec![1, 2];
+        cases.push(unaligned);
+        for (name, module, args, expected) in cases {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                assert_eq!(
+                    invoke_module(&module, profile, &args),
+                    Some(expected),
+                    "{name} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn vector_allocation_emitters_reject_non_integer_capacity() {
         use crate::core_ir::{Decl, Expr, Stmt};
         for value in [
