@@ -512,6 +512,7 @@ struct NominalApplication {
 }
 #[derive(Clone)]
 enum NominalObligation {
+    Projection,
     Application(NominalApplication),
     Failure(Failure),
 }
@@ -524,6 +525,7 @@ fn structural_failure(value: Resolved) -> Option<Failure> {
                         nominal_application(&application)
                     }
                     NominalObligation::Failure(failure) => Err(failure),
+                    NominalObligation::Projection => Err(projection_failure()),
                 };
                 crate::core_ir::type_proofs::prefer_failure(failure, result.err())
             })
@@ -543,6 +545,7 @@ struct SourceConstant {
 }
 #[derive(Clone)]
 enum Resolved {
+    Dependencies(Box<Resolved>, generic_aliases::Dependencies),
     Visible(Box<Resolved>, Extent),
     Type(Typ),
     Module(Vec<String>),
@@ -554,18 +557,30 @@ enum Resolved {
 impl Resolved {
     fn visibility(self) -> (Self, Extent) {
         match self {
-            Self::Visible(value, extent) => (*value, extent),
+            Self::Visible(value, extent) => {
+                let (value, _) = value.visibility();
+                (value, extent)
+            }
+            Self::Dependencies(value, _) => value.visibility(),
             value => (value, Extent::Public),
         }
     }
     fn with_visibility(self, extent: Extent) -> Self {
-        let (value, _) = self.visibility();
-        Self::Visible(Box::new(value), extent)
+        match self {
+            Self::Dependencies(value, dependencies) => {
+                Self::Dependencies(Box::new(value.with_visibility(extent)), dependencies)
+            }
+            Self::Visible(value, _) => value.with_visibility(extent),
+            value => Self::Visible(Box::new(value), extent),
+        }
     }
 }
 type Key = (Vec<String>, usize, String);
 fn unsupported(message: impl Into<String>) -> Failure {
     Failure::Unsupported(message.into())
+}
+fn projection_failure() -> Failure {
+    unsupported("generic associated projection is unresolved")
 }
 
 // Resolution cursors move through modules; access remains the module using the path.
@@ -1048,6 +1063,7 @@ fn resolve_parts(
                         unsupported_nominal_arguments: context.unsupported_nominal_arguments,
                     },
                 )?;
+                let dependencies = target.dependencies();
                 let (target, target_extent) = target.visibility();
                 if !target_extent.includes(&extent) {
                     return Err(Failure::Invalid(format!(
@@ -1088,7 +1104,7 @@ fn resolve_parts(
                         {
                             Err(unsupported(format!("unresolved imported type `{first}`")))
                         }
-                        result => Ok(result),
+                        result => Ok(result.with_dependencies(dependencies)),
                     }
                 }
             }
@@ -1100,9 +1116,8 @@ fn resolve_parts(
                 } else if parts.len() == 1 {
                     Ok(value.as_ref().clone())
                 } else {
-                    Ok(generic_aliases::deferred(
-                        "generic associated projection is unresolved",
-                    ))
+                    Ok(Resolved::Nominal(vec![NominalObligation::Projection])
+                        .with_dependencies(value.dependencies()))
                 }
             }
             Binding::Alias(syntax) => generic_aliases::expand(
@@ -1194,6 +1209,7 @@ pub(super) fn resolve_in(frame: &Frame, path: &syn::Path) -> Result<Option<Typ>,
                 .into_iter()
                 .filter_map(|obligation| match obligation {
                     NominalObligation::Failure(failure) => Some(failure),
+                    NominalObligation::Projection => Some(projection_failure()),
                     _ => None,
                 })
                 .fold(None, |failure, next| {
@@ -1204,7 +1220,9 @@ pub(super) fn resolve_in(frame: &Frame, path: &syn::Path) -> Result<Option<Typ>,
         Resolved::Value | Resolved::Constant(_) | Resolved::Missing | Resolved::Module(_) => {
             Ok(None)
         }
-        Resolved::Visible(..) => Err(unsupported("nested source visibility result")),
+        Resolved::Visible(..) | Resolved::Dependencies(..) => {
+            Err(unsupported("nested source resolution wrapper"))
+        }
     }
 }
 /// Resolve a source module in the type namespace, independently of value-only imports.
@@ -1266,6 +1284,7 @@ pub(super) fn resolve_value_owner(path: &syn::Path) -> Result<Option<Typ>, Failu
                 .into_iter()
                 .filter_map(|obligation| match obligation {
                     NominalObligation::Failure(failure) => Some(failure),
+                    NominalObligation::Projection => Some(projection_failure()),
                     _ => None,
                 })
                 .fold(None, |failure, next| {
@@ -1669,6 +1688,7 @@ pub(super) fn source_type_owned(path: &syn::Path) -> Result<bool, Failure> {
                     let application = match obligation {
                         NominalObligation::Application(application) => application,
                         NominalObligation::Failure(failure) => return Err(failure),
+                        NominalObligation::Projection => return Err(projection_failure()),
                     };
                     nominal_application(&application)
                 })();

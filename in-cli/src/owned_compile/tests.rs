@@ -10403,6 +10403,8 @@ fn rust_generic_alias_applications_execute_with_source_type_semantics() {
         return;
     }
     for source in [
+        "trait Trait{type Assoc<U>;}type A<T:Trait,U>=T::Assoc<U>;fn main()->i64{42}",
+        "trait Trait{type Assoc<U>;}type Id<V>=V;type A<T:Trait,U>=T::Assoc<Id<U>>;fn main()->i64{42}",
         "type Id<T>=T<>;fn main()->i64{let value:Id<i64>=42;value}",
         "type Id=u8<>;fn main()->i64{if Id::wrapping_add(255,43)==42{42}else{7}}",
         "type Borrow<'a,T>=&'a T;fn unused(value:&u8){let local:Borrow<u8>=value;}fn main()->i64{42}",
@@ -10488,6 +10490,52 @@ fn rust_generic_alias_applications_require_owned_source_facts() {
                     if target == CompileTarget::Native {
                         assert!(!report.success, "{source}: {report:?}");
                     }
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_unused_generic_alias_parameters_refuse_before_entry_pruning() {
+    for source in [
+        "type Ignored<T>=u8;fn main()->i64{42}",
+        "type A<T:Copy>=u8;fn main()->i64{42}",
+        "type A<T> where T:Copy =u8;fn main()->i64{42}",
+        "type A<T=u8,U=T>=U;fn main()->i64{42}",
+        "type Ignore<T>=u8;type A<T>=Ignore<T>;fn main()->i64{42}",
+        "type Ignore<T=u8>=u8;type A<T>=Ignore<T>;fn main()->i64{42}",
+        "type Ignore<T>=u8;type Next<T>=Ignore<T>;type A<T>=Next<T>;fn main()->i64{42}",
+        "type First<A,B>=A;type Outer<T,U>=First<T,U>;fn main()->i64{42}",
+        "trait Trait{type Item;}type A<T:Trait<Item=u8>>=u8;fn main()->i64{42}",
+        "type A<T=u8,const N:usize=1>=[u8;N];fn main()->i64{42}",
+        "type A<#[cfg(all())] T>=u8;fn main()->i64{42}",
+    ] {
+        let path = temp_path("unused-generic-alias.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                for entry in [None, Some("main")] {
+                    let out = temp_path("unused-generic-alias-out");
+                    let mut request =
+                        default_request(path.clone(), target, entry, Some(out.clone()));
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(!report.success, "{source}: {report:?}");
+                    assert_eq!(
+                        report.reason_code.as_deref(),
+                        Some("rust-invalid-associated-type"),
+                        "{source}: {report:?}"
+                    );
+                    assert!(!report.execution_started);
+                    assert_eq!(report.eval_result, None);
+                    assert_eq!(report.eval_exit_code, None);
+                    assert_eq!(report.artifact_path, None);
+                    assert_eq!(report.executable_path, None);
+                    assert_eq!(report.abi_path, None);
+                    assert!(report.external_invocations.is_empty());
+                    assert!(!out.exists());
                 }
             }
         }

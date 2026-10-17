@@ -2,6 +2,48 @@
 use super::*;
 use quote::ToTokens;
 
+// Dependencies describe the normalized RHS, independently of source proof/layout
+// failures. Unknown summaries never establish that a parameter is unused.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Dependencies {
+    used: std::collections::BTreeSet<String>,
+    unknown: bool,
+}
+impl Dependencies {
+    fn unknown() -> Self {
+        Self {
+            unknown: true,
+            ..Self::default()
+        }
+    }
+    fn parameter(name: String) -> Self {
+        Self {
+            used: [name].into_iter().collect(),
+            unknown: false,
+        }
+    }
+    fn merge(&mut self, other: Self) {
+        self.used.extend(other.used);
+        self.unknown |= other.unknown;
+    }
+}
+impl Resolved {
+    pub(super) fn dependencies(&self) -> Dependencies {
+        match self {
+            Self::Dependencies(_, dependencies) => dependencies.clone(),
+            Self::Visible(value, _) => value.dependencies(),
+            Self::Type(_) | Self::Value | Self::Constant(_) => Dependencies::default(),
+            _ => Dependencies::unknown(),
+        }
+    }
+    pub(super) fn with_dependencies(self, dependencies: Dependencies) -> Self {
+        match self {
+            Self::Dependencies(value, _) => Self::Dependencies(value, dependencies),
+            value => Self::Dependencies(Box::new(value), dependencies),
+        }
+    }
+}
+
 const MAX_DEPTH: usize = 128;
 const MAX_FUEL: usize = 65536;
 const MAX_TYPE_BYTES: usize = 65536;
@@ -77,13 +119,16 @@ fn frame_key(frame: &Frame) -> String {
 }
 fn value_key(value: &Resolved) -> String {
     match value {
+        Resolved::Dependencies(value, dependencies) => {
+            format!("{:?}:{}", dependencies, value_key(value))
+        }
         Resolved::Type(typ) => format!("{typ:?}"),
         _ => structural_failure(value.clone())
             .map_or_else(|| "nominal".into(), |failure| failure.symbol()),
     }
 }
 fn concrete(value: &Resolved) -> Option<Typ> {
-    let Resolved::Type(typ) = value else {
+    let Resolved::Type(typ) = value.clone().visibility().0 else {
         return None;
     };
     if matches!(typ, Typ::Generic(_)) {
@@ -92,12 +137,13 @@ fn concrete(value: &Resolved) -> Option<Typ> {
     if format!("{typ:?}").len() > MAX_TYPE_BYTES {
         return None;
     }
-    Some(typ.clone())
+    Some(typ)
 }
 fn argument(typ: &syn::Type, frame: &Frame, active: &mut HashSet<Key>) -> Resolved {
     match rhs_type(typ, frame, active) {
         Ok(value) => {
-            if let Some(failure) = structural_failure(value.clone()) {
+            let dependencies = value.dependencies();
+            let result = if let Some(failure) = structural_failure(value.clone()) {
                 failure_result(Some(failure))
             } else {
                 match value.visibility().0 {
@@ -106,7 +152,8 @@ fn argument(typ: &syn::Type, frame: &Frame, active: &mut HashSet<Key>) -> Resolv
                     }
                     value => value,
                 }
-            }
+            };
+            result.with_dependencies(dependencies)
         }
         Err(failure) => failure_result(Some(failure)),
     }
@@ -230,6 +277,7 @@ pub(super) fn expand(
     };
     let mut owner = declared.clone();
     let mut bindings = Vec::new();
+    let mut declared_parameters = Vec::new();
     for (index, parameter) in parameters.iter().enumerate() {
         let syn::GenericParam::Type(parameter) = parameter else {
             failure = crate::core_ir::type_proofs::prefer_failure(
@@ -261,10 +309,13 @@ pub(super) fn expand(
         let value = if generic_presence(parameters[index]) == Presence::Conditional {
             deferred("conditional alias parameter")
         } else if context.declaration {
+            let identity = format!("{}:{key:?}:{index}", frame_key(declared));
+            declared_parameters.push((identity.clone(), parameter.ident.to_string()));
             deferred(format!(
                 "symbolic alias parameter {key:?}:{}",
                 parameter.ident
             ))
+            .with_dependencies(Dependencies::parameter(identity))
         } else if let Some(syn::GenericArgument::Type(typ)) = supplied.get(index) {
             // Caller syntax is evaluated before entering this callee's alias body.
             let mut caller_active = context.caller_active.unwrap_or(active).clone();
@@ -331,15 +382,29 @@ pub(super) fn expand(
     active.insert(key.clone());
     let result = match rhs_type(body, &owner, active) {
         Ok(value) => {
+            let dependencies = value.dependencies();
+            if !dependencies.unknown {
+                for (identity, parameter) in &declared_parameters {
+                    if !dependencies.used.contains(identity) {
+                        failure = crate::core_ir::type_proofs::prefer_failure(
+                            failure,
+                            Some(Failure::Invalid(format!(
+                                "type parameter `{parameter}` is never used in source alias `{name}`"
+                            ))),
+                        );
+                    }
+                }
+            }
             failure = crate::core_ir::type_proofs::prefer_failure(
                 failure,
                 structural_failure(value.clone()),
             );
-            if let Some(failure) = failure {
-                Ok(failure_result(Some(failure)))
+            Ok(if let Some(failure) = failure {
+                failure_result(Some(failure))
             } else {
-                Ok(value.visibility().0)
+                value.visibility().0
             }
+            .with_dependencies(dependencies))
         }
         Err(error) => Ok(failure_result(crate::core_ir::type_proofs::prefer_failure(
             failure,
@@ -365,25 +430,69 @@ pub(super) fn rhs_type(
 ) -> Result<Resolved, Failure> {
     let _query = query()?;
     match typ {
-        syn::Type::Path(path) if path.qself.is_none() => {
+        syn::Type::Path(path) => {
             let mut failure = None;
+            let mut arguments = Dependencies::default();
             for segment in &path.path.segments {
-                if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
-                    for argument in &arguments.args {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    for argument in &args.args {
                         if let syn::GenericArgument::Type(typ) = argument {
-                            let result = rhs_type(typ, frame, active);
-                            let child = match result {
-                                Ok(value) => structural_failure(value),
-                                Err(error) => Some(error),
+                            let child = match rhs_type(typ, frame, active) {
+                                Ok(value) => {
+                                    arguments.merge(value.dependencies());
+                                    structural_failure(value)
+                                }
+                                Err(error) => {
+                                    arguments.unknown = true;
+                                    Some(error)
+                                }
                             };
                             failure = crate::core_ir::type_proofs::prefer_failure(failure, child);
                         }
                     }
                 }
             }
-            let result = path_type(&path.path, frame, active, true);
-            match result {
+            if let Some(qself) = &path.qself {
+                let value = rhs_type(&qself.ty, frame, active)?;
+                arguments.merge(value.dependencies());
+                failure =
+                    crate::core_ir::type_proofs::prefer_failure(failure, structural_failure(value));
+                return Ok(failure_result(crate::core_ir::type_proofs::prefer_failure(
+                    failure,
+                    Some(unsupported(
+                        "qualified alias projection requires source specialization",
+                    )),
+                ))
+                .with_dependencies(arguments));
+            }
+            match path_type(&path.path, frame, active, true) {
                 Ok(value) => {
+                    // A nominal preserves its type arguments, whereas an alias can
+                    // discard them. Eager argument validation above proves errors,
+                    // but contributes usage only to the nominal application.
+                    let dependencies = match value.clone().visibility().0 {
+                        Resolved::Nominal(ref obligations)
+                            if obligations.iter().any(|obligation| {
+                                matches!(obligation, NominalObligation::Projection)
+                            }) =>
+                        {
+                            // Only source projections consume their associated
+                            // argument dependencies here. Alias results already
+                            // carry the dependencies selected by their own RHS.
+                            let mut dependencies = value.dependencies();
+                            dependencies.merge(arguments);
+                            dependencies
+                        }
+                        Resolved::Nominal(ref obligations)
+                            if !obligations.is_empty()
+                                && obligations.iter().all(|obligation| {
+                                    matches!(obligation, NominalObligation::Application(_))
+                                }) =>
+                        {
+                            arguments
+                        }
+                        _ => value.dependencies(),
+                    };
                     let failure = crate::core_ir::type_proofs::prefer_failure(
                         failure,
                         structural_failure(value.clone()),
@@ -392,7 +501,8 @@ pub(super) fn rhs_type(
                         failure_result(failure)
                     } else {
                         value
-                    })
+                    }
+                    .with_dependencies(dependencies))
                 }
                 Err(error) => Ok(failure_result(crate::core_ir::type_proofs::prefer_failure(
                     failure,
@@ -402,12 +512,14 @@ pub(super) fn rhs_type(
         }
         syn::Type::Tuple(tuple) => {
             let mut failure = None;
+            let mut dependencies = Dependencies::default();
             let mut types = Vec::new();
             let mut exact = true;
             let mut bytes = 0usize;
             for element in &tuple.elems {
                 match rhs_type(element, frame, active) {
                     Ok(value) => {
+                        dependencies.merge(value.dependencies());
                         failure = crate::core_ir::type_proofs::prefer_failure(
                             failure,
                             structural_failure(value.clone()),
@@ -420,28 +532,34 @@ pub(super) fn rhs_type(
                         }
                     }
                     Err(error) => {
+                        dependencies.unknown = true;
                         exact = false;
                         failure = crate::core_ir::type_proofs::prefer_failure(failure, Some(error));
                     }
                 }
             }
-            if exact && failure.is_none() && bytes <= MAX_TYPE_BYTES / 4 && types.len() <= 64 {
-                Ok(Resolved::Type(crate::core_ir::tuples::typ(&types)))
-            } else {
-                Ok(failure_result(failure.or_else(|| {
-                    Some(unsupported("alias tuple layout is not concretely bounded"))
-                })))
-            }
+            Ok(
+                if exact && failure.is_none() && bytes <= MAX_TYPE_BYTES / 4 && types.len() <= 64 {
+                    Resolved::Type(crate::core_ir::tuples::typ(&types))
+                } else {
+                    failure_result(failure.or_else(|| {
+                        Some(unsupported("alias tuple layout is not concretely bounded"))
+                    }))
+                }
+                .with_dependencies(dependencies),
+            )
         }
         syn::Type::Reference(reference) => {
             let value = rhs_type(&reference.elem, frame, active)?;
+            let dependencies = value.dependencies();
             if reference.lifetime.is_some() {
                 return Ok(failure_result(crate::core_ir::type_proofs::prefer_failure(
                     structural_failure(value),
                     Some(unsupported(
                         "alias reference lifetime requires source specialization",
                     )),
-                )));
+                ))
+                .with_dependencies(dependencies));
             }
             if let Some(typ) = concrete(&value) {
                 if matches!(
@@ -455,7 +573,8 @@ pub(super) fn rhs_type(
                             referent: typ,
                             runtime,
                         },
-                    )));
+                    ))
+                    .with_dependencies(dependencies));
                 }
             }
             Ok(failure_result(crate::core_ir::type_proofs::prefer_failure(
@@ -463,35 +582,91 @@ pub(super) fn rhs_type(
                 Some(unsupported(
                     "alias borrow lacks an exact native representation",
                 )),
-            )))
+            ))
+            .with_dependencies(dependencies))
+        }
+        syn::Type::Ptr(pointer) => {
+            let value = rhs_type(&pointer.elem, frame, active)?;
+            let dependencies = value.dependencies();
+            Ok(failure_result(crate::core_ir::type_proofs::prefer_failure(
+                structural_failure(value),
+                Some(unsupported(
+                    "alias raw pointer requires a native pointer ABI",
+                )),
+            ))
+            .with_dependencies(dependencies))
         }
         syn::Type::Array(array) => {
             let value = rhs_type(&array.elem, frame, active)?;
+            let mut dependencies = value.dependencies();
+            // Simple constant paths/literals cannot capture a type parameter;
+            // other const expressions retain uncertainty rather than guessing.
+            if !matches!(&array.len, syn::Expr::Lit(_))
+                && !matches!(&array.len, syn::Expr::Path(path) if path.qself.is_none() && path.path.segments.iter().all(|segment| !has_generic_arguments(&segment.arguments)))
+            {
+                dependencies.unknown = true;
+            }
             let _scope = frame.enter();
             let length = super::super::fixed_array_length(&array.len);
-            match (concrete(&value), length) {
-                (Some(element), Ok(Some(length))) => Ok(Resolved::Type(
-                    crate::core_ir::rust_arrays::typ(element, length),
-                )),
-                (_, Err(error)) => Ok(failure_result(crate::core_ir::type_proofs::prefer_failure(
+            Ok(match (concrete(&value), length) {
+                (Some(element), Ok(Some(length))) => {
+                    Resolved::Type(crate::core_ir::rust_arrays::typ(element, length))
+                }
+                (_, Err(error)) => failure_result(crate::core_ir::type_proofs::prefer_failure(
                     structural_failure(value),
                     Some(error),
-                ))),
-                _ => Ok(failure_result(crate::core_ir::type_proofs::prefer_failure(
+                )),
+                _ => failure_result(crate::core_ir::type_proofs::prefer_failure(
                     structural_failure(value),
                     Some(unsupported(
                         "alias array layout requires owned element and length",
                     )),
-                ))),
+                )),
             }
+            .with_dependencies(dependencies))
         }
         syn::Type::Slice(slice) => {
             let value = rhs_type(&slice.elem, frame, active)?;
+            let dependencies = value.dependencies();
             Ok(failure_result(crate::core_ir::type_proofs::prefer_failure(
                 structural_failure(value),
                 Some(unsupported("alias slice requires a native slice ABI")),
-            )))
+            ))
+            .with_dependencies(dependencies))
         }
+        syn::Type::BareFn(function) => {
+            let mut dependencies = Dependencies::default();
+            let mut failure = Some(unsupported(
+                "alias function pointer requires a native function ABI",
+            ));
+            for typ in
+                function
+                    .inputs
+                    .iter()
+                    .map(|argument| &argument.ty)
+                    .chain(match &function.output {
+                        syn::ReturnType::Type(_, typ) => Some(typ.as_ref()),
+                        _ => None,
+                    })
+            {
+                match rhs_type(typ, frame, active) {
+                    Ok(value) => {
+                        dependencies.merge(value.dependencies());
+                        failure = crate::core_ir::type_proofs::prefer_failure(
+                            failure,
+                            structural_failure(value),
+                        );
+                    }
+                    Err(error) => {
+                        dependencies.unknown = true;
+                        failure = crate::core_ir::type_proofs::prefer_failure(failure, Some(error));
+                    }
+                }
+            }
+            Ok(failure_result(failure).with_dependencies(dependencies))
+        }
+        syn::Type::Never(_) => Ok(deferred("alias never type lacks a native representation")
+            .with_dependencies(Dependencies::default())),
         syn::Type::Paren(value) => rhs_type(&value.elem, frame, active),
         syn::Type::Group(value) => rhs_type(&value.elem, frame, active),
         _ => Err(unsupported(
@@ -700,6 +875,123 @@ mod tests {
             resolve_value_owner(&syn::parse_str("u8::<>").unwrap()),
             Ok(Some(Typ::Named("#rust-integer-u8".into())))
         );
+    }
+    #[test]
+    fn unused_type_parameters_follow_normalized_rhs_dependencies() {
+        for source in [
+            "type Ignored<T>=u8;",
+            "type A<T:Copy>=u8;",
+            "type A<T> where T:Copy =u8;",
+            "type A<T=u8,U=T>=U;",
+            "type Ignore<T>=u8;type A<T>=Ignore<T>;",
+            "type Ignore<T=u8>=u8;type A<T>=Ignore<T>;",
+            "type Ignore<T>=u8;type Next<T>=Ignore<T>;type A<T>=Next<T>;",
+            "type First<A,B>=A;type Outer<T,U>=First<T,U>;",
+            "trait Trait{type Item;}type A<T:Trait<Item=u8>>=u8;",
+            "type A<T=u8,const N:usize=1>=[u8;N];",
+            "type A<#[cfg(all())] T>=u8;",
+            "type A<T>=fn()->u8;",
+        ] {
+            let file = syn::parse_file(source).unwrap();
+            let failures = validate_declarations(&file, Catalog::new(&file));
+            assert!(
+                failures.iter().any(Failure::is_invalid),
+                "{source}: {failures:?}"
+            );
+        }
+        for source in [
+            "fn outer(){type Ignored<T>=u8;}",
+            "fn outer(){mod local{type Ignored<T>=u8;}}",
+        ] {
+            let file = syn::parse_file(source).unwrap();
+            assert!(
+                validate_declarations(&file, Catalog::module_source(&file))
+                    .iter()
+                    .any(Failure::is_invalid),
+                "{source}"
+            );
+        }
+        // Check the caller itself: validating the callee alone would conceal a
+        // regression which counted an eagerly validated but discarded argument.
+        let root = frame("type First<A,B>=A;type Outer<T,U>=First<T,U>;");
+        let error =
+            validate_alias_declaration(&syn::parse_str("Outer").unwrap(), &root).unwrap_err();
+        assert!(
+            matches!(error, Failure::Invalid(message) if message.contains("`U`") && message.contains("`Outer`"))
+        );
+    }
+    #[test]
+    fn used_or_unproven_type_parameters_do_not_gain_unused_failures() {
+        for source in [
+            "type A<T=u8,U=T>=(T,U);",
+            "type Id<T>=T;type Next<T>=Id<T>;type A<T>=Next<T>;",
+            "type A<T>=(T,u8);",
+            "type A<T>=*const T;type B<T>=&'static T;",
+            "struct Wrap<T>(T);type A<T>=Wrap<T>;",
+            "type A<T>=core::marker::PhantomData<T>;",
+            "trait Trait{type Item;}type A<T>=<T as Trait>::Item;",
+            "trait Trait{type Item;}type A<T:Trait>=T::Item;",
+            "type A<'a>=u8;",
+            "type A<'a,T>=&'a T;",
+            "type A<const N:usize>=u8;",
+            "type A<#[cfg(any())] T>=u8;",
+            "type A<#[cfg(feature=\"x\")] T>=u8;",
+            "type A<T>=external::Unknown;",
+            "type A<T>=fn(T)->T;",
+            "mod owner{pub type Id<T>=T;}use owner::Id;type A<T>=Id<T>;",
+        ] {
+            let file = syn::parse_file(source).unwrap();
+            let failures = validate_declarations(&file, Catalog::new(&file));
+            assert!(
+                !failures.iter().any(Failure::is_invalid),
+                "{source}: {failures:?}"
+            );
+        }
+    }
+    #[test]
+    fn projected_associated_arguments_retain_parameter_dependencies() {
+        for source in [
+            "trait Trait{type Assoc<U>;}type A<T:Trait,U>=T::Assoc<U>;",
+            "trait Trait{type Assoc<U>;}type Id<T>=T;type A<T:Trait,U>=T::Assoc<Id<U>>;",
+            "trait Trait{type Assoc<U>;}type A<T:Trait,U>=<T as Trait>::Assoc<U>;",
+        ] {
+            let root = frame(source);
+            let result = validate_alias_declaration(&syn::parse_str("A").unwrap(), &root);
+            assert!(
+                !result.is_err_and(|failure| failure.is_invalid()),
+                "{source}"
+            );
+        }
+    }
+    #[test]
+    fn projected_arguments_preserve_nested_alias_discarding() {
+        let root = frame(
+            "trait Trait{type Assoc<U>;}type Ignore<X>=u8;type A<T:Trait,U>=T::Assoc<Ignore<U>>;",
+        );
+        let result = validate_alias_declaration(&syn::parse_str("A").unwrap(), &root);
+        assert!(
+            matches!(result, Err(Failure::Invalid(message)) if message.contains("`U`") && message.contains("`A`"))
+        );
+    }
+    #[test]
+    fn alias_nominal_results_keep_authoritative_discarded_dependencies() {
+        for source in [
+            "struct Unit;type Ignore<T>=Unit;type Outer<T>=Ignore<T>;",
+            "struct Unit;type Ignore<T>=Unit;type Middle<T>=Ignore<T>;type Outer<T>=Middle<T>;",
+        ] {
+            let root = frame(source);
+            let result = validate_alias_declaration(&syn::parse_str("Outer").unwrap(), &root);
+            assert!(
+                matches!(result, Err(Failure::Invalid(message)) if message.contains("`T`") && message.contains("`Outer`")),
+                "{source}"
+            );
+        }
+    }
+    #[test]
+    fn dependency_cache_distinguishes_equal_layout_parameter_arguments() {
+        let root = frame("type First<T,U>=T;type Both<T,U>=(First<T,U>,First<U,T>);");
+        let result = validate_alias_declaration(&syn::parse_str("Both").unwrap(), &root);
+        assert!(!result.is_err_and(|failure| failure.is_invalid()));
     }
     #[test]
     fn generic_alias_applications_resolve_owned_arguments_and_defaults() {
