@@ -3632,7 +3632,7 @@ fn owned_rust_compile_only_keeps_unsupported_type_contracts_without_executing() 
         ("unsupported", unsupported, None, true),
         ("explicit-entry", unsupported, Some("main"), false),
         ("invalid", invalid, None, false),
-        ("unused-invalid", unused_invalid.as_str(), None, true),
+        ("unused-invalid", unused_invalid.as_str(), None, false),
         ("mixed", mixed.as_str(), None, false),
     ] {
         let path = temp_path(&format!("rust-type-proof-ir-only-{name}.rs"));
@@ -3650,6 +3650,11 @@ fn owned_rust_compile_only_keeps_unsupported_type_contracts_without_executing() 
                 assert_eq!(report.reason_code.as_deref(), Some("jit-ir-only"));
                 assert_eq!(report.backend_level, "owned-core-ir-only");
                 assert_eq!(report.runtime_level, "not-executed");
+            } else if name == "unused-invalid" {
+                assert_eq!(
+                    report.reason_code.as_deref(),
+                    Some("rust-invalid-associated-type")
+                );
             }
         }
         fs::remove_file(path).unwrap();
@@ -9382,7 +9387,7 @@ fn rust_associated_cycles_cannot_disappear_through_zero_argument_inlining() {
     for (name, output, entry, expected) in [
         ("cycle", "Self::Output", "<Row as Other>::make()", None),
         ("concrete", "i64", "<Row as Other>::make()", Some(42)),
-        ("unused-cycle", "Self::Output", "42", Some(42)),
+        ("unused-cycle", "Self::Output", "42", None),
     ] {
         let source = format!(
             "trait Other{{type Output;fn make()->Self::Output;}}struct Row;\
@@ -9526,6 +9531,45 @@ fn rust_used_type_alias_cycles_refuse_before_optimization_without_artifacts() {
 }
 
 #[test]
+fn rust_invalid_type_proofs_in_unused_code_refuse_before_entry_pruning() {
+    for source in [
+        "type A=B;type B=A;fn unused()->i64{let value:A;77}fn main()->i64{42}",
+        "type Byte=u8;type Byte=u16;fn unused(){let value:Byte;}fn main()->i64{42}",
+        "type A=B;type B=A;static UNUSED:A=0;fn main()->i64{42}",
+    ] {
+        let path = temp_path("unused-invalid-source.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for entry in [None, Some("main")] {
+                for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                    let out = temp_path("unused-invalid-source.artifact");
+                    let mut request =
+                        default_request(path.clone(), target, entry, Some(out.clone()));
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(
+                        !report.success && !report.execution_started,
+                        "{source} {target:?} {entry:?} {profile:?}: {report:?}"
+                    );
+                    assert_eq!(
+                        report.reason_code.as_deref(),
+                        Some("rust-invalid-associated-type")
+                    );
+                    assert_eq!(report.eval_result, None);
+                    assert_eq!(report.eval_exit_code, None);
+                    assert_eq!(report.artifact_path, None);
+                    assert_eq!(report.executable_path, None);
+                    assert_eq!(report.abi_path, None);
+                    assert!(report.external_invocations.is_empty());
+                    assert!(!out.exists());
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
 fn rust_type_alias_cycle_in_an_explicitly_selected_helper_refuses_without_artifacts() {
     let source = "type A=B;type B=A;fn bad()->i64{let value:A;77}fn main()->i64{42}";
     let path = temp_path("type-alias-cycle-selected-helper.rs");
@@ -9559,14 +9603,8 @@ fn rust_type_alias_cycle_in_an_explicitly_selected_helper_refuses_without_artifa
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 #[test]
-fn rust_type_alias_cycles_preserve_entry_root_policy_and_concrete_alias_controls() {
+fn rust_concrete_aliases_and_scoped_imports_preserve_values() {
     for (name, source) in [
-        // Existing executable-root policy permits an invalid unused helper to
-        // disappear; selecting that same helper is covered by the refusal test.
-        (
-            "unused-cycle",
-            "type A=B;type B=A;fn bad()->i64{let value:A;77}fn main()->i64{42}",
-        ),
         (
             "concrete-chain",
             "type A=B;type B=i64;fn main()->i64{let value:A;42}",

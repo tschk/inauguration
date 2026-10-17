@@ -553,7 +553,7 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     } else {
         proof_entry.as_deref()
     };
-    if let Err(error) = reject_invalid_type_proofs(&module, proof_roots) {
+    if let Err(error) = reject_invalid_type_proofs(&module) {
         report.reason_code = Some("rust-invalid-associated-type".into());
         report.reason = Some(error.clone());
         report.error = Some(error);
@@ -929,19 +929,12 @@ fn reject_uninitialized_locals(
 
 pub(crate) fn reject_invalid_type_proofs(
     module: &crate::core_ir::UnifiedModule,
-    entry: Option<&str>,
 ) -> Result<(), String> {
     if !crate::core_ir::type_proofs::present(&module.decls) {
         return Ok(());
     }
-    let reachable;
-    let declarations = if let Some(entry) = entry {
-        reachable = native::native_entry_module(module, entry);
-        &reachable.decls
-    } else {
-        &module.decls
-    };
-    let proofs = crate::typecheck::TypeChecker::new().typed_proof_functions(declarations);
+    // Definite source errors remain invalid even when entry pruning removes their owner.
+    let proofs = crate::typecheck::TypeChecker::new().typed_proof_nodes(&module.decls);
     let mut invalid: Vec<_> = proofs
         .into_iter()
         .filter(|(_, proof)| proof.is_invalid())
@@ -949,7 +942,7 @@ pub(crate) fn reject_invalid_type_proofs(
     invalid.sort_by(|left, right| left.0.cmp(&right.0));
     if let Some((name, proof)) = invalid.first() {
         Err(format!(
-            "invalid Rust associated type reachable in `{name}`: {}",
+            "invalid Rust associated type in `{name}`: {}",
             proof.message()
         ))
     } else {
@@ -965,7 +958,7 @@ pub(crate) fn optimize_retained_module(
     keep_all: bool,
     semantics: crate::integer_semantics::IntegerSemantics,
 ) -> Result<(), String> {
-    reject_invalid_type_proofs(module, if keep_all { None } else { entry })?;
+    reject_invalid_type_proofs(module)?;
     reject_uninitialized_locals(module, if keep_all { None } else { entry })?;
     fn count_tags(decls: &mut [Decl]) -> (usize, bool) {
         let mut tags = 0;
@@ -1041,8 +1034,7 @@ mod associated_type_root_tests {
     use super::*;
     use crate::core_ir::{Expr, Stmt, Typ, UnifiedModule};
     #[test]
-    fn invalid_export_roots_and_explicit_entry_are_checked_but_unused_executable_helpers_are_not_roots()
-     {
+    fn invalid_type_proofs_are_checked_before_entry_pruning() {
         let function = |name: &str, ret: Typ, value: Expr| Decl::Function {
             name: name.into(),
             params: vec![],
@@ -1058,15 +1050,34 @@ mod associated_type_root_tests {
             ),
             function("main", Typ::Int, Expr::IntLit(42)),
         ]);
-        assert!(reject_invalid_type_proofs(&module, Some("main")).is_ok());
-        assert!(reject_invalid_type_proofs(&module, Some("bad")).is_err());
-        assert!(reject_invalid_type_proofs(&module, None).is_err());
+        assert!(reject_invalid_type_proofs(&module).is_err());
         if let Decl::Function { body, .. } = &mut module.decls[1] {
             *body = vec![Stmt::Return(Some(Expr::Call {
                 callee: Box::new(Expr::Ident("bad".into())),
                 args: vec![],
             }))];
         }
-        assert!(reject_invalid_type_proofs(&module, Some("main")).is_err());
+        assert!(reject_invalid_type_proofs(&module).is_err());
+    }
+    #[test]
+    fn unused_global_invalid_proofs_are_rejected_but_unsupported_proofs_are_deferred() {
+        use crate::core_ir::type_proofs::ResolutionFailure;
+        let mut module = UnifiedModule::new(vec![Decl::Global {
+            name: "unused".into(),
+            typ: ResolutionFailure::Unsupported("unowned layout".into()).typ(),
+            init: Some(Box::new(Expr::IntLit(0))),
+            mutable: false,
+            constant_value: false,
+        }]);
+        assert!(reject_invalid_type_proofs(&module).is_ok());
+        let Decl::Global { typ, .. } = &mut module.decls[0] else {
+            unreachable!()
+        };
+        *typ = ResolutionFailure::Invalid("cycle".into()).typ();
+        let error = reject_invalid_type_proofs(&module).unwrap_err();
+        assert!(
+            error.contains("unused") && error.contains("cycle"),
+            "{error}"
+        );
     }
 }
