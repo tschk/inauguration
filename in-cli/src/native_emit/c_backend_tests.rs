@@ -2513,3 +2513,82 @@ fn boolean_negation_inferred_locals_keep_negative_integer_and_single_evaluation(
         "if(norm(1)!=-1||norm(0)!=0||compared(1)!=-1)return 7;calls=0;if(effects()!=-1||calls!=1)return 8;calls=0;if(skipped()!=0||calls!=0)return 9;return 42;",
     );
 }
+
+#[test]
+fn complement_projection_checks_operand_trees_and_retains_integer_aliases() {
+    for op in ["~", "bnot"] {
+        for operand in [
+            "true",
+            "1.5",
+            "\"hello\"",
+            "unknown",
+            "(true+1)",
+            "(\"hello\"+1)",
+        ] {
+            let mut module = crate::in_lang_parse::parse_in_source(&format!(
+                "fn main()->Int{{return ~{operand};}}"
+            ))
+            .unwrap();
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                if let Expr::Unary { op: current, .. } = expr
+                    && current == "~"
+                {
+                    *current = op.into();
+                }
+            });
+            let error = emit_c_module(&module).unwrap_err();
+            assert!(
+                error.contains("bitwise complement requires a resolved Int operand"),
+                "{op} {operand}: {error}"
+            );
+        }
+        for alias in ["Int", "i32", "u32"] {
+            // Internal Core IR aliases do not imply public .in type syntax support.
+            let mut module = crate::in_lang_parse::parse_in_source(
+                "fn invert(value:Int)->Int{return ~value;}fn main()->Int{return invert(-43);}",
+            )
+            .unwrap();
+            if alias != "Int" {
+                if let Decl::Function { params, .. } = &mut module.decls[0] {
+                    params[0].1 = Typ::Named(alias.into());
+                }
+            }
+            if let Decl::Function { name, .. } = &mut module.decls[1] {
+                *name = "answer".into();
+            }
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                if let Expr::Unary { op: current, .. } = expr
+                    && current == "~"
+                {
+                    *current = op.into();
+                }
+            });
+            assert_inferred_c_executes(&module, "if(answer()!=42)return 7;return 42;");
+        }
+    }
+}
+
+#[test]
+fn complement_projection_evaluates_once_and_preserves_scalar_logical_not() {
+    for op in ["~", "bnot"] {
+        let mut module=crate::in_lang_parse::parse_in_source("var calls:Int=0;fn next()->Int{calls+=1;return -43;}fn main()->Int{return ~next();}fn skipped()->Int{if false&&(~next()==42){return 7;}return calls;}fn not_float(value:Float)->Bool{return !value;}fn not_string(value:String)->Bool{return !value;}fn not_bool(value:Bool)->Bool{return !value;}").unwrap();
+        for decl in &mut module.decls {
+            if let Decl::Function { name, .. } = decl
+                && name == "main"
+            {
+                *name = "answer".into();
+            }
+        }
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            if let Expr::Unary { op: current, .. } = expr
+                && current == "~"
+            {
+                *current = op.into();
+            }
+        });
+        assert_inferred_c_executes(
+            &module,
+            "calls=0;if(answer()!=42||calls!=1)return 7;calls=0;if(skipped()!=0||calls!=0)return 8;if(!not_float(-0.0)||not_float(1.5)||not_string(\"\")||not_string(\"hello\")||!not_bool(0)||not_bool(1))return 9;return 42;",
+        );
+    }
+}

@@ -541,3 +541,46 @@ fn c_projection_rejects_invalid_unsigned_operands_before_writing_source() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn c_projection_rejects_invalid_complement_operands_before_writing_source() {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "in-c-complement-proof-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let input = root.join("invalid.in");
+    let output = root.join("invalid.c");
+    for operand in [
+        "true",
+        "false",
+        "1.5",
+        "\"hello\"",
+        "unknown",
+        "(true+1)",
+        "(\"hello\"+1)",
+    ] {
+        std::fs::write(&input, format!("fn main()->Int{{return ~{operand};}}\n")).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_in"))
+            .args(["compile", "--path"])
+            .arg(&input)
+            .args(["--emit", "c", "--out"])
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(
+            !result.status.success() && !output.exists(),
+            "{operand}: {result:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("bitwise complement requires a resolved Int operand"),
+            "{result:?}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

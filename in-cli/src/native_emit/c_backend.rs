@@ -806,7 +806,20 @@ impl Ctx {
                     "float-cast-f32" => format!("((double)((float)({e})))"),
                     "neg" | "-" => format!("(-{})", e),
                     "not" | "!" => format!("(!{})", e),
-                    "bnot" | "~" => format!("(~{})", e),
+                    "bnot" | "~" => {
+                        if TypeChecker::new()
+                            .checked_expr_type(expr, &self.facts, &self.types)
+                            .map(|typ| typ.canonical())
+                            != Some(Typ::Int)
+                        {
+                            self.fail(
+                                "c-backend: bitwise complement requires a resolved Int operand"
+                                    .into(),
+                            );
+                            return "0".into();
+                        }
+                        format!("(~{})", e)
+                    }
                     _ => format!("(/*op:{}*/{})", sanitize_comment(op), e),
                 }
             }
