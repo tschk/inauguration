@@ -13,7 +13,7 @@ mod value_spills;
 pub(crate) use constant_values::lower_named_constants_with_semantics;
 pub(crate) use static_initializers::{
     ConstantEvalError, evaluate_pure_constant, fold_static_initializers_with_semantics,
-    lower_inline_constants_with_semantics,
+    lower_inline_constants_with_semantics, validate_constant_arithmetic_with_semantics,
 };
 #[path = "lower_core/match_guards.rs"]
 mod match_guards;

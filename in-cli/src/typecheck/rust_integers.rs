@@ -508,7 +508,10 @@ impl Pass<'_> {
             }
             Expr::Unary { op, .. } if op == "rust-integer-literal" => true,
             Expr::Unary { op, expr }
-                if matches!(op.as_str(), "-" | "~" | "complement" | "bitnot") =>
+                if matches!(
+                    op.as_str(),
+                    "-" | "~" | "complement" | "bitnot" | core_ir::rust_references::NEGATE_VALUE
+                ) =>
             {
                 self.contextual_integer(expr, env)
             }
@@ -562,7 +565,10 @@ impl Pass<'_> {
                 Kind::parse(op.strip_prefix("rust-integer-literal-")?, self.semantics)
             }
             Expr::Unary { op, expr }
-                if matches!(op.as_str(), "-" | "~" | "complement" | "bitnot") =>
+                if matches!(
+                    op.as_str(),
+                    "-" | "~" | "complement" | "bitnot" | core_ir::rust_references::NEGATE_VALUE
+                ) =>
             {
                 self.hint(expr, env)
             }
@@ -820,17 +826,33 @@ impl Pass<'_> {
                         *expr = target.cast((**value).clone());
                     }
                     Some(target)
-                } else if matches!(name.as_str(), "-" | "~" | "complement" | "bitnot") {
+                } else if matches!(
+                    name.as_str(),
+                    "-" | "~" | "complement" | "bitnot" | core_ir::rust_references::NEGATE_VALUE
+                ) {
                     if self.rewrite
                         && let Some(kind) = inner
                     {
-                        bad |= name == "-" && !kind.signed;
-                        if name == "-" && kind.signed {
+                        let negate =
+                            matches!(name.as_str(), "-" | core_ir::rust_references::NEGATE_VALUE);
+                        bad |= negate && !kind.signed;
+                        if negate && kind.signed && self.const_env.is_none() {
                             bad |= self.constant(value).is_some_and(|value| {
-                                i128::from(value) == -(1i128 << (kind.bits - 1))
+                                fold_checked_integer(
+                                    &format!("i{}", kind.bits),
+                                    "-",
+                                    value,
+                                    None,
+                                    self.semantics,
+                                )
+                                .is_none()
                             });
                         }
-                        if self.const_env.is_some() && self.constant(value).is_none() {
+                        if name == core_ir::rust_references::NEGATE_VALUE {
+                            *op = "-".into();
+                        }
+                        // Constant control flow selects whether signed negation is evaluated.
+                        if self.const_env.is_some() {
                             *expr = Expr::Unary {
                                 op: format!(
                                     "rust-checked-integer-{}{}",
@@ -1790,6 +1812,7 @@ pub(crate) fn normalize(
             _ => {}
         }
     }
+    crate::lower_core::validate_constant_arithmetic_with_semantics(&mut module.decls, semantics);
     crate::core_bindings::rewrite_named_types(&mut module.decls, &|name| {
         core_ir::rust_integer_type_name(name)
             .and_then(|name| Kind::parse(name, semantics))
@@ -2540,6 +2563,140 @@ mod tests {
             assert_eq!(rejected, overflow, "{source}: {module:?}");
         }
     }
+    #[test]
+    fn constant_negation_keeps_exact_width_and_reached_path_semantics() {
+        for semantics in [IntegerSemantics::Word32, IntegerSemantics::Word64] {
+            for kind in ["i8", "i16", "i32", "isize", "i64"] {
+                if !Kind::parse(kind, semantics).unwrap().supported(semantics) {
+                    continue;
+                }
+                for cold in [false, true] {
+                    for inline in [false, true] {
+                        let value = if cold {
+                            format!("if true{{42}}else{{-{kind}::MIN}}")
+                        } else {
+                            format!("-{kind}::MIN")
+                        };
+                        let source = if inline {
+                            format!("fn main()->{kind}{{const{{{value}}}}}")
+                        } else {
+                            format!("const N:{kind}={value};fn main()->{kind}{{N}}")
+                        };
+                        let module = resolved(&source, semantics);
+                        let proofs = TypeChecker::new().typed_proof_nodes(&module.decls);
+                        assert_eq!(
+                            proofs
+                                .values()
+                                .any(core_ir::type_proofs::ResolutionFailure::is_invalid),
+                            !cold,
+                            "{source}: {module:?}",
+                        );
+                        if cold {
+                            assert!(proofs.is_empty(), "{source}: {module:?}");
+                            let value = if inline {
+                                return_value(&module)
+                            } else {
+                                module
+                                    .decls
+                                    .iter()
+                                    .find_map(|decl| match decl {
+                                        Decl::Global {
+                                            name,
+                                            init: Some(value),
+                                            ..
+                                        } if name == "N" => Some(value.as_ref()),
+                                        _ => None,
+                                    })
+                                    .unwrap()
+                            };
+                            assert_eq!(
+                                crate::lower_core::evaluate_pure_constant(value, semantics),
+                                Ok(Some(Expr::IntLit(42))),
+                                "{source}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_constant_alias_errors_survive_unused_declarations() {
+        for (semantics, kind) in [
+            (IntegerSemantics::Word32, "i32"),
+            (IntegerSemantics::Word64, "i64"),
+        ] {
+            for declarations in [
+                format!("const MIN:{kind}={kind}::MIN;const BAD:{kind}=-MIN;"),
+                format!("const BAD:{kind}=-MIN;const MIN:{kind}={kind}::MIN;"),
+                format!("const MAX:{kind}={kind}::MAX;const BAD:{kind}=MAX+1;"),
+            ] {
+                let source = format!("{declarations}fn main()->{kind}{{42}}");
+                let module = resolved(&source, semantics);
+                assert!(
+                    TypeChecker::new()
+                        .typed_proof_nodes(&module.decls)
+                        .values()
+                        .any(core_ir::type_proofs::ResolutionFailure::is_invalid),
+                    "{source}: {module:?}"
+                );
+            }
+            let source = format!(
+                "const MIN:{kind}={kind}::MIN;const GOOD:{kind}=if true{{42}}else{{-MIN}};fn main()->{kind}{{GOOD}}"
+            );
+            let module = resolved(&source, semantics);
+            assert!(
+                TypeChecker::new()
+                    .typed_proof_nodes(&module.decls)
+                    .is_empty(),
+                "{source}: {module:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_negation_preserves_valid_values_and_nominal_dispatch() {
+        for (source, expected) in [
+            ("fn main()->i8{-42i8}", -42),
+            ("fn main()->i8{-128i8}", -128),
+            ("fn main()->i64{-i64::MAX}", -i64::MAX),
+            ("fn main()->i8{const{let value:i8=42;-value}}", -42),
+        ] {
+            let module = resolved(source, IntegerSemantics::Word64);
+            assert!(
+                TypeChecker::new()
+                    .typed_proof_nodes(&module.decls)
+                    .is_empty(),
+                "{source}: {module:?}"
+            );
+            assert_eq!(
+                crate::lower_core::evaluate_pure_constant(
+                    return_value(&module),
+                    IntegerSemantics::Word64
+                ),
+                Ok(Some(Expr::IntLit(expected))),
+                "{source}: {module:?}",
+            );
+        }
+        let mut module = resolved(
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}fn negate(value:Row)->i64{-value}fn main()->i64{42}",
+            IntegerSemantics::Word64,
+        );
+        assert!(
+            TypeChecker::new()
+                .typed_proof_nodes(&module.decls)
+                .is_empty(),
+            "{module:?}"
+        );
+        let mut nominal_negation = false;
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            nominal_negation |= matches!(expr, Expr::Call { callee, .. }
+                if matches!(callee.as_ref(), Expr::Ident(name) if name == "Row::std::ops::Neg::neg"));
+        });
+        assert!(nominal_negation, "{module:?}");
+    }
+
     #[test]
     fn aggregate_result_containers_keep_contextual_element_widths() {
         for source in [

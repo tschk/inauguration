@@ -10183,3 +10183,114 @@ fn rust_fixed_array_external_count_errors_survive_unused_functions() {
     }
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn rust_constant_negation_preserves_cold_values_and_nominal_dispatch() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (name, source) in [
+        (
+            "cold-global",
+            "const N:i64=if true{42}else{-i64::MIN};fn main()->i64{N}",
+        ),
+        (
+            "cold-inline",
+            "fn main()->i64{(const{if true{42i8}else{-i8::MIN}}) as i64}",
+        ),
+        (
+            "cold-global-alias",
+            "const MIN:i64=i64::MIN;const N:i64=if true{42}else{-MIN};fn main()->i64{N}",
+        ),
+        (
+            "nominal-negation",
+            "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{self.x}}fn main()->i64{-Row{x:42}}",
+        ),
+    ] {
+        let path = temp_path("rust-constant-negation-valid.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                let out = temp_path("rust-constant-negation-valid-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{name} {profile:?} {target:?}: {report:?}");
+                assert!(report.degradations.is_empty(), "{name}: {report:?}");
+                assert!(report.external_invocations.is_empty(), "{name}: {report:?}");
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started, "{name}: {report:?}");
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(42)),
+                        "{name}: {report:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        report.executable_path.as_deref(),
+                        Some(out.to_string_lossy().as_ref())
+                    );
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{name} {profile:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_constant_negation_errors_survive_entry_pruning() {
+    for (name, source) in [
+        ("live-global", "const BAD:i64=-i64::MIN;fn main()->i64{BAD}"),
+        ("live-inline", "fn main()->i64{(const{-i8::MIN}) as i64}"),
+        (
+            "unused-global-alias",
+            "const MIN:i64=i64::MIN;const BAD:i64=-MIN;fn main()->i64{42}",
+        ),
+        (
+            "unused-forward-alias",
+            "const BAD:i64=-MIN;const MIN:i64=i64::MIN;fn main()->i64{42}",
+        ),
+        (
+            "unused-inline-alias",
+            "const MIN:i64=i64::MIN;fn unused()->i64{const{-MIN}}fn main()->i64{42}",
+        ),
+    ] {
+        let path = temp_path("rust-constant-negation-invalid.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                for entry in [None, Some("main")] {
+                    let out = temp_path("rust-constant-negation-invalid-out");
+                    let mut request =
+                        default_request(path.clone(), target, entry, Some(out.clone()));
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(
+                        !report.success && !report.execution_started,
+                        "{name} {profile:?} {target:?} {entry:?}: {report:?}"
+                    );
+                    assert_eq!(
+                        report.reason_code.as_deref(),
+                        Some("rust-invalid-associated-type"),
+                        "{name}: {report:?}"
+                    );
+                    assert_eq!(report.eval_result, None);
+                    assert_eq!(report.eval_exit_code, None);
+                    assert_eq!(report.artifact_path, None);
+                    assert_eq!(report.executable_path, None);
+                    assert_eq!(report.abi_path, None);
+                    assert!(report.external_invocations.is_empty(), "{name}: {report:?}");
+                    assert!(!out.exists(), "{name}: refused build left {out:?}");
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}

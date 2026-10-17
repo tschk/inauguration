@@ -716,14 +716,21 @@ pub(crate) fn evaluate_pure_constant(
     expr: &Expr,
     semantics: IntegerSemantics,
 ) -> Result<Option<Expr>, ConstantEvalError> {
-    let globals = HashMap::new();
-    let functions = HashSet::new();
-    if !const_syntax(expr, &globals, &functions, &HashSet::new(), 0, &mut 65536) {
+    evaluate_constant_with_globals(expr, &HashMap::new(), &HashSet::new(), semantics)
+}
+
+fn evaluate_constant_with_globals(
+    expr: &Expr,
+    globals: &HashMap<String, Option<Expr>>,
+    functions: &HashSet<String>,
+    semantics: IntegerSemantics,
+) -> Result<Option<Expr>, ConstantEvalError> {
+    if !const_syntax(expr, globals, functions, &HashSet::new(), 0, &mut 65536) {
         return Ok(None);
     }
     let mut evaluator = Eval {
-        globals: &globals,
-        functions: &functions,
+        globals,
+        functions,
         active: HashSet::new(),
         fuel: 65536,
         depth: 0,
@@ -737,6 +744,103 @@ pub(crate) fn evaluate_pure_constant(
     } else {
         Ok(value)
     }
+}
+
+/// Retain reached source-constant arithmetic failures before entry pruning.
+pub(crate) fn validate_constant_arithmetic_with_semantics(
+    decls: &mut [Decl],
+    semantics: IntegerSemantics,
+) {
+    let mut globals = HashMap::new();
+    let functions = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Function { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    for decl in decls.iter() {
+        if let Decl::Global {
+            name,
+            init,
+            constant_value: true,
+            mutable: false,
+            ..
+        } = decl
+        {
+            if globals.contains_key(name) {
+                globals.insert(name.clone(), None);
+            } else {
+                globals.insert(name.clone(), init.as_deref().cloned());
+            }
+        }
+    }
+    let validate = |value: &mut Expr, globals: &HashMap<String, Option<Expr>>| {
+        match evaluate_constant_with_globals(value, globals, &functions, semantics) {
+            Ok(value) => return value,
+            Err(ConstantEvalError::Arithmetic) => {}
+        }
+        let mut failure = None;
+        crate::core_opt::map_expr_mut(value, &mut |expr| {
+            if let Expr::Ident(name) = expr {
+                failure = crate::core_ir::type_proofs::prefer_failure(
+                    failure.take(),
+                    crate::core_ir::type_proofs::decode(name),
+                );
+            }
+        });
+        if let Some(failure) = crate::core_ir::type_proofs::prefer_failure(
+            failure,
+            Some(crate::core_ir::type_proofs::ResolutionFailure::Invalid(
+                "constant integer arithmetic failed".into(),
+            )),
+        ) {
+            *value = Expr::Ident(failure.symbol());
+        }
+        None
+    };
+    let mut pending: HashSet<_> = globals
+        .iter()
+        .filter_map(|(name, value)| value.as_ref().map(|_| name.clone()))
+        .collect();
+    while !pending.is_empty() {
+        let previous = pending.len();
+        for decl in decls.iter_mut() {
+            let Decl::Global {
+                name,
+                init: Some(value),
+                constant_value: true,
+                mutable: false,
+                ..
+            } = decl
+            else {
+                continue;
+            };
+            if !pending.contains(name) {
+                continue;
+            }
+            if let Some(evaluated) = validate(value, &globals) {
+                globals.insert(name.clone(), Some(evaluated));
+                pending.remove(name);
+            } else if matches!(value.as_ref(), Expr::Ident(symbol)
+                if crate::core_ir::type_proofs::decode(symbol).is_some_and(|proof| proof.is_invalid()))
+            {
+                globals.insert(name.clone(), None);
+                pending.remove(name);
+            }
+        }
+        // Forward dependencies can close after later declarations are memoized.
+        if pending.len() == previous {
+            break;
+        }
+    }
+    crate::core_opt::map_decl_exprs_mut(decls, &mut |expr| {
+        if matches!(expr, Expr::Call { callee, .. }
+            if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::INLINE_CONST))
+        {
+            let _ = validate(expr, &globals);
+        }
+    });
 }
 
 pub(crate) fn lower_inline_constants_with_semantics(
@@ -884,6 +988,145 @@ pub(crate) fn fold_static_initializers_with_semantics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn constant(name: &str, value: Expr) -> Decl {
+        Decl::Global {
+            name: name.into(),
+            typ: Typ::Int,
+            init: Some(Box::new(value)),
+            mutable: false,
+            constant_value: true,
+        }
+    }
+    fn checked_neg(value: Expr) -> Expr {
+        Expr::Unary {
+            op: "rust-checked-integer-i64".into(),
+            expr: Box::new(Expr::Unary {
+                op: "-".into(),
+                expr: Box::new(value),
+            }),
+        }
+    }
+    #[test]
+    fn constant_graph_retains_reached_errors_and_preserves_cold_initializers() {
+        let bad = checked_neg(Expr::Ident("MIN".into()));
+        let cold = Expr::Conditional {
+            cond: Box::new(Expr::BoolLit(true)),
+            then_expr: Box::new(Expr::IntLit(42)),
+            else_expr: Box::new(bad.clone()),
+        };
+        let mut decls = vec![
+            constant("MIN", Expr::IntLit(i64::MIN)),
+            constant("BAD", bad),
+            constant("GOOD", cold.clone()),
+        ];
+        validate_constant_arithmetic_with_semantics(&mut decls, IntegerSemantics::Word64);
+        let proofs = crate::typecheck::TypeChecker::new().typed_proof_nodes(&decls);
+        assert!(
+            proofs
+                .get("BAD")
+                .is_some_and(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+            "{decls:?}"
+        );
+        assert!(!proofs.contains_key("GOOD"), "{decls:?}");
+        assert!(matches!(&decls[2], Decl::Global { init: Some(value), .. } if **value == cold));
+    }
+    #[test]
+    fn constant_graph_memoizes_dags_without_folding_source() {
+        let mut decls = vec![constant("A0", Expr::IntLit(1))];
+        for index in 1..24 {
+            let previous = Expr::Ident(format!("A{}", index - 1));
+            decls.push(constant(
+                &format!("A{index}"),
+                Expr::Binary {
+                    op: "+".into(),
+                    lhs: Box::new(previous.clone()),
+                    rhs: Box::new(previous),
+                },
+            ));
+        }
+        decls.push(constant(
+            "BAD",
+            Expr::Unary {
+                op: "rust-checked-integer-i64".into(),
+                expr: Box::new(Expr::Binary {
+                    op: "+".into(),
+                    lhs: Box::new(Expr::Ident("A23".into())),
+                    rhs: Box::new(Expr::IntLit(i64::MAX)),
+                }),
+            },
+        ));
+        let source = decls[..24].to_vec();
+        let mut reverse = decls.clone();
+        reverse.reverse();
+        validate_constant_arithmetic_with_semantics(&mut decls, IntegerSemantics::Word64);
+        assert_eq!(decls[..24], source);
+        assert!(
+            crate::typecheck::TypeChecker::new()
+                .typed_proof_nodes(&decls)
+                .get("BAD")
+                .is_some_and(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+            "{decls:?}"
+        );
+        validate_constant_arithmetic_with_semantics(&mut reverse, IntegerSemantics::Word64);
+        assert!(
+            crate::typecheck::TypeChecker::new()
+                .typed_proof_nodes(&reverse)
+                .get("BAD")
+                .is_some_and(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+            "reverse dependency order: {reverse:?}"
+        );
+        assert_eq!(reverse[1..], source.into_iter().rev().collect::<Vec<_>>());
+    }
+    #[test]
+    fn inline_constant_graph_resolves_global_aliases_before_pruning() {
+        let mut decls = vec![
+            constant("MIN", Expr::IntLit(i64::MIN)),
+            Decl::Function {
+                name: "unused".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![Stmt::Return(Some(Expr::Call {
+                    callee: Box::new(Expr::Ident(crate::core_ir::INLINE_CONST.into())),
+                    args: vec![checked_neg(Expr::Ident("MIN".into()))],
+                }))],
+            },
+        ];
+        validate_constant_arithmetic_with_semantics(&mut decls, IntegerSemantics::Word64);
+        assert!(
+            crate::typecheck::TypeChecker::new()
+                .typed_proof_nodes(&decls)
+                .get("unused")
+                .is_some_and(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+            "{decls:?}"
+        );
+    }
+    #[test]
+    fn constant_graph_defers_mutable_nonconstant_duplicate_and_cyclic_bindings() {
+        let minimum = constant("MIN", Expr::IntLit(i64::MIN));
+        let mut mutable = minimum.clone();
+        if let Decl::Global { mutable, .. } = &mut mutable {
+            *mutable = true;
+        }
+        let mut nonconstant = minimum.clone();
+        if let Decl::Global { constant_value, .. } = &mut nonconstant {
+            *constant_value = false;
+        }
+        for mut decls in [
+            vec![mutable],
+            vec![nonconstant],
+            vec![minimum.clone(), minimum],
+            vec![
+                constant("MIN", Expr::Ident("OTHER".into())),
+                constant("OTHER", Expr::Ident("MIN".into())),
+            ],
+        ] {
+            decls.push(constant("BAD", checked_neg(Expr::Ident("MIN".into()))));
+            let before = decls.clone();
+            validate_constant_arithmetic_with_semantics(&mut decls, IntegerSemantics::Word64);
+            assert_eq!(decls, before);
+        }
+    }
     #[test]
     fn target_word_constants_reach_named_global_and_inline_values() {
         use IntegerSemantics::{Word32, Word64};
