@@ -45,6 +45,12 @@ integer operands for word shifts. It uses unsigned shifts with masked counts
 and explicit sign extension for arithmetic right shifts. Each operand evaluates
 once in source order. Global shift initializers must fold before projection.
 
+For validated integer operands, C projection implements addition, subtraction,
+multiplication and negation with unsigned word arithmetic and reconstructs the
+signed result without overflow. Operands evaluate once in source order; Float
+arithmetic retains its floating-point representation. Global integer arithmetic
+initializers must fold before projection.
+
 Objective-C free C functions use the existing C-family numeric normalization
 before native verification. This covers integer promotions without adding
 Objective-C message dispatch, a runtime, or full frontend typechecking.

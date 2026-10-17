@@ -1775,3 +1775,272 @@ fn word_shift_projection_preserves_resolved_integer_aliases() {
         }
     }
 }
+
+#[test]
+fn integer_arithmetic_projection_wraps_without_ubsan_and_retains_float_semantics() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    let source = "var trace:Int=0;fn left()->Int{trace=trace*10+1;return 9223372036854775807;}fn right()->Int{trace=trace*10+2;return 1;}fn calc(value:Int,other:Int)->Int{return value+other;}fn nested_symbolic(value:Int,other:Int)->Int{return (value+0)+other;}fn nested_alias(value:Int,other:Int)->Int{return (value+0)+other;}fn negate(value:Int)->Int{return -value;}fn unary_effect()->Int{return -left();}fn unary_skipped()->Int{if false&&((-left())==0){return 7;}return trace;}fn effects()->Int{return left()+right();}fn skipped()->Int{if false&&((left()+right())==0){return 7;}return trace;}fn float_calc(value:Float,other:Float)->Float{return value+other;}fn float_negate(value:Float)->Float{return -value;}fn main()->Int{return 42;}";
+    for op in ["+", "add", "-", "sub", "*", "mul"] {
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        for decl in &mut module.decls {
+            if let Decl::Function { name, .. } = decl {
+                if name == "main" {
+                    *name = "answer".into();
+                }
+                if name == "nested_alias" && matches!(op, "*" | "mul") {
+                    crate::core_opt::map_decl_exprs_mut(std::slice::from_mut(decl), &mut |expr| {
+                        if let Expr::IntLit(value) = expr
+                            && *value == 0
+                        {
+                            *value = 1;
+                        }
+                    });
+                }
+                if let Decl::Function { name, .. } = decl
+                    && matches!(
+                        name.as_str(),
+                        "negate" | "unary_effect" | "unary_skipped" | "float_negate"
+                    )
+                {
+                    crate::core_opt::map_decl_exprs_mut(std::slice::from_mut(decl), &mut |expr| {
+                        if let Expr::Unary { op: current, .. } = expr
+                            && current == "-"
+                        {
+                            *current = if matches!(op, "add" | "sub" | "mul") {
+                                "neg"
+                            } else {
+                                "-"
+                            }
+                            .into();
+                        }
+                    });
+                }
+                if let Decl::Function { name, .. } = decl
+                    && matches!(
+                        name.as_str(),
+                        "calc" | "effects" | "skipped" | "float_calc" | "nested_alias"
+                    )
+                {
+                    crate::core_opt::map_decl_exprs_mut(std::slice::from_mut(decl), &mut |expr| {
+                        if let Expr::Binary { op: current, .. } = expr
+                            && current == "+"
+                        {
+                            *current = op.into();
+                        }
+                    });
+                }
+            }
+        }
+        let before = module.clone();
+        let emitted = emit_c_module(&module).unwrap();
+        assert_eq!(module, before);
+        let expected = |left: i64, right: i64| match op {
+            "+" | "add" => left.wrapping_add(right),
+            "-" | "sub" => left.wrapping_sub(right),
+            _ => left.wrapping_mul(right),
+        };
+        let literal = |value: i64| {
+            if value == i64::MIN {
+                "INT64_MIN".to_owned()
+            } else {
+                format!("INT64_C({value})")
+            }
+        };
+        let mut checks = String::new();
+        for left in [0i64, 1, -1, -84, i64::MIN, i64::MAX] {
+            for right in [0i64, 1, -1, 2, i64::MIN, i64::MAX] {
+                checks.push_str(&format!("{{volatile int64_t left={};volatile int64_t right={};if(calc(left,right)!={})return 7;}}\n",literal(left),literal(right),literal(expected(left,right))));
+            }
+            checks.push_str(&format!(
+                "{{volatile int64_t value={};if(negate(value)!={})return 8;}}\n",
+                literal(left),
+                literal(left.wrapping_neg())
+            ));
+        }
+        for left in [i64::MIN, i64::MAX, -84] {
+            checks.push_str(&format!("{{volatile int64_t left={};volatile int64_t right=1;if(nested_alias(left,right)!={})return 13;if(nested_symbolic(left,right)!={})return 14;}}\n",literal(left),literal(expected(left,1)),literal(left.wrapping_add(1))));
+        }
+        checks.push_str(&format!("trace=0;if(unary_effect()!={}||trace!=1)return 15;trace=0;if(unary_skipped()!=0||trace!=0)return 16;",literal(i64::MAX.wrapping_neg())));
+        let float_expected = match op {
+            "+" | "add" => 4.0,
+            "-" | "sub" => -1.0,
+            _ => 3.75,
+        };
+        checks.push_str(&format!("trace=0;if(effects()!={}||trace!=12)return 9;trace=0;if(skipped()!=0||trace!=0)return 10;if(float_calc(1.5,2.5)!={float_expected})return 11;double negative_zero=float_negate(0.0);uint64_t zero_bits;memcpy(&zero_bits,&negative_zero,sizeof(zero_bits));if(zero_bits!=UINT64_C(0x8000000000000000))return 12;return 42;",literal(expected(i64::MAX,1))));
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "inauguration-c-arithmetic-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("arithmetic.c");
+        let binary = directory.join("arithmetic");
+        std::fs::write(
+            &path,
+            format!("#include <string.h>\n{emitted}\nint main(void){{{checks}}}\n"),
+        )
+        .unwrap();
+        let build = Command::new("clang")
+            .args([
+                "-std=gnu11",
+                "-O2",
+                "-fsanitize=undefined",
+                "-fno-sanitize-recover=undefined",
+            ])
+            .arg(&path)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{op}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let result = Command::new(&binary).output().unwrap();
+        assert_eq!(
+            result.status.code(),
+            Some(42),
+            "{op}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            result.stderr.is_empty(),
+            "{op}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
+fn overflowing_global_integer_arithmetic_requires_folding_before_projection() {
+    for (op, left, right) in [("+", i64::MAX, 1), ("-", i64::MIN, 1), ("*", i64::MAX, 2)] {
+        let module = UnifiedModule::new(vec![Decl::Global {
+            name: "result".into(),
+            typ: Typ::Int,
+            init: Some(Box::new(Expr::Binary {
+                op: op.into(),
+                lhs: Box::new(Expr::IntLit(left)),
+                rhs: Box::new(Expr::IntLit(right)),
+            })),
+            mutable: true,
+            constant_value: false,
+        }]);
+        assert!(
+            emit_c_module(&module)
+                .unwrap_err()
+                .contains("integer arithmetic in a global initializer requires constant folding")
+        );
+    }
+    let module = UnifiedModule::new(vec![Decl::Global {
+        name: "result".into(),
+        typ: Typ::Int,
+        init: Some(Box::new(Expr::Unary {
+            op: "-".into(),
+            expr: Box::new(Expr::IntLit(i64::MIN)),
+        })),
+        mutable: true,
+        constant_value: false,
+    }]);
+    assert!(
+        emit_c_module(&module)
+            .unwrap_err()
+            .contains("integer arithmetic in a global initializer requires constant folding")
+    );
+    let module = UnifiedModule::new(vec![Decl::Global {
+        name: "result".into(),
+        typ: Typ::Int,
+        init: Some(Box::new(Expr::Binary {
+            op: "+".into(),
+            lhs: Box::new(Expr::IntLit(20)),
+            rhs: Box::new(Expr::IntLit(22)),
+        })),
+        mutable: true,
+        constant_value: false,
+    }]);
+    assert_inferred_c_executes(&module, "if(result!=42)return 7;return 42;");
+}
+
+#[test]
+fn malformed_nested_string_arithmetic_does_not_gain_integer_casts() {
+    for typ in [Typ::Int, Typ::Named("i32".into()), Typ::Named("u32".into())] {
+        let inner = Expr::Binary {
+            op: "+".into(),
+            lhs: Box::new(Expr::Ident("text".into())),
+            rhs: Box::new(Expr::Ident("value".into())),
+        };
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "bad".into(),
+            params: vec![("text".into(), Typ::String), ("value".into(), typ)],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(inner),
+                rhs: Box::new(Expr::IntLit(1)),
+            }))],
+        }]);
+        let emitted = emit_c_module(&module).unwrap();
+        let function = &emitted[emitted.rfind("int64_t bad(").unwrap()..];
+        assert!(
+            !function.contains("(uint64_t)"),
+            "unsupported pointer arithmetic gained integer coercion: {function}"
+        );
+    }
+}
+
+#[test]
+fn arithmetic_primitive_aliases_preserve_float_results_and_checked_types() {
+    let checker = TypeChecker::new();
+    let facts = checker.collect_decl_facts(&[]);
+    for op in ["+", "add", "-", "sub", "*", "mul"] {
+        let expression = Expr::Binary {
+            op: op.into(),
+            lhs: Box::new(Expr::Ident("left".into())),
+            rhs: Box::new(Expr::Ident("right".into())),
+        };
+        for (left, right, expected) in [
+            (
+                Typ::Named("f64".into()),
+                Typ::Named("i32".into()),
+                Some(Typ::Float),
+            ),
+            (
+                Typ::Named("i32".into()),
+                Typ::Named("u32".into()),
+                Some(Typ::Int),
+            ),
+            (Typ::Named("i32".into()), Typ::String, None),
+            (Typ::Bool, Typ::Int, None),
+        ] {
+            let env = HashMap::from([("left".into(), left), ("right".into(), right)]);
+            assert_eq!(
+                checker.checked_expr_type(&expression, &facts, &env),
+                expected,
+                "{op}"
+            );
+        }
+    }
+    let mut module = crate::in_lang_parse::parse_in_source(
+        "fn calculate(left:Float,right:Int)->Float{return (left+right)+1;}fn main()->Int{return 42;}",
+    ).unwrap();
+    for decl in &mut module.decls {
+        if let Decl::Function { name, params, .. } = decl {
+            if name == "main" {
+                *name = "answer".into();
+            }
+            if name == "calculate" {
+                params[0].1 = Typ::Named("f64".into());
+                params[1].1 = Typ::Named("i32".into());
+            }
+        }
+    }
+    assert_inferred_c_executes(&module, "if(calculate(1.5,1)!=3.5)return 7;return 42;");
+}

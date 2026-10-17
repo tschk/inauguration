@@ -29,6 +29,10 @@ fn ctype(typ: &Typ) -> String {
     }
 }
 
+fn signed_word_from_bits(bits: &str) -> String {
+    format!("{bits} <= INT64_MAX ? (int64_t){bits} : -INT64_C(1) - (int64_t)(UINT64_MAX - {bits})")
+}
+
 fn sanitize_ident(name: &str) -> String {
     name.chars()
         .map(|c| {
@@ -576,6 +580,32 @@ impl Ctx {
                         return self.string_equality(&l, &r, matches!(op.as_str(), "neq" | "!="));
                     }
                 }
+                if matches!(op.as_str(), "+" | "add" | "-" | "sub" | "*" | "mul") {
+                    let checker = TypeChecker::new();
+                    let integer = |value: &Expr| {
+                        checker
+                            .checked_expr_type(value, &self.facts, &self.types)
+                            .is_some_and(|typ| typ.canonical() == Typ::Int)
+                    };
+                    if integer(lhs) && integer(rhs) {
+                        if self.global_initializer {
+                            self.fail("c-backend: integer arithmetic in a global initializer requires constant folding".into());
+                            return "0".into();
+                        }
+                        let left = self.fresh("integer_left");
+                        let right = self.fresh("integer_right");
+                        let bits = self.fresh("integer_bits");
+                        let operator = match op.as_str() {
+                            "+" | "add" => "+",
+                            "-" | "sub" => "-",
+                            _ => "*",
+                        };
+                        let result = signed_word_from_bits(&bits);
+                        return format!(
+                            "({{ uint64_t {left} = (uint64_t)({l}); uint64_t {right} = (uint64_t)({r}); uint64_t {bits} = {left} {operator} {right}; {result}; }})"
+                        );
+                    }
+                }
                 match op.as_str() {
                     "land" | "&&" => format!("({} && {})", l, r),
                     "lor" | "||" => format!("({} || {})", l, r),
@@ -616,8 +646,9 @@ impl Ctx {
                             ),
                         };
                         // Sequence operands once, shift unsigned bits, then reconstruct the signed word in range.
+                        let result = signed_word_from_bits(&bits);
                         format!(
-                            "({{ uint64_t {left} = (uint64_t)({l}); uint64_t {count} = (uint64_t)({r}) & UINT64_C(63); uint64_t {bits} = {operation}; {bits} <= INT64_MAX ? (int64_t){bits} : -INT64_C(1) - (int64_t)(UINT64_MAX - {bits}); }})"
+                            "({{ uint64_t {left} = (uint64_t)({l}); uint64_t {count} = (uint64_t)({r}) & UINT64_C(63); uint64_t {bits} = {operation}; {result}; }})"
                         )
                     }
                     "udiv" | "urem" => {
@@ -659,6 +690,23 @@ impl Ctx {
                     let value =
                         crate::core_ir::integer_cast_expr(expr.as_ref().clone(), op).unwrap();
                     return format!("((int64_t)({}))", self.expr_str(&value));
+                }
+                if matches!(op.as_str(), "neg" | "-")
+                    && TypeChecker::new()
+                        .checked_expr_type(expr, &self.facts, &self.types)
+                        .is_some_and(|typ| typ.canonical() == Typ::Int)
+                {
+                    if self.global_initializer {
+                        self.fail("c-backend: integer arithmetic in a global initializer requires constant folding".into());
+                        return "0".into();
+                    }
+                    let value = self.fresh("integer_value");
+                    let bits = self.fresh("integer_bits");
+                    let result = signed_word_from_bits(&bits);
+                    let e = self.expr_str(expr);
+                    return format!(
+                        "({{ uint64_t {value} = (uint64_t)({e}); uint64_t {bits} = UINT64_C(0) - {value}; {result}; }})"
+                    );
                 }
                 let e = self.expr_str(expr);
                 if let Some((bits, signed)) = crate::core_ir::saturating_float_cast_spec(op) {

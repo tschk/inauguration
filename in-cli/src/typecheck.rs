@@ -2060,13 +2060,20 @@ impl TypeChecker {
                 }
             }
             Expr::Binary { op, lhs, rhs, .. } => {
+                let op = match op.as_str() {
+                    "add" => "+",
+                    "sub" => "-",
+                    "mul" => "*",
+                    other => other,
+                };
                 self.check_expr(fn_name, lhs, facts, env, errors);
                 self.check_expr(fn_name, rhs, facts, env, errors);
                 if let (Some(l), Some(r)) = (
                     self.expr_type(lhs, facts, env),
                     self.expr_type(rhs, facts, env),
                 ) {
-                    match op.as_str() {
+                    let (l, r) = (l.canonical(), r.canonical());
+                    match op {
                         "+" => {
                             let l_concrete = is_concrete(&l);
                             let r_concrete = is_concrete(&r);
@@ -2416,6 +2423,20 @@ impl TypeChecker {
         }
     }
 
+    pub(crate) fn checked_expr_type(
+        &self,
+        expr: &Expr,
+        facts: &Facts,
+        env: &HashMap<String, Typ>,
+    ) -> Option<Typ> {
+        let mut errors = Vec::new();
+        self.check_expr("expression", expr, facts, env, &mut errors);
+        errors
+            .is_empty()
+            .then(|| self.expr_type(expr, facts, env))
+            .flatten()
+    }
+
     pub(crate) fn expr_type(
         &self,
         expr: &Expr,
@@ -2544,29 +2565,37 @@ impl TypeChecker {
                 _ => self.expr_type(expr, facts, env),
             },
             Expr::Binary { op, lhs, rhs, .. } => {
+                let op = match op.as_str() {
+                    "add" => "+",
+                    "sub" => "-",
+                    "mul" => "*",
+                    other => other,
+                };
                 let left = self.expr_type(lhs, facts, env);
                 let right = self.expr_type(rhs, facts, env);
                 if matches!(
-                    op.as_str(),
+                    op,
                     "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "xor" | "<<" | ">>"
                 ) {
                     let rust_kind = |typ: &Option<Typ>| matches!(typ, Some(Typ::Named(name)) if crate::core_ir::rust_integer_type_name(name).is_some());
                     if rust_kind(&left) {
                         return left;
                     }
-                    if rust_kind(&right) && !matches!(op.as_str(), "<<" | ">>") {
+                    if rust_kind(&right) && !matches!(op, "<<" | ">>") {
                         return right;
                     }
                 }
-                if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "xor" | "<<" | ">>")
+                if matches!(op, "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "xor" | "<<" | ">>")
                     && [left.as_ref(), right.as_ref()].iter().any(|typ| matches!(typ, Some(Typ::Named(name)) if crate::core_ir::integer_type_name(name).is_some()))
                 {
                     let l = c_expression_leaf_kind(lhs, left.as_ref());
                     let r = c_expression_leaf_kind(rhs, right.as_ref());
-                    let kind = if matches!(op.as_str(), "<<" | ">>") { l } else { CIntegerKind::common(l, r) };
+                    let kind = if matches!(op, "<<" | ">>") { l } else { CIntegerKind::common(l, r) };
                     if let Some(kind) = kind { return Some(kind.typ()); }
                 }
-                match op.as_str() {
+                let left = left.map(|typ| typ.canonical());
+                let right = right.map(|typ| typ.canonical());
+                match op {
                     "udiv" | "urem" | "lshr" => Some(Typ::Int),
                     "+" => match (left, right) {
                         (Some(Typ::String), Some(Typ::String)) => Some(Typ::String),
