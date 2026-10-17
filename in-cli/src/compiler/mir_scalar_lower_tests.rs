@@ -70,7 +70,6 @@ fn scalar_machine_pass_refuses_unimplemented_abi_and_checked_operations_without_
     for source in [
         "fn main()->Int{return 84/2;}",
         "fn main()->Int{return 84%43;}",
-        "fn main()->Int{return 21<<1;}",
         "extern c fn pending()->Int;fn main()->Int{return pending();}",
     ] {
         let input = typed(source);
@@ -136,5 +135,149 @@ fn scalar_typed_core_to_machine_executes_real_host_code() {
         let mut runtime = crate::jit_runtime::JitRuntime::new();
         runtime.load(&code, &exports, &[]).unwrap();
         assert_eq!(unsafe { runtime.invoke("main", &[]) }, Some(42), "{source}");
+    }
+}
+
+#[test]
+fn scalar_machine_shifts_preserve_word_counts_and_emit_both_targets() {
+    for op in ["<<", ">>", "lshr"] {
+        for value in [1i64, -84, i64::MIN] {
+            for count in [0i64, 1, 63, 64, 65, -1] {
+                let source = format!(
+                    "fn shift(value:Int,count:Int)->Int{{return value>>count;}}fn main()->Int{{return shift({value},{count});}}"
+                );
+                let mut core = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                crate::core_opt::map_decl_exprs_mut(&mut core.decls, &mut |expr| {
+                    if let crate::core_ir::Expr::Binary { op: current, .. } = expr
+                        && current == ">>"
+                    {
+                        *current = op.into();
+                    }
+                });
+                let input = crate::compiler::mir_lower::lower_to_mir(&core).unwrap();
+                let expected = match op {
+                    "<<" => value.wrapping_shl(count as u32),
+                    ">>" => value.wrapping_shr(count as u32),
+                    _ => (value as u64).wrapping_shr(count as u32) as i64,
+                };
+                for target in [ScalarTarget::Aarch64, ScalarTarget::X86_64] {
+                    let machine = lower_scalar_typed(&input, target).unwrap();
+                    assert!(machine.verify_machine().is_ok());
+                    let opcode = match op {
+                        "<<" => MirOp::Shl,
+                        ">>" => MirOp::Shr,
+                        _ => MirOp::Lshr,
+                    };
+                    assert!(
+                        machine
+                            .functions
+                            .iter()
+                            .flat_map(|f| &f.instructions)
+                            .any(|inst| inst.op == opcode)
+                    );
+                    let (code, exports) = match target {
+                        ScalarTarget::Aarch64 => crate::compiler::mir_emit::emit_jit(&machine),
+                        ScalarTarget::X86_64 => crate::compiler::mir_emit_x86::emit_boot(&machine),
+                    }
+                    .unwrap();
+                    if (target == ScalarTarget::Aarch64 && cfg!(target_arch = "aarch64"))
+                        || (target == ScalarTarget::X86_64 && cfg!(target_arch = "x86_64"))
+                    {
+                        #[cfg(any(
+                            all(target_os = "macos", target_arch = "aarch64"),
+                            all(target_os = "linux", target_arch = "x86_64"),
+                            all(target_os = "macos", target_arch = "x86_64")
+                        ))]
+                        {
+                            let mut runtime = crate::jit_runtime::JitRuntime::new();
+                            runtime.load(&code, &exports, &[]).unwrap();
+                            assert_eq!(
+                                unsafe { runtime.invoke("main", &[]) },
+                                Some(expected),
+                                "{op} {value} {count} {target:?}"
+                            );
+                        }
+                    }
+                    // Other hosts still validate both target encodings without executing them.
+                    let _ = (code, exports, expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+fn x86_machine_shifts_preserve_live_count_register_and_all_aliases() {
+    for op in [MirOp::Shl, MirOp::Shr, MirOp::Lshr] {
+        for dest in 0..3u32 {
+            for left in 0..3u32 {
+                for right in 0..3u32 {
+                    let values = [-84i64, 1, 13];
+                    let value = values[left as usize];
+                    let count = values[right as usize] as u32;
+                    let shifted = match op {
+                        MirOp::Shl => value.wrapping_shl(count),
+                        MirOp::Shr => value.wrapping_shr(count),
+                        _ => (value as u64).wrapping_shr(count) as i64,
+                    };
+                    let expected = if dest == 2 {
+                        shifted
+                    } else {
+                        shifted.wrapping_add(13)
+                    };
+                    let mut machine = lower_scalar_typed(
+                        &typed("fn main()->Int{return 42;}"),
+                        ScalarTarget::X86_64,
+                    )
+                    .unwrap();
+                    let function = &mut machine.functions[0];
+                    function.vreg_count = 6;
+                    function.frame_size = 0;
+                    function.instructions = values
+                        .iter()
+                        .enumerate()
+                        .map(|(reg, value)| {
+                            mir(
+                                MirOp::Mov,
+                                vec![MirOperand::Reg(reg as u32), MirOperand::Imm(*value)],
+                            )
+                        })
+                        .collect();
+                    function.instructions.push(mir(
+                        op.clone(),
+                        vec![
+                            MirOperand::Reg(dest),
+                            MirOperand::Reg(left),
+                            MirOperand::Reg(right),
+                        ],
+                    ));
+                    function.instructions.push(if dest == 2 {
+                        mir(MirOp::Mov, vec![MirOperand::Reg(0), MirOperand::Reg(dest)])
+                    } else {
+                        mir(
+                            MirOp::Add,
+                            vec![
+                                MirOperand::Reg(0),
+                                MirOperand::Reg(dest),
+                                MirOperand::Reg(2),
+                            ],
+                        )
+                    });
+                    function
+                        .instructions
+                        .push(mir(MirOp::Ret, vec![MirOperand::Reg(0)]));
+                    let (code, exports) =
+                        crate::compiler::mir_emit_x86::emit_boot(&machine).unwrap();
+                    let mut runtime = crate::jit_runtime::JitRuntime::new();
+                    runtime.load(&code, &exports, &[]).unwrap();
+                    assert_eq!(
+                        unsafe { runtime.invoke("main", &[]) },
+                        Some(expected),
+                        "{op:?} dest={dest} left={left} right={right}"
+                    );
+                }
+            }
+        }
     }
 }

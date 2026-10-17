@@ -8166,6 +8166,9 @@ fn icore_shifts_execute_parameterized_helpers_with_word_counts() {
             (">>", i64::MIN, 64, i64::MIN),
             (">>", i64::MIN, -1, -1),
             (">>", -84, 1, -42),
+            ("lshr", -84, 1, 9223372036854775766),
+            ("lshr", -84, 64, -84),
+            ("lshr", -84, -1, 1),
         ] {
             let mut module = original.clone();
             module["decls"][0]["body"][0]["value"]["op"] = op.into();
@@ -8176,6 +8179,13 @@ fn icore_shifts_execute_parameterized_helpers_with_word_counts() {
             let report = compile_owned(&request);
             assert!(
                 report.success && report.execution_started,
+                "{op} {count} {profile:?}: {report:?}"
+            );
+            assert!(
+                report
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("scalar MIR")),
                 "{op} {count} {profile:?}: {report:?}"
             );
             assert_eq!(

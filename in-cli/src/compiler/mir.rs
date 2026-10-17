@@ -149,8 +149,12 @@ pub enum MirOp {
     And,
     Or,
     Xor,
+    /// Logical left shift; runtime count is masked to the 64-bit word.
     Shl,
+    /// Arithmetic right shift with the same runtime count mask.
     Shr,
+    /// Logical right shift with the same runtime count mask.
+    Lshr,
     Not,
     Neg,
 

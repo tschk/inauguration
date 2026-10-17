@@ -278,7 +278,13 @@ fn emit_inst(instruction: &MirInst, code: &mut Vec<u8>) -> Result<(), String> {
             },
         ),
         (
-            op @ (MirOp::Mul | MirOp::And | MirOp::Or | MirOp::Xor),
+            op @ (MirOp::Mul
+            | MirOp::And
+            | MirOp::Or
+            | MirOp::Xor
+            | MirOp::Shl
+            | MirOp::Shr
+            | MirOp::Lshr),
             [MirOperand::Reg(d), MirOperand::Reg(a), MirOperand::Reg(b)],
         ) => {
             let (d, a, b) = (reg(*d)?, reg(*a)?, reg(*b)?);
@@ -289,6 +295,9 @@ fn emit_inst(instruction: &MirInst, code: &mut Vec<u8>) -> Result<(), String> {
                     MirOp::And => aarch64::and_reg64(d, a, b),
                     MirOp::Or => aarch64::orr_reg64(d, a, b),
                     MirOp::Xor => aarch64::eor_reg64(d, a, b),
+                    MirOp::Shl => aarch64::lsl_reg64(d, a, b),
+                    MirOp::Shr => aarch64::asr_reg64(d, a, b),
+                    MirOp::Lshr => aarch64::lsr_reg64(d, a, b),
                     _ => unreachable!(),
                 },
             );

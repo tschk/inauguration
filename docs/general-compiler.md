@@ -28,6 +28,9 @@ Status matrix: **`in languages`** / **`in languages --json`**. Roadmap: [univers
 Hosted JIT execution first tries verified scalar MIR for defined zero-argument
 entries on AArch64 and x86_64. The current subset includes signed 64-bit Int,
 Bool and Void, internal register-argument calls, branches, loops and returns.
+Integer `<<`, arithmetic `>>`, and logical `lshr` emit through scalar MIR
+with native 64-bit count masking. The x86 emitter preserves allocated RCX
+values around its implicit CL shift-count operand.
 Unsupported types, globals, runtime intrinsics, checked division/remainder and
 other unrepresented operations retain native lowering. Reserved atomic and raw
 runtime declarations cannot become ordinary MIR functions. Once machine MIR is

@@ -279,6 +279,7 @@ fn destination(instruction: &MirInst) -> Option<VReg> {
             | MirOp::Xor
             | MirOp::Shl
             | MirOp::Shr
+            | MirOp::Lshr
             | MirOp::Not
             | MirOp::Neg
             | MirOp::FAdd

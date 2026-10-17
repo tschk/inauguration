@@ -115,10 +115,13 @@ pub fn lower_scalar_typed(module: &MirModule, target: ScalarTarget) -> Result<Mi
                             "&" | "bitand" => Some(MirOp::And),
                             "|" | "bitor" => Some(MirOp::Or),
                             "^" | "xor" | "bitxor" => Some(MirOp::Xor),
+                            "<<" | "shl" => Some(MirOp::Shl),
+                            ">>" | "shr" => Some(MirOp::Shr),
+                            "lshr" => Some(MirOp::Lshr),
                             "==" | "eq" | "!=" | "neq" | "<" | "<=" | ">" | ">=" => None,
                             _ => {
                                 return Err(format!(
-                                    "{}: checked division/remainder/shift or unknown binary `{op}` is not implemented",
+                                    "{}: checked division/remainder or unknown binary `{op}` is not implemented",
                                     prefix()
                                 ));
                             }

@@ -363,6 +363,28 @@ fn emit_inst(instruction: &MirInst, code: &mut Vec<u8>) -> Result<(), String> {
                 _ => unreachable!(),
             });
         }
+        (
+            op @ (MirOp::Shl | MirOp::Shr | MirOp::Lshr),
+            [MirOperand::Reg(d), MirOperand::Reg(a), b],
+        ) => {
+            let dest = reg(*d)?;
+            // RCX is an allocated register: preserve it around the implicit CL count.
+            code.extend_from_slice(&x64::mov_rr(11, reg(*a)?));
+            code.extend_from_slice(&x64::mov_rr(10, x64::RCX));
+            match b {
+                MirOperand::Reg(b) => code.extend_from_slice(&x64::mov_rr(x64::RCX, reg(*b)?)),
+                MirOperand::Imm(value) => code.extend_from_slice(&x64::mov_ri64(x64::RCX, *value)),
+                _ => return Err("MIR shift RHS operand".into()),
+            }
+            code.extend_from_slice(&match op {
+                MirOp::Shl => x64::shl_reg_cl(11),
+                MirOp::Shr => x64::sar_reg_cl(11),
+                MirOp::Lshr => x64::shr_reg_cl(11),
+                _ => unreachable!(),
+            });
+            code.extend_from_slice(&x64::mov_rr(x64::RCX, 10));
+            code.extend_from_slice(&x64::mov_rr(dest, 11));
+        }
         (MirOp::Cmp, [MirOperand::Reg(a), MirOperand::Reg(b)]) => {
             code.extend_from_slice(&x64::cmp_rr(reg(*a)?, reg(*b)?))
         }
@@ -390,5 +412,47 @@ mod relocation_tests {
         assert_eq!(super::relative_displacement(0, 4), Ok(0));
         assert!(super::relative_displacement(0, u64::MAX).is_err());
         assert!(super::relative_displacement(u64::MAX, 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod shift_tests {
+    use super::*;
+
+    #[test]
+    fn shifts_save_and_restore_allocated_rcx_before_writing_destination() {
+        if x64::is_32bit() {
+            return;
+        }
+        for (op, shift) in [
+            (MirOp::Shl, x64::shl_reg_cl(11)),
+            (MirOp::Shr, x64::sar_reg_cl(11)),
+            (MirOp::Lshr, x64::shr_reg_cl(11)),
+        ] {
+            for dest in [0, 2] {
+                for right in [MirOperand::Reg(2), MirOperand::Imm(-1)] {
+                    let mut code = Vec::new();
+                    emit_inst(
+                        &mir(
+                            op.clone(),
+                            vec![MirOperand::Reg(dest), MirOperand::Reg(2), right.clone()],
+                        ),
+                        &mut code,
+                    )
+                    .unwrap();
+                    let mut expected = x64::mov_rr(11, x64::RCX);
+                    expected.extend(x64::mov_rr(10, x64::RCX));
+                    expected.extend(match right {
+                        MirOperand::Reg(_) => x64::mov_rr(x64::RCX, x64::RCX),
+                        MirOperand::Imm(value) => x64::mov_ri64(x64::RCX, value),
+                        _ => unreachable!(),
+                    });
+                    expected.extend_from_slice(&shift);
+                    expected.extend(x64::mov_rr(x64::RCX, 10));
+                    expected.extend(x64::mov_rr(reg(dest).unwrap(), 11));
+                    assert_eq!(code, expected);
+                }
+            }
+        }
     }
 }
