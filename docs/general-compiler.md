@@ -99,6 +99,9 @@ Core IR `xor` shares the native and typed MIR integer XOR implementation with
 Lua `^` retains its power refusal and is never interpreted as XOR.
 `.icore` also admits `&` and `|` with matching integer or Boolean operands;
 String and mixed-type operands fail verification before execution.
+`.icore` admits `<<` and arithmetic `>>` with matching integer operands,
+using the native target-word count mask. Float, Boolean and mixed operands
+fail verification before execution.
 Explicit `Float` types and `{"kind":"float","value":1.5}` literals use finite
 binary64 values; integer payloads in explicit Float nodes convert to binary64
 with its normal rounding. Bare decimal numbers and out-of-range bare integers

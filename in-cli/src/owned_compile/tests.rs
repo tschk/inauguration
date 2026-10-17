@@ -8143,6 +8143,84 @@ fn icore_explicit_float_helpers_preserve_values_and_type_boundaries() {
 }
 
 #[test]
+fn icore_shifts_execute_parameterized_helpers_with_word_counts() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("canonical-shifts.icore");
+    let original = serde_json::json!({"icoreVersion":2,"decls":[
+        {"kind":"function","name":"shift","params":[{"name":"left","type":"Int"},{"name":"right","type":"Int"}],"return":"Int","body":[{"kind":"return","value":{"kind":"binary","op":"<<","lhs":{"kind":"ident","name":"left"},"rhs":{"kind":"ident","name":"right"}}}]},
+        {"kind":"function","name":"main","params":[],"return":"Int","body":[{"kind":"return","value":{"kind":"call","callee":"shift","args":[1,1]}}]}
+    ]});
+    for profile in [
+        crate::emit_profile::EmitProfile::Default,
+        crate::emit_profile::EmitProfile::Lean,
+        crate::emit_profile::EmitProfile::Harden,
+    ] {
+        for (op, left, count, expected) in [
+            ("<<", 21i64, 1i64, 42i64),
+            (">>", 84, 1, 42),
+            ("<<", 1, 32, 4294967296),
+            ("<<", 1, 64, 1),
+            ("<<", 1, -1, i64::MIN),
+            (">>", i64::MIN, 64, i64::MIN),
+            (">>", i64::MIN, -1, -1),
+            (">>", -84, 1, -42),
+        ] {
+            let mut module = original.clone();
+            module["decls"][0]["body"][0]["value"]["op"] = op.into();
+            module["decls"][1]["body"][0]["value"]["args"] = serde_json::json!([left, count]);
+            fs::write(&path, serde_json::to_string(&module).unwrap()).unwrap();
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.execution_started,
+                "{op} {count} {profile:?}: {report:?}"
+            );
+            assert_eq!(
+                report.eval_result,
+                Some(EvalValue::Int(expected)),
+                "{op} {count} {profile:?}: {report:?}"
+            );
+        }
+        for op in ["<<", ">>"] {
+            for invalid in ["Float", "Bool", "Mixed"] {
+                let mut module = original.clone();
+                module["decls"][0]["body"][0]["value"]["op"] = op.into();
+                if invalid == "Mixed" {
+                    module["decls"][0]["params"][1]["type"] = "Bool".into();
+                    module["decls"][1]["body"][0]["value"]["args"] = serde_json::json!([1, true]);
+                } else {
+                    module["decls"][0]["return"] = invalid.into();
+                    for param in module["decls"][0]["params"].as_array_mut().unwrap() {
+                        param["type"] = invalid.into();
+                    }
+                    module["decls"][1]["body"] = serde_json::json!([{"kind":"return","value":42}]);
+                }
+                fs::write(&path, serde_json::to_string(&module).unwrap()).unwrap();
+                let mut request =
+                    default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    !report.success && !report.execution_started && report.eval_result.is_none(),
+                    "{op} {invalid} {profile:?}: {report:?}"
+                );
+                assert!(
+                    report
+                        .reason_code
+                        .as_deref()
+                        .is_some_and(|code| code.starts_with("verify-")),
+                    "{report:?}"
+                );
+            }
+        }
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn canonical_bitwise_operators_execute_parameterized_helpers() {
     if !super::jit::host_supports_jit() {
         return;

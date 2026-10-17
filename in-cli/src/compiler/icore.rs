@@ -437,6 +437,8 @@ fn is_supported_binary_op(op: &str) -> bool {
             | "udiv"
             | "urem"
             | "lshr"
+            | "<<"
+            | ">>"
             | "^"
             | "xor"
             | "&"
