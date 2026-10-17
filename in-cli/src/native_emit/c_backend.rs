@@ -651,7 +651,7 @@ impl Ctx {
                         let checker = TypeChecker::new();
                         if [lhs.as_ref(), rhs.as_ref()].into_iter().any(|operand| {
                             checker
-                                .expr_type(operand, &self.facts, &self.types)
+                                .checked_expr_type(operand, &self.facts, &self.types)
                                 .map(|typ| typ.canonical())
                                 != Some(Typ::Int)
                         }) {

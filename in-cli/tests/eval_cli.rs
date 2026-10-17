@@ -450,3 +450,46 @@ fn c_projection_promotes_c_family_shifts_without_coercing_in_operands() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn c_projection_rejects_nested_invalid_shift_operands_before_writing_source() {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("in-c-nested-shifts-{}-{stamp}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let input = root.join("invalid.in");
+    let output = root.join("invalid.c");
+    for op in ["<<", ">>"] {
+        for invalid in ["(\"hello\"+1)", "(true+20)"] {
+            for side in [0usize, 1] {
+                let expression = if side == 0 {
+                    format!("{invalid}{op}1")
+                } else {
+                    format!("84{op}{invalid}")
+                };
+                std::fs::write(&input, format!("fn main()->Int{{return {expression};}}\n"))
+                    .unwrap();
+                let result = Command::new(env!("CARGO_BIN_EXE_in"))
+                    .args(["compile", "--path"])
+                    .arg(&input)
+                    .args(["--emit", "c", "--out"])
+                    .arg(&output)
+                    .output()
+                    .unwrap();
+                assert!(
+                    !result.status.success() && !output.exists(),
+                    "{expression}: {result:?}"
+                );
+                assert!(
+                    String::from_utf8_lossy(&result.stderr)
+                        .contains("word shift requires resolved Int operands"),
+                    "{expression}: {result:?}"
+                );
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

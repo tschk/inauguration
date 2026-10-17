@@ -2202,3 +2202,65 @@ fn signed_division_globals_fold_or_explicitly_refuse_and_string_failure_abi_refu
         );
     }
 }
+
+#[test]
+fn word_shift_projection_checks_nested_operand_types_and_preserves_integer_aliases() {
+    for op in ["<<", ">>", "lshr", "shl", "shr"] {
+        for invalid in ["(\"hello\"+1)", "(true+20)"] {
+            for side in [0usize, 1] {
+                let expression = if side == 0 {
+                    format!("{invalid}<<1")
+                } else {
+                    format!("84<<{invalid}")
+                };
+                let mut module = crate::in_lang_parse::parse_in_source(&format!(
+                    "fn main()->Int{{return {expression};}}"
+                ))
+                .unwrap();
+                crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                    if let Expr::Binary { op: current, .. } = expr
+                        && current == "<<"
+                    {
+                        *current = op.into();
+                    }
+                });
+                let error = emit_c_module(&module).unwrap_err();
+                assert!(
+                    error.contains("word shift requires resolved Int operands"),
+                    "{op} {side} {invalid}: {error}"
+                );
+            }
+        }
+        for alias in ["Int", "i32", "u32"] {
+            // Exercise internal Core IR aliases without claiming .in type syntax.
+            let mut module=crate::in_lang_parse::parse_in_source("fn shift(left:Int,right:Int)->Int{return (left+0)<<(right+0);}fn main()->Int{return shift(21,1);}").unwrap();
+            if alias != "Int" {
+                if let Decl::Function { params, .. } = &mut module.decls[0] {
+                    for (_, typ) in params {
+                        *typ = Typ::Named(alias.into());
+                    }
+                }
+            }
+            for decl in &mut module.decls {
+                if let Decl::Function { name, body, .. } = decl
+                    && name == "main"
+                {
+                    *name = "answer".into();
+                    if !matches!(op, "<<" | "shl") {
+                        if let Stmt::Return(Some(Expr::Call { args, .. })) = &mut body[0] {
+                            args[0] = Expr::IntLit(84);
+                        }
+                    }
+                }
+            }
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                if let Expr::Binary { op: current, .. } = expr
+                    && current == "<<"
+                {
+                    *current = op.into();
+                }
+            });
+            assert_inferred_c_executes(&module, "if(answer()!=42)return 7;return 42;");
+        }
+    }
+}
