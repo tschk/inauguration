@@ -1,4 +1,5 @@
 pub(crate) mod rust_integers;
+mod type_proofs;
 #[path = "typecheck/vector_inference.rs"]
 mod vector_inference;
 use crate::core_ir::{Decl, Expr, MatchPattern, MethodSig, Stmt, Typ, UnifiedModule};

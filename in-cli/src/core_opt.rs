@@ -529,6 +529,9 @@ fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: 
     }
     detect_ptr_refs(decls, &mut ptr_refs);
 
+    // An inlined body must not erase an invalid/unsupported source type.
+    // This applies to pure and zero-argument calls as well as snapshots.
+    let typed_proofs = crate::typecheck::TypeChecker::new().typed_proof_functions(decls);
     let candidates: Vec<&String> = functions
         .iter()
         .filter(|(n, d)| {
@@ -545,6 +548,7 @@ fn inline_small_functions_with(decls: &mut [Decl], threshold: usize, max_depth: 
                         && body.len() <= threshold
                         && !ptr_refs.contains(n)
                         && !has_cf(body)
+                        && !typed_proofs.contains_key(n.as_str())
             )
         })
         .map(|(n, _)| n)
@@ -5662,5 +5666,53 @@ mod checked_snapshot_driver_tests {
         ];
         inline_small_functions(&mut declarations);
         assert!(contains_call(&mut declarations[2], "ignore"));
+    }
+}
+
+#[cfg(test)]
+mod associated_type_inline_barrier_tests {
+    use super::*;
+    #[test]
+    fn private_type_failures_block_pure_zeroarg_and_literal_argument_inline_paths() {
+        for proof in [
+            crate::core_ir::type_proofs::ResolutionFailure::Invalid("cycle".into()),
+            crate::core_ir::type_proofs::ResolutionFailure::Unsupported("projection".into()),
+        ] {
+            for argc in [0, 1] {
+                let call = Expr::Call {
+                    callee: Box::new(Expr::Ident("bad".into())),
+                    args: if argc == 0 {
+                        vec![]
+                    } else {
+                        vec![Expr::IntLit(42)]
+                    },
+                };
+                let mut declarations = vec![
+                    Decl::Function {
+                        name: "bad".into(),
+                        params: if argc == 0 {
+                            vec![]
+                        } else {
+                            vec![("unused".into(), Typ::Int)]
+                        },
+                        ret: proof.clone().typ(),
+                        body: vec![Stmt::Return(Some(Expr::IntLit(77)))],
+                        type_params: vec![],
+                    },
+                    Decl::Function {
+                        name: "main".into(),
+                        params: vec![],
+                        ret: Typ::Int,
+                        body: vec![Stmt::Return(Some(call.clone()))],
+                        type_params: vec![],
+                    },
+                ];
+                inline_small_functions_with(&mut declarations, usize::MAX, 4);
+                let Decl::Function { body, .. } = &declarations[1] else {
+                    panic!()
+                };
+                assert_eq!(body, &vec![Stmt::Return(Some(call))]);
+            }
+        }
     }
 }

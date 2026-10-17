@@ -9252,3 +9252,54 @@ fn rust_tuple_references_preserve_negation_receiver_identity() {
         fs::remove_file(path).unwrap();
     }
 }
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn rust_associated_cycles_cannot_disappear_through_zero_argument_inlining() {
+    for (name, output, entry, expected) in [
+        ("cycle", "Self::Output", "<Row as Other>::make()", None),
+        ("concrete", "i64", "<Row as Other>::make()", Some(42)),
+        ("unused-cycle", "Self::Output", "42", Some(42)),
+    ] {
+        let source = format!(
+            "trait Other{{type Output;fn make()->Self::Output;}}struct Row;\
+             impl Other for Row{{type Output={output};fn make()->Self::Output{{42}}}}\
+             fn main()->i64{{{entry}}}"
+        );
+        let path = temp_path(&format!("associated-cycle-{name}.rs"));
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            if let Some(expected) = expected {
+                assert!(
+                    report.success && report.execution_started,
+                    "{name} {profile:?}: {report:?}"
+                );
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(expected)),
+                    "{name} {profile:?}: {report:?}"
+                );
+            } else {
+                assert!(
+                    !report.success && !report.execution_started,
+                    "{name} {profile:?}: {report:?}"
+                );
+                assert!(
+                    report.eval_result.is_none(),
+                    "{name} {profile:?}: {report:?}"
+                );
+                assert_eq!(
+                    report.reason_code.as_deref(),
+                    Some("rust-invalid-associated-type")
+                );
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}

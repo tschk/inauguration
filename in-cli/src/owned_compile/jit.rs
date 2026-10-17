@@ -462,6 +462,12 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
             if matches!(item.canonical(), Typ::Int | Typ::Bool | Typ::Float | Typ::String))
     };
     let reachable = super::native::native_entry_module(module, entry);
+    if !crate::typecheck::TypeChecker::new()
+        .typed_proof_functions(&reachable.decls)
+        .is_empty()
+    {
+        return false;
+    }
     let mut names = std::collections::HashSet::new();
     for decl in &reachable.decls {
         let name = match decl {

@@ -522,6 +522,23 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         return finalize_report(report, started, &cwd, &frontend_hash);
     }
 
+    let proof_entry = request
+        .entry
+        .as_deref()
+        .or(pkg_entry.as_deref())
+        .or_else(|| module_has_function(&module, "main").then_some("main"));
+    let proof_entry = proof_entry.map(|entry| jit::resolve_jit_entry(&module, entry));
+    let proof_roots = if request.linkage == crate::native_emit::NativeLinkage::StaticLib {
+        None
+    } else {
+        proof_entry.as_deref()
+    };
+    if let Err(error) = reject_invalid_type_proofs(&module, proof_roots) {
+        report.reason_code = Some("rust-invalid-associated-type".into());
+        report.reason = Some(error.clone());
+        report.error = Some(error);
+        return finalize_report(report, started, &cwd, &frontend_hash);
+    }
     if request.target != CompileTarget::Jit {
         let context = format!(
             "{frontend_hash}:{:?}:{:?}:{:?}",
@@ -862,6 +879,39 @@ fn merge_retained_dependency_artifacts(
 
 /// Shared owned/coverage lifecycle: source proof survives substitution, resolves
 /// before folding/DCE, then erases to the preexisting native representation.
+/// Only callable roots poison an executable; unrelated library declarations
+/// remain eligible for ordinary DCE. native_entry_module retains schemas, so
+/// inspect function proof results rather than blanket-scanning that view.
+pub(crate) fn reject_invalid_type_proofs(
+    module: &crate::core_ir::UnifiedModule,
+    entry: Option<&str>,
+) -> Result<(), String> {
+    if !crate::core_ir::type_proofs::present(&module.decls) {
+        return Ok(());
+    }
+    let reachable;
+    let declarations = if let Some(entry) = entry {
+        reachable = native::native_entry_module(module, entry);
+        &reachable.decls
+    } else {
+        &module.decls
+    };
+    let proofs = crate::typecheck::TypeChecker::new().typed_proof_functions(declarations);
+    let mut invalid: Vec<_> = proofs
+        .into_iter()
+        .filter(|(_, proof)| proof.is_invalid())
+        .collect();
+    invalid.sort_by(|left, right| left.0.cmp(&right.0));
+    if let Some((name, proof)) = invalid.first() {
+        Err(format!(
+            "invalid Rust associated type reachable in `{name}`: {}",
+            proof.message()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn optimize_retained_module(
     module: &mut crate::core_ir::UnifiedModule,
     bindings: &crate::boundary_ir::UnaryMethodBindings,
@@ -870,6 +920,7 @@ pub(crate) fn optimize_retained_module(
     keep_all: bool,
     semantics: crate::integer_semantics::IntegerSemantics,
 ) -> Result<(), String> {
+    reject_invalid_type_proofs(module, if keep_all { None } else { entry })?;
     fn count_tags(decls: &mut [Decl]) -> (usize, bool) {
         let mut tags = 0;
         let mut reference_values = false;
@@ -937,4 +988,39 @@ pub(crate) fn optimize_retained_module(
     // native scalar-domain validation refuses their unsupported execution.
     crate::core_ir::rust_references::erase_declarations(&mut module.decls);
     Ok(())
+}
+
+#[cfg(test)]
+mod associated_type_root_tests {
+    use super::*;
+    use crate::core_ir::{Expr, Stmt, Typ, UnifiedModule};
+    #[test]
+    fn invalid_export_roots_and_explicit_entry_are_checked_but_unused_executable_helpers_are_not_roots()
+     {
+        let function = |name: &str, ret: Typ, value: Expr| Decl::Function {
+            name: name.into(),
+            params: vec![],
+            ret,
+            body: vec![Stmt::Return(Some(value))],
+            type_params: vec![],
+        };
+        let mut module = UnifiedModule::new(vec![
+            function(
+                "bad",
+                crate::core_ir::type_proofs::ResolutionFailure::Invalid("cycle".into()).typ(),
+                Expr::IntLit(77),
+            ),
+            function("main", Typ::Int, Expr::IntLit(42)),
+        ]);
+        assert!(reject_invalid_type_proofs(&module, Some("main")).is_ok());
+        assert!(reject_invalid_type_proofs(&module, Some("bad")).is_err());
+        assert!(reject_invalid_type_proofs(&module, None).is_err());
+        if let Decl::Function { body, .. } = &mut module.decls[1] {
+            *body = vec![Stmt::Return(Some(Expr::Call {
+                callee: Box::new(Expr::Ident("bad".into())),
+                args: vec![],
+            }))];
+        }
+        assert!(reject_invalid_type_proofs(&module, Some("main")).is_err());
+    }
 }

@@ -95,6 +95,7 @@ pub(crate) fn qualify_module_decls(decls: &mut [Decl], module: &str) {
         let names = NominalNames {
             type_name: &type_name,
             value_name: &|_| None,
+            constructors: true,
         };
         declaration(decl, &names, &HashSet::new());
     }
@@ -200,6 +201,7 @@ fn references(
 struct NominalNames<'a> {
     type_name: &'a dyn Fn(&str) -> Option<Typ>,
     value_name: &'a dyn Fn(&str) -> Option<String>,
+    constructors: bool,
 }
 
 /// Rewrite contextual nominal names without changing declarations or member names.
@@ -212,6 +214,7 @@ pub(crate) fn rewrite_nominal_names(
     let names = NominalNames {
         type_name: &|name| resolve_type(name).map(Typ::Named),
         value_name: resolve_value,
+        constructors: true,
     };
     for decl in decls {
         declaration(decl, &names, &HashSet::new());
@@ -224,12 +227,27 @@ pub(crate) fn rewrite_named_types(decls: &mut [Decl], resolve_type: &impl Fn(&st
     let names = NominalNames {
         type_name: resolve_type,
         value_name: &|_| None,
+        constructors: true,
     };
     for decl in decls {
         declaration(decl, &names, &HashSet::new());
     }
 }
 
+/// Resolve annotations without treating constructor or pattern value paths as types.
+pub(crate) fn rewrite_type_annotations(
+    decls: &mut [Decl],
+    resolve_type: &impl Fn(&str) -> Option<Typ>,
+) {
+    let names = NominalNames {
+        type_name: resolve_type,
+        value_name: &|_| None,
+        constructors: false,
+    };
+    for decl in decls {
+        declaration(decl, &names, &HashSet::new());
+    }
+}
 fn typ(value: &mut Typ, names: &NominalNames<'_>, generics: &HashSet<String>) {
     match value {
         Typ::Named(name) if !generics.contains(name) => {
@@ -260,6 +278,9 @@ fn typ(value: &mut Typ, names: &NominalNames<'_>, generics: &HashSet<String>) {
     }
 }
 fn pattern(source: &mut String, names: &NominalNames<'_>, generics: &HashSet<String>) {
+    if !names.constructors {
+        return;
+    }
     fn walk(value: &mut MatchPattern, names: &NominalNames<'_>, generics: &HashSet<String>) {
         match value {
             MatchPattern::StructPat { name, fields } => {
@@ -292,7 +313,7 @@ fn expr(value: &mut Expr, names: &NominalNames<'_>, generics: &HashSet<String>) 
                 *name = target;
             }
         }
-        Expr::StructInit { name, .. } => {
+        Expr::StructInit { name, .. } if names.constructors => {
             let mut value = Typ::Named(name.clone());
             typ(&mut value, names, generics);
             if let Typ::Named(target) = value {
@@ -862,6 +883,7 @@ mod tests {
             &NominalNames {
                 type_name: &|name| (name == "Pair").then(|| Typ::Named("dep::Pair".into())),
                 value_name: &|_| None,
+                constructors: true,
             },
             &HashSet::new(),
         );

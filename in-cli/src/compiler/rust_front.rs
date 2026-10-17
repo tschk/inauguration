@@ -1416,33 +1416,38 @@ fn resolve_impl_type(
     value: Typ,
     owner: &Typ,
     implementation: &syn::ItemImpl,
-) -> Result<Typ, String> {
+) -> Result<Typ, crate::core_ir::type_proofs::ResolutionFailure> {
+    use crate::core_ir::type_proofs::ResolutionFailure::{Invalid, Unsupported};
     fn resolve(
         value: Typ,
         owner: &Typ,
         implementation: &syn::ItemImpl,
         active: &mut HashSet<String>,
-    ) -> Result<Typ, String> {
+    ) -> Result<Typ, crate::core_ir::type_proofs::ResolutionFailure> {
         match value {
             Typ::Named(name) if name == "Self" => Ok(owner.clone()),
             Typ::Named(name) => {
                 if let Some(member) = name.strip_prefix("Self::") {
                     if !active.insert(member.to_string()) {
-                        return Err(format!("cyclic associated type `{name}`"));
+                        return Err(Invalid(format!("cyclic associated type `{name}`")));
                     }
                     let mut definitions =
                         implementation.items.iter().filter_map(|item| match item {
                             syn::ImplItem::Type(item) if item.ident == member => Some(item),
                             _ => None,
                         });
-                    let item = definitions
-                        .next()
-                        .ok_or_else(|| format!("unresolved associated type `{name}`"))?;
-                    if definitions.next().is_some()
-                        || !item.generics.params.is_empty()
-                        || item.generics.where_clause.is_some()
-                    {
-                        return Err(format!("unsupported associated type definition `{name}`"));
+                    let item = definitions.next().ok_or_else(|| {
+                        Unsupported(format!("unresolved associated type `{name}`"))
+                    })?;
+                    if definitions.next().is_some() {
+                        return Err(Invalid(format!(
+                            "duplicate associated type definition `{name}`"
+                        )));
+                    }
+                    if !item.generics.params.is_empty() || item.generics.where_clause.is_some() {
+                        return Err(Unsupported(format!(
+                            "unsupported associated type definition `{name}`"
+                        )));
                     }
                     let result = resolve(map_type(&item.ty), owner, implementation, active);
                     active.remove(member);
@@ -1469,7 +1474,9 @@ fn resolve_impl_type(
                     return Ok(crate::core_ir::tuples::typ(&items));
                 }
                 if name.contains('<') || name.contains('>') || name.contains("Self::") {
-                    return Err(format!("unsupported associated type projection `{name}`"));
+                    return Err(Unsupported(format!(
+                        "unsupported associated type projection `{name}`"
+                    )));
                 }
                 Ok(Typ::Named(name))
             }
@@ -1574,6 +1581,12 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
         reference.runtime = Typ::Named(self_type.clone());
         self_proof = crate::core_ir::rust_references::typ(reference);
     }
+    crate::core_bindings::rewrite_type_annotations(&mut decls, &|name| {
+        (name == "Self" || name.starts_with("Self::")).then(|| {
+            resolve_impl_type(Typ::Named(name.into()), &self_proof, i)
+                .unwrap_or_else(crate::core_ir::type_proofs::ResolutionFailure::typ)
+        })
+    });
     crate::core_bindings::rewrite_named_types(&mut decls, &|name| {
         // This walker also visits constructor/pattern names. Resolve only an
         // actual associated type here; other Self::member value paths keep the
@@ -1585,7 +1598,7 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
         });
         (name == "Self" || projection).then(|| {
             resolve_impl_type(Typ::Named(name.into()), &self_proof, i)
-                .unwrap_or_else(|_| Typ::Named("#unsupported-rust-associated-type".into()))
+                .unwrap_or_else(crate::core_ir::type_proofs::ResolutionFailure::typ)
         })
     });
     let resolve_self = |name: &str| {
@@ -4850,5 +4863,66 @@ mod impl_associated_type_tests {
                 "{lowered:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod associated_failure_classification_tests {
+    use super::*;
+    use crate::core_ir::type_proofs::ResolutionFailure;
+    #[test]
+    fn cycles_and_duplicates_are_invalid_but_unowned_resolution_stays_unsupported() {
+        for source in [
+            "impl Other for Row {type Output=Self::Output;}",
+            "impl Other for Row {type Output=Self::Other;type Other=Self::Output;}",
+            "impl Other for Row {type Output=i64;type Output=i32;}",
+        ] {
+            let implementation: syn::ItemImpl = syn::parse_str(source).unwrap();
+            assert!(
+                matches!(
+                    resolve_impl_type(
+                        Typ::Named("Self::Output".into()),
+                        &Typ::Named("Row".into()),
+                        &implementation
+                    ),
+                    Err(ResolutionFailure::Invalid(_))
+                ),
+                "{source}"
+            );
+        }
+        for source in [
+            "impl Other for Row {}",
+            "impl Other for Row {type Output<T>=T;}",
+            "impl Other for Row {type Output=<Row as Other>::Output;}",
+        ] {
+            let implementation: syn::ItemImpl = syn::parse_str(source).unwrap();
+            assert!(
+                matches!(
+                    resolve_impl_type(
+                        Typ::Named("Self::Output".into()),
+                        &Typ::Named("Row".into()),
+                        &implementation
+                    ),
+                    Err(ResolutionFailure::Unsupported(_))
+                ),
+                "{source}"
+            );
+        }
+    }
+    #[test]
+    fn missing_associated_annotations_keep_unsupported_proof_without_rewriting_self_value_paths() {
+        let implementation: syn::ItemImpl =
+            syn::parse_str("impl Other for Row {fn make()->Self::Output{Self::new()}}").unwrap();
+        let declarations = lower_impl(&implementation);
+        let Decl::Function { ret, body, .. } = &declarations[0] else {
+            panic!()
+        };
+        let Typ::Named(ret) = ret else { panic!() };
+        assert!(matches!(
+            crate::core_ir::type_proofs::decode(ret),
+            Some(ResolutionFailure::Unsupported(_))
+        ));
+
+        assert!(format!("{body:?}").contains("Row::new"));
     }
 }

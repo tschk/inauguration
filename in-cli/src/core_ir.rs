@@ -2,6 +2,7 @@
 
 pub(crate) mod rust_references;
 pub(crate) mod tuples;
+pub(crate) mod type_proofs;
 
 pub(crate) const INDEX_ASSIGN_VALUE_FIRST: &str = "#index-assign-value-first";
 pub(crate) const INDEX_MODIFY_VALUE_FIRST: &str = "#index-modify-value-first";

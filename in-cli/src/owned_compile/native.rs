@@ -41,6 +41,13 @@ pub fn compile_native(
         NativeLinkage::StaticLib => module.clone(),
         _ => native_entry_module(module, entry),
     };
+    let proofs = crate::typecheck::TypeChecker::new().typed_proof_functions(&native_module.decls);
+    if let Some((name, proof)) = proofs.iter().min_by_key(|(name, _)| *name) {
+        return Err(format!(
+            "unsupported Rust associated type in native callable `{name}`: {}",
+            proof.message()
+        ));
+    }
     let eval_exit = (request.linkage == NativeLinkage::Executable)
         .then(|| native_entry_exit_code(&native_module, entry))
         .flatten();
