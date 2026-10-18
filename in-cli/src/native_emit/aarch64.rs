@@ -199,6 +199,19 @@ pub fn scvtf_d(rd_v: u8, rn_x: u8) -> u32 {
     0x9E62_0000 | ((rn_x as u32) << 5) | (rd_v as u32)
 }
 
+/// Convert a signed 64-bit integer directly to single precision.
+pub fn scvtf_s(rd_v: u8, rn_x: u8) -> u32 {
+    0x9E22_0000 | ((rn_x as u32) << 5) | (rd_v as u32)
+}
+
+pub fn ucvtf_s(rd_v: u8, rn_x: u8) -> u32 {
+    0x9E23_0000 | ((rn_x as u32) << 5) | (rd_v as u32)
+}
+
+pub fn ucvtf_d(rd_v: u8, rn_x: u8) -> u32 {
+    0x9E63_0000 | ((rn_x as u32) << 5) | (rd_v as u32)
+}
+
 pub fn fcvt_s_d(rd: u8, rn: u8) -> u32 {
     0x1E62_4000 | ((rn as u32) << 5) | rd as u32
 }
@@ -376,6 +389,13 @@ mod tests {
         assert_eq!(fmov_from_gp(3, 7), 0x9E6700E3);
         assert_eq!(fmov_to_gp(3, 7), 0x9E6600E3);
         assert_eq!(scvtf_d(3, 7), 0x9E6200E3);
+        // Independent clang arm64 assembler encodings, including high registers.
+        assert_eq!(scvtf_s(3, 7), 0x9E2200E3);
+        assert_eq!(ucvtf_s(3, 7), 0x9E2300E3);
+        assert_eq!(ucvtf_d(3, 7), 0x9E6300E3);
+        assert_eq!(scvtf_s(31, 30), 0x9E2203DF);
+        assert_eq!(ucvtf_s(31, 30), 0x9E2303DF);
+        assert_eq!(ucvtf_d(31, 30), 0x9E6303DF);
         assert_eq!(fcvtzs_d(3, 7), 0x9E7800E3);
         assert_eq!(fcvtzu_d(3, 7), 0x9E7900E3);
         assert_eq!(fcvt_s_d(3, 7), 0x1E6240E3);

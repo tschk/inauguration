@@ -1155,11 +1155,23 @@ pub(crate) fn lower_unary(
             }
             Ok(())
         }
-        "int-to-float" => {
+        op if crate::core_ir::integer_float_cast_spec(op).is_some() => {
             if native_expr_type(expr, ctx, functions) != Some(Typ::Int) {
                 return Err("native-lower: integer conversion needs Int".into());
             }
-            emitter.emit_u32(aarch64::scvtf_d(rd, rd));
+            let (bits, signed) = crate::core_ir::integer_float_cast_spec(op).unwrap();
+            // The operand is already width-normalized in the 64-bit Int carrier.
+            // Convert directly to the destination precision to avoid double rounding.
+            emitter.emit_u32(match (bits, signed) {
+                (32, true) => aarch64::scvtf_s(rd, rd),
+                (32, false) => aarch64::ucvtf_s(rd, rd),
+                (64, true) => aarch64::scvtf_d(rd, rd),
+                (64, false) => aarch64::ucvtf_d(rd, rd),
+                _ => unreachable!("validated integer-to-float precision"),
+            });
+            if bits == 32 {
+                emitter.emit_u32(aarch64::fcvt_d_s(rd, rd));
+            }
             emitter.emit_u32(aarch64::fmov_to_gp(rd, rd));
             Ok(())
         }
@@ -1682,10 +1694,8 @@ fn native_expr_type_with_bindings(
             Some(Typ::Int)
         }
         Expr::Unary { op, .. }
-            if matches!(
-                op.as_str(),
-                "int-to-float" | "float-cast-f32" | "float-cast-f64"
-            ) =>
+            if crate::core_ir::integer_float_cast_spec(op).is_some()
+                || matches!(op.as_str(), "float-cast-f32" | "float-cast-f64") =>
         {
             Some(Typ::Float)
         }
@@ -1945,6 +1955,93 @@ pub(crate) fn lower_record_index_address(
         stage_record_index_place(emitter, ctx, base, index, functions, pending_calls, fn_name)?;
     load_record_index_address(emitter, ctx, &place, rd, fn_name)?;
     Ok(place.fields)
+}
+
+#[cfg(test)]
+mod integer_float_cast_tests {
+    use super::*;
+
+    #[test]
+    fn integer_casts_convert_directly_then_widen_the_carrier() {
+        let structs = HashMap::new();
+        let strings = HashMap::new();
+        let globals = HashMap::new();
+        let types = HashMap::new();
+        let mut runtime = Vec::new();
+        let mut pending_strings = Vec::new();
+        let mut ctx = LowerCtx::new(
+            &[],
+            &structs,
+            &strings,
+            &globals,
+            &types,
+            &mut runtime,
+            &mut pending_strings,
+            "test",
+        )
+        .unwrap();
+        let functions = HashMap::new();
+        let mut calls = Vec::new();
+        for (op, conversion, single) in [
+            ("int-to-float-f32", 0x9E220063, true),
+            ("uint-to-float-f32", 0x9E230063, true),
+            ("int-to-float", 0x9E620063, false),
+            ("uint-to-float", 0x9E630063, false),
+        ] {
+            let mut emitter = CodeEmitter::new();
+            // The high-bit operand is deliberately the same Int bit carrier for
+            // signed and unsigned conversions; only the conversion differs.
+            lower_unary(
+                &mut emitter,
+                &mut ctx,
+                op,
+                &Expr::IntLit(i64::MIN),
+                3,
+                &functions,
+                &mut calls,
+                "test",
+            )
+            .unwrap();
+            let words: Vec<_> = emitter
+                .bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| u32::from_le_bytes(*bytes))
+                .collect();
+            let mut expected = vec![conversion];
+            if single {
+                expected.push(0x1E22C063);
+            }
+            expected.push(0x9E660063);
+            assert!(words.ends_with(&expected), "{op}: {words:x?}");
+            assert_eq!(words.iter().filter(|word| **word == conversion).count(), 1);
+            assert_eq!(
+                native_expr_type(
+                    &Expr::Unary {
+                        op: op.into(),
+                        expr: Box::new(Expr::IntLit(1)),
+                    },
+                    &ctx,
+                    &functions
+                ),
+                Some(Typ::Float)
+            );
+            assert!(
+                lower_unary(
+                    &mut CodeEmitter::new(),
+                    &mut ctx,
+                    op,
+                    &Expr::BoolLit(true),
+                    3,
+                    &functions,
+                    &mut calls,
+                    "test"
+                )
+                .is_err()
+            );
+        }
+    }
 }
 
 #[cfg(test)]

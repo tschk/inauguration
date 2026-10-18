@@ -3041,3 +3041,101 @@ fn scalar_array_copy_refuses_malformed_counts_and_unchecked_operands() {
         assert!(emit_c_module(&module).is_err(), "{operand:?}");
     }
 }
+
+#[test]
+fn integer_float_projection_preserves_destination_precision_and_unsigned_carriers() {
+    for (op, expected) in [
+        ("int-to-float", "((double)(value))"),
+        ("int-to-float-f32", "((double)((float)((int64_t)(value))))"),
+        ("uint-to-float", "((double)((uint64_t)(value)))"),
+        (
+            "uint-to-float-f32",
+            "((double)((float)((uint64_t)(value))))",
+        ),
+    ] {
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "convert".into(),
+            params: vec![("value".into(), Typ::Int)],
+            ret: Typ::Float,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Unary {
+                op: op.into(),
+                expr: Box::new(Expr::Ident("value".into())),
+            }))],
+        }]);
+        let code = emit_c_module(&module).unwrap();
+        assert!(code.contains(expected), "{op}: {code}");
+    }
+}
+
+#[test]
+fn integer_float_projection_requires_recursively_checked_integer_operands() {
+    let function = |name: &str, params, ret, body| Decl::Function {
+        name: name.into(),
+        params,
+        ret,
+        body,
+        type_params: vec![],
+    };
+    for op in [
+        "int-to-float",
+        "int-to-float-f32",
+        "uint-to-float",
+        "uint-to-float-f32",
+    ] {
+        for invalid in [Typ::Float, Typ::Bool, Typ::String] {
+            let module = UnifiedModule::new(vec![function(
+                "convert",
+                vec![("value".into(), invalid.clone())],
+                Typ::Float,
+                vec![Stmt::Return(Some(Expr::Unary {
+                    op: op.into(),
+                    expr: Box::new(Expr::Ident("value".into())),
+                }))],
+            )]);
+            let error = emit_c_module(&module).unwrap_err();
+            assert!(
+                error.contains("integer to float conversion requires a resolved Int operand"),
+                "{op}/{invalid:?}: {error}"
+            );
+        }
+        // The callee's Int return fact alone must not hide an invalid call argument.
+        let module = UnifiedModule::new(vec![
+            function(
+                "identity",
+                vec![("value".into(), Typ::Int)],
+                Typ::Int,
+                vec![Stmt::Return(Some(Expr::Ident("value".into())))],
+            ),
+            function(
+                "convert",
+                vec![],
+                Typ::Float,
+                vec![Stmt::Return(Some(Expr::Unary {
+                    op: op.into(),
+                    expr: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Ident("identity".into())),
+                        args: vec![Expr::BoolLit(true)],
+                    }),
+                }))],
+            ),
+        ]);
+        let error = emit_c_module(&module).unwrap_err();
+        assert!(
+            error.contains("integer to float conversion requires a resolved Int operand"),
+            "{op}/invalid nested call: {error}"
+        );
+        for alias in ["#rust-integer-i8", "#rust-integer-u64"] {
+            let module = UnifiedModule::new(vec![function(
+                "convert",
+                vec![("value".into(), Typ::Named(alias.into()))],
+                Typ::Float,
+                vec![Stmt::Return(Some(Expr::Unary {
+                    op: op.into(),
+                    expr: Box::new(Expr::Ident("value".into())),
+                }))],
+            )]);
+            assert_inferred_c_executes(&module, "return convert(42)==42.0?42:7;");
+        }
+    }
+}

@@ -385,6 +385,59 @@ fn fold_integer(
     carrier(value)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Projection {
+    Element,
+    Field(String),
+    FromEnd(usize),
+}
+#[derive(Clone)]
+struct SourcePlace {
+    root: String,
+    path: Vec<Projection>,
+}
+fn source_place(expr: &Expr) -> Option<SourcePlace> {
+    match expr {
+        Expr::Ident(name) => Some(SourcePlace {
+            root: name.clone(),
+            path: vec![],
+        }),
+        Expr::Index { base, .. } => {
+            let mut place = source_place(base)?;
+            place.path.push(Projection::Element);
+            Some(place)
+        }
+        Expr::Field { base, name } => {
+            let mut place = source_place(base)?;
+            place.path.push(Projection::Field(name.clone()));
+            Some(place)
+        }
+        Expr::Call { callee, args } if matches!(callee.as_ref(),Expr::Ident(name)if name==core_ir::tuples::LET_FIELD) =>
+        {
+            let [base, Expr::IntLit(index), Expr::BoolLit(from_end)] = args.as_slice() else {
+                return None;
+            };
+            let index = usize::try_from(*index).ok()?;
+            let mut place = source_place(base)?;
+            place.path.push(if *from_end {
+                Projection::FromEnd(index)
+            } else {
+                Projection::Field(format!("_{index}"))
+            });
+            Some(place)
+        }
+        Expr::Block {
+            result: Some(result),
+            ..
+        } => source_place(result),
+        _ => None,
+    }
+}
+fn aggregate_value(expr: &Expr) -> bool {
+    matches!(expr, Expr::ArrayLit(_) | Expr::StructInit { .. })
+        || matches!(expr,Expr::Call{callee,..}if matches!(callee.as_ref(),Expr::Ident(name)if name==core_ir::tuples::VALUE))
+}
+
 struct Pass<'a> {
     checker: &'a TypeChecker,
     facts: &'a Facts,
@@ -393,10 +446,141 @@ struct Pass<'a> {
     flexible: HashSet<String>,
     opaque: HashSet<String>,
     rewrite: bool,
+    // Missing call/peer source signatures are not evidence of Rust's i32 default.
+    unresolved_width: bool,
+    unresolved_bindings: HashSet<String>,
+    source_places: HashMap<String, SourcePlace>,
+    aggregate_sources: HashSet<String>,
+    unresolved_projections: HashMap<String, HashSet<Vec<Projection>>>,
+    active_projections: HashSet<Vec<Projection>>,
+    projection_kinds: HashMap<String, HashMap<Vec<Projection>, Kind>>,
+    active_place: Option<SourcePlace>,
+    projection_failure: std::cell::Cell<bool>,
     return_type: Option<Typ>,
     const_env: Option<HashMap<String, i64>>,
 }
 impl Pass<'_> {
+    fn resolve_place(&self, mut place: SourcePlace) -> Option<SourcePlace> {
+        let mut seen = HashSet::new();
+        loop {
+            if place.path.len() > 128 || !seen.insert(place.root.clone()) {
+                self.projection_failure.set(true);
+                return None;
+            }
+            let Some(parent) = self.source_places.get(&place.root) else {
+                return Some(place);
+            };
+            let mut path = parent.path.clone();
+            path.extend(place.path);
+            place = SourcePlace {
+                root: parent.root.clone(),
+                path,
+            };
+        }
+    }
+    fn defer_place(&mut self, place: SourcePlace) {
+        let Some(place) = self.resolve_place(place) else {
+            return;
+        };
+        if place.path.is_empty() {
+            self.unresolved_bindings.insert(place.root);
+        } else {
+            self.unresolved_projections
+                .entry(place.root)
+                .or_default()
+                .insert(place.path);
+        }
+    }
+    fn defer_binding(&mut self, name: &str) {
+        self.unresolved_bindings.insert(name.into());
+        self.defer_place(SourcePlace {
+            root: name.into(),
+            path: vec![],
+        });
+    }
+    fn unresolved_place(&self, place: SourcePlace) -> bool {
+        self.resolve_place(place).is_some_and(|place| {
+            if place.path.is_empty() {
+                self.unresolved_bindings.contains(&place.root)
+            } else {
+                self.unresolved_projections
+                    .get(&place.root)
+                    .is_some_and(|paths| paths.contains(&place.path))
+            }
+        })
+    }
+    fn projection_kind(&self, place: SourcePlace) -> Option<Kind> {
+        let place = self.resolve_place(place)?;
+        self.projection_kinds
+            .get(&place.root)?
+            .get(&place.path)
+            .copied()
+    }
+    fn bind_projection_kind(&mut self, place: SourcePlace, kind: Kind) {
+        if !kind.source {
+            return;
+        }
+        let Some(place) = self.resolve_place(place) else {
+            return;
+        };
+        if !place.path.is_empty() {
+            // First owned column evidence is stable. A conflicting later source
+            // kind is checked against it by the ordinary strong mismatch guard.
+            self.projection_kinds
+                .entry(place.root)
+                .or_default()
+                .entry(place.path)
+                .or_insert(kind);
+        }
+    }
+    fn inherit_projection_kinds(&mut self, source: SourcePlace) {
+        let Some(owner) = self
+            .active_place
+            .clone()
+            .and_then(|place| self.resolve_place(place))
+        else {
+            return;
+        };
+        let columns = self
+            .projection_kinds
+            .get(&owner.root)
+            .cloned()
+            .unwrap_or_default();
+        for (path, kind) in columns {
+            if let Some(suffix) = path.strip_prefix(owner.path.as_slice()) {
+                let mut selected = source.clone();
+                selected.path.extend_from_slice(suffix);
+                self.bind_projection_kind(selected, kind);
+            }
+        }
+    }
+    fn enter_projection(
+        &mut self,
+        selected: Projection,
+        count: usize,
+    ) -> (HashSet<Vec<Projection>>, bool, Option<SourcePlace>) {
+        let previous = std::mem::take(&mut self.active_projections);
+        self.active_projections=previous.iter().filter_map(|path|{
+            let (head,tail)=path.split_first()?;
+            let matches=head==&selected || matches!((head,&selected),(Projection::FromEnd(offset),Projection::Field(name)) if count.checked_sub(offset+1).is_some_and(|index|name==&format!("_{index}")));
+            matches.then(||tail.to_vec())
+        }).collect();
+        let old = self.unresolved_width;
+        self.unresolved_width |= self.active_projections.contains(&Vec::new());
+        let old_place = self.active_place.clone();
+        if let Some(place) = self.active_place.as_mut() {
+            place.path.push(selected);
+        }
+        (previous, old, old_place)
+    }
+    fn leave_projection(
+        &mut self,
+        previous: (HashSet<Vec<Projection>>, bool, Option<SourcePlace>),
+    ) {
+        self.active_projections = previous.0;
+        self.unresolved_width = previous.1;
+        self.active_place = previous.2;
+    }
     fn validate_constant(&self, value: &mut Expr) {
         if self.rewrite
             && matches!(
@@ -501,12 +685,26 @@ impl Pass<'_> {
         if core_ir::expr_diverges(expr) {
             return true;
         }
+        if source_place(expr).is_some_and(|place| self.unresolved_place(place))
+            && self.hint(expr, env).is_none_or(|kind| !kind.source)
+        {
+            return false;
+        }
         match expr {
             Expr::Ident(name) => {
                 self.hint(expr, env).is_some()
-                    || (self.flexible.contains(name) && !self.opaque.contains(name))
+                    || (self.flexible.contains(name)
+                        && !self.opaque.contains(name)
+                        && !self.unresolved_bindings.contains(name))
             }
-            Expr::Unary { op, .. } if op == "rust-integer-literal" => true,
+            Expr::Unary { op, .. }
+                if matches!(
+                    op.as_str(),
+                    "rust-integer-literal" | "rust-integer-literal-magnitude"
+                ) =>
+            {
+                true
+            }
             Expr::Unary { op, expr }
                 if matches!(
                     op.as_str(),
@@ -543,6 +741,11 @@ impl Pass<'_> {
         }
     }
     fn hint(&self, expr: &Expr, env: &HashMap<String, Typ>) -> Option<Kind> {
+        // Projected aliases retain source-owned column facts even while their
+        // Core schema still uses the canonical integer carrier.
+        if let Some(kind) = source_place(expr).and_then(|place| self.projection_kind(place)) {
+            return Some(kind);
+        }
         match expr {
             Expr::Call { callee, .. } => {
                 if let Expr::Ident(name) = callee.as_ref()
@@ -641,13 +844,19 @@ impl Pass<'_> {
                 }
                 Expr::ArrayLit(items) => {
                     for value in items {
+                        let previous = self.enter_projection(Projection::Element, 0);
                         self.value(value, Some(item), env, ret);
+                        self.leave_projection(previous);
                     }
                     return None;
                 }
                 Expr::Block { body, result } => {
                     let mut inner = env.clone();
+                    let independent_place = self.active_place.take();
+                    let independent_paths = std::mem::take(&mut self.active_projections);
                     self.body(body, &mut inner, ret);
+                    self.active_place = independent_place;
+                    self.active_projections = independent_paths;
                     if let Some(result) = result {
                         self.value(result, Some(typ), &mut inner, ret);
                     }
@@ -658,7 +867,11 @@ impl Pass<'_> {
                     then_expr,
                     else_expr,
                 } => {
+                    let independent_place = self.active_place.take();
+                    let independent_paths = std::mem::take(&mut self.active_projections);
                     self.expression(cond, None, env, ret);
+                    self.active_place = independent_place;
+                    self.active_projections = independent_paths;
                     self.value(then_expr, Some(typ), &mut env.clone(), ret);
                     self.value(else_expr, Some(typ), &mut env.clone(), ret);
                     return None;
@@ -679,7 +892,11 @@ impl Pass<'_> {
                             .unwrap_or_else(|| env.clone());
                         self.flexible_pattern(&inner, env, kind.is_none());
                         if let Some(guard) = &mut arm.guard {
+                            let independent_place = self.active_place.take();
+                            let independent_paths = std::mem::take(&mut self.active_projections);
                             self.expression(guard, None, &mut inner, ret);
+                            self.active_place = independent_place;
+                            self.active_projections = independent_paths;
                         }
                         self.value(&mut arm.value, Some(typ), &mut inner, ret);
                     }
@@ -728,10 +945,81 @@ impl Pass<'_> {
         env: &mut HashMap<String, Typ>,
         ret: Option<Kind>,
     ) -> Option<Kind> {
+        let owner = self.active_place.take();
+        let expected =
+            if let Some(column) = owner.clone().and_then(|place| self.projection_kind(place)) {
+                Some(expected.map_or(column, |expected| expected.prefer_source(column)))
+            } else {
+                expected
+            };
+        // Column ownership belongs to the result, not arbitrary operands.
+        // Only aggregate/result edges retain it; scalar operators pass their
+        // selected width through the ordinary explicit expected-kind API.
+        if matches!(
+            expr,
+            Expr::Ident(_)
+                | Expr::ArrayLit(_)
+                | Expr::StructInit { .. }
+                | Expr::Block { .. }
+                | Expr::Conditional { .. }
+                | Expr::MatchValue { .. }
+        ) || matches!(expr,Expr::Call{callee,..}if matches!(callee.as_ref(),Expr::Ident(name)if name==core_ir::tuples::VALUE))
+        {
+            self.active_place = owner.clone();
+        }
+        let result = self.expression_inner(expr, expected, env, ret);
+        self.active_place = owner.clone();
+        if let (Some(place), Some(kind)) = (owner, result) {
+            self.bind_projection_kind(place, kind);
+        }
+        result
+    }
+
+    fn expression_inner(
+        &mut self,
+        expr: &mut Expr,
+        expected: Option<Kind>,
+        env: &mut HashMap<String, Typ>,
+        ret: Option<Kind>,
+    ) -> Option<Kind> {
         let mut bad = false;
         let mut mismatch = None;
         let kind = match expr {
             Expr::Ident(name) => {
+                if core_ir::type_proofs::decode(name).is_some_and(|proof| !proof.is_invalid())
+                    && let Some(owner) = self.active_place.clone()
+                    && !owner.path.is_empty()
+                {
+                    // Retained source uncertainty occupies this exact column;
+                    // it is not evidence that neighboring columns lack widths.
+                    self.defer_place(owner);
+                }
+                self.inherit_projection_kinds(SourcePlace {
+                    root: name.clone(),
+                    path: vec![],
+                });
+                for path in self.active_projections.clone() {
+                    self.defer_place(SourcePlace {
+                        root: name.clone(),
+                        path,
+                    });
+                }
+                if self.unresolved_width
+                    && matches!(env.get(name),Some(Typ::Vector(item)) if matches!(item.as_ref(),Typ::Int | Typ::Generic(_)))
+                {
+                    // An unresolved use of a homogeneous vector constrains its
+                    // element column, not arbitrary sibling aggregate fields.
+                    self.defer_place(SourcePlace {
+                        root: name.clone(),
+                        path: vec![Projection::Element],
+                    });
+                }
+                if self.unresolved_width
+                    && self.flexible.contains(name)
+                    && !self.opaque.contains(name)
+                {
+                    self.defer_binding(name);
+                }
                 if let Some((kind, value)) = primitive_constant(name, self.semantics) {
                     if self.rewrite {
                         *expr = kind.cast(Expr::IntLit(value));
@@ -756,6 +1044,16 @@ impl Pass<'_> {
                         && !self.opaque.contains(name)
                         && let Some(expected) = expected
                     {
+                        // A source-owned consumer constrains the projected source
+                        // column as well as this local alias. Otherwise an earlier
+                        // table initializer still defaults before its loop use.
+                        self.bind_projection_kind(
+                            SourcePlace {
+                                root: name.clone(),
+                                path: vec![],
+                            },
+                            expected,
+                        );
                         let selected =
                             known.map_or(expected, |known| known.prefer_source(expected));
                         self.inferred.insert(name.clone(), selected);
@@ -777,7 +1075,12 @@ impl Pass<'_> {
             Expr::Unary { op, expr: value }
                 if op == "rust-integer-literal" || op.starts_with("rust-integer-literal-") =>
             {
-                let suffix = op.strip_prefix("rust-integer-literal-");
+                let magnitude = op == "rust-integer-literal-magnitude";
+                let suffix = if magnitude {
+                    None
+                } else {
+                    op.strip_prefix("rust-integer-literal-")
+                };
                 let explicit = suffix.and_then(|name| Kind::parse(name, self.semantics));
                 bad |= suffix.is_some() && explicit.is_none();
                 let kind = explicit.or(expected).or_else(|| {
@@ -793,8 +1096,27 @@ impl Pass<'_> {
                     match value.as_ref() {
                         Expr::IntLit(integer) => {
                             // A u64 literal carries its full unsigned bit pattern.
-                            bad |= !(kind.contains(*integer)
-                                || (!kind.signed && kind.bits == 64 && suffix == Some("u64")));
+                            let fits = if magnitude {
+                                !kind.signed && kind.bits == 64
+                            } else {
+                                kind.contains(*integer)
+                                    || (!kind.signed && kind.bits == 64 && suffix == Some("u64"))
+                            };
+                            bad |= !fits;
+                            if !fits && kind.supported(self.semantics) {
+                                mismatch = Some(
+                                    if self.unresolved_width && explicit.is_none() && !kind.source {
+                                        core_ir::type_proofs::ResolutionFailure::Unsupported(
+                                        "integer literal width depends on unresolved source context".into(),
+                                    )
+                                    } else {
+                                        core_ir::type_proofs::ResolutionFailure::Invalid(
+                                            "integer literal is outside its Rust source type range"
+                                                .into(),
+                                        )
+                                    },
+                                );
+                            }
                             if !bad {
                                 let semantics = self.semantics;
                                 *expr = crate::core_opt::map_expr(
@@ -810,6 +1132,51 @@ impl Pass<'_> {
                 }
                 kind
             }
+            Expr::Unary { op, expr: value } if core_ir::rust_floats::cast_kind(op).is_some() => {
+                let target = core_ir::rust_floats::cast_kind(op);
+                // Infer/default the source independently of the float destination.
+                // The fixed point has retained local source kinds at this point.
+                let outer_place = self.active_place.take();
+                let outer_unresolved = std::mem::replace(&mut self.unresolved_width, false);
+                let source_paths = std::mem::take(&mut self.active_projections);
+                let source = self.expression(value, None, env, ret);
+                self.active_projections = source_paths;
+                self.unresolved_width = outer_unresolved;
+                self.active_place = outer_place;
+                if self.rewrite {
+                    let source_proof = invalid_preserving_proof(value);
+                    let failure = match source_proof {
+                        Expr::Ident(name) if core_ir::type_proofs::decode(&name).is_some() => {
+                            Some(Expr::Ident(name))
+                        }
+                        _ => None,
+                    };
+                    if let Some(failure) = failure {
+                        *expr = failure;
+                    } else if let Some(source) =
+                        source.filter(|kind| kind.supported(self.semantics))
+                    {
+                        let bits = match target {
+                            Some(core_ir::rust_floats::Kind::F32) => 32,
+                            _ => 64,
+                        };
+                        if let Some(operation) = core_ir::integer_float_cast_op(bits, source.signed)
+                        {
+                            *expr = Expr::Unary {
+                                op: operation.into(),
+                                expr: Box::new(source.cast((**value).clone())),
+                            };
+                        } else {
+                            *expr = invalid();
+                        }
+                    } else {
+                        *expr=Expr::Ident(core_ir::type_proofs::ResolutionFailure::Unsupported(
+                            "integer-to-float source width is unresolved or unsupported on this target".into(),
+                        ).symbol());
+                    }
+                }
+                None
+            }
             Expr::Unary { op, expr: value } => {
                 let name = op.clone();
                 let cast = name
@@ -817,12 +1184,26 @@ impl Pass<'_> {
                     .or_else(|| name.strip_prefix("int-cast-"))
                     .or_else(|| name.strip_prefix("float-saturate-"));
                 let target = cast.and_then(|name| Kind::parse(name, self.semantics));
+                let outer_unresolved = self.unresolved_width;
+                let outer_place = self.active_place.clone();
+                let outer_paths = cast
+                    .is_some()
+                    .then(|| std::mem::take(&mut self.active_projections));
+                if cast.is_some() {
+                    self.unresolved_width = false;
+                    self.active_place = None;
+                }
                 let inner = self.expression(
                     value,
                     if cast.is_some() { None } else { expected },
                     env,
                     ret,
                 );
+                self.unresolved_width = outer_unresolved;
+                self.active_place = outer_place;
+                if let Some(paths) = outer_paths {
+                    self.active_projections = paths;
+                }
                 if let Some(target) = target {
                     if self.rewrite && inner.is_some() && !name.starts_with("float-saturate-") {
                         *expr = target.cast((**value).clone());
@@ -898,9 +1279,24 @@ impl Pass<'_> {
                         None
                     }
                 });
+                let outer_unresolved = self.unresolved_width;
+                if !shift
+                    && peer.is_none_or(|kind| !kind.source)
+                    && (!self.contextual_integer(lhs, env) || !self.contextual_integer(rhs, env))
+                {
+                    self.unresolved_width = true;
+                }
                 let left = self.expression(lhs, peer, env, ret);
+                let shift_paths = shift.then(|| std::mem::take(&mut self.active_projections));
+                if shift {
+                    self.unresolved_width = false;
+                }
                 let right =
                     self.expression(rhs, if shift { None } else { peer.or(left) }, env, ret);
+                self.unresolved_width = outer_unresolved;
+                if let Some(paths) = shift_paths {
+                    self.active_projections = paths;
+                }
                 // Legacy builtins and not-yet-inferred closure parameters use
                 // canonical Int. Preserve that existing operation rather than
                 // inventing a Rust width from its other operand.
@@ -1023,9 +1419,14 @@ impl Pass<'_> {
                             None
                         }
                     });
+                    let outer_unresolved = self.unresolved_width;
+                    if target.is_none() {
+                        self.unresolved_width = true;
+                    }
                     let receiver_kind = self.expression(receiver, target, env, ret);
                     let kind = owner.or(receiver_kind).or(target);
                     let argument_kind = self.expression(argument, kind, env, ret);
+                    self.unresolved_width = outer_unresolved;
                     for actual in [receiver_kind, argument_kind] {
                         if !same_kinds(actual, kind) {
                             bad = true;
@@ -1189,16 +1590,38 @@ impl Pass<'_> {
                 };
                 // The callee may itself contain executable blocks or closures.
                 // Traverse it once before arguments, matching source evaluation.
+                let callee_place = self.active_place.take();
+                let callee_paths = std::mem::take(&mut self.active_projections);
+                let callee_context = std::mem::replace(&mut self.unresolved_width, false);
                 let callee_kind = self.expression(callee, None, env, ret);
+                self.active_projections = callee_paths;
+                self.unresolved_width = callee_context;
+                self.active_place = callee_place;
                 let atomic = if let Expr::Ident(name) = callee.as_ref() {
                     crate::core_atomic::operation(name)
                         .and_then(|(kind, _)| Kind::parse(kind.suffix(), self.semantics))
                 } else {
                     None
                 };
+                let tuple_value =
+                    matches!(callee.as_ref(),Expr::Ident(name) if name==core_ir::tuples::VALUE);
+                let tuple_projection = matches!(callee.as_ref(),Expr::Ident(name) if matches!(name.as_str(),core_ir::tuples::LET_FIELD|core_ir::tuples::LET_CHECK));
+                let argument_count = args.len();
                 for (index, arg) in args.iter_mut().enumerate() {
+                    let projected = tuple_value.then(|| {
+                        self.enter_projection(
+                            Projection::Field(format!("_{index}")),
+                            argument_count,
+                        )
+                    });
                     if index == 1 && vector_expected.is_some() {
+                        let old_context = self.unresolved_width;
+                        self.unresolved_width = matches!(
+                            vector_expected.as_ref(),
+                            Some(Typ::Int | Typ::Generic(_))
+                        ) || matches!(vector_expected.as_ref(),Some(Typ::Vector(item))if matches!(item.as_ref(),Typ::Int|Typ::Generic(_)));
                         self.value(arg, vector_expected.as_ref(), env, ret);
+                        self.unresolved_width = old_context;
                         continue;
                     }
                     if let Some(atomic_kind) = atomic
@@ -1210,15 +1633,35 @@ impl Pass<'_> {
                         self.expression(arg, Some(atomic_kind), env, ret);
                         continue;
                     }
-                    self.value(
-                        arg,
-                        signature
-                            .as_ref()
-                            .and_then(|(params, _)| params.get(index))
-                            .map(|(_, typ)| typ),
-                        env,
-                        ret,
-                    );
+                    let projection_arguments =
+                        tuple_projection.then(|| std::mem::take(&mut self.active_projections));
+                    let parameter = signature
+                        .as_ref()
+                        .and_then(|(params, _)| params.get(index))
+                        .map(|(_, typ)| typ);
+                    let independent =
+                        matches!(callee.as_ref(),Expr::Ident(name) if name==core_ir::tuples::VALUE);
+                    let unresolved = if tuple_projection {
+                        false
+                    } else if independent {
+                        self.unresolved_width
+                    } else {
+                        match parameter {
+                            None | Some(Typ::Generic(_) | Typ::Int) => true,
+                            Some(Typ::Named(name)) => name == "Any",
+                            _ => false,
+                        }
+                    };
+                    let outer_unresolved =
+                        std::mem::replace(&mut self.unresolved_width, unresolved);
+                    self.value(arg, parameter, env, ret);
+                    self.unresolved_width = outer_unresolved;
+                    if let Some(paths) = projection_arguments {
+                        self.active_projections = paths;
+                    }
+                    if let Some(projected) = projected {
+                        self.leave_projection(projected);
+                    }
                 }
                 if self.rewrite
                     && let Some(kind) = callee_kind
@@ -1240,7 +1683,13 @@ impl Pass<'_> {
             }
             Expr::Block { body, result } => {
                 let mut inner = env.clone();
+                let outer_place = self.active_place.take();
+                let body_paths = std::mem::take(&mut self.active_projections);
+                let outer_unresolved = std::mem::replace(&mut self.unresolved_width, false);
                 self.body(body, &mut inner, ret);
+                self.active_projections = body_paths;
+                self.unresolved_width = outer_unresolved;
+                self.active_place = outer_place;
                 result
                     .as_mut()
                     .and_then(|result| self.expression(result, expected, &mut inner, ret))
@@ -1250,9 +1699,29 @@ impl Pass<'_> {
                 then_expr,
                 else_expr,
             } => {
+                let outer_unresolved = std::mem::replace(&mut self.unresolved_width, false);
+                let independent_place = self.active_place.take();
+                let independent_paths = std::mem::take(&mut self.active_projections);
                 self.expression(cond, None, env, ret);
-                let left = self.expression(then_expr, expected, &mut env.clone(), ret);
-                let right = self.expression(else_expr, expected.or(left), &mut env.clone(), ret);
+                self.active_place = independent_place;
+                self.active_projections = independent_paths;
+                self.unresolved_width = outer_unresolved;
+                let mut peer = expected;
+                for branch in [&**then_expr, &**else_expr] {
+                    if let Some(hint) = self.hint(branch, env) {
+                        peer = Some(peer.map_or(hint, |kind| kind.prefer_source(hint)));
+                    }
+                }
+                let result_unresolved = self.unresolved_width;
+                if peer.is_none_or(|kind| !kind.source)
+                    && (!self.contextual_integer(then_expr, env)
+                        || !self.contextual_integer(else_expr, env))
+                {
+                    self.unresolved_width = true;
+                }
+                let left = self.expression(then_expr, peer, &mut env.clone(), ret);
+                let right = self.expression(else_expr, peer.or(left), &mut env.clone(), ret);
+                self.unresolved_width = result_unresolved;
                 if left.is_some() && right.is_some() && !same_kinds(left, right) {
                     bad = true;
                     mismatch = left
@@ -1270,7 +1739,13 @@ impl Pass<'_> {
                 let mut inner = env.clone();
                 inner.extend(params.iter().cloned());
                 let outer = self.return_type.replace(closure_ret.clone());
+                let outer_unresolved = std::mem::replace(&mut self.unresolved_width, false);
+                let independent_place = self.active_place.take();
+                let independent_paths = std::mem::take(&mut self.active_projections);
                 self.body(body, &mut inner, typ_kind(closure_ret, self.semantics));
+                self.active_place = independent_place;
+                self.active_projections = independent_paths;
+                self.unresolved_width = outer_unresolved;
                 self.return_type = outer;
                 if self.rewrite
                     && (unsupported_type(
@@ -1293,13 +1768,25 @@ impl Pass<'_> {
                     self.semantics,
                     &mut HashSet::new(),
                 );
-                let schema = self.facts.structs.get(name).cloned().unwrap_or_default();
+                let tuple_fields = core_ir::tuples::fields(name);
+                let tuple = tuple_fields.is_some();
+                let schema = self
+                    .facts
+                    .structs
+                    .get(name)
+                    .cloned()
+                    .or(tuple_fields)
+                    .unwrap_or_default();
+                let count = fields.len();
                 for (field, value) in fields {
+                    let previous = self.enter_projection(Projection::Field(field.clone()), count);
                     let expected = schema
                         .iter()
                         .find(|(name, _)| name == field)
-                        .map(|(_, typ)| typ);
+                        .map(|(_, typ)| typ)
+                        .filter(|typ| !tuple || **typ != Typ::Int);
                     self.value(value, expected, env, ret);
+                    self.leave_projection(previous);
                 }
                 None
             }
@@ -1308,14 +1795,36 @@ impl Pass<'_> {
                     .checker
                     .expr_type(expr, self.facts, env)
                     .and_then(|typ| typ_kind(&typ, self.semantics));
+                if (self.unresolved_width || !self.active_projections.is_empty())
+                    && let Some(place) = source_place(expr)
+                {
+                    if self.unresolved_width {
+                        self.defer_place(place.clone());
+                    }
+                    for path in self.active_projections.clone() {
+                        let mut selected = place.clone();
+                        selected.path.extend(path);
+                        self.defer_place(selected);
+                    }
+                }
+                let old = std::mem::replace(&mut self.unresolved_width, false);
+                let paths = std::mem::take(&mut self.active_projections);
                 core_ir::for_each_expr_child_mut(expr, &mut |child| {
                     self.expression(child, None, env, ret);
                 });
+                self.active_projections = paths;
+                self.unresolved_width = old;
                 kind
             }
             Expr::MatchValue { scrutinee, arms } => {
                 let hint = arms.iter().find_map(|arm| self.pattern_hint(&arm.pattern));
+                let outer_unresolved = std::mem::replace(&mut self.unresolved_width, false);
+                let independent_place = self.active_place.take();
+                let independent_paths = std::mem::take(&mut self.active_projections);
                 let scrutinee_kind = self.expression(scrutinee, hint, env, ret);
+                self.active_place = independent_place;
+                self.active_projections = independent_paths;
+                self.unresolved_width = outer_unresolved;
                 let typ = scrutinee_kind
                     .map(Kind::typ)
                     .or_else(|| self.checker.expr_type(scrutinee, self.facts, env));
@@ -1330,7 +1839,13 @@ impl Pass<'_> {
                         .unwrap_or_else(|| env.clone());
                     self.flexible_pattern(&inner, env, scrutinee_kind.is_none());
                     if let Some(guard) = &mut arm.guard {
+                        let outer_unresolved = std::mem::replace(&mut self.unresolved_width, false);
+                        let independent_place = self.active_place.take();
+                        let independent_paths = std::mem::take(&mut self.active_projections);
                         self.expression(guard, None, &mut inner, ret);
+                        self.active_place = independent_place;
+                        self.active_projections = independent_paths;
+                        self.unresolved_width = outer_unresolved;
                     }
                     let value = self.expression(&mut arm.value, kind, &mut inner, ret);
                     if kind.is_some() && value.is_some() && !same_kinds(kind, value) {
@@ -1342,6 +1857,14 @@ impl Pass<'_> {
                     kind = kind.or(value);
                 }
                 kind
+            }
+            Expr::ArrayLit(items) => {
+                for item in items {
+                    let previous = self.enter_projection(Projection::Element, 0);
+                    self.expression(item, None, env, ret);
+                    self.leave_projection(previous);
+                }
+                None
             }
             _ => {
                 core_ir::for_each_expr_child_mut(expr, &mut |child| {
@@ -1399,6 +1922,27 @@ impl Pass<'_> {
                     env.insert(name.clone(), typ.clone());
                 }
                 Stmt::Let(name, annotation, value) => {
+                    let outer_place = self.active_place.replace(SourcePlace {
+                        root: name.clone(),
+                        path: vec![],
+                    });
+                    if let Some(place) = source_place(value) {
+                        self.source_places.insert(name.clone(), place);
+                    }
+                    if aggregate_value(value) {
+                        self.aggregate_sources.insert(name.clone());
+                    }
+                    let outer_projections = std::mem::replace(
+                        &mut self.active_projections,
+                        self.unresolved_projections
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                    let outer_unresolved = std::mem::replace(
+                        &mut self.unresolved_width,
+                        self.unresolved_bindings.contains(name),
+                    );
                     // Canonical Int is a lowering carrier, not an explicit Rust width.
                     let carrier_kind = if *annotation == Some(Typ::Int) {
                         let kind =
@@ -1425,8 +1969,22 @@ impl Pass<'_> {
                     } else {
                         self.expression(value, expected, env, ret)
                     };
-                    if kind.is_none() && self.opaque_int(value, env) {
+                    let aggregate_projection = source_place(value).is_some_and(|place| {
+                        self.resolve_place(place)
+                            .is_some_and(|place| self.aggregate_sources.contains(&place.root))
+                    });
+                    if kind.is_none() && !aggregate_projection && self.opaque_int(value, env) {
                         self.opaque.insert(name.clone());
+                    }
+                    if kind.is_none()
+                        && !self.contextual_integer(value, env)
+                        && !self.known_noninteger(value, env)
+                        && !aggregate_projection
+                    {
+                        // Staging can spill an unowned call/field result before
+                        // its numeric use. Preserve that missing source context
+                        // so peers can constrain their own spilled literals.
+                        self.unresolved_bindings.insert(name.clone());
                     }
                     if self.rewrite && self.const_env.is_some() {
                         let value = self.constant(value);
@@ -1458,8 +2016,26 @@ impl Pass<'_> {
                     {
                         env.insert(name.clone(), typ);
                     }
+                    self.unresolved_width = outer_unresolved;
+                    self.active_projections = outer_projections;
+                    self.active_place = outer_place;
                 }
                 Stmt::Assign(name, value) => {
+                    let outer_place = self.active_place.replace(SourcePlace {
+                        root: name.clone(),
+                        path: vec![],
+                    });
+                    let outer_projections = std::mem::replace(
+                        &mut self.active_projections,
+                        self.unresolved_projections
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                    let outer_unresolved = std::mem::replace(
+                        &mut self.unresolved_width,
+                        self.unresolved_bindings.contains(name),
+                    );
                     let expected =
                         self.inferred.get(name).copied().or_else(|| {
                             env.get(name).and_then(|typ| typ_kind(typ, self.semantics))
@@ -1490,6 +2066,9 @@ impl Pass<'_> {
                             }
                         }
                     }
+                    self.unresolved_width = outer_unresolved;
+                    self.active_projections = outer_projections;
+                    self.active_place = outer_place;
                 }
                 Stmt::Return(Some(value)) => {
                     let expected = self.return_type.clone();
@@ -1503,7 +2082,11 @@ impl Pass<'_> {
                     then_body,
                     else_body,
                 } => {
+                    let independent_place = self.active_place.take();
+                    let independent_paths = std::mem::take(&mut self.active_projections);
                     self.expression(cond, None, env, ret);
+                    self.active_place = independent_place;
+                    self.active_projections = independent_paths;
                     let condition = match self.folded_constant(cond) {
                         Expr::BoolLit(value) => Some(value),
                         _ => None,
@@ -1522,14 +2105,60 @@ impl Pass<'_> {
                         }
                     }
                 }
-                Stmt::Loop { cond, body, .. } => {
+                Stmt::Loop { kind, cond, body } => {
                     if let Some(constants) = &mut self.const_env {
                         constants.clear();
                     }
-                    if let Some(cond) = cond {
+                    let mut inner = env.clone();
+                    if let (core_ir::LoopKind::For { binding }, Some(iterator)) =
+                        (kind, cond.as_mut())
+                    {
+                        // Rust metadata normalization also runs before for-loop
+                        // desugaring. Link the scoped iteration value to its
+                        // source without adding a fabricated source IR binding.
+                        let virtual_source = format!("#rust-loop-source:{binding}");
+                        let mut place = source_place(iterator).unwrap_or_else(|| SourcePlace {
+                            root: virtual_source.clone(),
+                            path: vec![],
+                        });
+                        place.path.push(Projection::Element);
+                        self.source_places.insert(binding.clone(), place);
+                        self.flexible.insert(binding.clone());
+                        if aggregate_value(iterator) {
+                            self.aggregate_sources.insert(virtual_source.clone());
+                        }
+                        if let Some(Typ::Array(element) | Typ::Vector(element)) =
+                            self.checker.expr_type(iterator, self.facts, env)
+                        {
+                            if let Some(kind) = typ_kind(&element, self.semantics) {
+                                self.inferred.insert(binding.clone(), kind);
+                            }
+                            inner.insert(binding.clone(), *element);
+                        }
+                        let paths = std::mem::replace(
+                            &mut self.active_projections,
+                            self.unresolved_projections
+                                .get(&virtual_source)
+                                .cloned()
+                                .unwrap_or_default(),
+                        );
+                        let position = self.active_place.replace(SourcePlace {
+                            root: virtual_source,
+                            path: vec![],
+                        });
+                        let context = std::mem::replace(&mut self.unresolved_width, false);
+                        self.expression(iterator, None, env, ret);
+                        self.active_place = position;
+                        self.active_projections = paths;
+                        self.unresolved_width = context;
+                    } else if let Some(cond) = cond {
+                        let independent_place = self.active_place.take();
+                        let independent_paths = std::mem::take(&mut self.active_projections);
                         self.expression(cond, None, env, ret);
+                        self.active_place = independent_place;
+                        self.active_projections = independent_paths;
                     }
-                    self.body(body, &mut env.clone(), ret);
+                    self.body(body, &mut inner, ret);
                     if let Some(constants) = &mut self.const_env {
                         constants.clear();
                     }
@@ -1561,7 +2190,11 @@ impl Pass<'_> {
                 }
                 Stmt::Match { scrutinee, arms } => {
                     let hint = arms.iter().find_map(|arm| self.pattern_hint(&arm.pattern));
+                    let independent_place = self.active_place.take();
+                    let independent_paths = std::mem::take(&mut self.active_projections);
                     let scrutinee_kind = self.expression(scrutinee, hint, env, ret);
+                    self.active_place = independent_place;
+                    self.active_projections = independent_paths;
                     let typ = scrutinee_kind
                         .map(Kind::typ)
                         .or_else(|| self.checker.expr_type(scrutinee, self.facts, env));
@@ -1575,7 +2208,11 @@ impl Pass<'_> {
                             .unwrap_or_else(|| env.clone());
                         self.flexible_pattern(&inner, env, scrutinee_kind.is_none());
                         if let Some(guard) = &mut arm.guard {
+                            let independent_place = self.active_place.take();
+                            let independent_paths = std::mem::take(&mut self.active_projections);
                             self.expression(guard, None, &mut inner, ret);
+                            self.active_place = independent_place;
+                            self.active_projections = independent_paths;
                         }
                         self.body(&mut arm.body, &mut inner, ret);
                     }
@@ -1632,6 +2269,9 @@ fn decl_has_metadata(value: &Decl) -> bool {
         }
     }
     fn expr(value: &Expr) -> bool {
+        if matches!(value,Expr::Unary{op,..} if core_ir::rust_floats::cast_kind(op).is_some()) {
+            return true;
+        }
         if matches!(value, Expr::Ident(name) if primitive_member(name, IntegerSemantics::Word64).is_some())
         {
             return true;
@@ -1763,6 +2403,15 @@ pub(crate) fn normalize(
             flexible: HashSet::new(),
             opaque: HashSet::new(),
             rewrite: false,
+            unresolved_width: false,
+            unresolved_bindings: HashSet::new(),
+            source_places: HashMap::new(),
+            aggregate_sources: HashSet::new(),
+            unresolved_projections: HashMap::new(),
+            active_projections: HashSet::new(),
+            projection_kinds: HashMap::new(),
+            active_place: None,
+            projection_failure: std::cell::Cell::new(false),
             return_type: None,
             const_env: None,
         };
@@ -1775,14 +2424,27 @@ pub(crate) fn normalize(
                 let mut initial = globals.clone();
                 initial.extend(params.iter().cloned());
                 loop {
-                    let before = pass.inferred.clone();
+                    let before = (
+                        pass.inferred.clone(),
+                        pass.unresolved_bindings.clone(),
+                        pass.unresolved_projections.clone(),
+                        pass.projection_kinds.clone(),
+                    );
                     pass.body(body, &mut initial.clone(), typ_kind(ret, semantics));
-                    if before == pass.inferred {
+                    if before.0 == pass.inferred
+                        && before.1 == pass.unresolved_bindings
+                        && before.2 == pass.unresolved_projections
+                        && before.3 == pass.projection_kinds
+                    {
                         break;
                     }
                 }
                 pass.rewrite = true;
                 pass.body(body, &mut initial, typ_kind(ret, semantics));
+                if pass.projection_failure.get() {
+                    body.insert(0,Stmt::Expr(Expr::Ident(core_ir::type_proofs::ResolutionFailure::Unsupported("aggregate source dependency cycle or depth exceeds bounded resolution".into()).symbol())));
+                }
+
                 if params
                     .iter()
                     .any(|(_, typ)| unsupported_type(typ, &facts, semantics, &mut HashSet::new()))
@@ -1797,9 +2459,18 @@ pub(crate) fn normalize(
                 ..
             } => {
                 loop {
-                    let before = pass.inferred.clone();
+                    let before = (
+                        pass.inferred.clone(),
+                        pass.unresolved_bindings.clone(),
+                        pass.unresolved_projections.clone(),
+                        pass.projection_kinds.clone(),
+                    );
                     pass.value(value, Some(typ), &mut globals.clone(), None);
-                    if before == pass.inferred {
+                    if before.0 == pass.inferred
+                        && before.1 == pass.unresolved_bindings
+                        && before.2 == pass.unresolved_projections
+                        && before.3 == pass.projection_kinds
+                    {
                         break;
                     }
                 }
@@ -1807,6 +2478,15 @@ pub(crate) fn normalize(
                 pass.const_env = Some(HashMap::new());
                 pass.value(value, Some(typ), &mut globals.clone(), None);
                 pass.validate_constant(value);
+                if pass.projection_failure.get() {
+                    let prior = invalid_preserving_proof(value);
+                    **value = if matches!(&prior,Expr::Ident(name)if core_ir::type_proofs::decode(name).is_some_and(|proof|proof.is_invalid()))
+                    {
+                        prior
+                    } else {
+                        Expr::Ident(core_ir::type_proofs::ResolutionFailure::Unsupported("aggregate source dependency cycle or depth exceeds bounded resolution".into()).symbol())
+                    };
+                }
                 if unsupported_type(typ, &facts, semantics, &mut HashSet::new()) {
                     **value = invalid();
                 }
@@ -2738,7 +3418,7 @@ mod tests {
             let mut module = resolved(source, IntegerSemantics::Word64);
             let mut rejected = false;
             crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
-                rejected |= matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+                rejected |= matches!(expr,Expr::Ident(name) if matches!(core_ir::type_proofs::decode(name), Some(core_ir::type_proofs::ResolutionFailure::Invalid(message)) if message == "integer literal is outside its Rust source type range"));
             });
             assert!(rejected, "{source}: {module:?}");
         }
@@ -2774,8 +3454,7 @@ mod tests {
         normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
         let mut rejected = false;
         crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
-            rejected |=
-                matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+            rejected |= matches!(expr,Expr::Ident(name) if matches!(core_ir::type_proofs::decode(name), Some(core_ir::type_proofs::ResolutionFailure::Invalid(message)) if message == "integer literal is outside its Rust source type range"));
         });
         assert!(rejected, "{module:?}");
     }
@@ -2843,8 +3522,7 @@ mod tests {
         );
         let mut rejected = false;
         crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
-            rejected |=
-                matches!(expr,Expr::Ident(name) if name.starts_with("#unsupported-rust-integer"));
+            rejected |= matches!(expr,Expr::Ident(name) if matches!(core_ir::type_proofs::decode(name), Some(core_ir::type_proofs::ResolutionFailure::Invalid(message)) if message == "integer literal is outside its Rust source type range"));
         });
         assert!(rejected, "{module:?}");
         let module = resolved(
@@ -3096,6 +3774,427 @@ mod tests {
             assert!(
                 !crate::core_ir_verifier::verify_for_entry(&module, "main").ok,
                 "{source}: {module:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod integer_float_tests {
+    use super::*;
+    fn lower(source: &str, semantics: IntegerSemantics) -> UnifiedModule {
+        let mut module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        normalize(&TypeChecker::new(), &mut module, semantics);
+        module
+    }
+    fn count_identifier(expression: &Expr, name: &str) -> usize {
+        let mut expression = expression.clone();
+        let mut count = 0;
+        crate::core_opt::map_expr_mut(&mut expression, &mut |value| {
+            if matches!(value,Expr::Ident(actual)if actual==name) {
+                count += 1;
+            }
+        });
+        count
+    }
+    #[test]
+    fn integer_source_width_and_sign_select_direct_float_precision() {
+        for kind in [
+            "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "isize", "usize",
+        ] {
+            for (destination, bits) in [("f32", 32), ("f64", 64)] {
+                let module = lower(
+                    &format!("fn convert(value:{kind})->{destination}{{value as {destination}}}"),
+                    IntegerSemantics::Word64,
+                );
+                let Decl::Function { body, .. } = &module.decls[0] else {
+                    panic!()
+                };
+                let Stmt::Return(Some(Expr::Unary { op, expr })) = body.last().unwrap() else {
+                    panic!("{kind}: {body:?}")
+                };
+                assert_eq!(
+                    core_ir::integer_float_cast_spec(op),
+                    Some((bits, kind.starts_with('i')))
+                );
+                assert_eq!(count_identifier(expr, "value"), 1, "{expr:?}");
+                assert!(!core_ir::type_proofs::present(&module.decls), "{module:?}");
+            }
+        }
+    }
+    #[test]
+    fn default_integer_range_errors_survive_cold_float_casts() {
+        for source in [
+            "fn main()->i64{if false{let x=2147483648 as f32;}42}",
+            "fn main()->i64{let x=2147483648;if false{let y=x as f64;}42}",
+        ] {
+            let module = lower(source, IntegerSemantics::Word64);
+            assert!(
+                TypeChecker::new()
+                    .typed_proof_nodes(&module.decls)
+                    .values()
+                    .any(core_ir::type_proofs::ResolutionFailure::is_invalid),
+                "{source}: {module:?}"
+            );
+        }
+        let module = lower(
+            "fn convert()->f32{2147483648i64 as f32}",
+            IntegerSemantics::Word64,
+        );
+        assert!(!core_ir::type_proofs::present(&module.decls), "{module:?}");
+    }
+    #[test]
+    fn conversion_evaluates_effectful_source_once_and_keeps_capability_refusals() {
+        let module = lower(
+            "fn next()->u64{42u64}fn convert()->f32{next() as f32}",
+            IntegerSemantics::Word64,
+        );
+        let Decl::Function { body, .. } = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl,Decl::Function{name,..}if name=="convert"))
+            .unwrap()
+        else {
+            panic!()
+        };
+        let Stmt::Return(Some(value)) = body.last().unwrap() else {
+            panic!()
+        };
+        assert_eq!(count_identifier(value, "next"), 1);
+        for (source, semantics) in [
+            (
+                "fn convert(value:u64)->f32{value as f32}",
+                IntegerSemantics::Word32,
+            ),
+            (
+                "fn convert(value:u128)->f64{value as f64}",
+                IntegerSemantics::Word64,
+            ),
+            (
+                "fn convert(value:Unknown)->f32{value as f32}",
+                IntegerSemantics::Word64,
+            ),
+        ] {
+            let module = lower(source, semantics);
+            let mut conversions = 0;
+            let mut view = module.decls.clone();
+            crate::core_opt::map_decl_exprs_mut(&mut view, &mut |value| {
+                if matches!(value,Expr::Unary{op,..}if core_ir::integer_float_cast_spec(op).is_some())
+                {
+                    conversions += 1;
+                }
+            });
+            assert_eq!(conversions, 0, "{source}: {module:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod unsigned_magnitude_float_tests {
+    use super::*;
+    fn normalize_source(source: &str, semantics: IntegerSemantics) -> UnifiedModule {
+        let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        super::super::normalize_module_with_semantics(
+            crate::parser_registry::ParserId::Rust,
+            &module,
+            semantics,
+        )
+    }
+    #[test]
+    fn unsuffixed_unsigned_magnitudes_keep_context_and_default_range() {
+        for kind in ["u64", "usize"] {
+            for destination in ["f32", "f64"] {
+                let module = normalize_source(
+                    &format!(
+                        "fn convert()->{destination}{{let value:{kind}=18446744073709551615;value as {destination}}}"
+                    ),
+                    IntegerSemantics::Word64,
+                );
+                assert!(!core_ir::type_proofs::present(&module.decls), "{module:?}");
+                let mut conversions = 0;
+                let mut view = module.decls.clone();
+                crate::core_opt::map_decl_exprs_mut(&mut view, &mut |value| {
+                    if let Expr::Unary { op, .. } = value {
+                        if let Some((_, signed)) = core_ir::integer_float_cast_spec(op) {
+                            assert!(!signed);
+                            conversions += 1;
+                        }
+                    }
+                });
+                assert_eq!(conversions, 1, "{module:?}");
+            }
+        }
+        let module = normalize_source(
+            "fn next()->u64{18446744073709551615}fn convert()->f32{next() as f32}",
+            IntegerSemantics::Word64,
+        );
+        assert!(!core_ir::type_proofs::present(&module.decls), "{module:?}");
+        let mut calls = 0;
+        let mut view = module.decls.clone();
+        crate::core_opt::map_decl_exprs_mut(&mut view, &mut |value| {
+            if matches!(value,Expr::Call{callee,..}if matches!(callee.as_ref(),Expr::Ident(name)if name=="next"))
+            {
+                calls += 1;
+            }
+        });
+        assert_eq!(calls, 1);
+        for source in [
+            "fn main()->i64{if false{let value=18446744073709551615 as f32;}42}",
+            "fn main()->i64{let value=18446744073709551615;if false{let other=value as f64;}42}",
+            "fn main()->i64{let value:i64=18446744073709551615;42}",
+        ] {
+            let module = normalize_source(source, IntegerSemantics::Word64);
+            assert!(
+                TypeChecker::new()
+                    .typed_proof_nodes(&module.decls)
+                    .values()
+                    .any(core_ir::type_proofs::ResolutionFailure::is_invalid),
+                "{source}: {module:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod unresolved_width_context_tests {
+    use super::*;
+    fn normalize_source(source: &str) -> UnifiedModule {
+        let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        super::super::normalize_module_with_semantics(
+            crate::parser_registry::ParserId::Rust,
+            &module,
+            IntegerSemantics::Word64,
+        )
+    }
+    fn invalid(module: &UnifiedModule) -> bool {
+        TypeChecker::new()
+            .typed_proof_nodes(&module.decls)
+            .values()
+            .any(core_ir::type_proofs::ResolutionFailure::is_invalid)
+    }
+    #[test]
+    fn unowned_argument_and_peer_widths_do_not_claim_default_i32() {
+        for source in [
+            "enum Value{Int(i64)}fn main()->i64{let value=Value::Int(4294967295);42}",
+            "struct Emitter;fn emit(e:Emitter)->i64{e.emit_u32(4294967295);42}",
+            "fn main()->i64{let instruction=u32::from_le_bytes([0u8;4])|0x80000000;42}",
+            "fn main()->i64{let values=[1u8];let result=values.len()|18446744073709551615;42}",
+            "fn main()->i64{let result:u64=std::hint::black_box({let value=2147483648;value});if result==2147483648u64{42}else{7}}",
+            "fn main()->i64{let result:u64=std::hint::black_box({let value=2147483648;let alias=value;alias});42}",
+            "fn main()->i64{let result:u64=std::hint::black_box({let mut value=0;value=2147483648;value});42}",
+            "enum E{Int(i64)}fn main()->i64{let body=[E::Int(2147483648)];for(_tag,expected)in[(\"wide\",2147483648)]{assert!(matches!(&body[0],E::Int(value)if *value==expected));}42}",
+        ] {
+            let module = normalize_source(source);
+            assert!(!invalid(&module), "{source}: {module:?}");
+        }
+    }
+    #[test]
+    fn independent_defaults_and_owned_ranges_remain_invalid() {
+        for source in [
+            "fn main()->i64{external(2147483648 as f32);42}",
+            "fn main()->i64{external({let bad:i8=128;42});42}",
+            "fn main()->i64{external({let bad=2147483648;42});42}",
+            "fn main()->i64{external(42);let bad=2147483648 as f64;42}",
+            "fn take(value:i8){}fn main()->i64{take(128);42}",
+            "fn main()->i64{external(256u8);42}",
+            "fn main()->i64{external(1<<2147483648);42}",
+            "fn main()->i64{external(if 2147483648==0{42}else{0});42}",
+            "enum E{Int(i64)}fn main()->i64{for(n,unused)in[(2147483648,2147483648)]{external(n);assert!(matches!(E::Int(0),E::Int(unused)if unused==0));}42}",
+        ] {
+            let module = normalize_source(source);
+            assert!(invalid(&module), "{source}: {module:?}");
+        }
+    }
+    #[test]
+    fn aggregate_projection_dependencies_are_selective_and_lexically_scoped() {
+        for (source, valid) in [
+            (
+                "enum E{Int(i64)}fn main()->i64{let mut sum=0i64;for(_tag,n)in[(\"a\",2147483648),(\"b\",4294967295)]{let E::Int(value)=E::Int(n);sum+=value;}if sum==6442450943i64{42}else{7}}",
+                true,
+            ),
+            (
+                "enum E{Int(i64)}fn main()->i64{let n:i8=127;let mut sum=0i64;for(_tag,(n,))in[(\"a\",(2147483648,))]{let E::Int(value)=E::Int(n);sum+=value;}if n==127i8&&sum==2147483648i64{42}else{7}}",
+                true,
+            ),
+            (
+                "enum E{Int(i64)}fn main()->i64{let mut tuple=(2147483648,1);let alias=tuple;tuple=alias;let E::Int(value)=E::Int(tuple.0);if value==2147483648i64{42}else{7}}",
+                true,
+            ),
+            (
+                "enum E{Int(i64)}fn main()->i64{for(n,_unused)in[(2147483648,2147483648)]{let value=E::Int(n);}42}",
+                false,
+            ),
+            (
+                "enum E{Int(i64)}fn main()->i64{let tuple=(2147483648,2147483648);let value=E::Int(tuple.0);42}",
+                false,
+            ),
+        ] {
+            let module = normalize_source(source);
+            assert_eq!(!invalid(&module), valid, "direct {source}: {module:?}");
+            let mut owned = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            crate::lower_core::desugar_module_with_semantics(&mut owned, IntegerSemantics::Word64);
+            let owned = super::super::normalize_module_with_semantics(
+                crate::parser_registry::ParserId::Rust,
+                &owned,
+                IntegerSemantics::Word64,
+            );
+            assert_eq!(!invalid(&owned), valid, "owned {source}: {owned:?}");
+        }
+    }
+    #[test]
+    fn aggregate_columns_share_only_owned_source_widths() {
+        let mut failures = Vec::new();
+        for (source, valid) in [
+            (
+                "fn observe(value:i64,expected:i64)->bool{value==i64::MIN && expected==i64::MIN}fn main()->i64{let mut found=false;let mut wide=false;for (_target,value,expected) in [(\"u8\",298,42),(\"i8\",170,-86),(\"i8\",-129,127),(\"u16\",-1,65535),(\"i16\",65535,-1),(\"u32\",-1,4294967295),(\"i32\",2147483648,-2147483648),(\"u64\",i64::MIN,i64::MIN)]{if expected==4294967295{wide=true;}if observe(value,expected){found=true;}}if found && wide{42}else{7}}\n",
+                true,
+            ),
+            (
+                "fn observe_expected(value:i64)->bool{value==4294967295}fn main()->i64{let mut found=false;let mut count=0;for (_target,value,expected) in [(\"u8\",256i64,0),(\"u8\",-1,255),(\"u16\",65536,0),(\"u16\",-1,65535),(\"i8\",-128,-128),(\"i8\",127,127),(\"i16\",-32768,-32768),(\"i16\",32767,32767),(\"i32\",4294967295,-1),(\"u32\",-1,4294967295)]{let _source:i64=value;if observe_expected(expected){found=true;}count+=1;}if found && count==10{42}else{7}}\n",
+                true,
+            ),
+            (
+                "fn main()->i64{let words:Vec<u32>=vec![0x9E230063,0x1E22C063,0x9E660063];let mut found=false;let mut count=0;for (_op,conversion,single) in [(\"int-to-float-f32\",0x9E220063,true),(\"uint-to-float-f32\",0x9E230063,true),(\"int-to-float\",0x9E620063,false),(\"uint-to-float\",0x9E630063,false)]{let mut expected=vec![conversion];if single{expected.push(0x1E22C063);}expected.push(0x9E660063);if words.ends_with(&expected){found=true;}count+=1;}if found && count==4{42}else{7}}\n",
+                true,
+            ),
+            (
+                "fn consume(_value:i64){}fn unused(){for (_name,value,_expected) in [(\"a\",1i64,4294967295),(\"b\",2,0)]{consume(value);}}fn main()->i64{42}\n",
+                false,
+            ),
+            (
+                "fn consume(_value:u32){}fn unused(){for (_unrelated,value) in [(4294967295,1u32),(0,2)]{consume(value);}}fn main()->i64{42}\n",
+                false,
+            ),
+            (
+                "fn main()->i64{for(_tag,value)in[(\"a\",1i64),(\"b\",{let value=2147483648;value as i64})]{external(value);}42}",
+                false,
+            ),
+            (
+                "fn main()->i64{for(_tag,value)in[(\"a\",1i64),(\"b\",1i64<<2147483648)]{external(value);}42}",
+                false,
+            ),
+        ] {
+            let direct = normalize_source(source);
+            if invalid(&direct) == valid {
+                failures.push(format!("direct {source}: {direct:?}"));
+            }
+            let mut owned = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            crate::lower_core::desugar_module_with_semantics(&mut owned, IntegerSemantics::Word64);
+            let owned = super::super::normalize_module_with_semantics(
+                crate::parser_registry::ParserId::Rust,
+                &owned,
+                IntegerSemantics::Word64,
+            );
+            if invalid(&owned) == valid {
+                failures.push(format!("owned {source}: {owned:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+    #[test]
+    fn conflicting_owned_columns_refuse_at_each_available_layer() {
+        let source = "fn main()->i64{let table=[(1u8,),(2u16,)];42}";
+        let module = normalize_source(source);
+        // The earlier fixed-array validator cannot yet prove tuple element
+        // compatibility; its Unsupported proof is an honest refusal.
+        assert!(
+            !TypeChecker::new()
+                .typed_proof_nodes(&module.decls)
+                .is_empty()
+        );
+        let mut integer_only = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        // Isolate the integer pass from the earlier retained-array validator.
+        crate::core_opt::map_decl_exprs_mut(&mut integer_only.decls, &mut |expr| {
+            if let Expr::Unary { op, expr: value } = &expr
+                && core_ir::rust_arrays::value_length(op).is_some()
+            {
+                *expr = (**value).clone();
+            }
+        });
+        normalize(
+            &TypeChecker::new(),
+            &mut integer_only,
+            IntegerSemantics::Word64,
+        );
+        assert!(invalid(&integer_only), "{integer_only:?}");
+    }
+    #[test]
+    fn conditional_results_use_owned_projection_peers_in_both_orders() {
+        for source in [
+            "fn main()->i64{let mut count=0;for(op,expected)in[(\"udiv\",i64::MAX),(\"urem\",1),(\"lshr\",i64::MAX)]{for zero in[false,true]{let expected=if op==\"lshr\"{4611686018427387903}else{expected};count+=1;}}42}",
+            "fn main()->i64{let mut count=0;for(op,expected)in[(\"udiv\",i64::MAX),(\"urem\",1),(\"lshr\",i64::MAX)]{for zero in[false,true]{let expected=if op==\"lshr\"{4611686018427387903}else{expected};let rendered=format!(\"{expected}\");count+=1;}}42}",
+            "fn main()->i64{for(op,expected)in[(\"a\",i64::MAX)]{let result=if op==\"a\"{expected}else{4611686018427387903};}42}",
+            "fn main()->i64{for(op,expected)in[(\"a\",i64::MAX)]{let result=if op==\"a\"{expected}else{4611686018427387903};let rendered=format!(\"{result}\");}42}",
+        ] {
+            let direct = normalize_source(source);
+            assert!(!invalid(&direct), "{source}: {direct:?}");
+            let mut owned = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            crate::lower_core::desugar_module_with_semantics(&mut owned, IntegerSemantics::Word64);
+            let owned = super::super::normalize_module_with_semantics(
+                crate::parser_registry::ParserId::Rust,
+                &owned,
+                IntegerSemantics::Word64,
+            );
+            assert!(!invalid(&owned), "{source}: {owned:?}");
+        }
+        for source in [
+            "fn main()->i64{let result=if true{1u8}else{2u16};42}",
+            "fn main()->i64{for(op,expected)in[(\"a\",i64::MAX)]{let result=if 2147483648==0{expected}else{1};external(result);}42}",
+            "fn main()->i64{for(op,expected)in[(\"a\",i64::MAX)]{let result=if true{expected}else{{let value=2147483648;value as i64}};external(result);}42}",
+        ] {
+            let module = normalize_source(source);
+            assert!(invalid(&module), "{source}: {module:?}");
+        }
+    }
+    #[test]
+    fn unresolved_source_columns_preserve_conditional_width_uncertainty_selectively() {
+        for (source, invalid_expected) in [
+            (
+                "#[cfg(feature=\"unresolved\")]mod pending{fn run()->i64{for(op,expected)in[(\"udiv\",i64::MAX),(\"urem\",1)]{let result=if op==\"lshr\"{4611686018427387903}else{expected};}42}}fn main()->i64{42}",
+                false,
+            ),
+            (
+                "#[cfg(feature=\"unresolved\")]mod pending{fn run()->i64{for(op,expected,unused)in[(\"udiv\",i64::MAX,2147483648),(\"urem\",1,0)]{let result=if op==\"lshr\"{4611686018427387903}else{expected};}42}}fn main()->i64{42}",
+                true,
+            ),
+        ] {
+            let module = normalize_source(source);
+            assert_eq!(invalid(&module), invalid_expected, "{source}: {module:?}");
+        }
+        // Isolate the exact preexisting cfg-erased value marker independently
+        // of frontend cfg catalog decisions.
+        for (source, invalid_expected) in [
+            (
+                "fn main()->i64{for(op,expected)in[(\"a\",i64::MAX),(\"b\",1)]{let result=if true{4611686018427387903}else{expected};}42}",
+                false,
+            ),
+            (
+                "fn main()->i64{for(op,expected,unused)in[(\"a\",i64::MAX,2147483648),(\"b\",1,0)]{let result=if true{4611686018427387903}else{expected};}42}",
+                true,
+            ),
+        ] {
+            let mut module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                if matches!(expr,Expr::Ident(name)if primitive_constant(name,IntegerSemantics::Word64).is_some())
+                {
+                    *expr = Expr::Ident(
+                        core_ir::type_proofs::ResolutionFailure::Unsupported(
+                            "source module depends on unresolved cfg predicates".into(),
+                        )
+                        .symbol(),
+                    );
+                }
+            });
+            crate::lower_core::desugar_module_with_semantics(&mut module, IntegerSemantics::Word64);
+            let module = super::super::normalize_module_with_semantics(
+                crate::parser_registry::ParserId::Rust,
+                &module,
+                IntegerSemantics::Word64,
+            );
+            assert_eq!(
+                invalid(&module),
+                invalid_expected,
+                "marker {source}: {module:?}"
             );
         }
     }

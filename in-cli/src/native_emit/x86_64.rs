@@ -143,6 +143,24 @@ pub fn cvtsi2sd(xmm: u8, gpr: u8) -> Vec<u8> {
     code
 }
 
+/// Convert a signed integer register directly to a scalar single.
+pub fn cvtsi2ss(xmm: u8, gpr: u8) -> Vec<u8> {
+    let mut code = vec![0xf3];
+    push_rex_wr(&mut code, xmm, gpr);
+    code.extend_from_slice(&[0x0f, 0x2a, modrm(3, xmm, gpr)]);
+    code
+}
+
+/// Scalar single arithmetic with the same register layout as scalar_double.
+pub fn scalar_single(opcode: u8, dst: u8, src: u8) -> Vec<u8> {
+    let mut code = vec![0xf3];
+    if dst >= 8 || src >= 8 {
+        code.push(0x40 | ((dst >> 3) << 2) | (src >> 3));
+    }
+    code.extend_from_slice(&[0x0f, opcode, modrm(3, dst, src)]);
+    code
+}
+
 /// Truncate a scalar double to a signed integer register.
 pub fn cvttsd2si(gpr: u8, xmm: u8) -> Vec<u8> {
     let mut code = vec![0xf2];
@@ -810,6 +828,19 @@ mod tests {
         assert_eq!(
             super::movq_xmm_gpr(0, super::RAX, false),
             [0x66, 0x48, 0x0f, 0x7e, 0xc0]
+        );
+        assert_eq!(
+            super::cvtsi2ss(1, super::RAX),
+            [0xf3, 0x48, 0x0f, 0x2a, 0xc8]
+        );
+        assert_eq!(
+            super::cvtsi2ss(8, super::R9),
+            [0xf3, 0x4d, 0x0f, 0x2a, 0xc1]
+        );
+        assert_eq!(super::scalar_single(0x58, 0, 0), [0xf3, 0x0f, 0x58, 0xc0]);
+        assert_eq!(
+            super::scalar_single(0x58, 8, 9),
+            [0xf3, 0x45, 0x0f, 0x58, 0xc1]
         );
         assert_eq!(
             super::cvtsi2sd(1, super::RAX),

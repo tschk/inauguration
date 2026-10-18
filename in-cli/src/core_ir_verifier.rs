@@ -1809,10 +1809,10 @@ fn check_expr_with_array_borrow(
                     ));
                 }
             }
-            if matches!(op.as_str(), "int-to-float" | "float-to-int")
+            if (crate::core_ir::integer_float_cast_spec(op).is_some() || op == "float-to-int")
                 || crate::core_ir::saturating_float_cast_spec(op).is_some()
             {
-                let expected = if op == "int-to-float" {
+                let expected = if crate::core_ir::integer_float_cast_spec(op).is_some() {
                     Typ::Int
                 } else {
                     Typ::Float
@@ -2370,7 +2370,8 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
         Expr::Unary { op, expr, .. } => match op.as_str() {
             "!" => Some(Typ::Bool),
             "bool-to-int" | "float-to-int" => Some(Typ::Int),
-            "int-to-float" | "float-cast-f32" | "float-cast-f64" => Some(Typ::Float),
+            op if crate::core_ir::integer_float_cast_spec(op).is_some() => Some(Typ::Float),
+            "float-cast-f32" | "float-cast-f64" => Some(Typ::Float),
             op if crate::core_ir::integer_cast_spec(op).is_some()
                 || crate::core_ir::saturating_float_cast_spec(op).is_some() =>
             {
@@ -4530,6 +4531,24 @@ mod tests {
         for (op, ret, good, bad) in [
             (
                 "int-to-float",
+                Typ::Float,
+                Expr::IntLit(42),
+                Expr::BoolLit(true),
+            ),
+            (
+                "int-to-float-f32",
+                Typ::Float,
+                Expr::IntLit(42),
+                Expr::BoolLit(true),
+            ),
+            (
+                "uint-to-float",
+                Typ::Float,
+                Expr::IntLit(42),
+                Expr::BoolLit(true),
+            ),
+            (
+                "uint-to-float-f32",
                 Typ::Float,
                 Expr::IntLit(42),
                 Expr::BoolLit(true),

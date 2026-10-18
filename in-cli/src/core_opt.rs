@@ -1498,11 +1498,19 @@ pub(crate) fn fold_expr_with_semantics(e: Expr, semantics: IntegerSemantics) -> 
                     value.0
                 }));
             }
-            if op == "int-to-float"
+            if crate::core_ir::integer_float_cast_spec(op).is_some()
                 && let Expr::IntLit(value) = expr.as_ref()
             {
-                if let Some(value) = semantics.normalize_word(*value) {
-                    return Expr::FloatLit(crate::core_ir::FloatVal(value as f64));
+                // New unsigned carriers require Word64; retain legacy signed word folding.
+                let value = if op == "int-to-float" {
+                    semantics.normalize_word(*value)
+                } else {
+                    (semantics == IntegerSemantics::Word64).then_some(*value)
+                };
+                if let Some(value) =
+                    value.and_then(|value| crate::core_ir::fold_integer_float_cast(op, value))
+                {
+                    return Expr::FloatLit(crate::core_ir::FloatVal(value));
                 }
             }
             if let Some((bits, signed)) = crate::core_ir::saturating_float_cast_spec(op)
@@ -6123,5 +6131,35 @@ mod array_copy_effect_tests {
             assert!(!is_propagatable_const(&copy));
         }
         assert!(!expr_has_effects(&Expr::Ident("source".into())));
+    }
+}
+
+#[cfg(test)]
+mod integer_float_conversion_tests {
+    use super::*;
+    #[test]
+    fn integer_float_folding_uses_direct_precision_and_retains_word32_boundary() {
+        for (op, value, expected) in [
+            (
+                "int-to-float-f32",
+                4611686293305294849_i64,
+                f64::from(f32::from_bits(0x5e80_0001)),
+            ),
+            ("uint-to-float-f32", -1, 18446744073709551616.0),
+            ("uint-to-float", -1, 18446744073709551616.0),
+        ] {
+            let cast = |value| Expr::Unary {
+                op: op.into(),
+                expr: Box::new(Expr::IntLit(value)),
+            };
+            assert_eq!(
+                fold_expr_with_semantics(cast(value), IntegerSemantics::Word64),
+                Expr::FloatLit(crate::core_ir::FloatVal(expected))
+            );
+            assert_eq!(
+                fold_expr_with_semantics(cast(-1), IntegerSemantics::Word32),
+                cast(-1)
+            );
+        }
     }
 }

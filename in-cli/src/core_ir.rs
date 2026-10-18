@@ -630,6 +630,37 @@ pub(crate) fn integer_spec(name: &str) -> Option<(u8, bool)> {
     }
 }
 
+/// Destination precision and source signedness for normalized 64-bit integer carriers.
+pub(crate) fn integer_float_cast_spec(op: &str) -> Option<(u8, bool)> {
+    match op {
+        "int-to-float" => Some((64, true)),
+        "int-to-float-f32" => Some((32, true)),
+        "uint-to-float" => Some((64, false)),
+        "uint-to-float-f32" => Some((32, false)),
+        _ => None,
+    }
+}
+
+pub(crate) fn integer_float_cast_op(bits: u8, signed: bool) -> Option<&'static str> {
+    match (bits, signed) {
+        (64, true) => Some("int-to-float"),
+        (32, true) => Some("int-to-float-f32"),
+        (64, false) => Some("uint-to-float"),
+        (32, false) => Some("uint-to-float-f32"),
+        _ => None,
+    }
+}
+
+pub(crate) fn fold_integer_float_cast(op: &str, value: i64) -> Option<f64> {
+    Some(match integer_float_cast_spec(op)? {
+        (32, true) => f64::from(value as f32),
+        (32, false) => f64::from((value as u64) as f32),
+        (64, true) => value as f64,
+        (64, false) => (value as u64) as f64,
+        _ => return None,
+    })
+}
+
 pub(crate) fn integer_cast_spec(op: &str) -> Option<(u8, bool)> {
     match op.strip_prefix("int-cast-")? {
         "isize" => Some((64, true)),
@@ -2697,5 +2728,30 @@ mod retained_string_comparison_tests {
             rust_references::receiver_identity(&view),
             rust_references::receiver_identity(&before)
         );
+    }
+}
+
+#[cfg(test)]
+mod integer_float_cast_tests {
+    #[test]
+    fn integer_float_casts_preserve_precision_and_unsigned_bits() {
+        for bits in [32, 64] {
+            for signed in [false, true] {
+                let op = super::integer_float_cast_op(bits, signed).unwrap();
+                assert_eq!(super::integer_float_cast_spec(op), Some((bits, signed)));
+            }
+        }
+        assert_eq!(super::integer_float_cast_op(16, true), None);
+        assert_eq!(super::integer_float_cast_spec("int-to-float-f16"), None);
+        let value = 4611686293305294849_i64;
+        let direct = super::fold_integer_float_cast("int-to-float-f32", value).unwrap();
+        assert_eq!((direct as f32).to_bits(), 0x5e80_0001);
+        assert_ne!(direct, f64::from((value as f64) as f32));
+        for op in ["uint-to-float", "uint-to-float-f32"] {
+            assert_eq!(
+                super::fold_integer_float_cast(op, -1),
+                Some(18446744073709551616.0)
+            );
+        }
     }
 }

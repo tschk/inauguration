@@ -893,14 +893,35 @@ impl Ctx {
                         "({{ uint64_t {value} = (uint64_t)({e}); uint64_t {bits} = UINT64_C(0) - {value}; {result}; }})"
                     );
                 }
+                if crate::core_ir::integer_float_cast_spec(op).is_some()
+                    && TypeChecker::new()
+                        .checked_expr_type(expr, &self.facts, &self.types)
+                        .map(|typ| typ.canonical())
+                        != Some(Typ::Int)
+                {
+                    self.fail(
+                        "c-backend: integer to float conversion requires a resolved Int operand"
+                            .into(),
+                    );
+                    return "0".into();
+                }
                 let e = self.expr_str(expr);
                 if let Some((bits, signed)) = crate::core_ir::saturating_float_cast_spec(op) {
                     return format!("in_float_saturate({e}, {bits}, {})", u8::from(signed));
                 }
 
+                if let Some((bits, signed)) = crate::core_ir::integer_float_cast_spec(op) {
+                    return match (bits, signed) {
+                        (64, true) => format!("((double)({e}))"),
+                        (64, false) => format!("((double)((uint64_t)({e})))"),
+                        (32, true) => format!("((double)((float)((int64_t)({e}))))"),
+                        (32, false) => format!("((double)((float)((uint64_t)({e}))))"),
+                        _ => unreachable!(),
+                    };
+                }
                 match op.as_str() {
                     "bool-to-int" | "float-to-int" => format!("((int64_t)({e}))"),
-                    "int-to-float" | "float-cast-f64" => format!("((double)({e}))"),
+                    "float-cast-f64" => format!("((double)({e}))"),
                     "float-cast-f32" => format!("((double)((float)({e})))"),
                     "neg" | "-" => format!("(-{})", e),
                     "not" | "!" => format!("(!{})", e),

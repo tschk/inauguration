@@ -813,6 +813,14 @@ pub(super) fn finish_expr(
             report(expr, proof.clone(), facts, policy);
             return Some(proof.typ());
         }
+        // Integer ownership remains with its width inference pass. A Float
+        // destination must never supply a source integer width or default.
+        let integer_pending = matches!(actual.as_ref(), Some(Typ::Int))
+            || matches!(actual.as_ref(),Some(Typ::Named(name)) if crate::core_ir::rust_integer_type_name(name).is_some() || name.starts_with("#unsupported-rust-integer-"))
+            || matches!(value.as_ref(),Expr::Unary{op,..} if op=="rust-integer-literal" || op.starts_with("rust-integer-literal-") || op.starts_with("rust-integer-value-"));
+        if integer_pending {
+            return Some(floats::typ(target));
+        }
         if !actual.as_ref().is_some_and(source) {
             let proof = ResolutionFailure::Unsupported(
                 "Rust float cast requires an owned float source; integer conversion is deferred"
@@ -1715,5 +1723,37 @@ mod tests {
         );
         assert_eq!(erase_values(value), Expr::FloatLit(FloatVal(1.0)));
         assert!(join_types(&[Some(Typ::Float), Some(Typ::Float)]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod integer_cast_deferral_tests {
+    use super::*;
+    #[test]
+    fn float_lowering_retains_integer_source_without_contextualizing_it() {
+        let facts = TypeChecker::new().collect_facts(&crate::core_ir::UnifiedModule::new(vec![]));
+        for value in [
+            Expr::Unary {
+                op: "rust-integer-literal".into(),
+                expr: Box::new(Expr::IntLit(2147483648)),
+            },
+            Expr::Ident("input".into()),
+        ] {
+            let env = HashMap::from([("input".into(), Typ::Named("#rust-integer-u64".into()))]);
+            let mut expression = floats::cast(value, Kind::F32);
+            let before = expression.clone();
+            assert_eq!(
+                finish_expr(
+                    &TypeChecker::new(),
+                    &mut expression,
+                    &facts,
+                    &env,
+                    ResolvePolicy::RustFloatLower
+                ),
+                Some(floats::typ(Kind::F32))
+            );
+            assert_eq!(expression, before);
+            assert!(facts.float_constraints.borrow().failure().is_none());
+        }
     }
 }

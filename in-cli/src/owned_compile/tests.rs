@@ -10861,3 +10861,117 @@ fn rust_captured_match_guards_preserve_scope_and_execute() {
         fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+fn rust_integer_float_casts_preserve_precision_and_sign() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main()->i64{let value:i8=-127;let actual:f32=value as f32;if actual==-127.0f32{42}else{7}}",
+        "fn main()->i64{let value:i8=-127;let actual:f64=value as f64;if actual==-127.0f64{42}else{7}}",
+        "fn main()->i64{let value:u8=255;let actual:f32=value as f32;if actual==255.0f32{42}else{7}}",
+        "fn main()->i64{let value:u8=255;let actual:f64=value as f64;if actual==255.0f64{42}else{7}}",
+        "fn main()->i64{let value:i16=-32767;let actual:f32=value as f32;if actual==-32767.0f32{42}else{7}}",
+        "fn main()->i64{let value:i16=-32767;let actual:f64=value as f64;if actual==-32767.0f64{42}else{7}}",
+        "fn main()->i64{let value:u16=65535;let actual:f32=value as f32;if actual==65535.0f32{42}else{7}}",
+        "fn main()->i64{let value:u16=65535;let actual:f64=value as f64;if actual==65535.0f64{42}else{7}}",
+        "fn main()->i64{let value:i32=-2147483647;let actual:f32=value as f32;if actual==-2147483648.0f32{42}else{7}}",
+        "fn main()->i64{let value:i32=-2147483647;let actual:f64=value as f64;if actual==-2147483647.0f64{42}else{7}}",
+        "fn main()->i64{let value:u32=4294967295;let actual:f32=value as f32;if actual==4294967296.0f32{42}else{7}}",
+        "fn main()->i64{let value:u32=4294967295;let actual:f64=value as f64;if actual==4294967295.0f64{42}else{7}}",
+        "fn main()->i64{let value:i64=-9223372036854775807;let actual:f32=value as f32;if actual==-9223372036854775808.0f32{42}else{7}}",
+        "fn main()->i64{let value:i64=-9223372036854775807;let actual:f64=value as f64;if actual==-9223372036854775808.0f64{42}else{7}}",
+        "fn main()->i64{let value:u64=18446744073709551615;let actual:f32=value as f32;if actual==18446744073709551616.0f32{42}else{7}}",
+        "fn main()->i64{let value:u64=18446744073709551615;let actual:f64=value as f64;if actual==18446744073709551616.0f64{42}else{7}}",
+        "fn main()->i64{let value:isize=-9223372036854775807;let actual:f32=value as f32;if actual==-9223372036854775808.0f32{42}else{7}}",
+        "fn main()->i64{let value:isize=-9223372036854775807;let actual:f64=value as f64;if actual==-9223372036854775808.0f64{42}else{7}}",
+        "fn main()->i64{let value:usize=18446744073709551615;let actual:f32=value as f32;if actual==18446744073709551616.0f32{42}else{7}}",
+        "fn main()->i64{let value:usize=18446744073709551615;let actual:f64=value as f64;if actual==18446744073709551616.0f64{42}else{7}}",
+        "fn main()->i64{let value:i64=4611686293305294849;let actual:f32=value as f32;if actual==4611686568183201792.0f32{42}else{7}}",
+        "fn main()->i64{let value:i64=4611686293305294849;let actual:f64=value as f64;if actual==4611686293305294848.0f64{42}else{7}}",
+        "fn main()->i64{let value:u64=9223372586610589697;let actual:f32=value as f32;if actual==9223373136366403584.0f32{42}else{7}}",
+        "fn main()->i64{let value:u64=9223372586610589697;let actual:f64=value as f64;if actual==9223372586610589696.0f64{42}else{7}}",
+        "fn main()->i64{let value:i32=2147483647;let actual:f32=value as f32;if actual==2147483648.0f32{42}else{7}}",
+        "fn main()->i64{let value:i32=2147483647;let actual:f64=value as f64;if actual==2147483647.0f64{42}else{7}}",
+        "fn main()->i64{let value:u64=9223372036854775808;let actual:f32=value as f32;if actual==9223372036854775808.0f32{42}else{7}}",
+        "fn main()->i64{let value:u64=9223372036854775808;let actual:f64=value as f64;if actual==9223372036854775808.0f64{42}else{7}}",
+        "fn main()->i64{let mut count:i64=0;let value:i64=4611686293305294849;let actual:f32={count+=1;value} as f32;if actual==4611686568183201792.0f32 && count==1{42}else{7}}",
+        "fn main()->i64{let mut count:i64=0;let value:i64=4611686293305294849;let actual:f64={count+=1;value} as f64;if actual==4611686293305294848.0f64 && count==1{42}else{7}}",
+    ] {
+        let path = temp_path("rust-integer-float.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("rust-integer-float-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{source} {profile:?}: {report:?}");
+                assert!(report.degradations.is_empty(), "{source}: {report:?}");
+                assert!(report.external_invocations.is_empty());
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started, "{source}: {report:?}");
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(42)),
+                        "{source} {profile:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{source} {profile:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_integer_float_casts_preserve_default_integer_range_refusals() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main()->i64{let value=18446744073709551615;if false{let x=value as f32;}42}",
+        "fn main()->i64{let value:i64=18446744073709551615;if false{let x=value as f64;}42}",
+        "fn main()->i64{if false{let x=2147483648 as f32;}42}",
+        "fn main()->i64{let value=2147483648;if false{let x=value as f64;}42}",
+        "fn unused()->f32{2147483648 as f32}fn main()->i64{42}",
+        "fn main()->i64{let value:i8=128;if false{let x=value as f32;}42}",
+    ] {
+        let path = temp_path("rust-integer-float-invalid.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                for entry in [None, Some("main")] {
+                    let out = temp_path("rust-integer-float-invalid-out");
+                    let mut request =
+                        default_request(path.clone(), target, entry, Some(out.clone()));
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(!report.success, "{source} {profile:?}: {report:?}");
+                    assert_eq!(
+                        report.reason_code.as_deref(),
+                        Some("rust-invalid-associated-type"),
+                        "{source}: {report:?}"
+                    );
+                    assert!(!report.execution_started);
+                    assert_eq!(report.eval_result, None);
+                    assert_eq!(report.eval_exit_code, None);
+                    assert_eq!(report.artifact_path, None);
+                    assert_eq!(report.executable_path, None);
+                    assert_eq!(report.abi_path, None);
+                    assert!(report.external_invocations.is_empty());
+                    assert!(!out.exists());
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}

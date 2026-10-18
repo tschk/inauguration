@@ -2749,6 +2749,100 @@ fn fixed_array_length(
     type_aliases::usize_length(expression, &shadows)
 }
 
+fn opaque_macro_dependencies(mac: &syn::Macro, local_types: &HashMap<String, String>) -> Expr {
+    let locals: HashSet<String> = local_types
+        .keys()
+        .filter_map(|name| name.strip_prefix(LENGTH_LOCAL).map(str::to_owned))
+        .collect();
+    // Retain missing inference edges without expanding or evaluating the macro.
+    let mut temporary = if mac
+        .path
+        .segments
+        .last()
+        .is_some_and(|s| s.ident == "matches")
+    {
+        let parser = |input: syn::parse::ParseStream<'_>| {
+            let value = input.parse::<syn::Expr>()?;
+            input.parse::<syn::Token![,]>()?;
+            let pattern = syn::Pat::parse_multi_with_leading_vert(input)?;
+            let guard = if input.peek(syn::Token![if]) {
+                input.parse::<syn::Token![if]>()?;
+                Some(input.parse::<syn::Expr>()?)
+            } else {
+                None
+            };
+            if input.peek(syn::Token![,]) {
+                input.parse::<syn::Token![,]>()?;
+            }
+            Ok((value, pattern, guard))
+        };
+        parser
+            .parse2(mac.tokens.clone())
+            .map(|(value, pattern, guard)| {
+                let mut body = vec![Stmt::Expr(lower_expr_with_types(
+                    &value,
+                    &mut local_types.clone(),
+                ))];
+                if let Some(guard) = guard {
+                    let mut params: Vec<_> = length_pattern_locals(&pattern, &HashMap::new())
+                        .keys()
+                        .filter_map(|name| name.strip_prefix(LENGTH_LOCAL))
+                        .map(|name| (name.to_owned(), Typ::Generic("_".into())))
+                        .collect();
+                    params.sort_by(|left, right| left.0.cmp(&right.0));
+                    body.push(Stmt::Expr(Expr::Closure {
+                        params,
+                        ret: Typ::Void,
+                        body: vec![Stmt::Expr(lower_expr_with_types(
+                            &guard,
+                            &mut length_pattern_locals(&pattern, local_types),
+                        ))],
+                        captures: vec![],
+                    }));
+                }
+                body
+            })
+            .unwrap_or_default()
+    } else {
+        syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+            .parse2(mac.tokens.clone())
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| Stmt::Expr(lower_expr_with_types(item, &mut local_types.clone())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // The runtime read collector skips unlowered closures. Analyze their scoped
+    // bodies too, while keeping these dependency-only expressions non-executable.
+    for stmt in &mut temporary {
+        crate::core_opt::map_stmt_exprs_mut(stmt, &mut |expr| {
+            if let Expr::Closure { params, body, .. } = expr {
+                let mut scoped: Vec<_> = std::mem::take(params)
+                    .into_iter()
+                    .map(|(name, typ)| Stmt::Declare(name, typ))
+                    .collect();
+                scoped.extend(std::mem::take(body));
+                *expr = Expr::Block {
+                    body: scoped,
+                    result: None,
+                };
+            }
+        });
+    }
+    crate::core_bindings::normalize_function(&mut [], &mut temporary, &locals);
+    let dependencies = crate::lower_core::collect_free_vars(&temporary, &[])
+        .into_iter()
+        .filter(|name| locals.contains(name))
+        .map(Expr::Ident)
+        .collect();
+    Expr::Call {
+        callee: Box::new(Expr::Ident(crate::core_ir::UNSUPPORTED_DEFINED_BODY.into())),
+        args: dependencies,
+    }
+}
+
 fn vector_value_initializer(expr: &syn::Expr) -> bool {
     match expr {
         syn::Expr::Macro(value) => value.mac.path.is_ident("vec"),
@@ -3424,16 +3518,31 @@ fn lower_expr_stmt(
         syn::Expr::If(eif) => lower_if_with_types(eif, false, out, local_types),
         syn::Expr::ForLoop(f) => {
             let mut inner = length_pattern_locals(&f.pat, local_types);
-            let body = lower_block_no_implicit_return_with_types(&f.body, &mut inner);
+            let mut prefix = Vec::new();
+            let binding = if tuple_let_pattern(&f.pat) {
+                let mut names = HashSet::new();
+                if !tuple_let_names(&f.pat, &mut names) {
+                    out.push(Stmt::Expr(Expr::Ident(
+                        "#unsupported-tuple-let-pattern".into(),
+                    )));
+                    return;
+                }
+                let binding = format!("#tuple-for-{}", out.len());
+                lower_tuple_let_bindings(&f.pat, Expr::Ident(binding.clone()), &mut prefix);
+                binding
+            } else {
+                match f.pat.as_ref() {
+                    syn::Pat::Ident(pattern) => pattern.ident.to_string(),
+                    pattern => pattern.to_token_stream().to_string(),
+                }
+            };
+            prefix.extend(lower_block_no_implicit_return_with_types(
+                &f.body, &mut inner,
+            ));
             out.push(Stmt::Loop {
-                kind: LoopKind::For {
-                    binding: match f.pat.as_ref() {
-                        syn::Pat::Ident(pattern) => pattern.ident.to_string(),
-                        pattern => pattern.to_token_stream().to_string(),
-                    },
-                },
+                kind: LoopKind::For { binding },
                 cond: Some(lower_expr_with_types(&f.expr, local_types)),
-                body,
+                body: prefix,
             });
         }
         syn::Expr::While(w) => {
@@ -3676,6 +3785,16 @@ fn lower_expr_with_types_inner(
             }
             syn::Lit::Int(i) => {
                 let suffix = i.suffix();
+                if suffix.is_empty()
+                    && i.base10_parse::<i64>().is_err()
+                    && let Ok(magnitude) = i.base10_parse::<u64>()
+                {
+                    // Retain the positive magnitude without assigning an unsigned source type.
+                    return Expr::Unary {
+                        op: "rust-integer-literal-magnitude".into(),
+                        expr: Box::new(Expr::IntLit(magnitude as i64)),
+                    };
+                }
                 let value = if suffix == "u64" {
                     i.base10_parse::<u64>().map(|value| value as i64).ok()
                 } else {
@@ -3872,6 +3991,7 @@ fn lower_expr_with_types_inner(
                 })
                 .unwrap_or_else(|| Expr::Ident(mac.to_token_stream().to_string()))
         }
+        syn::Expr::Macro(mac) => opaque_macro_dependencies(&mac.mac, local_types),
         syn::Expr::Closure(closure) => {
             let mut closure_types = local_types.clone();
             let params = closure
@@ -5925,6 +6045,7 @@ mod integer_metadata_tests {
         for (source, marker, value) in [
             ("42", "rust-integer-literal", 42),
             ("42u32", "rust-integer-literal-u32", 42),
+            ("18446744073709551615", "rust-integer-literal-magnitude", -1),
             ("0xffffffffffffffffu64", "rust-integer-literal-u64", -1),
             (
                 "-9223372036854775808i64",
@@ -5942,7 +6063,7 @@ mod integer_metadata_tests {
                 }
             );
         }
-        for source in ["18446744073709551615", "1u128", "-9223372036854775809i64"] {
+        for source in ["1u128", "-9223372036854775809i64"] {
             let expr: syn::Expr = syn::parse_str(source).unwrap();
             assert!(
                 matches!(lower_expr_with_types(&expr, &mut HashMap::new()), Expr::Ident(name) if name.starts_with("#unsupported-rust-"))
@@ -7009,5 +7130,127 @@ mod floating_source_metadata_tests {
             panic!("cast")
         };
         assert_eq!(*expr, Expr::Ident("value".into()));
+    }
+}
+
+#[cfg(test)]
+mod integer_magnitude_tests {
+    #[test]
+    fn high_magnitude_literals_retain_bits_without_assigning_unsigned_ownership() {
+        for source in [
+            "fn main()->i64{let value:u64=18446744073709551615;42}",
+            "fn main()->i64{let value=18446744073709551615;42}",
+        ] {
+            let mut module = super::parse_rust_source(source).unwrap();
+            let mut count = 0;
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+                if let crate::core_ir::Expr::Unary { op, expr } = expr
+                    && op == "rust-integer-literal-magnitude"
+                {
+                    assert_eq!(expr.as_ref(), &crate::core_ir::Expr::IntLit(-1));
+                    count += 1;
+                }
+            });
+            assert_eq!(count, 1, "{module:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tuple_for_binding_tests {
+    use super::*;
+    #[test]
+    fn tuple_for_patterns_use_real_scoped_projection_bindings() {
+        let module=parse_rust_source("fn main()->i64{let value:i8=127;for(_tag,(value,))in[(0,(42i64,))]{let x=value;}value as i64}").unwrap();
+        let Decl::Function { body, .. } = &module.decls[0] else {
+            panic!()
+        };
+        let mut checks = 0;
+        let mut fields = 0;
+        let mut view = module.decls.clone();
+        crate::core_opt::map_decl_exprs_mut(&mut view, &mut |value| {
+            if let Expr::Call { callee, .. } = value {
+                if matches!(callee.as_ref(),Expr::Ident(name)if name==crate::core_ir::tuples::LET_CHECK)
+                {
+                    checks += 1;
+                }
+                if matches!(callee.as_ref(),Expr::Ident(name)if name==crate::core_ir::tuples::LET_FIELD)
+                {
+                    fields += 1;
+                }
+            }
+        });
+        assert_eq!(checks, 2, "{body:?}");
+        assert_eq!(fields, 4, "{body:?}");
+        assert!(matches!(body.last(), Some(Stmt::Return(Some(_)))));
+    }
+}
+
+#[cfg(test)]
+mod opaque_macro_dependency_tests {
+    use super::*;
+
+    #[test]
+    fn opaque_macros_keep_only_free_local_dependencies_and_remain_unsupported() {
+        let locals = ["expected", "value", "object", "body"]
+            .into_iter()
+            .map(|name| (format!("{LENGTH_LOCAL}{name}"), String::new()))
+            .collect();
+        for (source, expected) in [
+            ("opaque!(next(value), 2147483648)", vec!["value"]),
+            ("opaque!({let expected=0;expected}, value)", vec!["value"]),
+            ("opaque!((|expected| expected)(0), value)", vec!["value"]),
+            ("opaque!(|| expected)", vec!["expected"]),
+            ("opaque!((|value| value+expected)(0))", vec!["expected"]),
+            ("opaque!({let expected=value;expected})", vec!["value"]),
+            (
+                "opaque!(object.expected, \"value\", Global::value)",
+                vec!["object"],
+            ),
+            ("opaque!(not => expression)", vec![]),
+            ("matches!(object, value)", vec!["object"]),
+            ("std::matches!(object, Some(value),)", vec!["object"]),
+            ("matches!(value, _)", vec!["value"]),
+            (
+                "matches!(object, Some(value) if value == expected)",
+                vec!["expected", "object"],
+            ),
+            (
+                "matches!(expected, Some(expected) if expected > 0)",
+                vec!["expected"],
+            ),
+            (
+                "assert!(matches!(&body[0], Stmt::Let(_,None,Expr::IntLit(value)) if *value==expected))",
+                vec!["body", "expected"],
+            ),
+            (
+                "matches!(object, Node{value:expected,..} if expected > 0)",
+                vec!["object"],
+            ),
+            (
+                "matches!(object, [value,expected@..] if value>0 && expected.len()>0)",
+                vec!["object"],
+            ),
+            (
+                "matches!(object, Some(value)|Other(value) if value==expected)",
+                vec!["expected", "object"],
+            ),
+            ("matches!(object, Some(value) if)", vec![]),
+        ] {
+            let syn::Expr::Macro(mac) = syn::parse_str(source).unwrap() else {
+                panic!()
+            };
+            assert_eq!(
+                opaque_macro_dependencies(&mac.mac, &locals),
+                Expr::Call {
+                    callee: Box::new(Expr::Ident(crate::core_ir::UNSUPPORTED_DEFINED_BODY.into())),
+                    args: expected
+                        .into_iter()
+                        .map(|name| Expr::Ident(name.into()))
+                        .collect(),
+                },
+                "{source}"
+            );
+        }
     }
 }

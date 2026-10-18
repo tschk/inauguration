@@ -834,7 +834,7 @@ fn collect_declared_vars_in_body(body: &[Stmt], out: &mut HashSet<String>) {
     }
 }
 
-fn collect_free_vars(body: &[Stmt], params: &[(String, Typ)]) -> Vec<String> {
+pub(crate) fn collect_free_vars(body: &[Stmt], params: &[(String, Typ)]) -> Vec<String> {
     let mut reads = HashSet::new();
     collect_body_reads(body, &mut reads);
 

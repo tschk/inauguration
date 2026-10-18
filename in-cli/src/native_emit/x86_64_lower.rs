@@ -2614,10 +2614,8 @@ fn scalar_expr_type_with_bindings(
             Some(Typ::Int)
         }
         Expr::Unary { op, .. }
-            if matches!(
-                op.as_str(),
-                "int-to-float" | "float-cast-f32" | "float-cast-f64"
-            ) =>
+            if crate::core_ir::integer_float_cast_spec(op).is_some()
+                || matches!(op.as_str(), "float-cast-f32" | "float-cast-f64") =>
         {
             Some(Typ::Float)
         }
@@ -4308,6 +4306,45 @@ fn lower_field_access(
     }
 }
 
+// RAX is the already-evaluated Int64 source; preserve the sticky-bit scratch.
+fn emit_integer_float_cast(emitter: &mut CodeEmitter, bits: u8, signed: bool) {
+    let convert = if bits == 32 {
+        x86_64::cvtsi2ss
+    } else {
+        x86_64::cvtsi2sd
+    };
+    if signed {
+        emitter.emit_insns(&convert(0, RAX));
+    } else {
+        emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+        let low_half = emitter.len();
+        emitter.emit_insns(&x86_64::jcc_near(9, 0)); // jns: direct signed conversion is exact-domain.
+        emitter.emit_insns(&x86_64::push_r(RDX));
+        emitter.emit_insns(&x86_64::load_i64(RDX, 1));
+        emitter.emit_insns(&x86_64::and_rr(RDX, RAX));
+        emitter.emit_insns(&x86_64::shr_reg_imm(RAX, 1));
+        emitter.emit_insns(&x86_64::or_rr(RAX, RDX));
+        // Sticky-half rounds at the chosen destination precision. Doubling is
+        // exact here; converting via f64 first would double-round some f32 inputs.
+        emitter.emit_insns(&convert(0, RAX));
+        emitter.emit_insns(&if bits == 32 {
+            x86_64::scalar_single(0x58, 0, 0)
+        } else {
+            x86_64::scalar_double(0x58, 0, 0)
+        });
+        emitter.emit_insns(&x86_64::pop_r(RDX));
+        let done = emitter.len();
+        emitter.emit_insns(&x86_64::jmp_rel32(0));
+        emitter.patch_u32(low_half + 2, emitter.len() - low_half - 6);
+        emitter.emit_insns(&convert(0, RAX));
+        emitter.patch_u32(done + 1, emitter.len() - done - 5);
+    }
+    if bits == 32 {
+        emitter.emit_insns(&x86_64::convert_scalar_float(0, 0, false));
+    }
+    emitter.emit_insns(&x86_64::movq_xmm_gpr(0, RAX, false));
+}
+
 fn emit_saturating_float_cast(emitter: &mut CodeEmitter, bits: u8, signed: bool) {
     let upper = 2.0f64.powi(i32::from(bits) - i32::from(signed));
     let lower = if signed { -upper } else { 0.0 };
@@ -4439,12 +4476,12 @@ fn lower_unary_expr(
                 emitter.emit_insns(&x86_64::movq_xmm_gpr(0, RAX, false));
             }
         }
-        "int-to-float" => {
-            if scalar_expr_type(expr, ctx) != Some(Typ::Int) {
-                return Err("x86_64-lower: integer conversion needs Int".into());
+        op if crate::core_ir::integer_float_cast_spec(op).is_some() => {
+            if x86_64::is_32bit() || scalar_expr_type(expr, ctx) != Some(Typ::Int) {
+                return Err("x86_64-lower: integer conversion needs a 64-bit Int carrier".into());
             }
-            emitter.emit_insns(&x86_64::cvtsi2sd(0, RAX));
-            emitter.emit_insns(&x86_64::movq_xmm_gpr(0, RAX, false));
+            let (bits, signed) = crate::core_ir::integer_float_cast_spec(op).unwrap();
+            emit_integer_float_cast(emitter, bits, signed);
         }
         op if crate::core_ir::saturating_float_cast_spec(op).is_some() => {
             if x86_64::is_32bit() || scalar_expr_type(expr, ctx) != Some(Typ::Float) {
@@ -7163,5 +7200,130 @@ mod scalar_array_copy_tests {
             Some(1)
         );
         assert_eq!(unsafe { runtime.invoke("copy", &[0]) }, Some(1));
+    }
+}
+
+#[cfg(test)]
+mod integer_float_cast_tests {
+    use super::*;
+
+    #[test]
+    fn integer_float_lowering_uses_selected_precision_and_unsigned_sticky_half() {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                x86_64::set_32bit(self.0);
+            }
+        }
+        let _restore = Restore(x86_64::is_32bit());
+        x86_64::set_32bit(false);
+        for (op, bits, signed) in [
+            ("int-to-float", 64, true),
+            ("int-to-float-f32", 32, true),
+            ("uint-to-float", 64, false),
+            ("uint-to-float-f32", 32, false),
+        ] {
+            let module = UnifiedModule::new(vec![Decl::Function {
+                name: "convert".into(),
+                params: vec![("value".into(), Typ::Int)],
+                ret: Typ::Float,
+                type_params: vec![],
+                body: vec![Stmt::Return(Some(Expr::Unary {
+                    op: op.into(),
+                    expr: Box::new(Expr::Ident("value".into())),
+                }))],
+            }]);
+            for result in [
+                lower_module(&module, "convert"),
+                lower_native_module(&module, "convert"),
+            ] {
+                let result = result.expect("owned conversion lowering");
+                let conversion = if bits == 32 {
+                    x86_64::cvtsi2ss(0, RAX)
+                } else {
+                    x86_64::cvtsi2sd(0, RAX)
+                };
+                assert!(
+                    result
+                        .code
+                        .windows(conversion.len())
+                        .any(|bytes| bytes == conversion),
+                    "{op}"
+                );
+                if bits == 32 {
+                    let double_conversion = x86_64::cvtsi2sd(0, RAX);
+                    assert!(
+                        !result
+                            .code
+                            .windows(double_conversion.len())
+                            .any(|bytes| bytes == double_conversion),
+                        "f32 must not convert through f64"
+                    );
+                    let widen = x86_64::convert_scalar_float(0, 0, false);
+                    assert!(result.code.windows(widen.len()).any(|bytes| bytes == widen));
+                }
+                if !signed {
+                    for instruction in [
+                        x86_64::shr_reg_imm(RAX, 1),
+                        x86_64::or_rr(RAX, RDX),
+                        if bits == 32 {
+                            x86_64::scalar_single(0x58, 0, 0)
+                        } else {
+                            x86_64::scalar_double(0x58, 0, 0)
+                        },
+                    ] {
+                        assert!(
+                            result
+                                .code
+                                .windows(instruction.len())
+                                .any(|bytes| bytes == instruction),
+                            "{op}"
+                        );
+                    }
+                }
+            }
+            x86_64::set_32bit(true);
+            assert!(
+                lower_module(&module, "convert").is_err(),
+                "Word32 must refuse {op}"
+            );
+            x86_64::set_32bit(false);
+        }
+    }
+
+    #[test]
+    fn unsigned_conversion_branch_targets_land_on_conversion_and_carrier_steps() {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                x86_64::set_32bit(self.0);
+            }
+        }
+        let _restore = Restore(x86_64::is_32bit());
+        x86_64::set_32bit(false);
+        for bits in [32, 64] {
+            let mut emitter = CodeEmitter::new();
+            emit_integer_float_cast(&mut emitter, bits, false);
+            let code = &emitter.bytes;
+            let branch = x86_64::test_rr(RAX, RAX).len();
+            assert_eq!(&code[branch..branch + 2], &[0x0f, 0x89]);
+            let displacement =
+                u32::from_le_bytes(code[branch + 2..branch + 6].try_into().unwrap()) as usize;
+            let direct = branch + 6 + displacement;
+            let conversion = if bits == 32 {
+                x86_64::cvtsi2ss(0, RAX)
+            } else {
+                x86_64::cvtsi2sd(0, RAX)
+            };
+            assert_eq!(
+                &code[direct..direct + conversion.len()],
+                conversion.as_slice()
+            );
+            let jump = direct - 5;
+            assert_eq!(code[jump], 0xe9);
+            let displacement =
+                u32::from_le_bytes(code[jump + 1..jump + 5].try_into().unwrap()) as usize;
+            assert_eq!(jump + 5 + displacement, direct + conversion.len());
+        }
     }
 }

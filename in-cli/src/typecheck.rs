@@ -2740,11 +2740,11 @@ impl TypeChecker {
                         got: actual,
                     });
                 }
-                if (matches!(op.as_str(), "int-to-float" | "float-to-int")
+                if ((crate::core_ir::integer_float_cast_spec(op).is_some() || op == "float-to-int")
                     || crate::core_ir::saturating_float_cast_spec(op).is_some())
                     && let Some(actual) = self.expr_type(inner, facts, env)
                 {
-                    let expected = if op == "int-to-float" {
+                    let expected = if crate::core_ir::integer_float_cast_spec(op).is_some() {
                         Typ::Int
                     } else {
                         Typ::Float
@@ -3348,6 +3348,7 @@ impl TypeChecker {
                 crate::core_ir::rust_floats::inferred_type(op)
             }
             Expr::Unary { op, expr, .. } => match op.as_str() {
+                "rust-integer-literal-magnitude" => Some(Typ::Int),
                 op if op
                     .strip_prefix("rust-integer-literal-")
                     .or_else(|| op.strip_prefix("rust-integer-value-"))
@@ -3366,7 +3367,8 @@ impl TypeChecker {
                 "c-integer-literal-u32" => Some(Typ::Named("#integer-u32".into())),
                 "!" => Some(Typ::Bool),
                 "bool-to-int" | "float-to-int" => Some(Typ::Int),
-                "int-to-float" | "float-cast-f32" | "float-cast-f64" => Some(Typ::Float),
+                op if crate::core_ir::integer_float_cast_spec(op).is_some() => Some(Typ::Float),
+                "float-cast-f32" | "float-cast-f64" => Some(Typ::Float),
                 op if crate::core_ir::integer_cast_spec(op).is_some()
                     || crate::core_ir::saturating_float_cast_spec(op).is_some() =>
                 {
