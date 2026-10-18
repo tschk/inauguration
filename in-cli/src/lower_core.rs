@@ -767,6 +767,9 @@ fn desugar_closures_in_body(
             } => {
                 desugar_closures_in_expr(scrutinee, counter, extra_decls, names, globals);
                 for arm in arms {
+                    if let Some(guard) = &mut arm.guard {
+                        desugar_closures_in_expr(guard, counter, extra_decls, names, globals);
+                    }
                     desugar_closures_in_body(&mut arm.body, counter, extra_decls, names, globals);
                 }
             }
@@ -904,7 +907,17 @@ fn rewrite_captures_in_body(body: &mut [Stmt], captures: &HashSet<&str>) {
             } => {
                 rewrite_captures_in_expr(scrutinee, captures);
                 for arm in arms {
-                    rewrite_captures_in_body(&mut arm.body, captures);
+                    let mut names = HashSet::new();
+                    crate::core_bindings::reserve_pattern(&arm.pattern, &mut names);
+                    let inner = captures
+                        .iter()
+                        .copied()
+                        .filter(|name| !names.contains(*name))
+                        .collect();
+                    if let Some(guard) = &mut arm.guard {
+                        rewrite_captures_in_expr(guard, &inner);
+                    }
+                    rewrite_captures_in_body(&mut arm.body, &inner);
                 }
             }
             Stmt::Return(None) => {}
@@ -1696,7 +1709,14 @@ fn collect_stmt_reads(st: &Stmt, reads: &mut HashSet<String>) {
         } => {
             collect_expr_reads(scrutinee, reads);
             for arm in arms {
-                collect_body_reads(&arm.body, reads);
+                let mut inner = HashSet::new();
+                if let Some(guard) = &arm.guard {
+                    collect_expr_reads(guard, &mut inner);
+                }
+                collect_body_reads(&arm.body, &mut inner);
+                let mut bound = HashSet::new();
+                crate::core_bindings::reserve_pattern(&arm.pattern, &mut bound);
+                reads.extend(inner.into_iter().filter(|name| !bound.contains(name)));
             }
         }
         Stmt::Return(None) => {}
@@ -3200,6 +3220,88 @@ mod tests {
             })
             .expect("captures struct should exist even when empty");
         assert!(cap_struct.is_empty(), "no captures -> empty struct");
+    }
+
+    #[test]
+    fn statement_match_capture_reads_and_rewrites_respect_arm_bindings() {
+        let mut body = vec![Stmt::Match {
+            scrutinee: Expr::IntLit(42),
+            arms: vec![crate::core_ir::MatchArm {
+                pattern: "n".into(),
+                guard: Some(Expr::Binary {
+                    op: ">".into(),
+                    lhs: Box::new(Expr::Ident("n".into())),
+                    rhs: Box::new(Expr::Ident("threshold".into())),
+                }),
+                body: vec![Stmt::Return(Some(Expr::Binary {
+                    op: "+".into(),
+                    lhs: Box::new(Expr::Ident("n".into())),
+                    rhs: Box::new(Expr::Ident("threshold".into())),
+                }))],
+            }],
+        }];
+        assert_eq!(collect_free_vars(&body, &[]), vec!["threshold".to_string()]);
+        rewrite_captures_in_body(&mut body, &HashSet::from(["n", "threshold"]));
+        let Stmt::Match { arms, .. } = &body[0] else {
+            panic!()
+        };
+        let expected = Expr::Field {
+            base: Box::new(Expr::Ident("self".into())),
+            name: "threshold".into(),
+        };
+        let Some(Expr::Binary { lhs, rhs, .. }) = &arms[0].guard else {
+            panic!()
+        };
+        assert_eq!(lhs.as_ref(), &Expr::Ident("n".into()));
+        assert_eq!(rhs.as_ref(), &expected);
+        let Stmt::Return(Some(Expr::Binary { lhs, rhs, .. })) = &arms[0].body[0] else {
+            panic!()
+        };
+        assert_eq!(lhs.as_ref(), &Expr::Ident("n".into()));
+        assert_eq!(rhs.as_ref(), &expected);
+    }
+
+    #[test]
+    fn statement_match_guard_lifts_nested_closure_values() {
+        let mut module = UnifiedModule::new(vec![Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Match {
+                scrutinee: Expr::IntLit(42),
+                arms: vec![crate::core_ir::MatchArm {
+                    pattern: "_".into(),
+                    guard: Some(Expr::Call {
+                        callee: Box::new(Expr::Closure {
+                            params: vec![],
+                            ret: Typ::Bool,
+                            captures: vec![],
+                            body: vec![Stmt::Return(Some(Expr::BoolLit(true)))],
+                        }),
+                        args: vec![],
+                    }),
+                    body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+                }],
+            }],
+        }]);
+        lower_closures(&mut module);
+        assert_eq!(module.decls.iter().filter(|decl| matches!(decl, Decl::Function { name, .. } if name.starts_with("__closure_"))).count(), 1);
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            assert!(
+                !matches!(expr, Expr::Closure { .. }),
+                "guard closure must be lifted"
+            );
+        });
+        let Decl::Function { body, .. } = &module.decls[0] else {
+            panic!()
+        };
+        let Stmt::Match { arms, .. } = &body[0] else {
+            panic!()
+        };
+        assert!(
+            matches!(&arms[0].guard, Some(Expr::Call { callee, .. }) if matches!(callee.as_ref(),Expr::Ident(name) if name.starts_with("__closure_")))
+        );
     }
 
     #[test]

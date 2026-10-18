@@ -10762,31 +10762,32 @@ fn mutable_captured_closures_refuse_before_execution() {
     if !native_backend::native_subset_host_available() {
         return;
     }
-    let path = temp_path("mutable-capture.rs");
-    fs::write(
-        &path,
+    for source in [
         "fn main()->i64{let mut x=41;let mut f=||{x+=1;x};f()}",
-    )
-    .unwrap();
-    for target in [CompileTarget::Jit, CompileTarget::Native] {
-        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
-            let out = temp_path("mutable-capture-out");
-            let mut request =
-                default_request(path.clone(), target, Some("main"), Some(out.clone()));
-            request.profile = profile;
-            let report = compile_owned(&request);
-            assert!(!report.success, "{report:?}");
-            assert!(!report.execution_started, "{report:?}");
-            assert_eq!(report.eval_result, None);
-            assert_eq!(report.eval_exit_code, None);
-            assert_eq!(report.artifact_path, None);
-            assert_eq!(report.executable_path, None);
-            assert_eq!(report.abi_path, None);
-            assert!(report.external_invocations.is_empty());
-            assert!(!out.exists());
+        "fn main()->i64{let mut x=41;(||{x+=1;x})()}",
+    ] {
+        let path = temp_path("mutable-capture.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("mutable-capture-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(!report.success, "{report:?}");
+                assert!(!report.execution_started, "{report:?}");
+                assert_eq!(report.eval_result, None);
+                assert_eq!(report.eval_exit_code, None);
+                assert_eq!(report.artifact_path, None);
+                assert_eq!(report.executable_path, None);
+                assert_eq!(report.abi_path, None);
+                assert!(report.external_invocations.is_empty());
+                assert!(!out.exists());
+            }
         }
+        fs::remove_file(path).unwrap();
     }
-    fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -10813,4 +10814,50 @@ fn captured_environment_refusal_survives_native_normalization() {
         crate::core_ir::type_proofs::present(&module.decls),
         "before: {before}\nafter: {module:#?}"
     );
+}
+
+#[test]
+fn rust_captured_match_guards_preserve_scope_and_execute() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main()->i64{match 42{n if (||n==42)()=>return 42,_=>return 7}}",
+        "fn main()->i64{let threshold=40;let f=||->i64{match 42{n if n>threshold=>return 42,_=>return 7};};f()}",
+        "fn main()->i64{let threshold=40;let f=||->i64{match 42{n if n>threshold=>42,_=>7}};f()}",
+        "fn main()->i64{let threshold=100;let f=||->i64{match 42{threshold if threshold==42=>return 42,_=>return 7};};let value=f();if threshold==100{value}else{7}}",
+        "fn main()->i64{let threshold=100;let f=||->i64{match 42{threshold if threshold==42=>42,_=>7}};let value=f();if threshold==100{value}else{7}}",
+        "fn main()->i64{let threshold=40;let f=||->i64{let answer=match 42{n if n>threshold=>42,_=>7};answer};f()}",
+    ] {
+        let path = temp_path("rust-captured-match-guard.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("rust-captured-match-guard-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{source} {profile:?}: {report:?}");
+                assert!(report.degradations.is_empty(), "{source}: {report:?}");
+                assert!(report.external_invocations.is_empty());
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started, "{source}: {report:?}");
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(42)),
+                        "{source} {profile:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{source} {profile:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
 }

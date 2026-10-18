@@ -1400,7 +1400,7 @@ impl TypeChecker {
                         _ => None,
                     }
                 }
-                Expr::StructInit { name, fields } if fields.is_empty() => Some(name.as_str()),
+                Expr::StructInit { name, .. } => Some(name.as_str()),
                 _ => None,
             };
             if let Some(function) = captures.and_then(|captures| facts.closure_target(captures)) {
