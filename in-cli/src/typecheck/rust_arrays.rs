@@ -231,19 +231,20 @@ pub(super) fn source_element_type(
     }
 }
 
-pub(super) fn finish_value(
+pub(super) fn finish_value_with_actual(
     checker: &TypeChecker,
     expr: &mut Expr,
     expected: Option<&Typ>,
     facts: &Facts,
     env: &HashMap<String, Typ>,
     policy: ResolvePolicy,
+    actual: Option<Option<Typ>>,
 ) -> Option<Typ> {
     let expected = expected.filter(|typ| !matches!(typ,Typ::Generic(name) if name=="_"));
     if let Some(expected) = expected.filter(|typ| fixed(typ).is_some()) {
         constrain_result(expr, expected, facts, env);
     }
-    let actual = checker.expr_type(expr, facts, env);
+    let actual = actual.unwrap_or_else(|| checker.expr_type(expr, facts, env));
     if let Some(proof) = actual
         .as_ref()
         .and_then(crate::core_ir::type_proofs::failure_in_type)
@@ -373,16 +374,17 @@ pub(super) fn finish_value(
     }
     result
 }
-pub(super) fn check_join(
+pub(super) fn check_join_with_actual(
     checker: &TypeChecker,
     expr: &mut Expr,
     facts: &Facts,
     env: &HashMap<String, Typ>,
     policy: ResolvePolicy,
+    actual: Option<Option<Typ>>,
 ) {
     if matches!(expr, Expr::Conditional { .. } | Expr::MatchValue { .. })
-        && let Some(proof) = checker
-            .expr_type(expr, facts, env)
+        && let Some(proof) = actual
+            .unwrap_or_else(|| checker.expr_type(expr, facts, env))
             .as_ref()
             .and_then(crate::core_ir::type_proofs::failure_in_type)
     {

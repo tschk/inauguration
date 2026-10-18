@@ -137,11 +137,38 @@ fn receiver_float_kind(mut typ: Typ) -> Option<Kind> {
         typ = reference.referent;
     }
 }
-fn bit_method(
+fn operand_type(
+    checker: &TypeChecker,
+    value: &Expr,
+    index: usize,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+    resolved: Option<&[Option<Typ>]>,
+) -> Option<Typ> {
+    match resolved {
+        Some(types) => types.get(index).cloned().flatten(),
+        None => source_type(checker, value, facts, env),
+    }
+}
+fn argument_type(
+    checker: &TypeChecker,
+    args: &[Expr],
+    index: usize,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+    resolved: Option<&[Option<Typ>]>,
+) -> Option<Typ> {
+    match resolved {
+        Some(types) => types.get(index).cloned().flatten(),
+        None => source_type(checker, args.get(index)?, facts, env),
+    }
+}
+fn bit_method_with_types(
     checker: &TypeChecker,
     expr: &Expr,
     facts: &Facts,
     env: &HashMap<String, Typ>,
+    resolved_arguments: Option<&[Option<Typ>]>,
 ) -> Option<BitMethod> {
     let Expr::Call { callee, args } = expr else {
         return None;
@@ -163,7 +190,14 @@ fn bit_method(
     if !matches!(method, "to_bits" | "from_bits") {
         return None;
     }
-    let kind = receiver_float_kind(source_type(checker, args.first()?, facts, env)?)?;
+    let kind = receiver_float_kind(argument_type(
+        checker,
+        args,
+        0,
+        facts,
+        env,
+        resolved_arguments,
+    )?)?;
     Some(BitMethod {
         kind,
         to_bits: method == "to_bits",
@@ -195,7 +229,16 @@ fn bit_call_type(
     facts: &Facts,
     env: &HashMap<String, Typ>,
 ) -> Option<Typ> {
-    let method = bit_method(checker, expr, facts, env)?;
+    bit_call_type_with_types(checker, expr, facts, env, None)
+}
+fn bit_call_type_with_types(
+    checker: &TypeChecker,
+    expr: &Expr,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+    resolved_arguments: Option<&[Option<Typ>]>,
+) -> Option<Typ> {
+    let method = bit_method_with_types(checker, expr, facts, env, resolved_arguments)?;
     let Expr::Call { args, .. } = expr else {
         return None;
     };
@@ -204,7 +247,7 @@ fn bit_call_type(
             "Rust float bit method arity or receiver syntax is invalid".into(),
         ))
     } else {
-        let actual = source_type(checker, &args[0], facts, env);
+        let actual = argument_type(checker, args, 0, facts, env, resolved_arguments);
         if let Some(proof) = actual.as_ref().and_then(type_proofs::failure_in_type) {
             Some(proof)
         } else if method.to_bits {
@@ -253,6 +296,7 @@ fn bit_call_type(
     };
     Some(failure.map_or_else(|| bit_result(method), ResolutionFailure::typ))
 }
+#[cfg(test)]
 fn finish_bit_call(
     checker: &TypeChecker,
     expr: &mut Expr,
@@ -260,10 +304,20 @@ fn finish_bit_call(
     env: &HashMap<String, Typ>,
     policy: ResolvePolicy,
 ) -> bool {
-    let Some(method) = bit_method(checker, expr, facts, env) else {
+    finish_bit_call_with_types(checker, expr, facts, env, policy, None)
+}
+fn finish_bit_call_with_types(
+    checker: &TypeChecker,
+    expr: &mut Expr,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+    policy: ResolvePolicy,
+    resolved_arguments: Option<&[Option<Typ>]>,
+) -> bool {
+    let Some(method) = bit_method_with_types(checker, expr, facts, env, resolved_arguments) else {
         return false;
     };
-    let Some(typ) = bit_call_type(checker, expr, facts, env) else {
+    let Some(typ) = bit_call_type_with_types(checker, expr, facts, env, resolved_arguments) else {
         return false;
     };
     if let Some(proof) = type_proofs::failure_in_type(&typ) {
@@ -277,11 +331,9 @@ fn finish_bit_call(
         return true;
     };
     let borrowed_receiver = method.receiver_syntax
-        && args
-            .first()
-            .and_then(|value| source_type(checker, value, facts, env))
+        && argument_type(checker, args, 0, facts, env, resolved_arguments)
             .is_some_and(|typ| crate::core_ir::rust_references::has_reference_proof(&typ));
-    if method.to_bits && !borrowed_receiver {
+    if method.to_bits && !borrowed_receiver && resolved_arguments.is_none() {
         finish_value(
             checker,
             &mut args[0],
@@ -391,6 +443,16 @@ fn effective_direct_call(
     facts: &Facts,
     env: &HashMap<String, Typ>,
 ) -> Option<(DirectSignature, Typ)> {
+    effective_direct_call_with_types(checker, expr, expected, facts, env, None)
+}
+fn effective_direct_call_with_types(
+    checker: &TypeChecker,
+    expr: &Expr,
+    expected: Option<&Typ>,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+    resolved_arguments: Option<&[Option<Typ>]>,
+) -> Option<(DirectSignature, Typ)> {
     let signature = direct_signature(expr, facts, env)?;
     let Expr::Call { args, .. } = expr else {
         unreachable!()
@@ -398,7 +460,7 @@ fn effective_direct_call(
     let mut types = signature
         .slots
         .iter()
-        .map(|index| source_type(checker, &args[*index], facts, env))
+        .map(|index| argument_type(checker, args, *index, facts, env, resolved_arguments))
         .collect::<Vec<_>>();
     // An expectation can strengthen existing floating arguments, not manufacture
     // floating ownership for integer/unresolved generic calls.
@@ -420,15 +482,17 @@ pub(super) fn call_type(
     bit_call_type(checker, expr, facts, env)
         .or_else(|| effective_direct_call(checker, expr, None, facts, env).map(|(_, typ)| typ))
 }
-fn finish_direct_call(
+fn finish_direct_call_with_types(
     checker: &TypeChecker,
     expr: &mut Expr,
     expected: Option<&Typ>,
     facts: &Facts,
     env: &HashMap<String, Typ>,
     policy: ResolvePolicy,
+    resolved_arguments: Option<&[Option<Typ>]>,
 ) -> Option<Typ> {
-    let (signature, result) = effective_direct_call(checker, expr, expected, facts, env)?;
+    let (signature, result) =
+        effective_direct_call_with_types(checker, expr, expected, facts, env, resolved_arguments)?;
     if let Some(proof) = type_proofs::failure_in_type(&result) {
         report(expr, proof.clone(), facts, policy);
         return Some(proof.typ());
@@ -436,7 +500,12 @@ fn finish_direct_call(
     let Expr::Call { args, .. } = expr else {
         unreachable!()
     };
-    for (index, (value, declared)) in args.iter_mut().zip(&signature.params).enumerate() {
+    for (index, (value, declared)) in args
+        .iter_mut()
+        .zip(&signature.params)
+        .enumerate()
+        .filter(|_| resolved_arguments.is_none())
+    {
         if signature.slots.contains(&index) {
             // A parent result edge (or a strong peer) must select the kind. In
             // particular, a postorder Lower visit cannot default weak arguments.
@@ -449,7 +518,92 @@ fn finish_direct_call(
     }
     Some(result)
 }
+/// Plan source-owned call destinations before descending scoped argument values.
+/// Weak generic slots remain expression-only during Lower unless a strong parent
+/// or peer selects them; planning never invents floating ownership for integers.
+pub(super) fn argument_contexts(
+    checker: &TypeChecker,
+    expr: &Expr,
+    expected: Option<&Typ>,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+    policy: ResolvePolicy,
+) -> Option<Vec<Option<Typ>>> {
+    if let Some((signature, result)) = effective_direct_call(checker, expr, expected, facts, env) {
+        return Some(
+            signature
+                .params
+                .iter()
+                .enumerate()
+                .map(|(index, declared)| {
+                    if signature.slots.contains(&index) {
+                        (floats::kind(&result).is_some() || policy != ResolvePolicy::RustFloatLower)
+                            .then(|| result.clone())
+                    } else {
+                        Some(declared.clone())
+                    }
+                })
+                .collect(),
+        );
+    }
+    if let Expr::Call { callee, args } = expr
+        && matches!(callee.as_ref(),Expr::Ident(name)if name=="vector-push" && !env.contains_key(name) && !facts.functions.contains_key(name))
+        && let [receiver, _] = args.as_slice()
+        && let Some(Typ::Vector(element)) = source_type(checker, receiver, facts, env)
+        && source(&element)
+    {
+        return Some(vec![None, Some(*element)]);
+    }
+    None
+}
+pub(super) fn element_context(
+    checker: &TypeChecker,
+    items: &[Expr],
+    expected: Option<&Typ>,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+) -> Option<Typ> {
+    expected.and_then(element_type).or_else(|| {
+        join_elements(
+            &items
+                .iter()
+                .map(|value| source_type(checker, value, facts, env))
+                .collect::<Vec<_>>(),
+        )
+    })
+}
+/// Only floating result relationships propagate to operands. Cast inputs,
+/// conditions, shift counts and other independent source domains stay separate.
+pub(super) fn operand_context(
+    checker: &TypeChecker,
+    expr: &Expr,
+    expected: Option<&Typ>,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+) -> Option<Typ> {
+    let mut types = match expr {
+        Expr::Binary { op, lhs, rhs } if arithmetic(op) || comparison(op) => vec![
+            source_type(checker, lhs, facts, env),
+            source_type(checker, rhs, facts, env),
+        ],
+        Expr::Unary { op, expr }
+            if matches!(
+                op.as_str(),
+                "-" | crate::core_ir::rust_references::NEGATE_VALUE
+            ) =>
+        {
+            vec![source_type(checker, expr, facts, env)]
+        }
+        _ => return None,
+    };
+    if let Some(expected) = expected.filter(|typ| source(typ)) {
+        types.push(Some(expected.clone()));
+    }
+    join_types(&types)
+}
+
 /// Return true only when this helper finished the complete owned call signature.
+#[cfg(test)]
 pub(super) fn finish_call(
     checker: &TypeChecker,
     expr: &mut Expr,
@@ -457,20 +611,98 @@ pub(super) fn finish_call(
     env: &HashMap<String, Typ>,
     policy: ResolvePolicy,
 ) -> bool {
-    if finish_bit_call(checker, expr, facts, env, policy) {
+    finish_call_with_types(checker, expr, facts, env, policy, None)
+}
+pub(super) fn finish_call_with_types(
+    checker: &TypeChecker,
+    expr: &mut Expr,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+    policy: ResolvePolicy,
+    resolved_arguments: Option<&[Option<Typ>]>,
+) -> bool {
+    if finish_bit_call_with_types(checker, expr, facts, env, policy, resolved_arguments) {
         return true;
     }
     if let Expr::Call { callee, args } = expr
         && matches!(callee.as_ref(),Expr::Ident(name) if name=="vector-push" && !env.contains_key(name) && !facts.functions.contains_key(name))
         && let [receiver, value] = args.as_mut_slice()
-        && let Some(Typ::Vector(element)) = source_type(checker, receiver, facts, env)
+        && let Some(Typ::Vector(element)) = match resolved_arguments {
+            Some(types) => types.first().cloned().flatten(),
+            None => source_type(checker, receiver, facts, env),
+        }
         && source(&element)
     {
-        finish_value(checker, value, Some(&element), facts, env, policy);
+        if resolved_arguments.is_none() {
+            finish_value(checker, value, Some(&element), facts, env, policy);
+        }
         return true;
     }
-    finish_direct_call(checker, expr, None, facts, env, policy).is_some()
+    finish_direct_call_with_types(checker, expr, None, facts, env, policy, resolved_arguments)
+        .is_some()
 }
+/// Invocation-local argument results; Some(slice) never falls back to retyping
+/// a provided-but-unresolved scoped argument.
+pub(super) fn call_type_with_arguments(
+    checker: &TypeChecker,
+    expr: &Expr,
+    expected: Option<&Typ>,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+    types: &[Option<Typ>],
+) -> Option<Typ> {
+    bit_call_type_with_types(checker, expr, facts, env, Some(types))
+        .or_else(|| {
+            effective_direct_call_with_types(checker, expr, expected, facts, env, Some(types))
+                .map(|(_, typ)| typ)
+        })
+        .or_else(|| match expr {
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Ident(name) if name == crate::core_ir::tuples::VALUE => types
+                    .iter()
+                    .cloned()
+                    .collect::<Option<Vec<_>>>()
+                    .map(|types| crate::core_ir::tuples::typ(&types)),
+                Expr::Ident(name)
+                    if matches!(
+                        name.as_str(),
+                        crate::core_ir::INLINE_CONST | crate::core_ir::BORROW
+                    ) =>
+                {
+                    types.first().cloned().flatten()
+                }
+                Expr::Ident(name) if name == crate::core_ir::ARRAY_REPEAT => types
+                    .first()
+                    .cloned()
+                    .flatten()
+                    .map(|typ| Typ::Array(Box::new(typ))),
+                Expr::Ident(name) if name == crate::core_ir::tuples::LET_FIELD => {
+                    let Expr::Call { args, .. } = expr else {
+                        return None;
+                    };
+                    match args.as_slice() {
+                        [_, Expr::IntLit(index), Expr::BoolLit(from_end)] => types
+                            .first()
+                            .and_then(Option::as_ref)
+                            .and_then(|typ| {
+                                crate::core_ir::tuples::let_field(typ, *index, *from_end)
+                            })
+                            .map(|(_, typ)| typ),
+                        _ => None,
+                    }
+                }
+                Expr::Ident(name) => facts
+                    .function_signature(name)
+                    .map(|(_, ret)| ret.clone())
+                    .or_else(|| {
+                        super::is_builtin_fn(name).then(|| super::builtin_return_type(name))
+                    }),
+                _ => None,
+            },
+            _ => None,
+        })
+}
+
 /// Private value/cast/literal facts are read before ordinary expression typing.
 /// Canonical Float/cast operators alone never establish Rust source ownership.
 pub(super) fn source_type(
@@ -737,11 +969,14 @@ fn finish_tuple(
     checker: &TypeChecker,
     expr: &mut Expr,
     expected: Option<&Typ>,
-    actual: Option<&Typ>,
     facts: &Facts,
     env: &HashMap<String, Typ>,
     policy: ResolvePolicy,
+    resolved: &super::ResolvedInputs<'_>,
 ) -> Option<Typ> {
+    let actual = resolved.actual.as_ref().and_then(Option::as_ref);
+    let children = resolved.values.or(resolved.arguments);
+
     let fields = expected
         .and_then(tuple_fields)
         .or_else(|| actual.and_then(tuple_fields))?;
@@ -755,9 +990,10 @@ fn finish_tuple(
                 && args.len() == fields.len() =>
         {
             for (index, (value, (_, expected))) in args.iter_mut().zip(&fields).enumerate() {
-                if let Some(typ) =
-                    checker.finish_typed_value(policy, value, Some(expected), facts, env)
-                {
+                if let Some(typ) = match children {
+                    Some(types) => types.get(index).cloned().flatten(),
+                    None => checker.finish_typed_value(policy, value, Some(expected), facts, env),
+                } {
                     finished[index] =
                         join_tuple_field(&[Some(expected.clone()), Some(typ.clone())])
                             .unwrap_or(typ);
@@ -787,8 +1023,12 @@ fn finish_tuple(
                     .iter()
                     .enumerate()
                     .find(|(_, (name, _))| name == field)
-                    && let Some(typ) =
-                        checker.finish_typed_value(policy, value, Some(expected), facts, env)
+                    && let Some(typ) = match children {
+                        Some(types) => types.get(index).cloned().flatten(),
+                        None => {
+                            checker.finish_typed_value(policy, value, Some(expected), facts, env)
+                        }
+                    }
                 {
                     finished[index] =
                         join_tuple_field(&[Some(expected.clone()), Some(typ.clone())])
@@ -811,11 +1051,14 @@ fn finish_aggregate(
     checker: &TypeChecker,
     expr: &mut Expr,
     expected: Option<&Typ>,
-    actual: Option<&Typ>,
     facts: &Facts,
     env: &HashMap<String, Typ>,
     policy: ResolvePolicy,
+    resolved: &super::ResolvedInputs<'_>,
 ) -> Option<Typ> {
+    let actual = resolved.actual.as_ref().and_then(Option::as_ref);
+    let children = resolved.values.or(resolved.arguments);
+
     let container = expected
         .filter(|typ| element_type(typ).is_some())
         .or_else(|| actual.filter(|typ| element_type(typ).is_some()))?;
@@ -826,7 +1069,15 @@ fn finish_aggregate(
         // The outer source carrier already proves the fixed length. Its raw
         // ArrayLit/repeat payload has a different Core container type; do not
         // rejoin that payload against the retained fixed-array identity.
-        let result = finish_aggregate(checker, inner, Some(container), actual, facts, env, policy);
+        let result = finish_aggregate(
+            checker,
+            inner,
+            Some(container),
+            facts,
+            env,
+            policy,
+            resolved,
+        );
         return Some(result.as_ref().and_then(element_type).map_or_else(
             || container.clone(),
             |element| with_element(container, element),
@@ -842,20 +1093,26 @@ fn finish_aggregate(
         _ => return None,
     };
     let mut types = vec![Some(element.clone())];
-    types.extend(
-        items
-            .iter()
-            .map(|value| source_type(checker, value, facts, env)),
-    );
+    if let Some(children) = children {
+        types.extend_from_slice(&children[..children.len().min(items.len())]);
+    } else {
+        types.extend(
+            items
+                .iter()
+                .map(|value| source_type(checker, value, facts, env)),
+        );
+    }
     let selected = join_elements(&types).unwrap_or(element);
     if let Some(proof) = type_proofs::failure_in_type(&selected) {
         report(expr, proof.clone(), facts, policy);
         return Some(proof.typ());
     }
     let mut finished = selected.clone();
-    for value in items {
-        if let Some(actual) = checker.finish_typed_value(policy, value, Some(&selected), facts, env)
-        {
+    for (index, value) in items.iter_mut().enumerate() {
+        if let Some(actual) = match children {
+            Some(types) => types.get(index).cloned().flatten(),
+            None => checker.finish_typed_value(policy, value, Some(&selected), facts, env),
+        } {
             if let Some(joined) = join_elements(&[Some(finished.clone()), Some(actual)]) {
                 finished = joined;
             }
@@ -909,11 +1166,35 @@ pub(super) fn finish_value(
     env: &HashMap<String, Typ>,
     policy: ResolvePolicy,
 ) -> Option<Typ> {
+    checker.finish_typed_value(policy, expr, expected, facts, env)
+}
+
+pub(super) fn finish_value_with_actual(
+    checker: &TypeChecker,
+    expr: &mut Expr,
+    expected: Option<&Typ>,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+    policy: ResolvePolicy,
+    resolved: &super::ResolvedInputs<'_>,
+) -> Option<Typ> {
     let expected = expected.filter(|typ| !matches!(typ,Typ::Generic(name) if name=="_"));
     if let Some(typ) = contextual_empty_allocation(checker, expr, expected, facts, env) {
         return Some(typ);
     }
-    let actual = source_type(checker, expr, facts, env);
+    let actual = resolved
+        .actual
+        .clone()
+        .unwrap_or_else(|| match resolved.arguments {
+            Some(types) => call_type_with_arguments(checker, expr, expected, facts, env, types),
+            None => source_type(checker, expr, facts, env),
+        });
+    let resolved = super::ResolvedInputs {
+        actual: Some(actual.clone()),
+        arguments: resolved.arguments,
+        operands: resolved.operands,
+        values: resolved.values,
+    };
     let refined = match (actual.as_ref(), expected) {
         (Some(actual), Some(expected))
             if structural_source(actual) || structural_source(expected) =>
@@ -933,12 +1214,11 @@ pub(super) fn finish_value(
     {
         constrain_result(checker, expr, context, facts, env);
     }
-    if let Some(tuple) = finish_tuple(checker, expr, expected, actual.as_ref(), facts, env, policy)
-    {
+    if let Some(tuple) = finish_tuple(checker, expr, expected, facts, env, policy, &resolved) {
         return Some(tuple);
     }
     if let Some(aggregate) =
-        finish_aggregate(checker, expr, expected, actual.as_ref(), facts, env, policy)
+        finish_aggregate(checker, expr, expected, facts, env, policy, &resolved)
     {
         return Some(aggregate);
     }
@@ -994,7 +1274,15 @@ pub(super) fn finish_value(
         return Some(typ);
     }
     if matches!(expr, Expr::Call { .. })
-        && let Some(result) = finish_direct_call(checker, expr, Some(&typ), facts, env, policy)
+        && let Some(result) = finish_direct_call_with_types(
+            checker,
+            expr,
+            Some(&typ),
+            facts,
+            env,
+            policy,
+            resolved.arguments,
+        )
     {
         if policy == ResolvePolicy::RustFloatLower
             && floats::kind(&result).is_some()
@@ -1006,8 +1294,10 @@ pub(super) fn finish_value(
     }
     match expr {
         Expr::Binary { op, lhs, rhs } if arithmetic(op) => {
-            finish_value(checker, lhs, Some(&typ), facts, env, policy);
-            finish_value(checker, rhs, Some(&typ), facts, env, policy);
+            if resolved.operands.is_none() {
+                finish_value(checker, lhs, Some(&typ), facts, env, policy);
+                finish_value(checker, rhs, Some(&typ), facts, env, policy);
+            }
             if policy == ResolvePolicy::RustFloatLower {
                 *expr = retain(expr.clone(), kind, true);
             }
@@ -1018,7 +1308,9 @@ pub(super) fn finish_value(
                 "-" | crate::core_ir::rust_references::NEGATE_VALUE
             ) =>
         {
-            finish_value(checker, value, Some(&typ), facts, env, policy);
+            if resolved.operands.is_none() {
+                finish_value(checker, value, Some(&typ), facts, env, policy);
+            }
             if policy == ResolvePolicy::RustFloatLower {
                 *expr = retain(expr.clone(), kind, false);
             }
@@ -1028,10 +1320,12 @@ pub(super) fn finish_value(
             else_expr,
             ..
         } => {
-            finish_value(checker, then_expr, Some(&typ), facts, env, policy);
-            finish_value(checker, else_expr, Some(&typ), facts, env, policy);
+            if resolved.operands.is_none() {
+                finish_value(checker, then_expr, Some(&typ), facts, env, policy);
+                finish_value(checker, else_expr, Some(&typ), facts, env, policy);
+            }
         }
-        Expr::MatchValue { scrutinee, arms } => {
+        Expr::MatchValue { scrutinee, arms } if resolved.operands.is_none() => {
             let scrutinee_type = source_type(checker, scrutinee, facts, env);
             for arm in arms {
                 let inner = scrutinee_type
@@ -1047,7 +1341,7 @@ pub(super) fn finish_value(
                 );
             }
         }
-        // Block-local result environments belong to finish_typed_value's shared
+        // Block-local result environments belong to resolve_typed_value's shared
         // scoped traversal; the caller has already finished that result edge.
         _ => {}
     }
@@ -1055,6 +1349,7 @@ pub(super) fn finish_value(
 }
 /// Shared traversal's expression hook. Weak operations remain untouched until a
 /// result edge establishes their width; lazy branches and operands stay in place.
+#[cfg(test)]
 pub(super) fn finish_expr(
     checker: &TypeChecker,
     expr: &mut Expr,
@@ -1062,10 +1357,20 @@ pub(super) fn finish_expr(
     env: &HashMap<String, Typ>,
     policy: ResolvePolicy,
 ) -> Option<Typ> {
+    finish_expr_with_inputs(checker, expr, facts, env, policy, None)
+}
+pub(super) fn finish_expr_with_inputs(
+    checker: &TypeChecker,
+    expr: &mut Expr,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+    policy: ResolvePolicy,
+    resolved_operands: Option<&[Option<Typ>]>,
+) -> Option<Typ> {
     if let Expr::Unary { op, expr: value } = expr
         && let Some(target) = floats::cast_kind(op)
     {
-        let actual = source_type(checker, value, facts, env);
+        let actual = operand_type(checker, value, 0, facts, env, resolved_operands);
         if let Some(proof) = actual.as_ref().and_then(type_proofs::failure_in_type) {
             report(expr, proof.clone(), facts, policy);
             return Some(proof.typ());
@@ -1086,7 +1391,9 @@ pub(super) fn finish_expr(
             report(expr, proof.clone(), facts, policy);
             return Some(proof.typ());
         }
-        finish_value(checker, value, None, facts, env, policy);
+        if resolved_operands.is_none() {
+            finish_value(checker, value, None, facts, env, policy);
+        }
         if policy == ResolvePolicy::RustFloatLower {
             let value = if actual.as_ref().and_then(floats::kind) == Some(target) {
                 (**value).clone()
@@ -1102,7 +1409,22 @@ pub(super) fn finish_expr(
     }
     if let Some(info) = floats::literal_info(expr) {
         return if let Some(kind) = info.suffix {
-            finish_value(checker, expr, Some(&floats::typ(kind)), facts, env, policy)
+            // The shared walker is completing this current literal already.
+            // Re-entering the legacy scoped entry on the same unchanged node
+            // would recurse; its explicit suffix is the owned source summary.
+            let typ = floats::typ(kind);
+            finish_value_with_actual(
+                checker,
+                expr,
+                Some(&typ),
+                facts,
+                env,
+                policy,
+                &super::ResolvedInputs {
+                    actual: Some(Some(typ.clone())),
+                    ..Default::default()
+                },
+            )
         } else {
             Some(floats::weak_type())
         };
@@ -1112,10 +1434,25 @@ pub(super) fn finish_expr(
     {
         let is_comparison = comparison(op);
         let joined = join_types(&[
-            source_type(checker, lhs, facts, env),
-            source_type(checker, rhs, facts, env),
+            operand_type(checker, lhs, 0, facts, env, resolved_operands),
+            operand_type(checker, rhs, 1, facts, env, resolved_operands),
         ]);
         let Some(mut joined) = joined else {
+            if let Some(types) = resolved_operands {
+                return if is_comparison {
+                    Some(Typ::Bool)
+                } else {
+                    match types {
+                        [Some(left), Some(right)] if left == right => Some(left.clone()),
+                        [Some(left), Some(right)]
+                            if left.canonical() == Typ::Int && right.canonical() == Typ::Int =>
+                        {
+                            Some(Typ::Int)
+                        }
+                        _ => None,
+                    }
+                };
+            }
             return source_type(checker, expr, facts, env);
         };
         if let Some(proof) = type_proofs::failure_in_type(&joined) {
@@ -1126,15 +1463,59 @@ pub(super) fn finish_expr(
             joined = floats::typ(Kind::F64);
         }
         if let Some(kind) = floats::kind(&joined) {
-            finish_value(checker, lhs, Some(&joined), facts, env, policy);
-            finish_value(checker, rhs, Some(&joined), facts, env, policy);
+            if resolved_operands.is_none() {
+                finish_value(checker, lhs, Some(&joined), facts, env, policy);
+                finish_value(checker, rhs, Some(&joined), facts, env, policy);
+            }
             if policy == ResolvePolicy::RustFloatLower && !is_comparison {
                 *expr = retain(expr.clone(), kind, true);
             }
         }
         return Some(if is_comparison { Typ::Bool } else { joined });
     }
-    let actual = source_type(checker, expr, facts, env);
+    let actual = if let Some(types) = resolved_operands {
+        match expr {
+            Expr::Unary { op, .. }
+                if matches!(
+                    op.as_str(),
+                    "-" | crate::core_ir::rust_references::NEGATE_VALUE
+                        | "~"
+                        | "complement"
+                        | "bitnot"
+                ) =>
+            {
+                types.first().cloned().flatten()
+            }
+            Expr::Unary { op, .. } if op == "!" => Some(Typ::Bool),
+            Expr::Unary { op, .. } if crate::core_ir::rust_arrays::value_length(op).is_some() => {
+                types
+                    .first()
+                    .and_then(Option::as_ref)
+                    .and_then(|typ| match typ {
+                        Typ::Array(element) => Some(crate::core_ir::rust_arrays::typ(
+                            (**element).clone(),
+                            crate::core_ir::rust_arrays::value_length(op)?,
+                        )),
+                        _ => None,
+                    })
+            }
+            Expr::Unary { op, .. } if floats::inferred_type(op).is_some() => {
+                floats::inferred_type(op)
+            }
+            Expr::Unary { op, .. }
+                if crate::core_ir::integer_cast_spec(op).is_some()
+                    || crate::core_ir::saturating_float_cast_spec(op).is_some() =>
+            {
+                Some(Typ::Int)
+            }
+            Expr::Unary { op, .. } if op.starts_with("rust-integer-value-") => Some(Typ::Named(
+                format!("#rust-integer-{}", op.strip_prefix("rust-integer-value-")?),
+            )),
+            _ => None,
+        }
+    } else {
+        source_type(checker, expr, facts, env)
+    };
     if let Some(proof) = actual.as_ref().and_then(type_proofs::failure_in_type) {
         report(expr, proof, facts, policy);
     }

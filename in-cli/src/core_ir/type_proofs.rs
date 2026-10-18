@@ -187,6 +187,18 @@ pub(crate) fn metadata_present(decls: &[super::Decl], mode: MetadataKind) -> boo
             {
                 return true;
             }
+            Expr::Unary { op, .. }
+                if super::rust_generics::decode_neg_bounds(op).is_some_and(|values| {
+                    values.iter().any(|value| {
+                        typ(&value.receiver, mode)
+                            || value.output.as_ref().is_some_and(|value| typ(value, mode))
+                    })
+                }) || super::rust_generics::decode_neg_implementation(op).is_some_and(
+                    |value| typ(&value.receiver, mode) || typ(&value.output, mode),
+                ) =>
+            {
+                return true;
+            }
             Expr::Ident(name) if mode == MetadataKind::TypeFailures && decode(name).is_some() => {
                 return true;
             }

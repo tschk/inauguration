@@ -1202,54 +1202,75 @@ fn simplify_expr_with_semantics(e: Expr, semantics: IntegerSemantics) -> Expr {
 
 /// Remove functions that are never called and not referenced as pointers.
 fn remove_dead_functions(decls: &mut Vec<Decl>, entry: Option<&str>) {
-    // Collect all called function names
-    let mut called: HashSet<String> = HashSet::new();
-    for d in decls.iter() {
-        if let Decl::Function { body, .. } = d {
-            for s in body {
-                collect_calls_in_stmt(s, &mut called);
+    // Calls inside an unreachable function do not make their callees roots.
+    // Index bodies once, then visit each reachable function at most once.
+    let mut functions = HashMap::new();
+    let mut called = HashSet::new();
+    for declaration in decls.iter() {
+        match declaration {
+            Decl::Function { name, body, .. } => {
+                functions.entry(name.as_str()).or_insert(body.as_slice());
             }
+            // Global declarations remain in the module, so their initializer
+            // calls (and transitive dependencies) must remain available too.
+            Decl::Global {
+                init: Some(value), ..
+            } => collect_calls_in_expr(value, &mut called),
+            Decl::Class { methods, .. } => {
+                // Classes are retained by this pass. Their method bodies and
+                // any nested retained declarations are executable roots too.
+                retained_declaration_calls(methods, &mut called);
+            }
+            _ => {}
         }
     }
-    // Entry function and ptr-refs are always kept
-    let mut ptr_refs: Vec<String> = Vec::new();
+    // Preserve the existing conservative address-taken root policy, including
+    // references in global initializers and class methods.
+    let mut ptr_refs = Vec::new();
     detect_ptr_refs(decls, &mut ptr_refs);
-    for n in &ptr_refs {
-        called.insert(n.clone());
-    }
-
-    // Keep entry, remove the rest
-    if let Some(e) = entry {
-        called.insert(e.to_string());
+    called.extend(ptr_refs);
+    if let Some(entry) = entry {
+        called.insert(entry.to_string());
     } else {
-        // Fallback for callers that don't know the entry name
-        called.insert("kernel_entry".to_string());
-        called.insert("kernel-entry".to_string());
-        called.insert("main".to_string());
+        called.extend(["kernel_entry".into(), "kernel-entry".into(), "main".into()]);
     }
-    // Transitive closure: aliases / wrappers that only show up as callees.
-    let mut work: Vec<String> = called.iter().cloned().collect();
+    let mut work = called.iter().cloned().collect::<Vec<_>>();
     while let Some(name) = work.pop() {
-        let Some(Decl::Function { body, .. }) = decls
-            .iter()
-            .find(|d| matches!(d, Decl::Function { name: n, .. } if n == &name))
-        else {
+        let Some(body) = functions.get(name.as_str()) else {
             continue;
         };
-        let mut extra = HashSet::new();
-        for s in body {
-            collect_calls_in_stmt(s, &mut extra);
+        let mut dependencies = HashSet::new();
+        for statement in *body {
+            collect_calls_in_stmt(statement, &mut dependencies);
         }
-        for n in extra {
-            if called.insert(n.clone()) {
-                work.push(n);
+        for dependency in dependencies {
+            if called.insert(dependency.clone()) {
+                work.push(dependency);
             }
         }
     }
-    decls.retain(|d| match d {
+    decls.retain(|declaration| match declaration {
         Decl::Function { name, .. } => called.contains(name),
         _ => true,
     });
+}
+
+fn retained_declaration_calls(declarations: &[Decl], roots: &mut HashSet<String>) {
+    for declaration in declarations {
+        match declaration {
+            Decl::Function { body, .. } => {
+                for statement in body {
+                    collect_calls_in_stmt(statement, roots);
+                }
+            }
+            Decl::Global {
+                init: Some(value), ..
+            } => collect_calls_in_expr(value, roots),
+            Decl::Class { methods, .. } => retained_declaration_calls(methods, roots),
+            // Struct/interface/component declarations contain no executable IR.
+            _ => {}
+        }
+    }
 }
 
 pub(crate) fn collect_calls_in_stmt(s: &Stmt, out: &mut HashSet<String>) {
@@ -1306,6 +1327,9 @@ pub(crate) fn collect_calls_in_stmt(s: &Stmt, out: &mut HashSet<String>) {
         } => {
             collect_calls_in_expr(scrutinee, out);
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_calls_in_expr(guard, out);
+                }
                 for s in &arm.body {
                     collect_calls_in_stmt(s, out);
                 }
@@ -4063,6 +4087,167 @@ mod tests {
         assert!(!names.contains(&"unused"));
     }
 
+    #[test]
+    fn remove_dead_functions_uses_entry_reachability_not_dead_caller_edges() {
+        let mut declarations = vec![
+            make_fn("main", vec![Stmt::Expr(call("live_a", vec![]))]),
+            make_fn("live_a", vec![Stmt::Expr(call("live_b", vec![]))]),
+            make_fn("live_b", vec![Stmt::Return(None)]),
+            make_fn("dead_a", vec![Stmt::Expr(call("dead_b", vec![]))]),
+            make_fn("dead_b", vec![Stmt::Return(None)]),
+            make_fn("cycle_a", vec![Stmt::Expr(call("cycle_b", vec![]))]),
+            make_fn("cycle_b", vec![Stmt::Expr(call("cycle_a", vec![]))]),
+        ];
+        remove_dead_functions(&mut declarations, Some("main"));
+        let names = declarations
+            .iter()
+            .filter_map(|decl| {
+                if let Decl::Function { name, .. } = decl {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(names, HashSet::from(["main", "live_a", "live_b"]));
+    }
+    #[test]
+    fn remove_dead_functions_preserves_pointer_global_and_match_guard_roots() {
+        let mut declarations = vec![
+            make_fn(
+                "main",
+                vec![Stmt::Match {
+                    scrutinee: Expr::BoolLit(true),
+                    arms: vec![MatchArm {
+                        pattern: "true".into(),
+                        guard: Some(call("guard", vec![])),
+                        body: vec![],
+                    }],
+                }],
+            ),
+            make_fn("guard", vec![Stmt::Return(None)]),
+            make_fn(
+                "global_init",
+                vec![Stmt::Expr(call("global_child", vec![]))],
+            ),
+            make_fn("global_child", vec![Stmt::Return(None)]),
+            make_fn("address", vec![Stmt::Expr(call("pointer_child", vec![]))]),
+            make_fn("pointer_child", vec![Stmt::Return(None)]),
+            make_fn("dead", vec![Stmt::Return(None)]),
+            Decl::Global {
+                name: "TABLE".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(ident("address"))),
+                mutable: false,
+                constant_value: false,
+            },
+            Decl::Global {
+                name: "VALUE".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(call("global_init", vec![]))),
+                mutable: false,
+                constant_value: false,
+            },
+        ];
+        remove_dead_functions(&mut declarations, Some("main"));
+        let names = declarations
+            .iter()
+            .filter_map(|decl| {
+                if let Decl::Function { name, .. } = decl {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            names,
+            HashSet::from([
+                "main",
+                "guard",
+                "global_init",
+                "global_child",
+                "address",
+                "pointer_child"
+            ])
+        );
+        assert!(
+            declarations
+                .iter()
+                .any(|decl| matches!(decl,Decl::Global{name,..}if name=="TABLE"))
+        );
+    }
+    #[test]
+    fn retained_class_method_bodies_keep_their_top_level_dependencies() {
+        let class = |name: &str, methods: Vec<Decl>| Decl::Class {
+            name: name.into(),
+            fields: vec![],
+            methods,
+            visibility: crate::core_ir::Visibility::Pub,
+            extends: None,
+            implements: vec![],
+            type_params: vec![],
+        };
+        let mut declarations = vec![
+            make_fn("main", vec![Stmt::Return(None)]),
+            make_fn(
+                "method_helper",
+                vec![Stmt::Expr(call("method_leaf", vec![]))],
+            ),
+            make_fn("method_leaf", vec![Stmt::Return(None)]),
+            make_fn("nested_helper", vec![Stmt::Return(None)]),
+            make_fn("unused", vec![Stmt::Return(None)]),
+            class(
+                "Root",
+                vec![
+                    make_fn("method", vec![Stmt::Expr(call("method_helper", vec![]))]),
+                    class(
+                        "Nested",
+                        vec![make_fn(
+                            "nested_method",
+                            vec![Stmt::Expr(call("nested_helper", vec![]))],
+                        )],
+                    ),
+                ],
+            ),
+        ];
+        remove_dead_functions(&mut declarations, Some("main"));
+        let names = declarations
+            .iter()
+            .filter_map(|decl| {
+                if let Decl::Function { name, .. } = decl {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            names,
+            HashSet::from(["main", "method_helper", "method_leaf", "nested_helper"])
+        );
+        assert!(
+            declarations
+                .iter()
+                .any(|decl| matches!(decl,Decl::Class{name,..}if name=="Root"))
+        );
+    }
+    #[test]
+    fn keep_all_linkage_retains_unreachable_callers_and_cycles() {
+        let mut declarations = vec![
+            make_fn("main", vec![Stmt::Return(None)]),
+            make_fn("cycle_a", vec![Stmt::Expr(call("cycle_b", vec![]))]),
+            make_fn("cycle_b", vec![Stmt::Expr(call("cycle_a", vec![]))]),
+        ];
+        optimize_with_linkage(&mut declarations, Some("main"), EmitProfile::Default, true);
+        assert_eq!(
+            declarations
+                .iter()
+                .filter(|decl| matches!(decl, Decl::Function { .. }))
+                .count(),
+            3
+        );
+    }
     #[test]
     fn remove_dead_functions_keeps_entry() {
         let mut decls = vec![

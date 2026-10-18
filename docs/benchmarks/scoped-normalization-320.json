@@ -1,0 +1,1108 @@
+{
+  "schema": 1,
+  "scope": "Public normalization only, debug library; uncontrolled concurrent load, not release compilation/selfhost benchmark",
+  "host": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "samples_per_fixture_per_revision": 3,
+  "fixture_count": 27,
+  "jit_expected_result": 42,
+  "source_manifest": {
+    "path": "target/verification/scoped-value320-source-r18.json",
+    "sha256": "22fded5651e8e0ea7e062188c0411052eebf77e15808ea4ff530a5b687dc356f",
+    "files": {
+      "in-cli/Cargo.lock": "c78305c052510c9119d5196277ad2eaef94b79876e2800f28551b5bb272a6f65",
+      "in-cli/Cargo.toml": "b4e573c83b2a46079d69df613f8f2059172fbcb2486984e809309a70181bd042",
+      "in-cli/src/typecheck.rs": "1024aeeea4fae838587e4438f6f05663e039153584a54876854a62a4a0b8ce63",
+      "in-cli/src/typecheck/rust_arrays.rs": "57b82c8c498cdd08e50ba4ec362c243a2e82f1fb56a3c42f228ed861d520ae42",
+      "in-cli/src/typecheck/rust_floats.rs": "8dd68c00566369ff70fbda9e422696a4cbcffce6e4811d13cf7e676671f47e07",
+      "in-cli/src/typecheck/rust_generics.rs": "a643ed3c684666038984ccb1ed66cf8078b369847adaa42861cc4fcd91bb4350",
+      "in-cli/src/core_ir/rust_generics.rs": "9f8fb11add92f802a38dcbf19527bba84e94b5d26f2c3ad07ce8684c155c7528",
+      "in-cli/src/core_bindings/namespace.rs": "5a0556cbe279c02a54526844da36c7e17afdb91ba2101e651e7d490f8ab0a69f",
+      "in-cli/src/compiler/rust_front/unary_methods.rs": "b079739ed4903eb768ce9b51d9e4c60a34383861b93aaf0f89bf1bc9e12ae847",
+      "in-cli/src/compiler/rust_front.rs": "06d3cf22aa8eade246f29298cc78ce9b97fca5623c967f905eb5d93091cdce1c",
+      "in-cli/src/owned_compile/tests.rs": "4482c3226775e30ae1f9f63b57b0ed728f5876bd3c298e573148e92ab99c8ee3",
+      "in-cli/src/core_ir/type_proofs.rs": "97f3b10195c31a1f43e668054128fba90747ebdddc3e7a4b2c07dccacb6f7ef2",
+      "in-cli/src/core_opt.rs": "e324c7fd7655896d479421bab8b12809b51a5885675043a07fa52320199abaea"
+    }
+  },
+  "candidate_library": {
+    "path": "target/verification/scoped-value320-debug-r5/libinauguration.rlib",
+    "sha256": "2be7004a894d35479034746f77d98fcb13fad84f552d17b905ac70767ea99c37"
+  },
+  "candidate_binary": {
+    "path": "target/verification/scoped-value320-debug-r5/in",
+    "sha256": "3a804256c107283ba8284c0de20c4a921a4ba0116bb19ba5e05f75f563886944"
+  },
+  "groups": [
+    {
+      "name": "nested-let",
+      "receipts": [
+        {
+          "path": "target/verification/float319-block-value-timing-r1/results.json",
+          "sha256": "9b29220f2efc4ac695dabf8f8049fe01006d7c7d926bb73ee0442643e49609f9",
+          "library_sha256": "48792acd626f656b3ffe28ea7de0d81581d3f4cc5ded77c9fc3c827813e98452",
+          "probe_sha256": "0377f5caab45034e240c50e8d4bdeee25baff8f23aebf983771b25826e8cf2c4"
+        },
+        {
+          "path": "target/verification/float320-block-value-timing-debug-r2/results.json",
+          "sha256": "e99ca8e82c21a8354a8899bc73ca5373afcb75dc266dd926565bbdb2bc7c1e29",
+          "library_sha256": "45de9aa6237ce5b2122367a055073a821a6b379feadddb06d349364dcd72c929",
+          "probe_sha256": "0377f5caab45034e240c50e8d4bdeee25baff8f23aebf983771b25826e8cf2c4"
+        },
+        {
+          "path": "target/verification/float320-block-value-timing-debug-r3/results.json",
+          "sha256": "962faf3e0b842453da281862bfb5c9cee519c1e2e403cb0ab10d87978cfebb95",
+          "library_sha256": "253ddbd50f6e08d79d9ed80719c73217b94a417da3a90e8c84b0505412bf129a",
+          "probe_sha256": "0377f5caab45034e240c50e8d4bdeee25baff8f23aebf983771b25826e8cf2c4"
+        },
+        {
+          "path": "target/verification/float319-block-value-timing-r1/candidate320-debug-r5/results.json",
+          "sha256": "3a60a9b264383a0b9134474db18db21c2f6d6613589d77ed464cac5bb899ad50",
+          "library_sha256": "2be7004a894d35479034746f77d98fcb13fad84f552d17b905ac70767ea99c37",
+          "probe_sha256": "0377f5caab45034e240c50e8d4bdeee25baff8f23aebf983771b25826e8cf2c4"
+        }
+      ],
+      "cases": [
+        {
+          "depth": 0,
+          "source_sha256": "e1a314d5ff170d0ba21da65fde06563413a39c20605377cca8b9807463e59bd2",
+          "ir_sha256": "4daf78a8d525855760f8b17932b4bfeacb06a703fb2c1afb3b004b761f30ea3a",
+          "code_sha256": "7abb18c0bd0a9de09a2788bd5bc2c72caf5c3214bd25845f98980f9d26bc4cdc",
+          "raw_nanoseconds": {
+            "baseline319": [
+              1857125,
+              1401042,
+              364000
+            ],
+            "candidate320_r2": [
+              1274750,
+              488125,
+              412416
+            ],
+            "candidate320_r3": [
+              4699084,
+              1738416,
+              1091708
+            ],
+            "candidate320_r5": [
+              2727125,
+              606125,
+              845167
+            ]
+          },
+          "median_ms": {
+            "baseline319": 1.401042,
+            "candidate320_r2": 0.488125,
+            "candidate320_r3": 1.738416,
+            "candidate320_r5": 0.845167
+          },
+          "fixture_source": "fn main()->i64{let value:f32=16777217.0;if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "depth": 1,
+          "source_sha256": "9a0c167fb633d8a334eca30519b8059408ec2c9dcfd5b884b0abedf7f1d84a55",
+          "ir_sha256": "60b0b43f917a0bf5d0699d6e991936b9c83f3114550f0373a46183c57c108594",
+          "code_sha256": "4d350273bf644ea7dbf5ba5854f96c42b7f42e2da1735da40c5c9bf15ba601ba",
+          "raw_nanoseconds": {
+            "baseline319": [
+              4258417,
+              1434500,
+              1006500
+            ],
+            "candidate320_r2": [
+              1023875,
+              564084,
+              1554292
+            ],
+            "candidate320_r3": [
+              808500,
+              2086917,
+              724625
+            ],
+            "candidate320_r5": [
+              785667,
+              552083,
+              516250
+            ]
+          },
+          "median_ms": {
+            "baseline319": 1.4345,
+            "candidate320_r2": 1.023875,
+            "candidate320_r3": 0.8085,
+            "candidate320_r5": 0.552083
+          },
+          "fixture_source": "fn main()->i64{let value:f32={let level0=16777217.0;level0};if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "depth": 2,
+          "source_sha256": "e51a35cdfc89ef752fc407b04c57adc4ead41a62c36683481e026229adc0fd5c",
+          "ir_sha256": "997d1d8658ad03bb29047fdd2aa730d04c6e320b5ee42bf0eaaf6f845b3d12f2",
+          "code_sha256": "fda82903b2d8ff7e062f05b18ae0649b1f48e8cdecc03274822dde1b63c9040b",
+          "raw_nanoseconds": {
+            "baseline319": [
+              1607167,
+              1234166,
+              1386667
+            ],
+            "candidate320_r2": [
+              1052583,
+              782458,
+              755833
+            ],
+            "candidate320_r3": [
+              1467958,
+              1092208,
+              1400750
+            ],
+            "candidate320_r5": [
+              1029167,
+              921917,
+              1449041
+            ]
+          },
+          "median_ms": {
+            "baseline319": 1.386667,
+            "candidate320_r2": 0.782458,
+            "candidate320_r3": 1.40075,
+            "candidate320_r5": 1.029167
+          },
+          "fixture_source": "fn main()->i64{let value:f32={let level1={let level0=16777217.0;level0};level1};if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "depth": 3,
+          "source_sha256": "835287ae0df2b97a230aed665d133dcc30d4fb448bc049b1158a58c5758ceb40",
+          "ir_sha256": "ab6763adf9d147e1d111fbcd173844a5ab54b9ebed31f3b4bc893112853f5563",
+          "code_sha256": "3a0cfa7e97e32c5c60489108c0f384e4a1d3e2548198608962ea68d81a537e83",
+          "raw_nanoseconds": {
+            "baseline319": [
+              1873917,
+              2027708,
+              3582542
+            ],
+            "candidate320_r2": [
+              1476542,
+              1769250,
+              1507458
+            ],
+            "candidate320_r3": [
+              1437084,
+              1748208,
+              1130208
+            ],
+            "candidate320_r5": [
+              2463292,
+              1389292,
+              1470708
+            ]
+          },
+          "median_ms": {
+            "baseline319": 2.027708,
+            "candidate320_r2": 1.507458,
+            "candidate320_r3": 1.437084,
+            "candidate320_r5": 1.470708
+          },
+          "fixture_source": "fn main()->i64{let value:f32={let level2={let level1={let level0=16777217.0;level0};level1};level2};if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "depth": 4,
+          "source_sha256": "4dab42bd4e06e0124aaf8ecaefb9d5191d99be190fbfb15b07f8047fbb3b4920",
+          "ir_sha256": "69829f5b12d20552cc1232cec8089c5b72774495958d70f6ec3fa58d7165b61a",
+          "code_sha256": "2b3e2f846162cd2d14bf66ad9bde9b0bedabeb8e7727eac6b9523e003dd3a58a",
+          "raw_nanoseconds": {
+            "baseline319": [
+              3729334,
+              5982541,
+              5810250
+            ],
+            "candidate320_r2": [
+              1591500,
+              1613209,
+              1718042
+            ],
+            "candidate320_r3": [
+              2859542,
+              1941292,
+              1651125
+            ],
+            "candidate320_r5": [
+              3146167,
+              1678041,
+              3079667
+            ]
+          },
+          "median_ms": {
+            "baseline319": 5.81025,
+            "candidate320_r2": 1.613209,
+            "candidate320_r3": 1.941292,
+            "candidate320_r5": 3.079667
+          },
+          "fixture_source": "fn main()->i64{let value:f32={let level3={let level2={let level1={let level0=16777217.0;level0};level1};level2};level3};if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "depth": 5,
+          "source_sha256": "9a2d332df5671448d982abf7a495c312e15d9a4af7fa90a7e4bb0e66e26fb14a",
+          "ir_sha256": "f47c299f07ccc3185115b4a906d0b8cdbe7c0f798bde316784427e8455349474",
+          "code_sha256": "b2b4307aa82a078b1d1e1ef5d3436b72aee707726297251d5e8827039d4c3bce",
+          "raw_nanoseconds": {
+            "baseline319": [
+              7321875,
+              13305583,
+              22735958
+            ],
+            "candidate320_r2": [
+              1897083,
+              1660292,
+              1841250
+            ],
+            "candidate320_r3": [
+              2198083,
+              2312875,
+              2154375
+            ],
+            "candidate320_r5": [
+              1956584,
+              2316334,
+              1666375
+            ]
+          },
+          "median_ms": {
+            "baseline319": 13.305583,
+            "candidate320_r2": 1.84125,
+            "candidate320_r3": 2.198083,
+            "candidate320_r5": 1.956584
+          },
+          "fixture_source": "fn main()->i64{let value:f32={let level4={let level3={let level2={let level1={let level0=16777217.0;level0};level1};level2};level3};level4};if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "depth": 6,
+          "source_sha256": "f1d98f2de55b8e8e244945de152e9f09f14017ef63fa7842631e9beeebf969a3",
+          "ir_sha256": "310a7783fbb49ff388f4edbfc00aad621b928beec133c9e65aa81a7c798a675d",
+          "code_sha256": "6215a3577d878541b8928dbe97bef015017a6db3be40fa99981aea060e4f4f2b",
+          "raw_nanoseconds": {
+            "baseline319": [
+              21024708,
+              20512209,
+              26556042
+            ],
+            "candidate320_r2": [
+              2901042,
+              2678167,
+              2491375
+            ],
+            "candidate320_r3": [
+              3255500,
+              2425375,
+              2234042
+            ],
+            "candidate320_r5": [
+              4640458,
+              3525750,
+              4313084
+            ]
+          },
+          "median_ms": {
+            "baseline319": 21.024708,
+            "candidate320_r2": 2.678167,
+            "candidate320_r3": 2.425375,
+            "candidate320_r5": 4.313084
+          },
+          "fixture_source": "fn main()->i64{let value:f32={let level5={let level4={let level3={let level2={let level1={let level0=16777217.0;level0};level1};level2};level3};level4};level5};if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "depth": 7,
+          "source_sha256": "518737f6c7408cbe7e28d9cf5300cc06f27f7f6909424df33794b4432e5a105e",
+          "ir_sha256": "86a3797e20d7e63acab7b0d640b8c1782eeffde2dbf92d9fb99c8680b992b67d",
+          "code_sha256": "d7527ad7e1463a1d902d733845bb7659afe94ccb41c9ba9f9a388d936a3e8d67",
+          "raw_nanoseconds": {
+            "baseline319": [
+              33028208,
+              28407250,
+              31281542
+            ],
+            "candidate320_r2": [
+              2813209,
+              3931292,
+              4655875
+            ],
+            "candidate320_r3": [
+              3370458,
+              3114708,
+              4880500
+            ],
+            "candidate320_r5": [
+              2774708,
+              12701417,
+              5748958
+            ]
+          },
+          "median_ms": {
+            "baseline319": 31.281542,
+            "candidate320_r2": 3.931292,
+            "candidate320_r3": 3.370458,
+            "candidate320_r5": 5.748958
+          },
+          "fixture_source": "fn main()->i64{let value:f32={let level6={let level5={let level4={let level3={let level2={let level1={let level0=16777217.0;level0};level1};level2};level3};level4};level5};level6};if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "depth": 8,
+          "source_sha256": "0045284ad02842cd4448793bb9e7ea7770a8c1f77b3db34a1aa34dabad989431",
+          "ir_sha256": "635cda7806ae9889a0781c1cc5c0bc0aba6814b9cff60ed5d41f4a9817c93f0a",
+          "code_sha256": "c406506c7e1d27583a40bb3da3c25d8ebda3bf09c730ca9426475344573242c5",
+          "raw_nanoseconds": {
+            "baseline319": [
+              97779500,
+              187907875,
+              465630166
+            ],
+            "candidate320_r2": [
+              4901916,
+              4910083,
+              4286541
+            ],
+            "candidate320_r3": [
+              3460333,
+              3997000,
+              3617625
+            ],
+            "candidate320_r5": [
+              3803041,
+              3278375,
+              3727583
+            ]
+          },
+          "median_ms": {
+            "baseline319": 187.907875,
+            "candidate320_r2": 4.901916,
+            "candidate320_r3": 3.617625,
+            "candidate320_r5": 3.727583
+          },
+          "fixture_source": "fn main()->i64{let value:f32={let level7={let level6={let level5={let level4={let level3={let level2={let level1={let level0=16777217.0;level0};level1};level2};level3};level4};level5};level6};level7};if value==16777216.0f32{42}else{7}}\n"
+        }
+      ]
+    },
+    {
+      "name": "scoped-shapes",
+      "receipts": [
+        {
+          "path": "target/verification/float319-scoped-shapes-timing-r1/baseline319-r5/results.json",
+          "sha256": "e54bdd97baaa0f099dc39e2d15d2c4cc8a561955f502efd5f5889679df95d58d",
+          "library_sha256": "48792acd626f656b3ffe28ea7de0d81581d3f4cc5ded77c9fc3c827813e98452",
+          "probe_sha256": "0377f5caab45034e240c50e8d4bdeee25baff8f23aebf983771b25826e8cf2c4"
+        },
+        {
+          "path": "target/verification/float319-scoped-shapes-timing-r1/candidate320-debug-r2/results.json",
+          "sha256": "a05643d4b3ccf1a705309f9edd9b04207b87b03a061065173f57d2a95f4b3816",
+          "library_sha256": "45de9aa6237ce5b2122367a055073a821a6b379feadddb06d349364dcd72c929",
+          "probe_sha256": "0377f5caab45034e240c50e8d4bdeee25baff8f23aebf983771b25826e8cf2c4"
+        },
+        {
+          "path": "target/verification/float319-scoped-shapes-timing-r1/candidate320-debug-r3/results.json",
+          "sha256": "42cae3f29ff744dd9663b6a0bc096f40227d7c5bafd66b487452b63136654153",
+          "library_sha256": "253ddbd50f6e08d79d9ed80719c73217b94a417da3a90e8c84b0505412bf129a",
+          "probe_sha256": "0377f5caab45034e240c50e8d4bdeee25baff8f23aebf983771b25826e8cf2c4"
+        },
+        {
+          "path": "target/verification/float319-scoped-shapes-timing-r1/candidate320-debug-r5/results.json",
+          "sha256": "cf89a4de8176fbc6aa5346135022dbde6b48e4032c7fd392d3676c53b53f4dd3",
+          "library_sha256": "2be7004a894d35479034746f77d98fcb13fad84f552d17b905ac70767ea99c37",
+          "probe_sha256": "0377f5caab45034e240c50e8d4bdeee25baff8f23aebf983771b25826e8cf2c4"
+        }
+      ],
+      "cases": [
+        {
+          "shape": "typed-call",
+          "depth": 0,
+          "source_sha256": "e7eec61d69fcfd80909bce9174fb024de59cb1d15592ccb10b82ae602f3a78ea",
+          "ir_sha256": "f62553447a8d67096cfd0544523422b007c1bc27a4b39a4417de4dabe5f21d7c",
+          "code_sha256": "8218344bf6eca78f699c0d9755a02a9cffc22eddb212fe618f27ecb2603b139d",
+          "raw_nanoseconds": {
+            "baseline319": [
+              1119500,
+              457417,
+              420125
+            ],
+            "candidate320_r2": [
+              1502833,
+              590875,
+              601917
+            ],
+            "candidate320_r3": [
+              1382959,
+              602667,
+              1328125
+            ],
+            "candidate320_r5": [
+              1679584,
+              2437625,
+              600375
+            ]
+          },
+          "median_ms": {
+            "baseline319": 0.457417,
+            "candidate320_r2": 0.601917,
+            "candidate320_r3": 1.328125,
+            "candidate320_r5": 1.679584
+          },
+          "fixture_source": "fn one(value:f32)->f32{value}fn main()->i64{let value:f32=16777217.0;if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "typed-call",
+          "depth": 1,
+          "source_sha256": "5fa919bafd8f274f8413a804fe63866a6dd1c08c425e73f7b280087114e6f465",
+          "ir_sha256": "2aa6bdca1ee0a400ad0a4ed51453c574b7080d4cdf0c8bb29d77825ae0dc653e",
+          "code_sha256": "fc00a5ef2fb7c118b3fea2b6ab5ecb1b6a05fd5cc307840468b85866c1a54e3c",
+          "raw_nanoseconds": {
+            "baseline319": [
+              1230625,
+              835958,
+              1341708
+            ],
+            "candidate320_r2": [
+              966958,
+              609709,
+              662917
+            ],
+            "candidate320_r3": [
+              1247458,
+              1203625,
+              1364000
+            ],
+            "candidate320_r5": [
+              1880167,
+              1066750,
+              1490708
+            ]
+          },
+          "median_ms": {
+            "baseline319": 1.230625,
+            "candidate320_r2": 0.662917,
+            "candidate320_r3": 1.247458,
+            "candidate320_r5": 1.490708
+          },
+          "fixture_source": "fn one(value:f32)->f32{value}fn main()->i64{let value:f32=one({16777217.0});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "typed-call",
+          "depth": 2,
+          "source_sha256": "6759a334fe47eb5334e9c3c37b2a272ec4f66fdbe2b4f4c6eaa9dc8cd75de60d",
+          "ir_sha256": "6c950abf598306e57690aadfd9f3ef0eda919f655828184287d0755c1d3ecd91",
+          "code_sha256": "9bd62e35717318a2f91b84c1e318bcee7554ec7d67a6576d84fc59640a8379a9",
+          "raw_nanoseconds": {
+            "baseline319": [
+              1111333,
+              932167,
+              890708
+            ],
+            "candidate320_r2": [
+              1091625,
+              690125,
+              652333
+            ],
+            "candidate320_r3": [
+              994208,
+              736083,
+              962333
+            ],
+            "candidate320_r5": [
+              1386375,
+              853792,
+              881042
+            ]
+          },
+          "median_ms": {
+            "baseline319": 0.932167,
+            "candidate320_r2": 0.690125,
+            "candidate320_r3": 0.962333,
+            "candidate320_r5": 0.881042
+          },
+          "fixture_source": "fn one(value:f32)->f32{value}fn main()->i64{let value:f32=one({one({16777217.0})});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "typed-call",
+          "depth": 3,
+          "source_sha256": "2507171687aeb516e98232b019ffcf5bfb8fa5ae82909f69e1dd684fd1f852d9",
+          "ir_sha256": "f7cdf8262e0f7de82199c01b0e332d453545bfa07f9f95bb925ef7527b41afb8",
+          "code_sha256": "b8a1f86b343a27f1ebf1786113368365a8568941bca4efbacc445162b51b2f8e",
+          "raw_nanoseconds": {
+            "baseline319": [
+              1102458,
+              1185375,
+              1497125
+            ],
+            "candidate320_r2": [
+              846916,
+              631666,
+              638167
+            ],
+            "candidate320_r3": [
+              1700541,
+              2989292,
+              1174792
+            ],
+            "candidate320_r5": [
+              2893084,
+              4149958,
+              1116167
+            ]
+          },
+          "median_ms": {
+            "baseline319": 1.185375,
+            "candidate320_r2": 0.638167,
+            "candidate320_r3": 1.700541,
+            "candidate320_r5": 2.893084
+          },
+          "fixture_source": "fn one(value:f32)->f32{value}fn main()->i64{let value:f32=one({one({one({16777217.0})})});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "typed-call",
+          "depth": 4,
+          "source_sha256": "cc29e34ebf29fe0c9d9d1d1c682881765013ce810a3adbd5fae141829334c0d9",
+          "ir_sha256": "b1ee49249a3070f0ddbec3c8ab37f2938ccdcd0006bb55bf288f984544d5206c",
+          "code_sha256": "0f2b4390c7e229ff10504f5acccc1ae27c26df9654a06db40a08ae2793e6f3bc",
+          "raw_nanoseconds": {
+            "baseline319": [
+              1476167,
+              1890625,
+              892583
+            ],
+            "candidate320_r2": [
+              1148083,
+              940958,
+              860333
+            ],
+            "candidate320_r3": [
+              2548333,
+              2161375,
+              1002125
+            ],
+            "candidate320_r5": [
+              1663458,
+              989959,
+              979917
+            ]
+          },
+          "median_ms": {
+            "baseline319": 1.476167,
+            "candidate320_r2": 0.940958,
+            "candidate320_r3": 2.161375,
+            "candidate320_r5": 0.989959
+          },
+          "fixture_source": "fn one(value:f32)->f32{value}fn main()->i64{let value:f32=one({one({one({one({16777217.0})})})});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "typed-call",
+          "depth": 5,
+          "source_sha256": "bd90129de59df1394058e2fa9e54beb2dc3a00359a0fac68a652b7a5a48e7dc1",
+          "ir_sha256": "b626ca824814950b03a743bd083c346a18c564a187e60f47878a900431afc782",
+          "code_sha256": "d41f3af344ad150c3b3fc325493d4be7d1600e54f93830636b8e3ab3e7e1caac",
+          "raw_nanoseconds": {
+            "baseline319": [
+              1220500,
+              957792,
+              935125
+            ],
+            "candidate320_r2": [
+              1244000,
+              970875,
+              923834
+            ],
+            "candidate320_r3": [
+              1454625,
+              1902583,
+              1816917
+            ],
+            "candidate320_r5": [
+              1161417,
+              925334,
+              891042
+            ]
+          },
+          "median_ms": {
+            "baseline319": 0.957792,
+            "candidate320_r2": 0.970875,
+            "candidate320_r3": 1.816917,
+            "candidate320_r5": 0.925334
+          },
+          "fixture_source": "fn one(value:f32)->f32{value}fn main()->i64{let value:f32=one({one({one({one({one({16777217.0})})})})});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "conditional",
+          "depth": 0,
+          "source_sha256": "e1a314d5ff170d0ba21da65fde06563413a39c20605377cca8b9807463e59bd2",
+          "ir_sha256": "4daf78a8d525855760f8b17932b4bfeacb06a703fb2c1afb3b004b761f30ea3a",
+          "code_sha256": "7abb18c0bd0a9de09a2788bd5bc2c72caf5c3214bd25845f98980f9d26bc4cdc",
+          "raw_nanoseconds": {
+            "baseline319": [
+              569500,
+              528334,
+              579042
+            ],
+            "candidate320_r2": [
+              532000,
+              535834,
+              399750
+            ],
+            "candidate320_r3": [
+              750583,
+              581667,
+              393417
+            ],
+            "candidate320_r5": [
+              1087791,
+              496167,
+              1153583
+            ]
+          },
+          "median_ms": {
+            "baseline319": 0.5695,
+            "candidate320_r2": 0.532,
+            "candidate320_r3": 0.581667,
+            "candidate320_r5": 1.087791
+          },
+          "fixture_source": "fn main()->i64{let value:f32=16777217.0;if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "conditional",
+          "depth": 1,
+          "source_sha256": "74b123818c6456e35eeb7ddcf8b468e8027981020c8bac601a95350111fb3ade",
+          "ir_sha256": "236ce414e457efda5f1bc613f8104ed57cfab34ca49d0a94098e36e42380ca86",
+          "code_sha256": "997acbee6892a1ed3b587623df258e2bd52eb813cff16983190763417007cdad",
+          "raw_nanoseconds": {
+            "baseline319": [
+              2088375,
+              1175250,
+              2511916
+            ],
+            "candidate320_r2": [
+              735916,
+              683334,
+              762542
+            ],
+            "candidate320_r3": [
+              893917,
+              845167,
+              725292
+            ],
+            "candidate320_r5": [
+              1259000,
+              720583,
+              687500
+            ]
+          },
+          "median_ms": {
+            "baseline319": 2.088375,
+            "candidate320_r2": 0.735916,
+            "candidate320_r3": 0.845167,
+            "candidate320_r5": 0.720583
+          },
+          "fixture_source": "fn main()->i64{let value:f32=(if true{let arm0=16777217.0;arm0}else{16777216.0f32});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "conditional",
+          "depth": 2,
+          "source_sha256": "1e3837aa2ee11b6fc906a98e7e8d91e04fcc058e9461ff89136c9ac83fb63193",
+          "ir_sha256": "7a81470199b6b5045baeade923bc8d64bb1c42ccf077533b34e23052b5fdd4b6",
+          "code_sha256": "71cce0343ce86443a4d257f04179a37827c835de953b2bc8bad060da15ebaff5",
+          "raw_nanoseconds": {
+            "baseline319": [
+              1564417,
+              2397917,
+              6820917
+            ],
+            "candidate320_r2": [
+              1129542,
+              942917,
+              786333
+            ],
+            "candidate320_r3": [
+              1447291,
+              968292,
+              1743917
+            ],
+            "candidate320_r5": [
+              2030917,
+              1698333,
+              1164792
+            ]
+          },
+          "median_ms": {
+            "baseline319": 2.397917,
+            "candidate320_r2": 0.942917,
+            "candidate320_r3": 1.447291,
+            "candidate320_r5": 1.698333
+          },
+          "fixture_source": "fn main()->i64{let value:f32=(if true{let arm1=(if true{let arm0=16777217.0;arm0}else{16777216.0f32});arm1}else{16777216.0f32});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "conditional",
+          "depth": 3,
+          "source_sha256": "23f348b6142da1ceebf694b3fe02f5671b43f4fbdfb7498680e0d07357046b8f",
+          "ir_sha256": "5731202843eb34ef7f83690753d49129a31afc74a7dbc14c2a9f1518e26a96b0",
+          "code_sha256": "7f8b6f9a526df56e80cf02e7e7a3e9282cfbd6a6f01c58b9c0cdfa43302d4649",
+          "raw_nanoseconds": {
+            "baseline319": [
+              2813000,
+              4520917,
+              4462000
+            ],
+            "candidate320_r2": [
+              1255458,
+              1139334,
+              1217834
+            ],
+            "candidate320_r3": [
+              2689875,
+              2460291,
+              1192917
+            ],
+            "candidate320_r5": [
+              1857333,
+              3331625,
+              1511083
+            ]
+          },
+          "median_ms": {
+            "baseline319": 4.462,
+            "candidate320_r2": 1.217834,
+            "candidate320_r3": 2.460291,
+            "candidate320_r5": 1.857333
+          },
+          "fixture_source": "fn main()->i64{let value:f32=(if true{let arm2=(if true{let arm1=(if true{let arm0=16777217.0;arm0}else{16777216.0f32});arm1}else{16777216.0f32});arm2}else{16777216.0f32});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "conditional",
+          "depth": 4,
+          "source_sha256": "8b7e4e56cd90b24fb74b5f7ccc0a3f9c783dd65c5c74d72efff322373ce66a5b",
+          "ir_sha256": "b1ae0e2ef417495bf1e1fe1ad0d60674ea934b9c0dea967d6bd5b1441da10695",
+          "code_sha256": "ec04df9637150922cb74c7a7fc1eec2ca60ad7f04ec07dfb6d413554261813a5",
+          "raw_nanoseconds": {
+            "baseline319": [
+              5660500,
+              6642792,
+              5615917
+            ],
+            "candidate320_r2": [
+              1691500,
+              1363167,
+              1505375
+            ],
+            "candidate320_r3": [
+              1996792,
+              3329666,
+              1768500
+            ],
+            "candidate320_r5": [
+              1959000,
+              1399875,
+              1374791
+            ]
+          },
+          "median_ms": {
+            "baseline319": 5.6605,
+            "candidate320_r2": 1.505375,
+            "candidate320_r3": 1.996792,
+            "candidate320_r5": 1.399875
+          },
+          "fixture_source": "fn main()->i64{let value:f32=(if true{let arm3=(if true{let arm2=(if true{let arm1=(if true{let arm0=16777217.0;arm0}else{16777216.0f32});arm1}else{16777216.0f32});arm2}else{16777216.0f32});arm3}else{16777216.0f32});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "conditional",
+          "depth": 5,
+          "source_sha256": "87f6123157b215a3d535b89929f831b1a9aa642b67fe4d29a03b591ae18fd3b1",
+          "ir_sha256": "f0de276ceb4afe40cf93e1c4f38a285061591ffaf29f0d5c0a8634711d9a09ac",
+          "code_sha256": "7804175aa8649ced1bb197f98ef2840bfa6a10f05ed95c1252d69559ad1019ef",
+          "raw_nanoseconds": {
+            "baseline319": [
+              60990583,
+              16963792,
+              27844333
+            ],
+            "candidate320_r2": [
+              2677916,
+              1500209,
+              2121625
+            ],
+            "candidate320_r3": [
+              5191542,
+              2377958,
+              3931833
+            ],
+            "candidate320_r5": [
+              3395125,
+              1784750,
+              1736167
+            ]
+          },
+          "median_ms": {
+            "baseline319": 27.844333,
+            "candidate320_r2": 2.121625,
+            "candidate320_r3": 3.931833,
+            "candidate320_r5": 1.78475
+          },
+          "fixture_source": "fn main()->i64{let value:f32=(if true{let arm4=(if true{let arm3=(if true{let arm2=(if true{let arm1=(if true{let arm0=16777217.0;arm0}else{16777216.0f32});arm1}else{16777216.0f32});arm2}else{16777216.0f32});arm3}else{16777216.0f32});arm4}else{16777216.0f32});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "bool-match",
+          "depth": 0,
+          "source_sha256": "e1a314d5ff170d0ba21da65fde06563413a39c20605377cca8b9807463e59bd2",
+          "ir_sha256": "4daf78a8d525855760f8b17932b4bfeacb06a703fb2c1afb3b004b761f30ea3a",
+          "code_sha256": "7abb18c0bd0a9de09a2788bd5bc2c72caf5c3214bd25845f98980f9d26bc4cdc",
+          "raw_nanoseconds": {
+            "baseline319": [
+              550083,
+              437042,
+              770583
+            ],
+            "candidate320_r2": [
+              742375,
+              438250,
+              361958
+            ],
+            "candidate320_r3": [
+              782209,
+              450833,
+              953750
+            ],
+            "candidate320_r5": [
+              4972208,
+              583250,
+              440834
+            ]
+          },
+          "median_ms": {
+            "baseline319": 0.550083,
+            "candidate320_r2": 0.43825,
+            "candidate320_r3": 0.782209,
+            "candidate320_r5": 0.58325
+          },
+          "fixture_source": "fn main()->i64{let value:f32=16777217.0;if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "bool-match",
+          "depth": 1,
+          "source_sha256": "803804de4a046d7cb8c2099aa4f54c98dfac5a248ef29d31f5843ca292015964",
+          "ir_sha256": "b0fdbe0110c2913205eef957de8d4a2215f7aef09fdd0cb07100700946b7623f",
+          "code_sha256": "f388c89c19d34149b933160fa691563ae6e94d409d68ab10af1852d3f58a1acc",
+          "raw_nanoseconds": {
+            "baseline319": [
+              1085791,
+              770458,
+              769042
+            ],
+            "candidate320_r2": [
+              1328667,
+              825125,
+              717041
+            ],
+            "candidate320_r3": [
+              1115209,
+              724459,
+              675083
+            ],
+            "candidate320_r5": [
+              1833833,
+              1535459,
+              1918375
+            ]
+          },
+          "median_ms": {
+            "baseline319": 0.770458,
+            "candidate320_r2": 0.825125,
+            "candidate320_r3": 0.724459,
+            "candidate320_r5": 1.833833
+          },
+          "fixture_source": "fn main()->i64{let value:f32=(match true{true=>{let arm0=16777217.0;arm0},false=>16777216.0f32});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "bool-match",
+          "depth": 2,
+          "source_sha256": "db129558fe73c77b4093657441a8688bee1e76c7414e9d6a542dbc4e576bc40b",
+          "ir_sha256": "5f61bb18923db6a0c8930c6cf78a6ee4458aec6a14107d9d9d7f1e7dae480d0a",
+          "code_sha256": "b8d47d8f10cb470c6812a41a30bd0513da99c5f71a1bf4dc05c313446795ae6b",
+          "raw_nanoseconds": {
+            "baseline319": [
+              4921750,
+              7926125,
+              2281625
+            ],
+            "candidate320_r2": [
+              1491875,
+              1136292,
+              1055500
+            ],
+            "candidate320_r3": [
+              1666291,
+              2104792,
+              1946625
+            ],
+            "candidate320_r5": [
+              1807834,
+              2270458,
+              2091375
+            ]
+          },
+          "median_ms": {
+            "baseline319": 4.92175,
+            "candidate320_r2": 1.136292,
+            "candidate320_r3": 1.946625,
+            "candidate320_r5": 2.091375
+          },
+          "fixture_source": "fn main()->i64{let value:f32=(match true{true=>{let arm1=(match true{true=>{let arm0=16777217.0;arm0},false=>16777216.0f32});arm1},false=>16777216.0f32});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "bool-match",
+          "depth": 3,
+          "source_sha256": "068510180374e7845fb997b83b6d68861d3a588468ba789498ae97497aa66711",
+          "ir_sha256": "44acb0e15248be859794018571fba76fc35a5c24fbe10a51d8b7ae3b05b7a8e0",
+          "code_sha256": "0bf245957954b4aa216c14d5b1ce0bdf847bc7f55e184b80ae6239f95fd398cb",
+          "raw_nanoseconds": {
+            "baseline319": [
+              6641250,
+              5347791,
+              4832166
+            ],
+            "candidate320_r2": [
+              1961917,
+              1694625,
+              1573208
+            ],
+            "candidate320_r3": [
+              2469667,
+              2034459,
+              2309083
+            ],
+            "candidate320_r5": [
+              5112292,
+              1974250,
+              2782084
+            ]
+          },
+          "median_ms": {
+            "baseline319": 5.347791,
+            "candidate320_r2": 1.694625,
+            "candidate320_r3": 2.309083,
+            "candidate320_r5": 2.782084
+          },
+          "fixture_source": "fn main()->i64{let value:f32=(match true{true=>{let arm2=(match true{true=>{let arm1=(match true{true=>{let arm0=16777217.0;arm0},false=>16777216.0f32});arm1},false=>16777216.0f32});arm2},false=>16777216.0f32});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "bool-match",
+          "depth": 4,
+          "source_sha256": "52927ee6ca4d8177220fe475b3924a4a95c04b35781590a436fc036c66d633cb",
+          "ir_sha256": "e6823f4c554a1384a7c04e440c415c4160482afa0538f6ab0ae9bcb0e3bb0546",
+          "code_sha256": "c30f52a5ea923042e5050eb99b13d3446e4ca2f3c95896758b32cb93f384e0ab",
+          "raw_nanoseconds": {
+            "baseline319": [
+              32535917,
+              9891333,
+              52486125
+            ],
+            "candidate320_r2": [
+              2283834,
+              2281542,
+              2061584
+            ],
+            "candidate320_r3": [
+              3825000,
+              2105000,
+              1967291
+            ],
+            "candidate320_r5": [
+              6334333,
+              2048583,
+              1955958
+            ]
+          },
+          "median_ms": {
+            "baseline319": 32.535917,
+            "candidate320_r2": 2.281542,
+            "candidate320_r3": 2.105,
+            "candidate320_r5": 2.048583
+          },
+          "fixture_source": "fn main()->i64{let value:f32=(match true{true=>{let arm3=(match true{true=>{let arm2=(match true{true=>{let arm1=(match true{true=>{let arm0=16777217.0;arm0},false=>16777216.0f32});arm1},false=>16777216.0f32});arm2},false=>16777216.0f32});arm3},false=>16777216.0f32});if value==16777216.0f32{42}else{7}}\n"
+        },
+        {
+          "shape": "bool-match",
+          "depth": 5,
+          "source_sha256": "ef4a00defadb96a8e585c4b5da082349c2e29d15af904f9f113cc245d95a0325",
+          "ir_sha256": "554806db76e08108818be39b36c1189a12aa08b6e20cad46877ced230a6eeb4e",
+          "code_sha256": "36f32254eb5d50abd7417da31d303dae15295f307c1902b44ea340bb45e69cd6",
+          "raw_nanoseconds": {
+            "baseline319": [
+              24264584,
+              29959792,
+              28511875
+            ],
+            "candidate320_r2": [
+              3124167,
+              3179500,
+              2779458
+            ],
+            "candidate320_r3": [
+              3275084,
+              3349042,
+              2677083
+            ],
+            "candidate320_r5": [
+              4260167,
+              4617500,
+              3871958
+            ]
+          },
+          "median_ms": {
+            "baseline319": 28.511875,
+            "candidate320_r2": 3.124167,
+            "candidate320_r3": 3.275084,
+            "candidate320_r5": 4.260167
+          },
+          "fixture_source": "fn main()->i64{let value:f32=(match true{true=>{let arm4=(match true{true=>{let arm3=(match true{true=>{let arm2=(match true{true=>{let arm1=(match true{true=>{let arm0=16777217.0;arm0},false=>16777216.0f32});arm1},false=>16777216.0f32});arm2},false=>16777216.0f32});arm3},false=>16777216.0f32});arm4},false=>16777216.0f32});if value==16777216.0f32{42}else{7}}\n"
+        }
+      ]
+    }
+  ],
+  "baseline_provenance": "Immutable prepublication 0.9.319 r5 debug snapshot, not the installed release binary. Exact library hash retained per receipt.",
+  "candidate_provenance": "Unpublished 0.9.320 debug r5 snapshot; source-r18. Full Cargo and publication gates were pending at measurement time. Historical r2/r3 samples are retained. These timing snapshots precede the later exact import-alias correction and do not measure the final release candidate.",
+  "probes": [
+    {
+      "path": "target/verification/float319-block-value-timing-r1/probe.rs",
+      "sha256": "0377f5caab45034e240c50e8d4bdeee25baff8f23aebf983771b25826e8cf2c4",
+      "source": "use inauguration::{compiler::rust_front,core_ir::Decl,parser_registry::ParserId,typecheck,lower_core,native_emit::{lower,NativeLinkage},jit_runtime::JitRuntime};\nfn main(){let args=std::env::args().collect::<Vec<_>>();let source=std::fs::read_to_string(&args[1]).unwrap();let raw=rust_front::parse_rust_source(&source).unwrap();let mut times=vec![];let mut normalized=raw.clone();for _ in 0..3{let start=std::time::Instant::now();normalized=typecheck::normalize_module(ParserId::Rust,&raw);times.push(start.elapsed().as_nanos());}\n let debug=format!(\"{normalized:?}\");assert!(!debug.contains(\"#rust-associated-type-proof:\"),\"{debug}\");assert!(!debug.contains(\"16777217.0\"),\"literal did not receive f32 context: {debug}\");assert!(normalized.decls.iter().any(|d|matches!(d,Decl::Function{name,..}if name==\"main\")));std::fs::write(&args[2],debug).unwrap();lower_core::desugar_module(&mut normalized);let code=lower::lower_module(&normalized,\"main\",NativeLinkage::Executable).unwrap();assert!(code.degradations.is_empty());assert!(code.external_refs.is_empty());let offsets=code.function_offsets.iter().map(|(n,o)|(n.clone(),*o,0)).collect::<Vec<_>>();let mut rt=JitRuntime::new();rt.load_with_data_relocations(&code.code,&offsets,&code.relocations,&code.data,&code.global_relocs,&code.data_relocations).unwrap();let actual=unsafe{rt.invoke(\"main\",&[])}.unwrap();assert_eq!(actual,42);std::fs::write(&args[3],&code.code).unwrap();println!(\"{{\\\"nanoseconds\\\":{:?},\\\"actual_jit_result\\\":{},\\\"degradations\\\":0,\\\"external_refs\\\":0}}\",times,actual);}\n"
+    },
+    {
+      "path": "target/verification/float319-scoped-shapes-timing-r1/probe.rs",
+      "sha256": "0377f5caab45034e240c50e8d4bdeee25baff8f23aebf983771b25826e8cf2c4",
+      "source": "use inauguration::{compiler::rust_front,core_ir::Decl,parser_registry::ParserId,typecheck,lower_core,native_emit::{lower,NativeLinkage},jit_runtime::JitRuntime};\nfn main(){let args=std::env::args().collect::<Vec<_>>();let source=std::fs::read_to_string(&args[1]).unwrap();let raw=rust_front::parse_rust_source(&source).unwrap();let mut times=vec![];let mut normalized=raw.clone();for _ in 0..3{let start=std::time::Instant::now();normalized=typecheck::normalize_module(ParserId::Rust,&raw);times.push(start.elapsed().as_nanos());}\n let debug=format!(\"{normalized:?}\");assert!(!debug.contains(\"#rust-associated-type-proof:\"),\"{debug}\");assert!(!debug.contains(\"16777217.0\"),\"literal did not receive f32 context: {debug}\");assert!(normalized.decls.iter().any(|d|matches!(d,Decl::Function{name,..}if name==\"main\")));std::fs::write(&args[2],debug).unwrap();lower_core::desugar_module(&mut normalized);let code=lower::lower_module(&normalized,\"main\",NativeLinkage::Executable).unwrap();assert!(code.degradations.is_empty());assert!(code.external_refs.is_empty());let offsets=code.function_offsets.iter().map(|(n,o)|(n.clone(),*o,0)).collect::<Vec<_>>();let mut rt=JitRuntime::new();rt.load_with_data_relocations(&code.code,&offsets,&code.relocations,&code.data,&code.global_relocs,&code.data_relocations).unwrap();let actual=unsafe{rt.invoke(\"main\",&[])}.unwrap();assert_eq!(actual,42);std::fs::write(&args[3],&code.code).unwrap();println!(\"{{\\\"nanoseconds\\\":{:?},\\\"actual_jit_result\\\":{},\\\"degradations\\\":0,\\\"external_refs\\\":0}}\",times,actual);}\n"
+    }
+  ],
+  "historical_source_manifest_r11": {
+    "path": "target/verification/scoped-value320-source-r11.json",
+    "sha256": "d00128de2ac10630fc7fcbc9987f07015e5bbd1345bfc1d9decf54800ff6165c",
+    "files": {
+      "in-cli/Cargo.lock": "c78305c052510c9119d5196277ad2eaef94b79876e2800f28551b5bb272a6f65",
+      "in-cli/Cargo.toml": "b4e573c83b2a46079d69df613f8f2059172fbcb2486984e809309a70181bd042",
+      "in-cli/src/typecheck.rs": "3f10d2ab78366064328590859777b1817a2cfae220f5f223725b68012ad0b2d2",
+      "in-cli/src/typecheck/rust_arrays.rs": "57b82c8c498cdd08e50ba4ec362c243a2e82f1fb56a3c42f228ed861d520ae42",
+      "in-cli/src/typecheck/rust_floats.rs": "8dd68c00566369ff70fbda9e422696a4cbcffce6e4811d13cf7e676671f47e07",
+      "in-cli/src/typecheck/rust_generics.rs": "ae92e523de53097f38c5315b533748b4bbad7088c7e407c1ab14bd21bede09d2"
+    }
+  },
+  "baseline_build_evidence": {
+    "script": "target/verification/float319-build-r5.py",
+    "script_sha256": "f1629b6014d75d07fd5e94371dcf34e87b2fe60b37a86ce13ad7f5d956449736",
+    "receipt": "target/verification/float319-built-r5.json",
+    "receipt_sha256": "d7a68382537b92ec8aa17564e11ddac1ba5618ee8f80569a95b92d6760497983",
+    "command": [
+      "cargo",
+      "build",
+      "--manifest-path",
+      "in-cli/Cargo.toml",
+      "--locked",
+      "--lib",
+      "--bins"
+    ],
+    "note": "cargo build without --release; snapshot copied from target/debug. Standalone probe opt-level=2 does not change library profile. The r5 nested-let raw receipt incorrectly calls the historical library release; this evidence corrects that label without changing its raw data.",
+    "correction_receipt": {
+      "path": "target/verification/float319-block-value-timing-r1/candidate320-debug-r5/profile-correction.json",
+      "sha256": "37ab3af0bc0eb54ce4b167f34eddec767a9a8a7b810f1bbd6010f74791450a6f"
+    }
+  }
+}

@@ -121,6 +121,226 @@ fn standard_neg(path: &syn::Path, file: &syn::File) -> bool {
     }
 }
 
+// Bound provenance is stricter than legacy implementation discovery: unknown
+// cfg imports and generic root shadows cannot establish an external identity.
+fn strict_neg_scope(file: &syn::File) -> bool {
+    type_aliases::current().is_some_and(|frame| frame.source_is_active())
+        && type_aliases::attrs_presence(&file.attrs) == type_aliases::Presence::Active
+        && file.items.iter().all(|item| {
+            !matches!(item, syn::Item::Use(_) | syn::Item::ExternCrate(_))
+                || type_aliases::item_presence(item) != type_aliases::Presence::Conditional
+        })
+}
+// Only existing Catalog ownership establishes a source type identity. This
+// proof helper never infers a layout or treats an unknown Named carrier as owned.
+fn source_type_identity_owned(source: &syn::Type, allow_self: bool) -> bool {
+    match source {
+        syn::Type::Path(path) if path.qself.is_none() => {
+            (allow_self && path.path.is_ident("Self"))
+                || type_aliases::source_type_owned(&path.path).unwrap_or(false)
+        }
+        syn::Type::Reference(value) => source_type_identity_owned(&value.elem, allow_self),
+        syn::Type::Paren(value) => source_type_identity_owned(&value.elem, allow_self),
+        syn::Type::Group(value) => source_type_identity_owned(&value.elem, allow_self),
+        _ => false,
+    }
+}
+pub(super) fn generic_neg_obligations(
+    file: &syn::File,
+    function: &syn::ItemFn,
+) -> Result<
+    Option<Vec<crate::core_ir::rust_generics::NegObligation>>,
+    crate::core_ir::type_proofs::ResolutionFailure,
+> {
+    use crate::core_ir::rust_generics::NegObligation;
+    let _scope = type_aliases::generic_scope(&function.sig.generics);
+    if type_aliases::attrs_presence(&function.attrs) == type_aliases::Presence::Active
+        && type_aliases::current().is_some_and(|frame| frame.source_is_active())
+    {
+        let mut bounds: Vec<_> = function
+            .sig
+            .generics
+            .type_params()
+            .filter(|value| {
+                type_aliases::attrs_presence(&value.attrs) == type_aliases::Presence::Active
+            })
+            .flat_map(|value| value.bounds.iter())
+            .collect();
+        if let Some(clause) = &function.sig.generics.where_clause {
+            for predicate in &clause.predicates {
+                if let syn::WherePredicate::Type(value) = predicate {
+                    bounds.extend(value.bounds.iter());
+                }
+            }
+        }
+        let mut failure = None;
+        for bound in bounds {
+            if let syn::TypeParamBound::Trait(bound) = bound {
+                for segment in &bound.path.segments {
+                    if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                        for argument in &arguments.args {
+                            if let syn::GenericArgument::AssocType(binding) = argument
+                                && binding.ident == "Output"
+                                && let Some(proof) = crate::core_ir::type_proofs::failure_in_type(
+                                    &map_type(&binding.ty),
+                                )
+                                .filter(|proof| proof.is_invalid())
+                            {
+                                failure = crate::core_ir::type_proofs::prefer_failure(
+                                    failure,
+                                    Some(proof),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
+    }
+    let result = (|| {
+        if !strict_neg_scope(file)
+            || type_aliases::attrs_presence(&function.attrs) != type_aliases::Presence::Active
+        {
+            return None;
+        }
+        let parameters: HashSet<_> = function
+            .sig
+            .generics
+            .type_params()
+            .map(|value| value.ident.to_string())
+            .collect();
+        let mut obligations = Vec::new();
+        let mut add =
+            |receiver: Typ,
+             bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>|
+             -> Option<()> {
+                for bound in bounds {
+                    let syn::TypeParamBound::Trait(bound) = bound else {
+                        return None;
+                    };
+                    if bound.lifetimes.is_some()
+                        || !matches!(bound.modifier, syn::TraitBoundModifier::None)
+                    {
+                        return None;
+                    }
+                    let mut path = bound.path.clone();
+                    if path.leading_colon.is_none()
+                        && path
+                            .segments
+                            .first()
+                            .is_some_and(|segment| parameters.contains(&segment.ident.to_string()))
+                    {
+                        return None;
+                    }
+                    let last = path.segments.last_mut()?;
+                    let output = match &last.arguments {
+                        syn::PathArguments::None => None,
+                        syn::PathArguments::AngleBracketed(arguments)
+                            if arguments.args.len() == 1 && arguments.colon2_token.is_none() =>
+                        {
+                            let syn::GenericArgument::AssocType(binding) =
+                                arguments.args.first()?
+                            else {
+                                return None;
+                            };
+                            if binding.ident != "Output" || binding.generics.is_some() {
+                                return None;
+                            }
+                            if !source_type_identity_owned(&binding.ty, false) {
+                                return None;
+                            }
+                            let output = map_type(&binding.ty);
+                            if crate::core_ir::type_proofs::failure_in_type(&output).is_some() {
+                                return None;
+                            }
+                            Some(output)
+                        }
+                        _ => return None,
+                    };
+                    last.arguments = syn::PathArguments::None;
+                    if !standard_neg(&path, file) {
+                        return None;
+                    }
+                    obligations.push(NegObligation {
+                        receiver: receiver.clone(),
+                        output,
+                    });
+                }
+                Some(())
+            };
+        for parameter in &function.sig.generics.params {
+            let syn::GenericParam::Type(parameter) = parameter else {
+                return None;
+            };
+            if type_aliases::attrs_presence(&parameter.attrs) != type_aliases::Presence::Active
+                || parameter.default.is_some()
+            {
+                return None;
+            }
+            add(Typ::Generic(parameter.ident.to_string()), &parameter.bounds)?;
+        }
+        if let Some(where_clause) = &function.sig.generics.where_clause {
+            for predicate in &where_clause.predicates {
+                let syn::WherePredicate::Type(predicate) = predicate else {
+                    return None;
+                };
+                if predicate.lifetimes.is_some() {
+                    return None;
+                }
+                let receiver = map_type(&predicate.bounded_ty);
+                if crate::core_ir::type_proofs::failure_in_type(&receiver).is_some() {
+                    return None;
+                }
+                add(receiver, &predicate.bounds)?;
+            }
+        }
+        (!obligations.is_empty()).then_some(obligations)
+    })();
+    Ok(result)
+}
+pub(super) fn neg_implementation_proof(
+    file: &syn::File,
+    implementation: &syn::ItemImpl,
+    bindings: &UnaryMethodBindings,
+) -> Option<(String, crate::core_ir::rust_generics::NegImplementation)> {
+    if !strict_neg_scope(file)
+        || type_aliases::attrs_presence(&implementation.attrs) != type_aliases::Presence::Active
+    {
+        return None;
+    }
+    let _scope = type_aliases::generic_scope(&implementation.generics);
+    if !source_type_identity_owned(&implementation.self_ty, false) {
+        return None;
+    }
+    let receiver = map_type(&implementation.self_ty);
+    let identity = rust_references::receiver_identity(&receiver)?;
+    let target = bindings.get(&(identity, "-".into()))?.as_ref().ok()?;
+    let outputs: Vec<_> = implementation
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::ImplItem::Type(item) if item.ident == "Output" => Some(item),
+            _ => None,
+        })
+        .collect();
+    let [output] = outputs.as_slice() else {
+        return None;
+    };
+    if type_aliases::attrs_presence(&output.attrs) != type_aliases::Presence::Active
+        || implementation.items.iter().any(|item|matches!(item,syn::ImplItem::Fn(method) if method.sig.ident=="neg" && type_aliases::attrs_presence(&method.attrs)!=type_aliases::Presence::Active))
+    { return None; }
+    if !source_type_identity_owned(&output.ty, true) {
+        return None;
+    }
+    let output = resolve_impl_type(map_type(&output.ty), &receiver, implementation).ok()?;
+    Some((
+        target.clone(),
+        crate::core_ir::rust_generics::NegImplementation { receiver, output },
+    ))
+}
 pub(super) fn collect(file: &syn::File) -> UnaryMethodBindings {
     let mut bindings = UnaryMethodBindings::new();
     for item in &file.items {
@@ -383,5 +603,48 @@ mod collector_tests {
     fn inherent_and_unrelated_traits_never_establish_operator_proof() {
         let source = "struct Row;trait Neg{fn neg(self)->i64;}impl Row{fn neg(self)->i64{77}}impl Neg for Row{fn neg(self)->i64{88}}";
         assert!(collect(&parsed(source)).is_empty());
+    }
+    #[test]
+    fn generic_bound_metadata_requires_exact_active_complete_standard_trait_provenance() {
+        use crate::core_ir::rust_generics;
+        for source in [
+            "use std::ops::Neg as Minus;fn negate<T:Minus<Output=i64>>(value:T)->i64{-value}",
+            "fn negate<T>(value:T)->i64 where T: ::core::ops::Neg<Output=i64>{-value}",
+        ] {
+            let artifact =
+                crate::compiler::rust_front::parse_rust_artifact_source(source, "bounds").unwrap();
+            assert!(artifact.semantic.decls.iter().any(|decl|matches!(decl,Decl::Function{body,..}if body.iter().any(|statement|matches!(statement,Stmt::Expr(Expr::Unary{op,..})if rust_generics::decode_neg_bounds(op).is_some())))),"{source}");
+        }
+        for source in [
+            "fn negate<T:std::ops::Neg<Output=i64>+MissingTrait>(value:T)->i64{-value}",
+            "trait Neg{type Output;}fn negate<T:Neg<Output=i64>>(value:T)->i64{42}",
+            "use std::ops::Neg as Minus;fn negate<Minus,T:Minus<Output=i64>>(value:T)->i64{42}",
+            r#"#[cfg(feature="other")]use std::ops::Neg as Minus;fn negate<T:Minus<Output=i64>>(value:T)->i64{42}"#,
+        ] {
+            let artifact =
+                crate::compiler::rust_front::parse_rust_artifact_source(source, "bounds").unwrap();
+            assert!(!artifact.semantic.decls.iter().any(|decl|matches!(decl,Decl::Function{body,..}if body.iter().any(|statement|matches!(statement,Stmt::Expr(Expr::Unary{op,..})if rust_generics::decode_neg_bounds(op).is_some())))),"{source}");
+        }
+    }
+    #[test]
+    fn inactive_and_conditional_generic_bounds_cannot_create_definite_output_failures() {
+        for source in [
+            r#"fn unused<#[cfg(any())] T:std::ops::Neg<Output=bool<u8>>>(){}fn main()->i64{42}"#,
+            r#"fn unused<#[cfg(feature="enabled")] T:std::ops::Neg<Output=bool<u8>>>(){}fn main()->i64{42}"#,
+        ] {
+            let artifact = crate::compiler::rust_front::parse_rust_artifact_source(
+                source,
+                "conditional-bounds",
+            )
+            .unwrap();
+            assert!(
+                !crate::typecheck::TypeChecker::new()
+                    .typed_proof_nodes(&artifact.semantic.decls)
+                    .values()
+                    .any(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+                "{source}: {:#?}",
+                artifact.semantic
+            );
+        }
     }
 }

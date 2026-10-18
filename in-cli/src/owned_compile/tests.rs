@@ -9035,6 +9035,79 @@ fn rust_retained_neg_dispatch_executes_generic_owned_shared_mutable_and_field_pr
 }
 
 #[test]
+fn retained_neg_bounds_do_not_discharge_unrelated_or_wrong_source_obligations() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}fn negate<T:std::ops::Neg<Output=i64>+MissingTrait>(value:T)->i64{-value}fn main()->i64{negate(Row{x:42})}",
+        "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}fn negate<T:MissingTrait>(value:T)->i64{-value}fn main()->i64{negate(Row{x:42})}",
+        "trait Neg{type Output;}struct Row{x:i64}impl std::ops::Neg for Row{type Output=i64;fn neg(self)->i64{77}}fn negate<T:Neg<Output=i64>>(value:T)->i64{-value}fn main()->i64{negate(Row{x:42})}",
+        "fn negate<T:std::ops::Neg<Output=u64>>(value:T)->u64{-value}fn main()->i64{negate(42i64) as i64}",
+        "struct Row{x:i64}impl std::ops::Neg for Row{type Output=i32;fn neg(self)->i32{42}}fn negate<T:std::ops::Neg<Output=i32>>(value:T)->i64{-value}fn main()->i64{negate(Row{x:42})}",
+        "fn negate<T:std::ops::Neg<Output=T>>(value:T)->T{-value}fn main()->i64{negate(42u64) as i64}",
+    ] {
+        let path = temp_path("retained-neg-bound-unproved.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                let artifact = temp_path("retained-neg-bound-unproved-artifact");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(artifact.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    !report.success && !report.execution_started && report.eval_result.is_none(),
+                    "{source} {target:?} {profile:?}: {report:?}"
+                );
+                assert!(
+                    report.artifact_path.is_none()
+                        && report.executable_path.is_none()
+                        && report.external_invocations.is_empty()
+                        && !artifact.exists(),
+                    "{report:?}"
+                );
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+#[test]
+fn raw_dependency_artifacts_retain_neg_output_proof_until_generic_normalization() {
+    use crate::core_ir::{Expr, Stmt, rust_generics};
+    let dependency=crate::compiler::rust_front::parse_rust_artifact_source("pub struct Row{x:i64}impl std::ops::Neg for Row{type Output=usize;fn neg(self)->usize{42}}pub fn negate<T:std::ops::Neg<Output=usize>>(value:T)->usize{-value}","dep").unwrap();
+    let mut main =
+        crate::compiler::rust_front::parse_rust_artifact_source("fn main()->i64{42}", "main")
+            .unwrap();
+    crate::cargo_linker::merge_dependency_artifacts(&mut main, vec![("dep".into(), dependency)])
+        .unwrap();
+    let mut proofs = Vec::new();
+    crate::core_opt::map_decl_exprs_mut(&mut main.semantic.decls, &mut |expression| {
+        if let Expr::Unary { op, .. } = expression
+            && let Some(proof) = rust_generics::decode_neg_implementation(op)
+        {
+            proofs.push(proof);
+        }
+    });
+    assert_eq!(
+        proofs.len(),
+        1,
+        "raw artifact merge must retain authoritative proof"
+    );
+    assert_eq!(
+        proofs[0].output,
+        crate::core_ir::Typ::Named("#rust-integer-usize".into())
+    );
+    let normalized =
+        crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &main.semantic);
+    for decl in &normalized.decls {
+        if let crate::core_ir::Decl::Function { body, .. } = decl {
+            assert!(!body.iter().any(|statement|matches!(statement,Stmt::Expr(Expr::Unary{op,..})if rust_generics::is_neg_implementation(op))),"private implementation metadata must be removed before emission");
+        }
+    }
+}
+
+#[test]
 fn retained_neg_post_inline_failure_aborts_before_execution() {
     let path = temp_path("ambiguous-post-inline-neg.rs");
     fs::write(
@@ -11332,6 +11405,53 @@ fn rust_ieee_trait_static_calls_refuse_invalid_source_contracts() {
                 assert_eq!(report.artifact_path, None);
                 assert!(report.external_invocations.is_empty());
                 assert!(!out.exists());
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn rust_retained_neg_result_casts_preserve_operand_effects_once() {
+    for (name, source) in [
+        (
+            "explicit-result-cast",
+            r#"struct Row{x:i64}impl std::ops::Neg for Row{type Output=i32;fn neg(self)->i32{42}}fn negate<T:std::ops::Neg<Output=i32>>(value:T)->i64{(-value) as i64}fn main()->i64{negate(Row{x:7})}"#,
+        ),
+        (
+            "operand-effect-once",
+            r#"static mut COUNT:i64=0;struct Row{x:i64}impl std::ops::Neg for Row{type Output=i32;fn neg(self)->i32{42}}fn negate<T:std::ops::Neg<Output=i32>>(value:T)->i64{(-{unsafe{COUNT+=1;}value}) as i64}fn main()->i64{let answer=negate(Row{x:7});if unsafe{COUNT==1}{answer}else{7}}"#,
+        ),
+    ] {
+        let path = temp_path(&format!("retained-neg-result-{name}.rs"));
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                let artifact = temp_path("retained-neg-result-native");
+                let mut request = default_request(path.clone(), target, Some("main"), None);
+                request.profile = profile;
+                if target == CompileTarget::Native {
+                    request.out = Some(artifact.clone());
+                }
+                let report = compile_owned(&request);
+                assert!(report.success, "{name} {profile:?} {target:?}: {report:?}");
+                assert!(report.degradations.is_empty(), "{report:?}");
+                if target == CompileTarget::Jit {
+                    assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{report:?}");
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&artifact)
+                            .status()
+                            .unwrap()
+                            .code(),
+                        Some(42)
+                    );
+                    fs::remove_file(&artifact).unwrap();
+                }
             }
         }
         fs::remove_file(path).unwrap();

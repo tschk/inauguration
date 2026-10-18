@@ -758,9 +758,46 @@ fn lower_file_items_at_visited(
                 retain_generic_scope(&mut declaration, declared_type_parameters(&s.generics));
                 decls.push(declaration);
             }
-            syn::Item::Fn(f) => decls.push(lower_fn(f.clone())),
+            syn::Item::Fn(f) => {
+                let obligations = unary_methods::generic_neg_obligations(file, f);
+                let mut declaration = lower_fn(f.clone());
+                match obligations {
+                    Ok(Some(obligations)) => {
+                        if let Decl::Function { body, .. } = &mut declaration {
+                            for statement in body {
+                                if let Stmt::Expr(Expr::Unary { op, expr }) = statement
+                                    && op == crate::core_ir::rust_generics::CONSTRAINTS
+                                    && matches!(expr.as_ref(), Expr::UnitLit)
+                                {
+                                    *op = crate::core_ir::rust_generics::neg_bounds(&obligations);
+                                }
+                            }
+                        }
+                    }
+                    Err(proof) => {
+                        if let Decl::Function { body, .. } = &mut declaration {
+                            body.insert(0, Stmt::Expr(Expr::Ident(proof.symbol())));
+                        }
+                    }
+                    Ok(None) => {}
+                }
+                decls.push(declaration);
+            }
             syn::Item::Impl(i) => {
-                for method in lower_impl(i) {
+                let proof = unary_methods::neg_implementation_proof(file, i, &unary_methods);
+                for mut method in lower_impl(i) {
+                    if let Some((target, proof)) = &proof
+                        && let Decl::Function { name, body, .. } = &mut method
+                        && name == target
+                    {
+                        body.insert(
+                            0,
+                            Stmt::Expr(Expr::Unary {
+                                op: crate::core_ir::rust_generics::neg_implementation(proof),
+                                expr: Box::new(Expr::UnitLit),
+                            }),
+                        );
+                    }
                     decls.push(method);
                 }
             }
@@ -1260,6 +1297,32 @@ fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str, file: &syn::File, ro
     if full == short {
         return;
     }
+    // Resolve module aliases through the existing source catalog. Catalog paths
+    // are crate-relative; this lowering unit has not received its module prefix.
+    // Translate only an exact current-module prefix, never a basename suffix.
+    let canonical;
+    let full = if let Some((prefix, member)) = full.rsplit_once("::") {
+        let resolved = syn::parse_str::<syn::Path>(prefix)
+            .ok()
+            .and_then(|path| type_aliases::source_module_path(&path).ok().flatten());
+        if let (Some(module), Some(current)) = (resolved, type_aliases::current_module_path()) {
+            if let Some(relative) = module.strip_prefix(current.as_slice()) {
+                canonical = relative
+                    .iter()
+                    .map(String::as_str)
+                    .chain(std::iter::once(member))
+                    .collect::<Vec<_>>()
+                    .join("::");
+                canonical.as_str()
+            } else {
+                full
+            }
+        } else {
+            full
+        }
+    } else {
+        full
+    };
     if decls
         .iter()
         .any(|decl| matches!(decl, Decl::Global { name, .. } if name == full))
@@ -1275,13 +1338,23 @@ fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str, file: &syn::File, ro
     {
         return;
     }
-    let Some((target, params, ret, type_params, source_template)) = decls.iter().find_map(|d| match d {
+    let Some((target, params, ret, type_params, source_template, contracts)) = decls.iter().find_map(|d| match d {
         Decl::Function {
             name, params, ret, type_params, body,
-        } if name == full || name.ends_with(&format!("::{short}")) => {
+        } if name == full => {
             let owned = name == full && body.iter().any(|stmt|
                 matches!(stmt, Stmt::Expr(Expr::Unary { op, .. }) if op == crate::core_ir::rust_generics::TEMPLATE));
-            Some((name.clone(), params.clone(), ret.clone(), type_params.clone(), owned))
+            // Forward only source contract metadata, never executable template
+            // statements. Exact target ownership above prevents guessed aliases
+            // from manufacturing generic proof. Typed payloads continue through
+            // the shared namespace/substitution visitor with the copied types.
+            let contracts = body.iter().filter(|statement| matches!(statement,
+                Stmt::Expr(Expr::Unary { op, expr })
+                    if (op == crate::core_ir::rust_generics::CONSTRAINTS
+                        || crate::core_ir::rust_generics::is_neg_bounds(op))
+                        && matches!(expr.as_ref(), Expr::UnitLit)
+            )).cloned().collect::<Vec<_>>();
+            Some((name.clone(), params.clone(), ret.clone(), type_params.clone(), owned, contracts))
         }
         _ => None,
     }) else {
@@ -1299,6 +1372,7 @@ fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str, file: &syn::File, ro
             op: crate::core_ir::rust_generics::TEMPLATE.into(),
             expr: Box::new(Expr::UnitLit),
         }));
+        body.extend(contracts);
     }
     body.push(Stmt::Return(Some(Expr::Call {
         callee: Box::new(callee),
@@ -7704,5 +7778,165 @@ mod ieee_primitive_path_tests {
             proofs.values().all(|proof| !proof.is_invalid()),
             "{proofs:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod forwarding_generic_contract_tests {
+    use super::*;
+    fn contracts(declaration: &Decl) -> Vec<Stmt> {
+        let Decl::Function { body, .. } = declaration else {
+            panic!("function")
+        };
+        body.iter().filter(|stmt|matches!(stmt,Stmt::Expr(Expr::Unary{op,expr})if (op==crate::core_ir::rust_generics::CONSTRAINTS || crate::core_ir::rust_generics::is_neg_bounds(op)) && matches!(expr.as_ref(),Expr::UnitLit))).cloned().collect()
+    }
+    #[test]
+    fn chained_forwarders_preserve_typed_neg_contract_and_source_namespaces() {
+        let source = "struct Output;struct T;mod child{pub struct Output;mod nested{pub fn negate<T:std::ops::Neg<Output=crate::child::Output>>(value:T)->crate::child::Output{-value}}pub use nested::negate as relay;}use child::relay as run;fn main()->i64{42}";
+        let module = parse_rust_artifact_source(source, "forward-contract")
+            .unwrap()
+            .semantic;
+        let find = |name: &str| {
+            module
+                .decls
+                .iter()
+                .find(|decl| matches!(decl,Decl::Function{name:actual,..}if actual==name))
+                .unwrap()
+        };
+        let original = contracts(find("child::nested::negate"));
+        assert_eq!(original.len(), 1, "exact typed Neg bound");
+        for name in ["child::relay", "run"] {
+            let alias = find(name);
+            assert_eq!(
+                contracts(alias),
+                original,
+                "{name} must retain declaration-scope output identity"
+            );
+            let Decl::Function {
+                type_params,
+                params,
+                ret,
+                body,
+                ..
+            } = alias
+            else {
+                unreachable!()
+            };
+            assert_eq!(type_params, &["T"]);
+            assert_eq!(params[0].1, Typ::Generic("T".into()));
+            assert_eq!(ret, &Typ::Named("crate::child::Output".into()));
+            assert_eq!(
+                body.iter()
+                    .filter(|stmt| matches!(stmt, Stmt::Return(Some(Expr::Call { .. }))))
+                    .count(),
+                1
+            );
+            assert!(
+                body.iter().all(|stmt| matches!(
+                    stmt,
+                    Stmt::Expr(Expr::Unary { .. }) | Stmt::Return(Some(Expr::Call { .. }))
+                )),
+                "only contract metadata plus forwarding call, no target body clone"
+            );
+        }
+    }
+    #[test]
+    fn ordinary_unproved_bounds_survive_alias_without_copying_body_effects() {
+        let module=parse_rust_artifact_source("fn generic<T:Copy>(value:T)->T{external_effect();value}use generic as alias;fn main()->i64{42}","forward-copy").unwrap().semantic;
+        let original = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl,Decl::Function{name,..}if name=="generic"))
+            .unwrap();
+        let alias = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl,Decl::Function{name,..}if name=="alias"))
+            .unwrap();
+        assert_eq!(contracts(alias), contracts(original));
+        assert_eq!(contracts(alias).len(), 1);
+        let Decl::Function { body, .. } = alias else {
+            unreachable!()
+        };
+        assert!(
+            !format!("{body:?}").contains("external_effect"),
+            "forward contracts, not executable template statements"
+        );
+    }
+}
+
+#[cfg(test)]
+mod exact_import_alias_tests {
+    use super::*;
+    #[test]
+    fn imported_module_does_not_manufacture_a_same_basename_method_alias() {
+        let module=parse_rust_artifact_source("mod block_api{use std::fmt;pub struct HmacCore<D>{pub value:D}pub struct Sha1Core;impl<D> HmacCore<D>{pub fn fmt(&self)->i64{7}}impl Sha1Core{pub fn fmt(&self)->i64{42}}}fn main()->i64{let value=block_api::Sha1Core{};block_api::Sha1Core::fmt(&value)}","exact-import").unwrap().semantic;
+        let names = module
+            .decls
+            .iter()
+            .filter_map(|decl| {
+                if let Decl::Function { name, .. } = decl {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !names.contains(&"block_api::fmt"),
+            "a module import cannot choose an unrelated associated method: {names:?}"
+        );
+        assert!(names.contains(&"block_api::HmacCore<D>::fmt"), "{names:?}");
+        assert!(names.contains(&"block_api::Sha1Core::fmt"), "{names:?}");
+    }
+    #[test]
+    fn exact_crate_and_self_function_aliases_keep_source_generic_contracts() {
+        let module=parse_rust_artifact_source("fn identity<T>(value:T)->T{value}use crate::identity as root;use self::identity as local;fn main()->i64{root(local(42i64))}","exact-aliases").unwrap().semantic;
+        for alias in ["root", "local"] {
+            let declaration = module
+                .decls
+                .iter()
+                .find(|decl| matches!(decl,Decl::Function{name,..}if name==alias))
+                .expect("exact source alias");
+            let Decl::Function {
+                type_params, body, ..
+            } = declaration
+            else {
+                unreachable!()
+            };
+            assert_eq!(type_params, &["T"]);
+            assert!(body.iter().any(|stmt|matches!(stmt,Stmt::Expr(Expr::Unary{op,..})if op==crate::core_ir::rust_generics::TEMPLATE)));
+            assert!(body.iter().any(|stmt|matches!(stmt,Stmt::Return(Some(Expr::Call{callee,..}))if matches!(callee.as_ref(),Expr::Ident(target)if target=="identity"))));
+        }
+    }
+    #[test]
+    fn source_module_aliases_select_exact_local_function_targets() {
+        for source in [
+            "mod child{pub fn helper()->i64{42}}use child as values;use values::helper;fn main()->i64{helper()}",
+            "mod outer{mod child{pub fn helper()->i64{42}}use child as values;use values::helper;pub fn entry()->i64{helper()}}fn main()->i64{outer::entry()}",
+        ] {
+            let module = parse_rust_artifact_source(source, "module-alias")
+                .unwrap()
+                .semantic;
+            let alias=module.decls.iter().find(|decl|matches!(decl,Decl::Function{name,..}if name=="helper" || name=="outer::helper")).expect("exact module alias forwarding function");
+            let Decl::Function { body, .. } = alias else {
+                unreachable!()
+            };
+            assert!(body.iter().any(|stmt|matches!(stmt,Stmt::Return(Some(Expr::Call{callee,..}))if matches!(callee.as_ref(),Expr::Ident(target)if target=="child::helper" || target=="outer::child::helper"))),"{module:#?}");
+        }
+    }
+    #[test]
+    fn canonical_module_alias_does_not_admit_private_function() {
+        let source = "mod child{fn hidden()->i64{42}}use child as values;use values::hidden as stolen;fn main()->i64{stolen()}";
+        if let Ok(artifact) = parse_rust_artifact_source(source, "private-module-alias") {
+            assert!(
+                crate::typecheck::TypeChecker::new()
+                    .typed_proof_nodes(&artifact.semantic.decls)
+                    .values()
+                    .any(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+                "{:#?}",
+                artifact.semantic
+            );
+        }
     }
 }

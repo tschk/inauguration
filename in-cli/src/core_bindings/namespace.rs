@@ -350,6 +350,20 @@ fn expr(value: &mut Expr, names: &NominalNames<'_>, generics: &HashSet<String>) 
                 }
                 *op = crate::core_ir::rust_generics::arguments(&arguments);
             }
+            if let Some(mut obligations) = crate::core_ir::rust_generics::decode_neg_bounds(op) {
+                for obligation in &mut obligations {
+                    typ(&mut obligation.receiver, names, generics);
+                    if let Some(output) = &mut obligation.output {
+                        typ(output, names, generics);
+                    }
+                }
+                *op = crate::core_ir::rust_generics::neg_bounds(&obligations);
+            }
+            if let Some(mut proof) = crate::core_ir::rust_generics::decode_neg_implementation(op) {
+                typ(&mut proof.receiver, names, generics);
+                typ(&mut proof.output, names, generics);
+                *op = crate::core_ir::rust_generics::neg_implementation(&proof);
+            }
         }
         Expr::Ident(name) => {
             if let Some(target) = (names.value_name)(name) {
@@ -1324,5 +1338,70 @@ mod generic_substitution_tests {
         assert_eq!(fields, vec![("T".into(), Typ::Int)]);
         assert_eq!(methods[0], original);
         assert_eq!(methods[1], function(Typ::Int, vec![]));
+    }
+    #[test]
+    fn neg_proof_metadata_uses_existing_substitution_and_dependency_namespace_walk() {
+        use crate::core_ir::{Expr, Stmt, rust_generics};
+        let mut declarations = vec![
+            Decl::Struct {
+                name: "Row".into(),
+                fields: vec![],
+                type_params: vec![],
+            },
+            Decl::Function {
+                name: "apply".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![Stmt::Expr(Expr::Unary {
+                    op: rust_generics::neg_bounds(&[rust_generics::NegObligation {
+                        receiver: Typ::Generic("T".into()),
+                        output: Some(Typ::Named("#rust-integer-usize".into())),
+                    }]),
+                    expr: Box::new(Expr::UnitLit),
+                })],
+            },
+            Decl::Function {
+                name: "Row::Neg::neg".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![Stmt::Expr(Expr::Unary {
+                    op: rust_generics::neg_implementation(&rust_generics::NegImplementation {
+                        receiver: Typ::Named("Row".into()),
+                        output: Typ::Named("#rust-integer-usize".into()),
+                    }),
+                    expr: Box::new(Expr::UnitLit),
+                })],
+            },
+        ];
+        substitute_type_parameters(
+            &mut declarations[1],
+            &[("T".into(), Typ::Named("Row".into()))]
+                .into_iter()
+                .collect(),
+        );
+        qualify_module_decls(&mut declarations, "dep");
+        let Decl::Function { body, .. } = &declarations[1] else {
+            panic!()
+        };
+        let Stmt::Expr(Expr::Unary { op, .. }) = &body[0] else {
+            panic!()
+        };
+        let bounds = rust_generics::decode_neg_bounds(op).unwrap();
+        assert_eq!(bounds[0].receiver, Typ::Named("dep::Row".into()));
+        assert_eq!(
+            bounds[0].output,
+            Some(Typ::Named("#rust-integer-usize".into()))
+        );
+        let Decl::Function { body, .. } = &declarations[2] else {
+            panic!()
+        };
+        let Stmt::Expr(Expr::Unary { op, .. }) = &body[0] else {
+            panic!()
+        };
+        let proof = rust_generics::decode_neg_implementation(op).unwrap();
+        assert_eq!(proof.receiver, bounds[0].receiver);
+        assert_ne!(proof.output, Typ::Named("#rust-integer-u64".into()));
     }
 }

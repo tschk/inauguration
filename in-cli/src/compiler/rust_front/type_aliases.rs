@@ -1297,6 +1297,11 @@ pub(super) fn source_module_path(path: &syn::Path) -> Result<Option<Vec<String>>
     }
 }
 
+/// Exact current source module identity; an owned crate root is Some(empty).
+pub(super) fn current_module_path() -> Option<Vec<String>> {
+    current().map(|frame| frame.module)
+}
+
 /// Source-owned implicit associated dispatch; unrelated ordinary paths stay untouched.
 pub(super) fn resolve_trait_static(path: &syn::Path) -> Option<Result<String, Failure>> {
     let frame = current()?;
@@ -1804,6 +1809,25 @@ mod tests {
             query(frame, path).unwrap(),
             Some(Typ::Named(format!("#rust-integer-{kind}")))
         );
+    }
+    #[test]
+    fn current_module_identity_distinguishes_absence_root_and_nested_scope() {
+        {
+            let _suspended = suspend();
+            assert_eq!(current_module_path(), None);
+        }
+        let root = frame("mod outer{mod child{}}");
+        {
+            let _scope = root.clone().enter();
+            assert_eq!(current_module_path(), Some(vec![]));
+        }
+        {
+            let _scope = root.module("outer").module("child").enter();
+            assert_eq!(
+                current_module_path(),
+                Some(vec!["outer".into(), "child".into()])
+            );
+        }
     }
     #[test]
     fn structural_alias_argument_ownership_retains_unresolved_children() {
