@@ -2743,10 +2743,14 @@ impl TypeChecker {
                     });
                 }
                 if ((crate::core_ir::integer_float_cast_spec(op).is_some() || op == "float-to-int")
-                    || crate::core_ir::saturating_float_cast_spec(op).is_some())
+                    || crate::core_ir::saturating_float_cast_spec(op).is_some()
+                    || crate::core_ir::float_to_bits_width(op).is_some()
+                    || crate::core_ir::bits_to_float_width(op).is_some())
                     && let Some(actual) = self.expr_type(inner, facts, env)
                 {
-                    let expected = if crate::core_ir::integer_float_cast_spec(op).is_some() {
+                    let expected = if crate::core_ir::integer_float_cast_spec(op).is_some()
+                        || crate::core_ir::bits_to_float_width(op).is_some()
+                    {
                         Typ::Int
                     } else {
                         Typ::Float
@@ -3369,7 +3373,12 @@ impl TypeChecker {
                 "c-integer-literal-u32" => Some(Typ::Named("#integer-u32".into())),
                 "!" => Some(Typ::Bool),
                 "bool-to-int" | "float-to-int" => Some(Typ::Int),
-                op if crate::core_ir::integer_float_cast_spec(op).is_some() => Some(Typ::Float),
+                op if crate::core_ir::integer_float_cast_spec(op).is_some()
+                    || crate::core_ir::bits_to_float_width(op).is_some() =>
+                {
+                    Some(Typ::Float)
+                }
+                op if crate::core_ir::float_to_bits_width(op).is_some() => Some(Typ::Int),
                 "float-cast-f32" | "float-cast-f64" => Some(Typ::Float),
                 op if crate::core_ir::integer_cast_spec(op).is_some()
                     || crate::core_ir::saturating_float_cast_spec(op).is_some() =>
@@ -4009,8 +4018,11 @@ fn erase_rust_float_metadata(module: &mut UnifiedModule) {
                 Stmt::Assign(
                     name.clone(),
                     Expr::Unary {
-                        op: "float-cast-f32".into(),
-                        expr: Box::new(Expr::Ident(name.clone())),
+                        op: "bits-to-float-f32".into(),
+                        expr: Box::new(Expr::Unary {
+                            op: "float-to-bits-f32".into(),
+                            expr: Box::new(Expr::Ident(name.clone())),
+                        }),
                     },
                 )
             });

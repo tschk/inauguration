@@ -110,8 +110,29 @@ pub(crate) fn cast(value: Expr, kind: Kind) -> Expr {
 pub(crate) fn inferred_type(op: &str) -> Option<Typ> {
     cast_kind(op)
         .or_else(|| value_kind(op))
+        .or_else(|| from_bits_kind(op))
         .map(typ)
         .or_else(|| literal_kind(op).map(|kind| kind.map_or_else(weak_type, typ)))
+}
+pub(crate) fn from_bits_kind(op: &str) -> Option<Kind> {
+    match op {
+        "#rust-float-from-bits-f32" => Some(Kind::F32),
+        "#rust-float-from-bits-f64" => Some(Kind::F64),
+        _ => None,
+    }
+}
+pub(crate) fn bit_method(name: &str) -> Option<(Kind, bool)> {
+    let (owner, method) = name.rsplit_once("::")?;
+    let kind = match owner {
+        F32 => Kind::F32,
+        F64 => Kind::F64,
+        _ => return None,
+    };
+    match method {
+        "to_bits" => Some((kind, true)),
+        "from_bits" => Some((kind, false)),
+        _ => None,
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LiteralInfo<'a> {

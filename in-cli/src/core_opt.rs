@@ -1489,14 +1489,30 @@ pub(crate) fn fold_expr_with_semantics(e: Expr, semantics: IntegerSemantics) -> 
                     );
                 }
             }
-            if matches!(op.as_str(), "float-cast-f32" | "float-cast-f64")
-                && let Expr::FloatLit(value) = expr.as_ref()
+            if let Some(width) = crate::core_ir::float_to_bits_width(op)
+                && semantics == IntegerSemantics::Word64
+                && let Some(bits) = crate::core_ir::constant_float_bits(expr)
             {
-                return Expr::FloatLit(crate::core_ir::FloatVal(if op == "float-cast-f32" {
-                    f64::from(value.0 as f32)
+                return Expr::IntLit(if width == 32 {
+                    i64::from(crate::core_ir::narrow_f64_bits(bits))
                 } else {
-                    value.0
-                }));
+                    bits as i64
+                });
+            }
+            if let Some(width) = crate::core_ir::bits_to_float_width(op)
+                && semantics == IntegerSemantics::Word64
+                && let Expr::IntLit(bits) = expr.as_ref()
+            {
+                return crate::core_ir::float_bits_expr(if width == 32 {
+                    crate::core_ir::embed_f32_bits(*bits as u32)
+                } else {
+                    *bits as u64
+                });
+            }
+            if matches!(op.as_str(), "float-cast-f32" | "float-cast-f64")
+                && let Some(bits) = crate::core_ir::constant_float_bits(&e)
+            {
+                return crate::core_ir::float_bits_expr(bits);
             }
             if crate::core_ir::integer_float_cast_spec(op).is_some()
                 && let Expr::IntLit(value) = expr.as_ref()
@@ -5125,10 +5141,10 @@ mod tests {
                 "float-cast-f32",
                 Expr::FloatLit(crate::core_ir::FloatVal(value)),
             ));
-            let Expr::FloatLit(value) = folded else {
-                panic!("literal");
-            };
-            assert_eq!(value.0.to_bits(), expected.to_bits());
+            assert_eq!(
+                crate::core_ir::constant_float_bits(&folded),
+                Some(expected.to_bits())
+            );
         }
     }
     #[test]
@@ -6160,6 +6176,34 @@ mod integer_float_conversion_tests {
                 fold_expr_with_semantics(cast(-1), IntegerSemantics::Word32),
                 cast(-1)
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod ieee_bit_folding_tests {
+    use super::*;
+    #[test]
+    fn folding_keeps_nonfinite_constants_as_exact_integer_bit_constructors() {
+        for (width, bits) in [
+            (32, 0x7f800001u64),
+            (32, 0xffc12345),
+            (64, 0x7ff0000000000001),
+            (64, 0xfff8123456789abc),
+        ] {
+            let value = Expr::Unary {
+                op: format!("bits-to-float-f{width}"),
+                expr: Box::new(Expr::IntLit(bits as i64)),
+            };
+            let folded = fold_expr(value);
+            assert!(
+                matches!(&folded,Expr::Unary {op,expr} if op == "bits-to-float-f64" && matches!(expr.as_ref(),Expr::IntLit(_)))
+            );
+            let extracted = fold_expr(Expr::Unary {
+                op: format!("float-to-bits-f{width}"),
+                expr: Box::new(folded),
+            });
+            assert_eq!(extracted, Expr::IntLit(bits as i64));
         }
     }
 }

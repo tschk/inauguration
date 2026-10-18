@@ -7,6 +7,8 @@ use std::rc::Rc;
 
 mod declarations;
 mod generic_aliases;
+mod source_signatures;
+mod trait_statics;
 pub(super) fn validate_declarations(
     file: &syn::File,
     catalog: Rc<Catalog>,
@@ -121,7 +123,7 @@ pub(super) fn item_presence(item: &syn::Item) -> Presence {
     };
     attrs_presence(attrs)
 }
-fn attrs_presence(attrs: &[syn::Attribute]) -> Presence {
+pub(super) fn attrs_presence(attrs: &[syn::Attribute]) -> Presence {
     attrs.iter().fold(Presence::Active, |value, attr| {
         value.and(meta_presence(&attr.meta))
     })
@@ -346,6 +348,7 @@ impl Scope {
 pub(super) struct Catalog {
     owns_crate_root: bool,
     modules: HashMap<Vec<String>, Rc<Scope>>,
+    trait_statics: trait_statics::Index,
 }
 impl Catalog {
     pub(super) fn new(file: &syn::File) -> Rc<Self> {
@@ -363,7 +366,9 @@ impl Catalog {
             module: Vec<String>,
             modules: &mut HashMap<Vec<String>, Rc<Scope>>,
             conditional: bool,
+            trait_statics: &mut trait_statics::Index,
         ) {
+            trait_statics.collect(items, &module, conditional);
             let mut scope = Scope::items(items.iter(), Some(&module));
             scope.conditional = conditional;
             modules.insert(module.clone(), Rc::new(scope));
@@ -380,20 +385,24 @@ impl Catalog {
                         child,
                         modules,
                         conditional || presence == Presence::Conditional,
+                        trait_statics,
                     );
                 }
             }
         }
         let mut modules = HashMap::new();
+        let mut trait_statics = trait_statics::Index::default();
         collect(
             &file.items,
             vec![],
             &mut modules,
             presence.and(attrs_presence(&file.attrs)) != Presence::Active,
+            &mut trait_statics,
         );
         Rc::new(Self {
             modules,
             owns_crate_root,
+            trait_statics,
         })
     }
 }
@@ -506,6 +515,8 @@ impl Extent {
 }
 #[derive(Clone)]
 struct NominalApplication {
+    identity: Option<Vec<String>>,
+    type_extent: Extent,
     generics: syn::Generics,
     arguments: usize,
     unsupported_arguments: bool,
@@ -649,6 +660,7 @@ struct LookupContext<'a> {
     source_qualified: bool,
     ordinary_value_owner: bool,
     constant_value: bool,
+    trait_position: bool,
     nominal_arguments: usize,
     unsupported_nominal_arguments: bool,
 }
@@ -666,7 +678,7 @@ fn path_type(
     active: &mut HashSet<Key>,
     alias_target: bool,
 ) -> Result<Resolved, Failure> {
-    path_type_with_mode(path, frame, active, alias_target, false)
+    path_type_with_mode(path, frame, active, alias_target, false, false)
 }
 fn path_type_with_mode(
     path: &syn::Path,
@@ -674,6 +686,7 @@ fn path_type_with_mode(
     active: &mut HashSet<Key>,
     alias_target: bool,
     declaration: bool,
+    trait_position: bool,
 ) -> Result<Resolved, Failure> {
     let _query = generic_aliases::query()?;
     let caller_active = active.clone();
@@ -711,6 +724,7 @@ fn path_type_with_mode(
             source_qualified: false,
             ordinary_value_owner: false,
             constant_value: false,
+            trait_position,
             nominal_arguments: path
                 .segments
                 .last()
@@ -781,6 +795,7 @@ fn scope_binding(
                 source_qualified: false,
                 ordinary_value_owner: false,
                 constant_value,
+                trait_position: false,
                 nominal_arguments: 0,
                 unsupported_nominal_arguments: false,
             },
@@ -887,6 +902,11 @@ fn resolve_parts(
             return Err(unsupported(
                 "external artifact alias identity is not owned by this source",
             ));
+        }
+        if source_signatures::active()
+            && let Some(value) = source_signatures::builtin(parts, context, active)?
+        {
+            return Ok(value);
         }
         return primitive(parts, generic);
     }
@@ -1006,9 +1026,27 @@ fn resolve_parts(
                 "type parameter requires zero generic arguments".into(),
             )),
             Binding::Generic => Err(unsupported("generic type owner requires monomorphization")),
+            Binding::Nominal(generics) if parts.len() == 1 && source_signatures::active() => {
+                source_signatures::nominal(
+                    (depth == 0).then(|| {
+                        let mut identity = frame.module.clone();
+                        identity.push(first.clone());
+                        identity
+                    }),
+                    &generics,
+                    context,
+                    active,
+                )
+            }
             Binding::Nominal(generics) if parts.len() == 1 => {
                 Ok(Resolved::Nominal(vec![NominalObligation::Application(
                     NominalApplication {
+                        identity: (depth == 0).then(|| {
+                            let mut identity = frame.module.clone();
+                            identity.push(first.clone());
+                            identity
+                        }),
+                        type_extent: extent.clone(),
                         generics,
                         arguments: context.nominal_arguments,
                         unsupported_arguments: context.unsupported_nominal_arguments,
@@ -1059,6 +1097,7 @@ fn resolve_parts(
                         source_qualified: false,
                         ordinary_value_owner: context.ordinary_value_owner && parts.len() == 1,
                         constant_value: context.constant_value && parts.len() == 1,
+                        trait_position: context.trait_position,
                         nominal_arguments: context.nominal_arguments,
                         unsupported_nominal_arguments: context.unsupported_nominal_arguments,
                     },
@@ -1120,6 +1159,9 @@ fn resolve_parts(
                         .with_dependencies(value.dependencies()))
                 }
             }
+            Binding::Alias(_) if context.trait_position => Err(Failure::Invalid(
+                "type alias cannot be used in trait position".into(),
+            )),
             Binding::Alias(syntax) => generic_aliases::expand(
                 &syntax,
                 first,
@@ -1148,7 +1190,14 @@ fn resolve_parts(
     if context.source_qualified {
         return Ok(Resolved::Missing);
     }
-    let result = primitive(parts, generic)?;
+    let result = if source_signatures::active() {
+        match source_signatures::builtin(parts, context, active)? {
+            Some(value) => value,
+            None => primitive(parts, generic)?,
+        }
+    } else {
+        primitive(parts, generic)?
+    };
     if context.alias_target
         && (module.glob || frame.locals.iter().any(|scope| scope.glob))
         && matches!(&result, Resolved::Type(_))
@@ -1248,6 +1297,32 @@ pub(super) fn source_module_path(path: &syn::Path) -> Result<Option<Vec<String>>
     }
 }
 
+/// Source-owned implicit associated dispatch; unrelated ordinary paths stay untouched.
+pub(super) fn resolve_trait_static(path: &syn::Path) -> Option<Result<String, Failure>> {
+    let frame = current()?;
+    frame.catalog.trait_statics.resolve(path, &frame)
+}
+
+pub(super) fn resolve_trait_ufcs(
+    qself: &syn::QSelf,
+    path: &syn::Path,
+) -> Option<Result<String, Failure>> {
+    let frame = current()?;
+    frame
+        .catalog
+        .trait_statics
+        .resolve_ufcs(qself, path, &frame)
+}
+
+/// Validate the type-vs-trait syntactic role through imports and module paths.
+/// External/unowned trait identities retain their existing unsupported boundary.
+pub(super) fn trait_path_failure(path: &syn::Path) -> Option<Failure> {
+    let frame = current()?;
+    path_type_with_mode(path, &frame, &mut HashSet::new(), false, false, true)
+        .err()
+        .filter(Failure::is_invalid)
+}
+
 /// Ordinary call/value paths may belong to lazily loaded modules outside this catalog.
 /// Alias RHS and import target recursion intentionally retain their strict contexts.
 pub(super) fn resolve_value_owner(path: &syn::Path) -> Result<Option<Typ>, Failure> {
@@ -1282,6 +1357,7 @@ pub(super) fn resolve_value_owner(path: &syn::Path) -> Result<Option<Typ>, Failu
             source_qualified: false,
             ordinary_value_owner: true,
             constant_value: false,
+            trait_position: false,
             nominal_arguments: 0,
             unsupported_nominal_arguments: false,
         },
@@ -1453,6 +1529,7 @@ pub(super) fn usize_length(
                     source_qualified: false,
                     ordinary_value_owner: false,
                     constant_value: true,
+                    trait_position: false,
                     nominal_arguments: 0,
                     unsupported_nominal_arguments: false,
                 },
@@ -1675,7 +1752,7 @@ fn nominal_application(application: &NominalApplication) -> Result<(), Failure> 
 }
 
 pub(super) fn validate_alias_declaration(path: &syn::Path, frame: &Frame) -> Result<(), Failure> {
-    let value = path_type_with_mode(path, frame, &mut HashSet::new(), false, true)?;
+    let value = path_type_with_mode(path, frame, &mut HashSet::new(), false, true, false)?;
     structural_failure(value).map_or(Ok(()), Err)
 }
 

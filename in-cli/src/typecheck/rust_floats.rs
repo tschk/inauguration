@@ -116,6 +116,234 @@ pub(super) fn join_types(types: &[Option<Typ>]) -> Option<Typ> {
         ResolutionFailure::typ,
     ))
 }
+#[derive(Clone, Copy)]
+struct BitMethod {
+    kind: Kind,
+    to_bits: bool,
+    receiver_syntax: bool,
+}
+fn receiver_float_kind(mut typ: Typ) -> Option<Kind> {
+    loop {
+        if let Some(kind) = floats::kind(&typ) {
+            return Some(kind);
+        }
+        let Typ::Named(name) = typ else {
+            return None;
+        };
+        let reference = crate::core_ir::rust_references::decode(&name)?;
+        if reference.runtime.canonical() != Typ::Float {
+            return None;
+        }
+        typ = reference.referent;
+    }
+}
+fn bit_method(
+    checker: &TypeChecker,
+    expr: &Expr,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+) -> Option<BitMethod> {
+    let Expr::Call { callee, args } = expr else {
+        return None;
+    };
+    let Expr::Ident(name) = callee.as_ref() else {
+        return None;
+    };
+    if env.contains_key(name) || facts.functions.contains_key(name) {
+        return None;
+    }
+    if let Some((kind, to_bits)) = floats::bit_method(name) {
+        return Some(BitMethod {
+            kind,
+            to_bits,
+            receiver_syntax: false,
+        });
+    }
+    let method = name.strip_prefix(crate::core_ir::METHOD_PREFIX)?;
+    if !matches!(method, "to_bits" | "from_bits") {
+        return None;
+    }
+    let kind = receiver_float_kind(source_type(checker, args.first()?, facts, env)?)?;
+    Some(BitMethod {
+        kind,
+        to_bits: method == "to_bits",
+        receiver_syntax: true,
+    })
+}
+fn bit_result(method: BitMethod) -> Typ {
+    if method.to_bits {
+        Typ::Named(format!(
+            "#rust-integer-{}",
+            if method.kind == Kind::F32 {
+                "u32"
+            } else {
+                "u64"
+            }
+        ))
+    } else {
+        floats::typ(method.kind)
+    }
+}
+fn definite_bit_operand(typ: &Typ, facts: &Facts) -> bool {
+    definite(typ)
+        || crate::core_ir::rust_references::has_reference_proof(typ)
+        || matches!(typ,Typ::Named(name)if facts.structs.contains_key(name))
+}
+fn bit_call_type(
+    checker: &TypeChecker,
+    expr: &Expr,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+) -> Option<Typ> {
+    let method = bit_method(checker, expr, facts, env)?;
+    let Expr::Call { args, .. } = expr else {
+        return None;
+    };
+    let failure = if args.len() != 1 || (method.receiver_syntax && !method.to_bits) {
+        Some(ResolutionFailure::Invalid(
+            "Rust float bit method arity or receiver syntax is invalid".into(),
+        ))
+    } else {
+        let actual = source_type(checker, &args[0], facts, env);
+        if let Some(proof) = actual.as_ref().and_then(type_proofs::failure_in_type) {
+            Some(proof)
+        } else if method.to_bits {
+            match actual.as_ref() {
+                Some(typ)
+                    if (if method.receiver_syntax {
+                        receiver_float_kind(typ.clone())
+                    } else {
+                        floats::kind(typ)
+                    }) == Some(method.kind) =>
+                {
+                    None
+                }
+                Some(typ) if source(typ) || definite_bit_operand(typ, facts) => {
+                    Some(ResolutionFailure::Invalid(
+                        "Rust to_bits receiver has the wrong source type".into(),
+                    ))
+                }
+                _ => Some(ResolutionFailure::Unsupported(
+                    "Rust to_bits receiver source identity is unresolved".into(),
+                )),
+            }
+        } else {
+            let expected = if method.kind == Kind::F32 {
+                "u32"
+            } else {
+                "u64"
+            };
+            match actual.as_ref() {
+                Some(Typ::Named(name))
+                    if crate::core_ir::rust_integer_type_name(name) == Some(expected) =>
+                {
+                    None
+                }
+                Some(Typ::Int) => None, // Contextual integer inference owns unsuffixed values.
+                Some(typ) if source(typ) || definite_bit_operand(typ, facts) => {
+                    Some(ResolutionFailure::Invalid(
+                        "Rust from_bits requires its exact unsigned integer source type".into(),
+                    ))
+                }
+                _ => Some(ResolutionFailure::Unsupported(
+                    "Rust from_bits integer source identity is unresolved".into(),
+                )),
+            }
+        }
+    };
+    Some(failure.map_or_else(|| bit_result(method), ResolutionFailure::typ))
+}
+fn finish_bit_call(
+    checker: &TypeChecker,
+    expr: &mut Expr,
+    facts: &Facts,
+    env: &HashMap<String, Typ>,
+    policy: ResolvePolicy,
+) -> bool {
+    let Some(method) = bit_method(checker, expr, facts, env) else {
+        return false;
+    };
+    let Some(typ) = bit_call_type(checker, expr, facts, env) else {
+        return false;
+    };
+    if let Some(proof) = type_proofs::failure_in_type(&typ) {
+        report(expr, proof, facts, policy);
+        return true;
+    }
+    if policy != ResolvePolicy::RustFloatLower {
+        return true;
+    }
+    let Expr::Call { args, .. } = expr else {
+        return true;
+    };
+    let borrowed_receiver = method.receiver_syntax
+        && args
+            .first()
+            .and_then(|value| source_type(checker, value, facts, env))
+            .is_some_and(|typ| crate::core_ir::rust_references::has_reference_proof(&typ));
+    if method.to_bits && !borrowed_receiver {
+        finish_value(
+            checker,
+            &mut args[0],
+            Some(&floats::typ(method.kind)),
+            facts,
+            env,
+            policy,
+        );
+    }
+    let mut operand = args.remove(0);
+    if borrowed_receiver {
+        // Scalar reference runtime representation is the proven Float value.
+        // Autoderef only the owned dot receiver, never by-value UFCS arguments.
+        loop {
+            match operand {
+                Expr::Unary {
+                    ref op,
+                    ref mut expr,
+                } if crate::core_ir::rust_references::value_kind(op).is_some() => {
+                    operand = std::mem::replace(expr, Box::new(Expr::UnitLit))
+                        .as_ref()
+                        .clone()
+                }
+                Expr::Call {
+                    ref callee,
+                    ref mut args,
+                } if matches!(callee.as_ref(),Expr::Ident(name)if name==crate::core_ir::BORROW)
+                    && args.len() == 1 =>
+                {
+                    operand = args.remove(0)
+                }
+                _ => break,
+            }
+        }
+    }
+    *expr = if method.to_bits {
+        Expr::Unary {
+            op: format!(
+                "rust-integer-value-{}",
+                if method.kind == Kind::F32 {
+                    "u32"
+                } else {
+                    "u64"
+                }
+            ),
+            expr: Box::new(Expr::Unary {
+                op: format!("float-to-bits-{}", method.kind.name()),
+                expr: Box::new(operand),
+            }),
+        }
+    } else {
+        floats::value(
+            Expr::Unary {
+                op: format!("#rust-float-from-bits-{}", method.kind.name()),
+                expr: Box::new(operand),
+            },
+            method.kind,
+        )
+    };
+    true
+}
+
 struct DirectSignature {
     declared_return: Typ,
     params: Vec<Typ>,
@@ -189,7 +417,8 @@ pub(super) fn call_type(
     facts: &Facts,
     env: &HashMap<String, Typ>,
 ) -> Option<Typ> {
-    effective_direct_call(checker, expr, None, facts, env).map(|(_, typ)| typ)
+    bit_call_type(checker, expr, facts, env)
+        .or_else(|| effective_direct_call(checker, expr, None, facts, env).map(|(_, typ)| typ))
 }
 fn finish_direct_call(
     checker: &TypeChecker,
@@ -228,6 +457,9 @@ pub(super) fn finish_call(
     env: &HashMap<String, Typ>,
     policy: ResolvePolicy,
 ) -> bool {
+    if finish_bit_call(checker, expr, facts, env, policy) {
+        return true;
+    }
     if let Expr::Call { callee, args } = expr
         && matches!(callee.as_ref(),Expr::Ident(name) if name=="vector-push" && !env.contains_key(name) && !facts.functions.contains_key(name))
         && let [receiver, value] = args.as_mut_slice()
@@ -248,6 +480,9 @@ pub(super) fn source_type(
     env: &HashMap<String, Typ>,
 ) -> Option<Typ> {
     match expr {
+        Expr::Ident(name) if type_proofs::decode(name).is_some() => {
+            type_proofs::decode(name).map(ResolutionFailure::typ)
+        }
         Expr::Ident(name) if env.contains_key(name) => facts
             .float_constraints
             .borrow()
@@ -289,6 +524,25 @@ fn comparison(op: &str) -> bool {
     matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=")
 }
 fn report(expr: &mut Expr, proof: ResolutionFailure, facts: &Facts, policy: ResolvePolicy) {
+    // Reporting is rare. Reuse the central proof scanner so collapsing an
+    // unsupported result cannot erase a stronger failure in a nested block/type.
+    let temporary = crate::core_ir::Decl::Function {
+        name: "#rust-float-failure-scan".into(),
+        params: vec![],
+        ret: Typ::Void,
+        body: vec![crate::core_ir::Stmt::Expr(expr.clone())],
+        type_params: vec![],
+    };
+    let mut selected = Some(proof);
+    for child in TypeChecker::new()
+        .typed_proof_nodes(&[temporary])
+        .into_values()
+    {
+        selected = type_proofs::prefer_failure(selected, Some(child));
+    }
+    let Some(proof) = selected else {
+        return;
+    };
     if policy == ResolvePolicy::RustFloatValidate && !proof.is_invalid() {
         return;
     }
@@ -379,8 +633,11 @@ fn constrain_result(
 fn retain(value: Expr, kind: Kind, round: bool) -> Expr {
     let value = if round && kind == Kind::F32 {
         Expr::Unary {
-            op: "float-cast-f32".into(),
-            expr: Box::new(value),
+            op: "bits-to-float-f32".into(),
+            expr: Box::new(Expr::Unary {
+                op: "float-to-bits-f32".into(),
+                expr: Box::new(value),
+            }),
         }
     } else {
         value
@@ -831,13 +1088,15 @@ pub(super) fn finish_expr(
         }
         finish_value(checker, value, None, facts, env, policy);
         if policy == ResolvePolicy::RustFloatLower {
-            *expr = floats::value(
+            let value = if actual.as_ref().and_then(floats::kind) == Some(target) {
+                (**value).clone()
+            } else {
                 Expr::Unary {
-                    op: format!("float-cast-{}", target.name()),
+                    op: "float-cast-f32".into(),
                     expr: value.clone(),
-                },
-                target,
-            );
+                }
+            };
+            *expr = floats::value(value, target);
         }
         return Some(floats::typ(target));
     }
@@ -1755,5 +2014,251 @@ mod integer_cast_deferral_tests {
             assert_eq!(expression, before);
             assert!(facts.float_constraints.borrow().failure().is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod ieee_source_tests {
+    use super::*;
+    use crate::core_ir::{Decl, Stmt};
+    fn call(kind: Kind, to_bits: bool, arg: Expr) -> Expr {
+        Expr::Call {
+            callee: Box::new(Expr::Ident(format!(
+                "#rust-float-{}::{}",
+                kind.name(),
+                if to_bits { "to_bits" } else { "from_bits" }
+            ))),
+            args: vec![arg],
+        }
+    }
+    #[test]
+    fn ieee_bit_methods_require_exact_owned_sources_and_keep_unsigned_results() {
+        let facts = TypeChecker.collect_decl_facts(&[]);
+        let env = HashMap::new();
+        for (kind, integer) in [(Kind::F32, "u32"), (Kind::F64, "u64")] {
+            let expected = Typ::Named(format!("#rust-integer-{integer}"));
+            let mut value = call(
+                kind,
+                false,
+                Expr::Unary {
+                    op: format!("rust-integer-literal-{integer}"),
+                    expr: Box::new(Expr::IntLit(0)),
+                },
+            );
+            assert_eq!(
+                bit_call_type(&TypeChecker, &value, &facts, &env),
+                Some(floats::typ(kind))
+            );
+            assert!(finish_bit_call(
+                &TypeChecker,
+                &mut value,
+                &facts,
+                &env,
+                ResolvePolicy::RustFloatLower
+            ));
+            assert!(
+                matches!(&value,Expr::Unary{op,expr}if floats::value_kind(op)==Some(kind)&&matches!(expr.as_ref(),Expr::Unary{op,..}if floats::from_bits_kind(op)==Some(kind)))
+            );
+            let mut bits = call(
+                kind,
+                true,
+                floats::value(Expr::FloatLit(FloatVal(-0.0)), kind),
+            );
+            assert_eq!(
+                bit_call_type(&TypeChecker, &bits, &facts, &env),
+                Some(expected)
+            );
+            finish_bit_call(
+                &TypeChecker,
+                &mut bits,
+                &facts,
+                &env,
+                ResolvePolicy::RustFloatLower,
+            );
+            assert!(
+                matches!(&bits,Expr::Unary{op,..}if op==&format!("rust-integer-value-{integer}"))
+            );
+            for wrong in [
+                "usize",
+                "isize",
+                "i32",
+                "i64",
+                if integer == "u32" { "u64" } else { "u32" },
+            ] {
+                let value = call(
+                    kind,
+                    false,
+                    Expr::Unary {
+                        op: format!("rust-integer-literal-{wrong}"),
+                        expr: Box::new(Expr::IntLit(0)),
+                    },
+                );
+                let typ = bit_call_type(&TypeChecker, &value, &facts, &env).unwrap();
+                assert!(
+                    type_proofs::failure_in_type(&typ).is_some_and(|proof| proof.is_invalid()),
+                    "{kind:?} {wrong}: {typ:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn ieee_f32_transfers_preserve_all_nan_bits_and_evaluate_operand_once() {
+        for bits in [
+            0,
+            0x8000_0000,
+            1,
+            0x007f_ffff,
+            0x0080_0000,
+            0x7f7f_ffff,
+            0x7f80_0000,
+            0xff80_0000,
+            0x7f80_0001,
+            0xff80_0001,
+            0x7fc0_1234,
+            0xffdf_ffff,
+        ] {
+            let value = retain(
+                Expr::Unary {
+                    op: "bits-to-float-f32".into(),
+                    expr: Box::new(Expr::IntLit(i64::from(bits))),
+                },
+                Kind::F32,
+                true,
+            );
+            let Expr::Unary { expr, .. } = value else {
+                panic!()
+            };
+            assert_eq!(
+                crate::core_ir::constant_float_bits(&expr),
+                Some(crate::core_ir::embed_f32_bits(bits)),
+                "{bits:08x}"
+            );
+        }
+        let value = retain(
+            Expr::Call {
+                callee: Box::new(Expr::Ident("effect".into())),
+                args: vec![],
+            },
+            Kind::F32,
+            true,
+        );
+        let mut calls = 0;
+        crate::core_opt::map_expr(value, &mut |value| {
+            if matches!(&value,Expr::Call{callee,..}if matches!(callee.as_ref(),Expr::Ident(name)if name=="effect"))
+            {
+                calls += 1;
+            }
+            value
+        });
+        assert_eq!(calls, 1);
+    }
+    #[test]
+    fn ieee_samewidth_casts_keep_bits_and_crosswidth_casts_remain_numeric() {
+        let facts = TypeChecker.collect_decl_facts(&[]);
+        let env = HashMap::new();
+        for source in [Kind::F32, Kind::F64] {
+            for target in [Kind::F32, Kind::F64] {
+                let value = floats::value(
+                    Expr::Unary {
+                        op: format!("bits-to-float-{}", source.name()),
+                        expr: Box::new(Expr::IntLit(if source == Kind::F32 {
+                            0x7f80_0001
+                        } else {
+                            0x7ff0_0000_0000_0001
+                        })),
+                    },
+                    source,
+                );
+                let mut cast = floats::cast(value, target);
+                finish_expr(
+                    &TypeChecker,
+                    &mut cast,
+                    &facts,
+                    &env,
+                    ResolvePolicy::RustFloatLower,
+                );
+                let mut numeric = 0;
+                crate::core_opt::map_expr(cast, &mut |value| {
+                    if matches!(&value,Expr::Unary{op,..}if op=="float-cast-f32") {
+                        numeric += 1;
+                    }
+                    value
+                });
+                assert_eq!(
+                    numeric,
+                    usize::from(source != target),
+                    "{source:?}->{target:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn ieee_borrowed_dot_receiver_is_owned_but_ufcs_reference_is_invalid() {
+        let facts = TypeChecker.collect_decl_facts(&[]);
+        let reference = crate::core_ir::rust_references::value_type(
+            crate::core_ir::rust_references::SHARED_VALUE,
+            floats::typ(Kind::F32),
+        )
+        .unwrap();
+        let env = HashMap::from([("r".into(), reference)]);
+        let mut dot = Expr::Call {
+            callee: Box::new(Expr::Ident(format!(
+                "{}to_bits",
+                crate::core_ir::METHOD_PREFIX
+            ))),
+            args: vec![Expr::Ident("r".into())],
+        };
+        assert_eq!(
+            bit_call_type(&TypeChecker, &dot, &facts, &env),
+            Some(Typ::Named("#rust-integer-u32".into()))
+        );
+        finish_bit_call(
+            &TypeChecker,
+            &mut dot,
+            &facts,
+            &env,
+            ResolvePolicy::RustFloatLower,
+        );
+        let ufcs = call(Kind::F32, true, Expr::Ident("r".into()));
+        assert!(
+            type_proofs::failure_in_type(
+                &bit_call_type(&TypeChecker, &ufcs, &facts, &env).unwrap()
+            )
+            .unwrap()
+            .is_invalid()
+        );
+    }
+    #[test]
+    fn ieee_reports_keep_nested_invalid_types_ahead_of_unsupported_sources() {
+        let facts = TypeChecker.collect_decl_facts(&[]);
+        let mut value = call(
+            Kind::F64,
+            false,
+            Expr::Block {
+                body: vec![Stmt::Declare(
+                    "bad".into(),
+                    ResolutionFailure::Invalid("original source error".into()).typ(),
+                )],
+                result: Some(Box::new(Expr::Ident("unknown".into()))),
+            },
+        );
+        finish_bit_call(
+            &TypeChecker,
+            &mut value,
+            &facts,
+            &HashMap::new(),
+            ResolvePolicy::RustFloatLower,
+        );
+        let nodes = TypeChecker.typed_proof_nodes(&[Decl::Function {
+            name: "main".into(),
+            params: vec![],
+            ret: Typ::Float,
+            body: vec![Stmt::Expr(value)],
+            type_params: vec![],
+        }]);
+        assert!(
+            nodes.values().any(ResolutionFailure::is_invalid),
+            "{nodes:?}"
+        );
     }
 }

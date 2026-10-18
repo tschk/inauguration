@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 fn value_nodes(value: &Expr) -> usize {
     match value {
+        Expr::Unary { expr, .. } => 1 + value_nodes(expr),
         Expr::ArrayLit(items) => 1 + items.iter().map(value_nodes).sum::<usize>(),
         Expr::StructInit { fields, .. } => {
             1 + fields
@@ -18,6 +19,7 @@ fn value_nodes(value: &Expr) -> usize {
 
 fn value_bytes(value: &Expr) -> usize {
     match value {
+        Expr::Unary { expr, .. } => 64 + value_bytes(expr),
         Expr::ArrayLit(items) => 64 + items.iter().map(value_bytes).sum::<usize>(),
         Expr::StringLit(value) => 64 + value.len(),
         Expr::StructInit { fields, .. } => {
@@ -32,6 +34,7 @@ fn value_bytes(value: &Expr) -> usize {
 fn depth_bounded(value: &Expr, depth: usize) -> bool {
     depth < 128
         && match value {
+            Expr::Unary { expr, .. } => depth_bounded(expr, depth + 1),
             Expr::ArrayLit(items) => items.iter().all(|item| depth_bounded(item, depth + 1)),
             Expr::StructInit { fields, .. } => fields
                 .iter()
@@ -44,6 +47,9 @@ fn bounded(value: &Expr) -> bool {
 }
 
 fn value_type(value: &Expr) -> Option<Typ> {
+    if crate::core_ir::constant_float_bits(value).is_some() {
+        return Some(Typ::Float);
+    }
     Some(match value {
         Expr::UnitLit => Typ::Void,
         Expr::IntLit(_) => Typ::Int,
@@ -549,16 +555,17 @@ impl Eval<'_> {
         if !bounded(&value) {
             return None;
         }
-        matches!(
-            value,
-            Expr::UnitLit
-                | Expr::IntLit(_)
-                | Expr::BoolLit(_)
-                | Expr::FloatLit(_)
-                | Expr::StringLit(_)
-                | Expr::ArrayLit(_)
-                | Expr::StructInit { .. }
-        )
+        (crate::core_ir::constant_float_bits(&value).is_some()
+            || matches!(
+                value,
+                Expr::UnitLit
+                    | Expr::IntLit(_)
+                    | Expr::BoolLit(_)
+                    | Expr::FloatLit(_)
+                    | Expr::StringLit(_)
+                    | Expr::ArrayLit(_)
+                    | Expr::StructInit { .. }
+            ))
         .then_some(value)
     }
     fn scope(
@@ -1881,5 +1888,36 @@ mod tests {
             };
             assert!(eval.expr(init, &mut empty).is_none(), "{source}");
         }
+    }
+}
+
+#[cfg(test)]
+mod ieee_static_tests {
+    use super::*;
+    #[test]
+    fn pure_static_blocks_retain_nonfinite_float_bits() {
+        let bits = 0x7ff0_0000_0000_0001u64;
+        let value = crate::core_ir::float_bits_expr(bits);
+        let mut decls = vec![Decl::Global {
+            name: "VALUE".into(),
+            typ: Typ::Float,
+            init: Some(Box::new(Expr::Block {
+                body: vec![Stmt::Let("value".into(), Some(Typ::Float), value)],
+                result: Some(Box::new(Expr::Ident("value".into()))),
+            })),
+            mutable: false,
+            constant_value: false,
+        }];
+        fold_static_initializers(&mut decls);
+        let Decl::Global {
+            init: Some(init), ..
+        } = &decls[0]
+        else {
+            panic!()
+        };
+        assert_eq!(crate::core_ir::constant_float_bits(init), Some(bits));
+        assert!(
+            matches!(init.as_ref(),Expr::Unary {op,expr} if op == "bits-to-float-f64" && matches!(expr.as_ref(),Expr::IntLit(_)))
+        );
     }
 }

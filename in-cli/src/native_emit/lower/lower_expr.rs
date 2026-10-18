@@ -1143,6 +1143,29 @@ pub(crate) fn lower_unary(
     }
     lower_expr_into(emitter, ctx, expr, rd, functions, pending_calls, fn_name)?;
     match op {
+        op if crate::core_ir::float_to_bits_width(op).is_some()
+            || crate::core_ir::bits_to_float_width(op).is_some() =>
+        {
+            let to_bits = crate::core_ir::float_to_bits_width(op);
+            let expected = if to_bits.is_some() {
+                Typ::Float
+            } else {
+                Typ::Int
+            };
+            if native_expr_type(expr, ctx, functions) != Some(expected) {
+                return Err(
+                    "native-lower: IEEE bit conversion needs its canonical source type".into(),
+                );
+            }
+            let width = to_bits
+                .or_else(|| crate::core_ir::bits_to_float_width(op))
+                .unwrap();
+            if width == 32 {
+                emit_f32_bit_conversion(emitter, rd, to_bits.is_some());
+            }
+            // The f64 Float ABI already carries the identical bits in an X register.
+            Ok(())
+        }
         "float-cast-f32" | "float-cast-f64" => {
             if native_expr_type(expr, ctx, functions) != Some(Typ::Float) {
                 return Err("native-lower: floating width cast needs Float".into());
@@ -1503,6 +1526,86 @@ pub(crate) fn lower_binary(
     Ok(())
 }
 
+/// Preserve NaN signaling/payload bits without passing NaNs through FP conversion.
+/// Operand evaluation has completed before this leaf sequence changes SP.
+fn emit_f32_bit_conversion(emitter: &mut CodeEmitter, rd: u8, to_bits: bool) {
+    let sign = pick_scratch(&[rd]);
+    let mask = pick_scratch(&[rd, sign]);
+    emitter.emit_u32(aarch64::stp_pre(sign, mask, -16));
+    if !to_bits {
+        emitter.emit_insns(&aarch64::load_i64(mask, 0xffff_ffff));
+        emitter.emit_u32(aarch64::and_reg64(rd, rd, mask));
+    }
+    let (exponent, fraction, sign_bit) = if to_bits {
+        (
+            0x7ff0_0000_0000_0000u64,
+            0x000f_ffff_ffff_ffffu64,
+            1u64 << 63,
+        )
+    } else {
+        (0x7f80_0000u64, 0x007f_ffffu64, 1u64 << 31)
+    };
+    emitter.emit_insns(&aarch64::load_i64(mask, exponent as i64));
+    emitter.emit_u32(aarch64::and_reg64(sign, rd, mask));
+    emitter.emit_u32(aarch64::cmp_reg64(sign, mask));
+    let finite = emitter.emit_insn(aarch64::b_cond(1, 0));
+    emitter.emit_insns(&aarch64::load_i64(mask, fraction as i64));
+    emitter.emit_u32(aarch64::and_reg64(sign, rd, mask));
+    emitter.emit_u32(aarch64::cmp_reg64(sign, aarch64::REG_XZR));
+    let nan = emitter.emit_insn(aarch64::b_cond(1, 0));
+    emitter.patch_u32(
+        finite,
+        aarch64::b_cond(1, emitter.len() as i32 - finite as i32),
+    );
+    if to_bits {
+        emitter.emit_u32(aarch64::fmov_from_gp(rd, rd));
+        emitter.emit_u32(aarch64::fcvt_s_d(rd, rd));
+        emitter.emit_u32(aarch64::fmov_s_to_gp(rd, rd));
+    } else {
+        emitter.emit_u32(aarch64::fmov_s_from_gp(rd, rd));
+        emitter.emit_u32(aarch64::fcvt_d_s(rd, rd));
+        emitter.emit_u32(aarch64::fmov_to_gp(rd, rd));
+    }
+    let done = emitter.emit_insn(aarch64::b(0));
+    emitter.patch_u32(nan, aarch64::b_cond(1, emitter.len() as i32 - nan as i32));
+    emitter.emit_insns(&aarch64::load_i64(mask, sign_bit as i64));
+    emitter.emit_u32(aarch64::and_reg64(sign, rd, mask));
+    emitter.emit_insns(&aarch64::load_i64(mask, 32));
+    emitter.emit_u32(if to_bits {
+        aarch64::lsr_reg64(sign, sign, mask)
+    } else {
+        aarch64::lsl_reg64(sign, sign, mask)
+    });
+    emitter.emit_insns(&aarch64::load_i64(mask, fraction as i64));
+    emitter.emit_u32(aarch64::and_reg64(rd, rd, mask));
+    emitter.emit_insns(&aarch64::load_i64(mask, 29));
+    emitter.emit_u32(if to_bits {
+        aarch64::lsr_reg64(rd, rd, mask)
+    } else {
+        aarch64::lsl_reg64(rd, rd, mask)
+    });
+    if to_bits {
+        // A non-embedded f64 NaN can lose every payload bit when narrowed.
+        emitter.emit_u32(aarch64::cmp_reg64(rd, aarch64::REG_XZR));
+        let nonzero = emitter.emit_insn(aarch64::b_cond(1, 0));
+        emitter.emit_insns(&aarch64::load_i64(rd, 1));
+        emitter.patch_u32(
+            nonzero,
+            aarch64::b_cond(1, emitter.len() as i32 - nonzero as i32),
+        );
+    }
+    let output_exponent = if to_bits {
+        0x7f80_0000
+    } else {
+        0x7ff0_0000_0000_0000u64
+    };
+    emitter.emit_insns(&aarch64::load_i64(mask, output_exponent as i64));
+    emitter.emit_u32(aarch64::orr_reg64(rd, rd, mask));
+    emitter.emit_u32(aarch64::orr_reg64(rd, rd, sign));
+    emitter.patch_u32(done, aarch64::b(emitter.len() as i32 - done as i32));
+    emitter.emit_u32(aarch64::ldp_post(sign, mask, 16));
+}
+
 fn emit_saturating_float_cast(emitter: &mut CodeEmitter, rd: u8, bits: u8, signed: bool) {
     let scratch = pick_scratch(&[rd]);
     let upper = 2.0f64.powi(i32::from(bits) - i32::from(signed));
@@ -1689,12 +1792,14 @@ fn native_expr_type_with_bindings(
                 || op == "bool-to-int"
                 || op == "float-to-int"
                 || crate::core_ir::integer_cast_spec(op).is_some()
-                || crate::core_ir::saturating_float_cast_spec(op).is_some() =>
+                || crate::core_ir::saturating_float_cast_spec(op).is_some()
+                || crate::core_ir::float_to_bits_width(op).is_some() =>
         {
             Some(Typ::Int)
         }
         Expr::Unary { op, .. }
             if crate::core_ir::integer_float_cast_spec(op).is_some()
+                || crate::core_ir::bits_to_float_width(op).is_some()
                 || matches!(op.as_str(), "float-cast-f32" | "float-cast-f64") =>
         {
             Some(Typ::Float)
@@ -1955,6 +2060,149 @@ pub(crate) fn lower_record_index_address(
         stage_record_index_place(emitter, ctx, base, index, functions, pending_calls, fn_name)?;
     load_record_index_address(emitter, ctx, &place, rd, fn_name)?;
     Ok(place.fields)
+}
+
+#[cfg(test)]
+mod ieee_bit_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn f32_sequences_restore_scratch_and_keep_nan_paths_integer_only() {
+        for rd in [0, 2, 3, 15] {
+            for to_bits in [false, true] {
+                let mut emitter = CodeEmitter::new();
+                emit_f32_bit_conversion(&mut emitter, rd, to_bits);
+                let words: Vec<_> = emitter
+                    .bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|bytes| u32::from_le_bytes(*bytes))
+                    .collect();
+                let first = pick_scratch(&[rd]);
+                let second = pick_scratch(&[rd, first]);
+                assert_eq!(words[0], aarch64::stp_pre(first, second, -16));
+                assert_eq!(*words.last().unwrap(), aarch64::ldp_post(first, second, 16));
+                let branches: Vec<_> = words
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, word)| **word & 0xff00_001f == 0x5400_0001)
+                    .collect();
+                let (site, word) = branches[1];
+                let nan_start = site + ((word >> 5) & 0x7ffff) as usize;
+                assert!(
+                    words[nan_start..words.len() - 1]
+                        .iter()
+                        .all(|word| !matches!(word >> 24, 0x1e | 0x9e)),
+                    "NaN path must not quiet through FP"
+                );
+                let finite = if to_bits {
+                    [
+                        aarch64::fmov_from_gp(rd, rd),
+                        aarch64::fcvt_s_d(rd, rd),
+                        aarch64::fmov_s_to_gp(rd, rd),
+                    ]
+                } else {
+                    [
+                        aarch64::fmov_s_from_gp(rd, rd),
+                        aarch64::fcvt_d_s(rd, rd),
+                        aarch64::fmov_to_gp(rd, rd),
+                    ]
+                };
+                assert!(words.windows(3).any(|window| window == finite));
+                let (done_site, done) = words
+                    .iter()
+                    .enumerate()
+                    .find(|(_, word)| **word & 0xfc00_0000 == 0x1400_0000)
+                    .unwrap();
+                assert_eq!(done_site + (done & 0x03ff_ffff) as usize, words.len() - 1);
+            }
+        }
+    }
+
+    #[test]
+    fn ieee_unary_ops_validate_types_and_f64_keeps_raw_bits() {
+        let structs = HashMap::new();
+        let strings = HashMap::new();
+        let globals = HashMap::new();
+        let types = HashMap::new();
+        let mut runtime = Vec::new();
+        let mut pending_strings = Vec::new();
+        let mut ctx = LowerCtx::new(
+            &[],
+            &structs,
+            &strings,
+            &globals,
+            &types,
+            &mut runtime,
+            &mut pending_strings,
+            "test",
+        )
+        .unwrap();
+        let functions = HashMap::new();
+        let mut calls = Vec::new();
+        for (op, to_bits, width) in [
+            ("float-to-bits-f32", true, 32),
+            ("float-to-bits-f64", true, 64),
+            ("bits-to-float-f32", false, 32),
+            ("bits-to-float-f64", false, 64),
+        ] {
+            let bits = 0xfff0_0000_0000_0001u64 as i64;
+            let input = if to_bits {
+                Expr::Unary {
+                    op: "bits-to-float-f64".into(),
+                    expr: Box::new(Expr::IntLit(bits)),
+                }
+            } else {
+                Expr::IntLit(bits)
+            };
+            let mut emitter = CodeEmitter::new();
+            lower_unary(
+                &mut emitter,
+                &mut ctx,
+                op,
+                &input,
+                3,
+                &functions,
+                &mut calls,
+                "test",
+            )
+            .unwrap();
+            let prefix: Vec<_> = aarch64::load_i64(3, bits)
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            assert!(emitter.bytes.starts_with(&prefix));
+            if width == 64 {
+                assert_eq!(emitter.bytes, prefix);
+            }
+            let expected = if to_bits { Typ::Int } else { Typ::Float };
+            assert_eq!(
+                native_expr_type(
+                    &Expr::Unary {
+                        op: op.into(),
+                        expr: Box::new(input)
+                    },
+                    &ctx,
+                    &functions
+                ),
+                Some(expected)
+            );
+            assert!(
+                lower_unary(
+                    &mut CodeEmitter::new(),
+                    &mut ctx,
+                    op,
+                    &Expr::BoolLit(true),
+                    3,
+                    &functions,
+                    &mut calls,
+                    "test"
+                )
+                .is_err()
+            );
+        }
+    }
 }
 
 #[cfg(test)]

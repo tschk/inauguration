@@ -374,9 +374,9 @@ fn eval_initial_value<'a>(
         (Typ::String, Some(Expr::StringLit(value))) => Ok(InitialValue::String(value)),
         (Typ::String, None) => Ok(InitialValue::String("")),
         (Typ::Int, Some(Expr::IntLit(value))) => Ok(InitialValue::Scalar(*value)),
-        (Typ::Float, Some(Expr::FloatLit(value))) => {
-            Ok(InitialValue::Scalar(value.0.to_bits() as i64))
-        }
+        (Typ::Float, Some(value)) if crate::core_ir::constant_float_bits(value).is_some() => Ok(
+            InitialValue::Scalar(crate::core_ir::constant_float_bits(value).unwrap() as i64),
+        ),
         (Typ::Bool, Some(Expr::BoolLit(value))) => Ok(InitialValue::Scalar(i64::from(*value))),
         (Typ::Int | Typ::Float | Typ::Bool, None) => Ok(InitialValue::Scalar(0)),
         (Typ::String, _) => Err(format!(
@@ -572,7 +572,12 @@ pub(crate) fn build_data_section(
             let val: i64 = match init.as_deref() {
                 Some(Expr::IntLit(v)) => *v,
                 Some(Expr::BoolLit(b)) => *b as i64,
-                Some(Expr::FloatLit(crate::core_ir::FloatVal(v))) => v.to_bits() as i64,
+                Some(value)
+                    if typ.canonical() == Typ::Float
+                        && crate::core_ir::constant_float_bits(value).is_some() =>
+                {
+                    crate::core_ir::constant_float_bits(value).unwrap() as i64
+                }
                 None => 0,
                 // ponytail: runtime and aggregate initializers need an initialization pipeline, not fabricated zero values.
                 _ => {
@@ -1819,5 +1824,77 @@ mod flat_record_array_storage_tests {
         let mut fixups = vec![(0, 8)];
         assert!(reserve_pointer_fixups(&mut fixups, usize::MAX).is_err());
         assert_eq!(fixups, vec![(0, 8)]);
+    }
+}
+
+#[cfg(test)]
+mod ieee_global_tests {
+    use super::*;
+    #[test]
+    fn exact_float_bits_reach_scalar_copy_arrays_and_flat_records() {
+        let bits = [
+            0x7ff0_0000_0000_0001u64,
+            0xfff8_1234_5678_9abc,
+            0x8000_0000_0000_0000,
+        ];
+        let global = |name: &str, typ: Typ, init: Expr| Decl::Global {
+            name: name.into(),
+            typ,
+            init: Some(Box::new(init)),
+            mutable: true,
+            constant_value: false,
+        };
+        let fields = vec![("a".into(), Typ::Float), ("b".into(), Typ::Float)];
+        let module = UnifiedModule::new(vec![
+            Decl::Struct {
+                name: "Pair".into(),
+                fields: fields.clone(),
+                type_params: vec![],
+            },
+            global(
+                "scalar",
+                Typ::Float,
+                crate::core_ir::float_bits_expr(bits[0]),
+            ),
+            global("copy", Typ::Float, Expr::Ident("scalar".into())),
+            global(
+                "array",
+                Typ::Array(Box::new(Typ::Float)),
+                Expr::ArrayLit(
+                    bits.iter()
+                        .map(|bits| crate::core_ir::float_bits_expr(*bits))
+                        .collect(),
+                ),
+            ),
+            global(
+                "record",
+                Typ::Named("Pair".into()),
+                Expr::StructInit {
+                    name: "Pair".into(),
+                    fields: vec![
+                        ("a".into(), crate::core_ir::float_bits_expr(bits[1])),
+                        ("b".into(), crate::core_ir::float_bits_expr(bits[2])),
+                    ],
+                },
+            ),
+        ]);
+        let offsets = collect_globals(&module, &HashMap::from([("Pair".into(), fields)])).unwrap();
+        for layout in [StringLayout::Instring, StringLayout::Cstring] {
+            let data = build_data_section(&module, &offsets, layout).unwrap();
+            let word = |offset: u64| {
+                u64::from_le_bytes(
+                    data.bytes[offset as usize..offset as usize + 8]
+                        .try_into()
+                        .unwrap(),
+                )
+            };
+            assert_eq!(word(offsets["scalar"]), bits[0]);
+            assert_eq!(word(offsets["copy"]), bits[0]);
+            for (index, bits) in bits.iter().enumerate() {
+                assert_eq!(word(offsets["array"] + 16 + index as u64 * 8), *bits);
+            }
+            assert_eq!(word(offsets["record.a"]), bits[1]);
+            assert_eq!(word(offsets["record.b"]), bits[2]);
+        }
     }
 }

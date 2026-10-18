@@ -3662,6 +3662,36 @@ fn owned_rust_compile_only_keeps_unsupported_type_contracts_without_executing() 
 }
 
 #[test]
+fn owned_rust_compile_only_preserves_unsupported_pattern_shadowing() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn helper(len:u64)->i64{let Ok(len)=usize::try_from(len)else{return 7;};let end:usize=len;end as i64}fn main()->i64{helper(42u64)}",
+        "fn helper(len:u64,align:u64)->i64{let(Ok(align),Ok(len))=(usize::try_from(align.max(1)),usize::try_from(len))else{return 7;};let end:usize=len+align;end as i64}fn main()->i64{helper(41u64,1u64)}",
+    ] {
+        let path = temp_path("rust-pattern-shadow-ir-only.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, None, None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(report.success, "{source} {profile:?}: {report:?}");
+            assert_eq!(report.reason_code.as_deref(), Some("jit-ir-only"));
+            assert_eq!(report.backend_level, "owned-core-ir-only");
+            assert_eq!(report.runtime_level, "not-executed");
+            assert!(!report.execution_started);
+            assert_eq!(report.eval_result, None);
+            assert_eq!(report.eval_exit_code, None);
+            assert_eq!(report.artifact_path, None);
+            assert_eq!(report.executable_path, None);
+            assert!(report.external_invocations.is_empty());
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
 fn owned_rust_jit_verifies_before_execution() {
     if !native_backend::native_subset_host_available() {
         return;
@@ -11088,6 +11118,220 @@ fn rust_integer_literal_casts_refuse_invalid_sources_before_execution() {
                     assert!(report.external_invocations.is_empty());
                     assert!(!out.exists());
                 }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_ieee_bit_conversions_preserve_transfers_and_effects() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let patterns32 = [
+        0u32, 0x80000000, 1, 0x007fffff, 0x7f7fffff, 0x7f800000, 0xff800000, 0x7f800001,
+        0xff800001, 0x7fc12345, 0xffc12345,
+    ];
+    let patterns64 = [
+        0u64,
+        0x8000000000000000,
+        1,
+        0x000fffffffffffff,
+        0x7fefffffffffffff,
+        0x7ff0000000000000,
+        0xfff0000000000000,
+        0x7ff0000000000001,
+        0xfff0000000000001,
+        0x7ff8123456789abc,
+        0xfff8123456789abc,
+    ];
+    let checks = patterns32
+        .iter()
+        .map(|bits| format!("check32({bits}u32)"))
+        .chain(patterns64.iter().map(|bits| format!("check64({bits}u64)")))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    for definitions in [
+        "fn check32(bits:u32)->bool{f32::from_bits(bits).to_bits()==bits}fn check64(bits:u64)->bool{f64::from_bits(bits).to_bits()==bits}",
+        "fn id32(value:f32)->f32{value}fn id64(value:f64)->f64{value}fn check32(bits:u32)->bool{id32(f32::from_bits(bits)).to_bits()==bits}fn check64(bits:u64)->bool{id64(f64::from_bits(bits)).to_bits()==bits}",
+        "struct Row32{value:f32}struct Row64{value:f64}fn check32(bits:u32)->bool{let row=Row32{value:f32::from_bits(bits)};row.value.to_bits()==bits}fn check64(bits:u64)->bool{let row=Row64{value:f64::from_bits(bits)};row.value.to_bits()==bits}",
+        "fn check32(bits:u32)->bool{let values=[f32::from_bits(bits)];values[0].to_bits()==bits}fn check64(bits:u64)->bool{let values=[f64::from_bits(bits)];values[0].to_bits()==bits}",
+        "fn check32(bits:u32)->bool{let values=vec![f32::from_bits(bits)];values[0].to_bits()==bits}fn check64(bits:u64)->bool{let values=vec![f64::from_bits(bits)];values[0].to_bits()==bits}",
+        "fn identity<T>(value:T)->T{value}fn check32(bits:u32)->bool{identity(f32::from_bits(bits)).to_bits()==bits}fn check64(bits:u64)->bool{identity(f64::from_bits(bits)).to_bits()==bits}",
+        "fn check32(bits:u32)->bool{let id=|value:f32|->f32{value};id(f32::from_bits(bits)).to_bits()==bits}fn check64(bits:u64)->bool{let id=|value:f64|->f64{value};id(f64::from_bits(bits)).to_bits()==bits}",
+        "static mut COUNT:i64=0;fn input32(bits:u32)->u32{unsafe{COUNT+=1;}bits}fn input64(bits:u64)->u64{unsafe{COUNT+=1;}bits}fn check32(bits:u32)->bool{let before=unsafe{COUNT};let value=f32::from_bits(input32(bits));value.to_bits()==bits && unsafe{COUNT==before+1}}fn check64(bits:u64)->bool{let before=unsafe{COUNT};let value=f64::from_bits(input64(bits));value.to_bits()==bits && unsafe{COUNT==before+1}}",
+    ] {
+        let source = format!("{definitions}fn main()->i64{{if {checks}{{42}}else{{7}}}}");
+        let path = temp_path("rust-ieee-transfer.rs");
+        fs::write(&path, &source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("rust-ieee-transfer-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{source} {target:?}/{profile:?}: {report:?}"
+                );
+                assert!(report.external_invocations.is_empty());
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started);
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(42)),
+                        "{source} {profile:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{source} {profile:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_ieee_bit_conversions_refuse_invalid_primitive_sources() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main()->i64{let value=f32::from_bits(1i32);42}",
+        "fn main()->i64{if false{let value=f32::from_bits(1usize);}42}",
+        "fn main()->i64{let value=f64::from_bits(1i64);42}",
+        "fn main()->i64{let bits=1usize;let value=f64::from_bits(bits);42}",
+        "fn source()->usize{1usize}fn main()->i64{let value=f64::from_bits(source());42}",
+        "fn main()->i64{let value=f64::from_bits(1u32);42}",
+        "fn main()->i64{let value=f32::from_bits(1u64);42}",
+        "fn main()->i64{let value:usize=1.0f64.to_bits();42}",
+        "fn main()->i64{let value:u64=1.0f32.to_bits();42}",
+        "fn main()->i64{let value=f32::from_bits();42}",
+        "fn main()->i64{let value=f64::from_bits(1u64,2u64);42}",
+        "fn main()->i64{let value=f32::to_bits(1.0f64);42}",
+        "fn main()->i64{let value=f64::to_bits(1.0f32);42}",
+    ] {
+        let path = temp_path("rust-ieee-invalid.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("rust-ieee-invalid-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(!report.success, "{source}: {report:?}");
+                assert_eq!(
+                    report.reason_code.as_deref(),
+                    Some("rust-invalid-associated-type"),
+                    "{source}: {report:?}"
+                );
+                assert!(!report.execution_started);
+                assert_eq!(report.eval_result, None);
+                assert_eq!(report.artifact_path, None);
+                assert!(report.external_invocations.is_empty());
+                assert!(!out.exists());
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_ieee_trait_static_calls_preserve_owned_scope_and_dispatch_priority() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        r#"mod defs{pub trait Make{fn value()->f32;}pub struct Row;impl Make for Row{fn value()->f32{42.0}}}type Make=u8;fn main()->i64{{use defs::Make;if defs::Row::value()==42.0f32{42}else{7}}}"#,
+        r#"mod m{pub trait Make{fn value()->i64;}pub struct Hidden;impl Make for Hidden{fn value()->i64{42}}pub type Alias=Hidden;}use m::Make;fn main()->i64{m::Alias::value()}"#,
+        r#"#[derive(Default)]struct Item;trait Make{fn default()->i64;}impl Make for Item{fn default()->i64{7}}impl Item{fn default()->i64{42}}fn main()->i64{Item::default()}"#,
+        r#"pub struct Item;pub trait Make{fn value()->i64;}mod implementations{use super::Make;impl Make for crate::Item{fn value()->i64{42}}}fn main()->i64{Item::value()}"#,
+        r#"mod traits{pub trait Make{fn value()->i64;}}use traits::Make as Alias;struct Item;impl Alias for Item{fn value()->i64{42}}fn main()->i64{Item::value()}"#,
+        r#"trait Factory { fn value()->f32; } struct Item; impl Factory for Item { fn value()->f32{42.0} } fn main()->i64{if Item::value()==42.0f32{42}else{7}}"#,
+        r#"trait Factory { fn value()->f32; } struct Item; impl Factory for Item{fn value()->f32{7.0}} impl Item{fn value()->f32{42.0}} fn main()->i64{if Item::value()==42.0f32{42}else{7}}"#,
+        r#"mod source{pub trait Factory{fn value()->f32;} pub struct Item; impl Factory for Item{fn value()->f32{42.0}}} use source::Factory as Make; fn main()->i64{if source::Item::value()==42.0{42}else{7}}"#,
+        r#"trait Factory{fn value()->f32;} struct Item; impl Factory for Item{fn value()->f32{42.0}} type Alias=Item; fn main()->i64{if Alias::value()==42.0{42}else{7}}"#,
+        r#"#[cfg(any())] trait Hidden{fn value()->f32;} trait Factory{fn value()->f32;} struct Item; impl Factory for Item{#[cfg(not(any()))] fn value()->f32{42.0} #[cfg(any())] fn value()->f32{7.0}} fn main()->i64{if Item::value()==42.0{42}else{7}}"#,
+        r#"mod source{pub trait Factory{fn value()->f32;} pub struct Item; impl Factory for Item{fn value()->f32{42.0}}} fn main()->i64{if <source::Item as source::Factory>::value()==42.0{42}else{7}}"#,
+        r#"trait Factory{fn value()->i64;} struct Item; impl Factory for Item{fn value()->i64{42}} fn main()->i64{Item::value()}"#,
+        r#"trait Make{type Output;fn value()->Self::Output;}struct Factory;impl Make for Factory{type Output=f32;fn value()->Self::Output{Self::Output::from_bits(2139095041u32)}}fn main()->i64{if Factory::value().to_bits()==2139095041u32{42}else{7}}"#,
+    ] {
+        let path = temp_path("rust-ieee-trait-static.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("rust-ieee-trait-static-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{source} {target:?}/{profile:?}: {report:?}"
+                );
+                assert!(report.external_invocations.is_empty());
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started);
+                    assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{source}");
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{source}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_ieee_trait_static_calls_refuse_invalid_source_contracts() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        r#"trait A{fn value()->f32;} trait B{fn value()->f32;} struct Item; impl A for Item{fn value()->f32{42.0}} impl B for Item{fn value()->f32{7.0}} fn main()->i64{if Item::value()==42.0{42}else{7}}"#,
+        r#"mod source{pub trait Factory{fn value()->f32;} pub struct Item; impl Factory for Item{fn value()->f32{42.0}}} fn main()->i64{if source::Item::value()==42.0{42}else{7}}"#,
+        r#"trait Make{fn value()->bool;}struct Row;impl Make for Row{fn value()->i64{42}}fn main()->i64{Row::value()}"#,
+        r#"trait Make{fn value(x:bool)->i64;}struct Row;impl Make for Row{fn value(x:i64)->i64{x}}fn main()->i64{Row::value(42)}"#,
+        r#"trait Make{fn value(x:i64)->i64;}struct Row;impl Make for Row{fn value()->i64{42}}fn main()->i64{Row::value()}"#,
+        r#"trait Make{fn value()->Result<i64,bool>;}struct Row;impl Make for Row{fn value()->i64{42}}fn main()->i64{Row::value()}"#,
+        r#"trait Make{fn value()->Result<i64,bool>;}struct Row;impl Make for Row{fn value()->Result<i64,u8>{Ok(42)}}fn main()->i64{match Row::value(){Ok(value)=>value,Err(_)=>7}}"#,
+        r#"trait Make{fn value(x:&str)->i64;}struct Row;impl Make for Row{fn value(x:&String)->i64{42}}fn main()->i64{let x=String::from("x");Row::value(&x)}"#,
+        r#"type Text=str;type Owned=String;trait Make{fn value(x:&Text)->i64;}struct Row;impl Make for Row{fn value(x:&Owned)->i64{42}}fn main()->i64{let x=String::from("x");Row::value(&x)}"#,
+        r#"trait Make{fn value()->Self::Extra;}struct Row;impl Make for Row{type Extra=i64;fn value()->i64{42}}fn main()->i64{Row::value()}"#,
+    ] {
+        let path = temp_path("rust-ieee-trait-static-invalid.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("rust-ieee-trait-static-invalid-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(!report.success, "{source}: {report:?}");
+                assert_eq!(
+                    report.reason_code.as_deref(),
+                    Some("rust-invalid-associated-type"),
+                    "{source}: {report:?}"
+                );
+                assert!(!report.execution_started);
+                assert_eq!(report.eval_result, None);
+                assert_eq!(report.artifact_path, None);
+                assert!(report.external_invocations.is_empty());
+                assert!(!out.exists());
             }
         }
         fs::remove_file(path).unwrap();

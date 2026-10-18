@@ -195,6 +195,15 @@ pub fn fmov_to_gp(rd_x: u8, rn_v: u8) -> u32 {
     0x9E66_0000 | ((rn_v as u32) << 5) | (rd_x as u32)
 }
 
+/// Move raw single-precision bits between an S register and a W register.
+pub fn fmov_s_from_gp(rd_s: u8, rn_w: u8) -> u32 {
+    0x1E27_0000 | ((rn_w as u32) << 5) | (rd_s as u32)
+}
+
+pub fn fmov_s_to_gp(rd_w: u8, rn_s: u8) -> u32 {
+    0x1E26_0000 | ((rn_s as u32) << 5) | (rd_w as u32)
+}
+
 pub fn scvtf_d(rd_v: u8, rn_x: u8) -> u32 {
     0x9E62_0000 | ((rn_x as u32) << 5) | (rd_v as u32)
 }
@@ -388,6 +397,11 @@ mod tests {
         assert_eq!(nop(), 0xD503201F);
         assert_eq!(fmov_from_gp(3, 7), 0x9E6700E3);
         assert_eq!(fmov_to_gp(3, 7), 0x9E6600E3);
+        // clang arm64 assembly: FMOV S3,W7 / W3,S7 / S31,W30 / WZR,S30.
+        assert_eq!(fmov_s_from_gp(3, 7), 0x1E2700E3);
+        assert_eq!(fmov_s_to_gp(3, 7), 0x1E2600E3);
+        assert_eq!(fmov_s_from_gp(31, 30), 0x1E2703DF);
+        assert_eq!(fmov_s_to_gp(31, 30), 0x1E2603DF);
         assert_eq!(scvtf_d(3, 7), 0x9E6200E3);
         // Independent clang arm64 assembler encodings, including high registers.
         assert_eq!(scvtf_s(3, 7), 0x9E2200E3);

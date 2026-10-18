@@ -1795,6 +1795,36 @@ fn check_expr_with_array_borrow(
             {
                 require_type(fn_name, "integer cast", &Typ::Int, expr, facts, env)?;
             }
+            if crate::core_ir::float_to_bits_width(op).is_some() {
+                require_type(
+                    fn_name,
+                    "float bit extraction",
+                    &Typ::Float,
+                    expr,
+                    facts,
+                    env,
+                )?;
+            }
+            if crate::core_ir::bits_to_float_width(op).is_some() {
+                require_type(
+                    fn_name,
+                    "float bit construction",
+                    &Typ::Int,
+                    expr,
+                    facts,
+                    env,
+                )?;
+            }
+            if (op.starts_with("float-to-bits-")
+                && crate::core_ir::float_to_bits_width(op).is_none())
+                || (op.starts_with("bits-to-float-")
+                    && crate::core_ir::bits_to_float_width(op).is_none())
+            {
+                return Err((
+                    "unsupported-floating-cast".into(),
+                    format!("unsupported float bit operation `{op}` in `{fn_name}`"),
+                ));
+            }
             if op.starts_with("float-cast-") {
                 if !matches!(op.as_str(), "float-cast-f32" | "float-cast-f64") {
                     return Err((
@@ -2370,7 +2400,12 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
         Expr::Unary { op, expr, .. } => match op.as_str() {
             "!" => Some(Typ::Bool),
             "bool-to-int" | "float-to-int" => Some(Typ::Int),
-            op if crate::core_ir::integer_float_cast_spec(op).is_some() => Some(Typ::Float),
+            op if crate::core_ir::integer_float_cast_spec(op).is_some()
+                || crate::core_ir::bits_to_float_width(op).is_some() =>
+            {
+                Some(Typ::Float)
+            }
+            op if crate::core_ir::float_to_bits_width(op).is_some() => Some(Typ::Int),
             "float-cast-f32" | "float-cast-f64" => Some(Typ::Float),
             op if crate::core_ir::integer_cast_spec(op).is_some()
                 || crate::core_ir::saturating_float_cast_spec(op).is_some() =>
@@ -4578,6 +4613,67 @@ mod tests {
                     assert_eq!(report.reason_code.as_deref(), Some("type-mismatch"));
                 }
             }
+        }
+    }
+    #[test]
+    fn ieee_bit_operations_require_exact_canonical_operand_domains() {
+        for width in [32, 64] {
+            for to_bits in [false, true] {
+                let op = format!(
+                    "{}-f{width}",
+                    if to_bits {
+                        "float-to-bits"
+                    } else {
+                        "bits-to-float"
+                    }
+                );
+                let ret = if to_bits { Typ::Int } else { Typ::Float };
+                for operand in [
+                    Expr::IntLit(42),
+                    Expr::FloatLit(crate::core_ir::FloatVal(1.0)),
+                    Expr::BoolLit(true),
+                    Expr::StringLit("bad".into()),
+                ] {
+                    let accepted = if to_bits {
+                        matches!(operand, Expr::FloatLit(_))
+                    } else {
+                        matches!(operand, Expr::IntLit(_))
+                    };
+                    let report = verify_module(
+                        &module(vec![function_with_ret(
+                            "main",
+                            ret.clone(),
+                            vec![Stmt::Return(Some(Expr::Unary {
+                                op: op.clone(),
+                                expr: Box::new(operand),
+                            }))],
+                        )]),
+                        &default_options(),
+                    );
+                    assert_eq!(report.ok, accepted, "{op}: {report:?}");
+                    if !accepted {
+                        assert_eq!(report.reason_code.as_deref(), Some("type-mismatch"));
+                    }
+                }
+            }
+        }
+        for op in ["float-to-bits-f16", "bits-to-float-f128"] {
+            let report = verify_module(
+                &module(vec![function_with_ret(
+                    "main",
+                    Typ::Int,
+                    vec![Stmt::Return(Some(Expr::Unary {
+                        op: op.into(),
+                        expr: Box::new(Expr::IntLit(42)),
+                    }))],
+                )]),
+                &default_options(),
+            );
+            assert!(!report.ok);
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("unsupported-floating-cast")
+            );
         }
     }
     #[test]

@@ -661,6 +661,95 @@ pub(crate) fn fold_integer_float_cast(op: &str, value: i64) -> Option<f64> {
     })
 }
 
+pub(crate) fn float_to_bits_width(op: &str) -> Option<u8> {
+    match op {
+        "float-to-bits-f32" => Some(32),
+        "float-to-bits-f64" => Some(64),
+        _ => None,
+    }
+}
+
+pub(crate) fn bits_to_float_width(op: &str) -> Option<u8> {
+    match op {
+        "bits-to-float-f32" => Some(32),
+        "bits-to-float-f64" => Some(64),
+        _ => None,
+    }
+}
+
+pub(crate) fn embed_f32_bits(bits: u32) -> u64 {
+    if bits & 0x7f80_0000 == 0x7f80_0000 && bits & 0x007f_ffff != 0 {
+        // Hardware conversion quiets signaling NaNs; transfers preserve their bits.
+        (u64::from(bits & 0x8000_0000) << 32)
+            | 0x7ff0_0000_0000_0000
+            | (u64::from(bits & 0x007f_ffff) << 29)
+    } else {
+        f64::from(f32::from_bits(bits)).to_bits()
+    }
+}
+
+pub(crate) fn narrow_f64_bits(bits: u64) -> u32 {
+    if bits & 0x7ff0_0000_0000_0000 == 0x7ff0_0000_0000_0000 && bits & 0x000f_ffff_ffff_ffff != 0 {
+        let fraction = ((bits >> 29) as u32) & 0x007f_ffff;
+        ((bits >> 32) as u32 & 0x8000_0000) | 0x7f80_0000 | fraction.max(1)
+    } else {
+        (f64::from_bits(bits) as f32).to_bits()
+    }
+}
+
+pub(crate) fn float_bits_expr(bits: u64) -> Expr {
+    let value = f64::from_bits(bits);
+    if value.is_finite() {
+        Expr::FloatLit(FloatVal(value))
+    } else {
+        // JSON numbers cannot carry infinity or exact NaN payloads.
+        Expr::Unary {
+            op: "bits-to-float-f64".into(),
+            expr: Box::new(Expr::IntLit(bits as i64)),
+        }
+    }
+}
+
+pub(crate) fn constant_float_bits(expr: &Expr) -> Option<u64> {
+    fn extract(expr: &Expr, depth: u8) -> Option<u64> {
+        if depth == 0 {
+            return None;
+        }
+        match expr {
+            Expr::FloatLit(value) => Some(value.0.to_bits()),
+            Expr::Unary { op, expr } => match op.as_str() {
+                "bits-to-float-f32" | "bits-to-float-f64" => {
+                    let bits = match expr.as_ref() {
+                        Expr::IntLit(bits) => *bits as u64,
+                        Expr::Unary { op, expr } if float_to_bits_width(op).is_some() => {
+                            let bits = extract(expr, depth - 1)?;
+                            if float_to_bits_width(op) == Some(32) {
+                                u64::from(narrow_f64_bits(bits))
+                            } else {
+                                bits
+                            }
+                        }
+                        _ => return None,
+                    };
+                    Some(if op == "bits-to-float-f32" {
+                        embed_f32_bits(bits as u32)
+                    } else {
+                        bits
+                    })
+                }
+                "float-cast-f64" => extract(expr, depth - 1),
+                "float-cast-f32" => {
+                    Some(embed_f32_bits(narrow_f64_bits(extract(expr, depth - 1)?)))
+                }
+                "neg" | "-" => Some(extract(expr, depth - 1)? ^ (1 << 63)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    extract(expr, 64)
+}
+
 pub(crate) fn integer_cast_spec(op: &str) -> Option<(u8, bool)> {
     match op.strip_prefix("int-cast-")? {
         "isize" => Some((64, true)),
@@ -2753,5 +2842,67 @@ mod integer_float_cast_tests {
                 Some(18446744073709551616.0)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ieee_bit_tests {
+    use super::*;
+    #[test]
+    fn f32_carriers_round_trip_every_special_kind_and_seeded_bits() {
+        let mut state = 0xd1b5_4a32_u32;
+        let mut values = vec![
+            0,
+            0x8000_0000,
+            1,
+            0x007f_ffff,
+            0x0080_0000,
+            0x7f7f_ffff,
+            0x7f80_0000,
+            0xff80_0000,
+            0x7f80_0001,
+            0xff80_0001,
+            0x7fc0_0000,
+            0xffff_ffff,
+        ];
+        for _ in 0..10_000 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            values.push(state);
+        }
+        for bits in values {
+            let carrier = embed_f32_bits(bits);
+            assert_eq!(narrow_f64_bits(carrier), bits, "{bits:08x}");
+            let expr = float_bits_expr(carrier);
+            assert_eq!(constant_float_bits(&expr), Some(carrier));
+            if !f64::from_bits(carrier).is_finite() {
+                assert!(
+                    matches!(expr, Expr::Unary {ref op, ref expr} if op == "bits-to-float-f64" && matches!(expr.as_ref(),Expr::IntLit(_)))
+                );
+            }
+        }
+    }
+    #[test]
+    fn f64_constants_keep_payloads_and_narrowing_boundaries() {
+        for bits in [
+            0,
+            1,
+            0x8000_0000_0000_0000,
+            0x7ff0_0000_0000_0000,
+            0xfff0_0000_0000_0000,
+            0x7ff0_0000_0000_0001,
+            0xfff8_1234_5678_9abc,
+        ] {
+            let expr = float_bits_expr(bits);
+            assert_eq!(constant_float_bits(&expr), Some(bits));
+            if !f64::from_bits(bits).is_finite() {
+                assert!(!matches!(expr, Expr::FloatLit(_)));
+            }
+        }
+        assert_eq!(narrow_f64_bits(0x47ef_ffff_efff_ffff), 0x7f7f_ffff);
+        assert_eq!(narrow_f64_bits(0x47ef_ffff_f000_0000), 0x7f80_0000);
+        assert_eq!(narrow_f64_bits(0x7ff0_0000_0000_0001), 0x7f80_0001);
+        assert_eq!(constant_float_bits(&Expr::IntLit(42)), None);
     }
 }

@@ -3139,3 +3139,161 @@ fn integer_float_projection_requires_recursively_checked_integer_operands() {
         }
     }
 }
+
+#[test]
+fn ieee_bit_projection_preserves_special_values_and_runtime_round_trips() {
+    let unary = |op: &str, expr: Expr| Expr::Unary {
+        op: op.into(),
+        expr: Box::new(expr),
+    };
+    let mut decls = Vec::new();
+    for width in [32, 64] {
+        decls.push(Decl::Function {
+            name: format!("round{width}"),
+            params: vec![("bits".into(), Typ::Int)],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(unary(
+                &format!("float-to-bits-f{width}"),
+                unary(
+                    &format!("bits-to-float-f{width}"),
+                    Expr::Ident("bits".into()),
+                ),
+            )))],
+        });
+    }
+    decls.push(Decl::Function {
+        name: "narrow".into(),
+        params: vec![("bits".into(), Typ::Int)],
+        ret: Typ::Int,
+        type_params: vec![],
+        body: vec![Stmt::Return(Some(unary(
+            "float-to-bits-f32",
+            unary("bits-to-float-f64", Expr::Ident("bits".into())),
+        )))],
+    });
+    for (name, bits) in [
+        ("snan", 0x7ff0_0000_0000_0001u64),
+        ("negative_zero", 1u64 << 63),
+        ("negative_infinity", 0xfff0_0000_0000_0000),
+    ] {
+        decls.push(Decl::Global {
+            name: name.into(),
+            typ: Typ::Float,
+            init: Some(Box::new(crate::core_ir::float_bits_expr(bits))),
+            mutable: false,
+            constant_value: false,
+        });
+    }
+    let module = UnifiedModule::new(decls);
+    assert_inferred_c_executes(
+        &module,
+        r#"
+        uint64_t patterns[] = {0,1,UINT64_C(0x8000000000000000),UINT64_C(0x7ff0000000000000),UINT64_C(0x7ff0000000000001),UINT64_C(0xfff8123456789abc)};
+        for(unsigned i=0;i<sizeof(patterns)/sizeof(patterns[0]);++i){if((uint64_t)round64((int64_t)patterns[i])!=patterns[i])return 7;}
+        uint32_t small[] = {0,1,0x80000000,0x7f800000,0x7f800001,0xff800001,0x7fc12345,0xffffffff};
+        for(unsigned i=0;i<sizeof(small)/sizeof(small[0]);++i){if((uint32_t)round32(small[i])!=small[i])return 8;}
+        if(narrow(INT64_C(0x47efffffefffffff))!=0x7f7fffff || narrow(INT64_C(0x47effffff0000000))!=0x7f800000)return 9;
+        uint64_t bits; memcpy(&bits,&snan,8);if(bits!=UINT64_C(0x7ff0000000000001))return 10;
+        memcpy(&bits,&negative_zero,8);if(bits!=UINT64_C(0x8000000000000000))return 11;
+        memcpy(&bits,&negative_infinity,8);if(bits!=UINT64_C(0xfff0000000000000))return 12;
+        return 42;
+    "#,
+    );
+}
+
+#[test]
+fn ieee_bit_projection_refuses_wrong_operand_domains() {
+    for (op, typ) in [
+        ("float-to-bits-f32", Typ::Int),
+        ("float-to-bits-f64", Typ::Bool),
+        ("bits-to-float-f32", Typ::Float),
+        ("bits-to-float-f64", Typ::Bool),
+    ] {
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "convert".into(),
+            params: vec![("value".into(), typ)],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Unary {
+                op: op.into(),
+                expr: Box::new(Expr::Ident("value".into())),
+            }))],
+        }]);
+        assert!(
+            emit_c_module(&module)
+                .unwrap_err()
+                .contains("float bit operation has an invalid operand type")
+        );
+    }
+}
+
+#[test]
+fn ieee_c_builtins_cannot_be_shadowed_by_source_bindings() {
+    let unary = |op: &str, value: Expr| Expr::Unary {
+        op: op.into(),
+        expr: Box::new(value),
+    };
+    let round = |value| unary("float-to-bits-f64", unary("bits-to-float-f64", value));
+    let ident = |name: &str| Expr::Ident(name.into());
+    let function = |name: &str, params, body| Decl::Function {
+        name: name.into(),
+        params,
+        ret: Typ::Int,
+        body,
+        type_params: vec![],
+    };
+    let encoded = sanitize_ident("__builtin_memcpy");
+    assert_ne!(sanitize_ident(&encoded), encoded);
+    assert_ne!(sanitize_ident(&encoded.replace('_', "-")), encoded);
+    let module = UnifiedModule::new(vec![function(
+        "calculate",
+        vec![
+            ("value".into(), Typ::Int),
+            ("__builtin_memcpy".into(), Typ::Int),
+            (encoded.clone(), Typ::Int),
+        ],
+        vec![Stmt::Return(Some(Expr::Binary {
+            op: "-".into(),
+            lhs: Box::new(Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(round(ident("value"))),
+                rhs: Box::new(ident("__builtin_memcpy")),
+            }),
+            rhs: Box::new(ident(&encoded)),
+        }))],
+    )]);
+    assert_inferred_c_executes(&module, "return calculate(40,3,1);");
+    let module = UnifiedModule::new(vec![function(
+        "calculate",
+        vec![("value".into(), Typ::Int)],
+        vec![
+            Stmt::Let("__builtin_memcpy".into(), Some(Typ::Int), ident("value")),
+            Stmt::Return(Some(round(ident("__builtin_memcpy")))),
+        ],
+    )]);
+    assert_inferred_c_executes(&module, "return calculate(42);");
+    for name in [
+        "__builtin_memcpy",
+        "__builtin_nan",
+        "__builtin_nans",
+        "__builtin_inf",
+    ] {
+        let module = UnifiedModule::new(vec![
+            function(
+                name,
+                vec![("value".into(), Typ::Int)],
+                vec![Stmt::Return(Some(ident("value")))],
+            ),
+            function(
+                "calculate",
+                vec![("value".into(), Typ::Int)],
+                vec![Stmt::Return(Some(round(Expr::Call {
+                    callee: Box::new(ident(name)),
+                    args: vec![ident("value")],
+                })))],
+            ),
+        ]);
+        assert_inferred_c_executes(&module, "return calculate(42);");
+    }
+}

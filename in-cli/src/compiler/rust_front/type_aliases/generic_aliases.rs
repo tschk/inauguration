@@ -22,7 +22,7 @@ impl Dependencies {
             unknown: false,
         }
     }
-    fn merge(&mut self, other: Self) {
+    pub(super) fn merge(&mut self, other: Self) {
         self.used.extend(other.used);
         self.unknown |= other.unknown;
     }
@@ -98,7 +98,12 @@ fn failure_result(failure: Option<Failure>) -> Resolved {
     )
 }
 fn frame_key(frame: &Frame) -> String {
-    let mut key = format!("{:p}:{:?}", Rc::as_ptr(&frame.catalog), frame.module);
+    let mut key = format!(
+        "{:p}:{:?}:signature{}",
+        Rc::as_ptr(&frame.catalog),
+        frame.module,
+        source_signatures::cache_key()
+    );
     for scope in &frame.locals {
         if scope.parameters {
             let mut parameters: Vec<_> = scope.bindings.iter().collect();
@@ -429,6 +434,9 @@ pub(super) fn rhs_type(
     active: &mut HashSet<Key>,
 ) -> Result<Resolved, Failure> {
     let _query = query()?;
+    if source_signatures::active() {
+        return source_signatures::rhs_type(typ, frame, active);
+    }
     match typ {
         syn::Type::Path(path) => {
             let mut failure = None;

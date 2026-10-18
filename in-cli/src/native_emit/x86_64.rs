@@ -135,6 +135,16 @@ pub fn movq_xmm_gpr(xmm: u8, gpr: u8, to_xmm: bool) -> Vec<u8> {
     code
 }
 
+/// Move the low scalar single bits; a GPR destination is zero-extended.
+pub fn movd_xmm_gpr(xmm: u8, gpr: u8, to_xmm: bool) -> Vec<u8> {
+    let mut code = vec![0x66];
+    if !is_32bit() && (xmm >= 8 || gpr >= 8) {
+        code.push(0x40 | ((xmm >> 3) << 2) | (gpr >> 3));
+    }
+    code.extend_from_slice(&[0x0f, if to_xmm { 0x6e } else { 0x7e }, modrm(3, xmm, gpr)]);
+    code
+}
+
 /// Convert a signed integer register to a scalar double.
 pub fn cvtsi2sd(xmm: u8, gpr: u8) -> Vec<u8> {
     let mut code = vec![0xf2];
@@ -812,6 +822,18 @@ mod tests {
     #[test]
     fn encodes_scalar_double_register_operations() {
         assert_eq!(super::sar_reg_cl(super::RAX), [0x48, 0xd3, 0xf8]);
+        assert_eq!(
+            super::movd_xmm_gpr(0, super::RAX, false),
+            [0x66, 0x0f, 0x7e, 0xc0]
+        );
+        assert_eq!(
+            super::movd_xmm_gpr(8, super::R9, false),
+            [0x66, 0x45, 0x0f, 0x7e, 0xc1]
+        );
+        assert_eq!(
+            super::movd_xmm_gpr(9, super::R8, true),
+            [0x66, 0x45, 0x0f, 0x6e, 0xc8]
+        );
         assert_eq!(super::sar_reg_cl(super::R9), [0x49, 0xd3, 0xf9]);
         assert_eq!(
             super::convert_scalar_float(0, 1, true),

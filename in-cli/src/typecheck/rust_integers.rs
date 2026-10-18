@@ -9,10 +9,22 @@ struct Kind {
     bits: u8,
     signed: bool,
     source: bool,
+    pointer_sized: bool,
 }
 impl Kind {
     fn same_width(self, other: Self) -> bool {
         self.bits == other.bits && self.signed == other.signed
+    }
+    fn source_compatible(self, other: Self) -> bool {
+        self.same_width(other)
+            && (!(self.source && other.source) || self.pointer_sized == other.pointer_sized)
+    }
+    fn source_name(self) -> String {
+        if self.pointer_sized {
+            if self.signed { "isize" } else { "usize" }.into()
+        } else {
+            format!("{}{}", if self.signed { "i" } else { "u" }, self.bits)
+        }
     }
     fn prefer_source(self, other: Self) -> Self {
         if !self.source && other.source {
@@ -46,17 +58,14 @@ impl Kind {
             bits,
             signed,
             source: true,
+            pointer_sized: matches!(name, "isize" | "usize"),
         })
     }
     fn typ(self) -> Typ {
         if !self.source {
             return Typ::Int;
         }
-        Typ::Named(format!(
-            "#rust-integer-{}{}",
-            if self.signed { "i" } else { "u" },
-            self.bits
-        ))
+        Typ::Named(format!("#rust-integer-{}", self.source_name()))
     }
     fn cast(self, value: Expr) -> Expr {
         core_ir::integer_cast_expr(
@@ -91,15 +100,13 @@ impl Kind {
 }
 fn same_kinds(left: Option<Kind>, right: Option<Kind>) -> bool {
     left.zip(right)
-        .is_some_and(|(left, right)| left.same_width(right))
+        .is_some_and(|(left, right)| left.source_compatible(right))
 }
 fn kind_mismatch(actual: Kind, expected: Kind) -> core_ir::type_proofs::ResolutionFailure {
     let message = format!(
-        "incompatible Rust integer kinds: expected {}{}, found {}{}",
-        if expected.signed { "i" } else { "u" },
-        expected.bits,
-        if actual.signed { "i" } else { "u" },
-        actual.bits,
+        "incompatible Rust integer kinds: expected {}, found {}",
+        expected.source_name(),
+        actual.source_name(),
     );
     if actual.source && expected.source {
         core_ir::type_proofs::ResolutionFailure::Invalid(message)
@@ -144,6 +151,7 @@ fn primitive_constant(name: &str, semantics: IntegerSemantics) -> Option<(Kind, 
                     bits: 32,
                     signed: false,
                     source: true,
+                    pointer_sized: false,
                 },
                 i64::from(kind.bits),
             ));
@@ -839,6 +847,7 @@ impl Pass<'_> {
                     },
                     signed: true,
                     source: false,
+                    pointer_sized: false,
                 }),
                 env,
                 ret,
@@ -1124,6 +1133,7 @@ impl Pass<'_> {
                         bits: 32,
                         signed: true,
                         source: false,
+                        pointer_sized: false,
                     })
                 });
                 if self.rewrite
@@ -1169,6 +1179,46 @@ impl Pass<'_> {
                     }
                 }
                 kind
+            }
+            Expr::Unary { op, expr: value }
+                if core_ir::rust_floats::from_bits_kind(op).is_some() =>
+            {
+                let target = core_ir::rust_floats::from_bits_kind(op);
+                let suffix = if target == Some(core_ir::rust_floats::Kind::F32) {
+                    "u32"
+                } else {
+                    "u64"
+                };
+                let expected = Kind::parse(suffix, self.semantics);
+                let outer_place = self.active_place.take();
+                let outer_paths = std::mem::take(&mut self.active_projections);
+                let outer_unresolved = std::mem::replace(&mut self.unresolved_width, false);
+                let source = self.expression(value, expected, env, ret);
+                self.active_place = outer_place;
+                self.active_projections = outer_paths;
+                self.unresolved_width = outer_unresolved;
+                if self.rewrite {
+                    let preserved = invalid_preserving_proof(value);
+                    if matches!(&preserved,Expr::Ident(name)if core_ir::type_proofs::decode(name).is_some())
+                    {
+                        *expr = preserved;
+                    } else if let Some(kind) =
+                        source.filter(|kind| kind.source && kind.supported(self.semantics))
+                    {
+                        *expr = Expr::Unary {
+                            op: format!(
+                                "bits-to-float-{}",
+                                if suffix == "u32" { "f32" } else { "f64" }
+                            ),
+                            expr: Box::new(kind.cast((**value).clone())),
+                        };
+                    } else {
+                        *expr=Expr::Ident(core_ir::type_proofs::ResolutionFailure::Unsupported(
+                            "Rust from_bits integer source is unresolved or unsupported on this target".into(),
+                        ).symbol());
+                    }
+                }
+                None
             }
             Expr::Unary { op, expr: value } if core_ir::rust_floats::cast_kind(op).is_some() => {
                 let target = core_ir::rust_floats::cast_kind(op);
@@ -1315,6 +1365,7 @@ impl Pass<'_> {
                             },
                             signed: true,
                             source: false,
+                            pointer_sized: false,
                         })
                     } else {
                         None
@@ -1917,7 +1968,7 @@ impl Pass<'_> {
         bad |= kind.is_some_and(|kind| !kind.supported(self.semantics));
         if let Some((actual, expected)) = kind
             .zip(expected)
-            .filter(|(actual, expected)| !actual.same_width(*expected))
+            .filter(|(actual, expected)| !actual.source_compatible(*expected))
         {
             let proof = kind_mismatch(actual, expected);
             if !mismatch
@@ -2310,7 +2361,8 @@ fn decl_has_metadata(value: &Decl) -> bool {
         }
     }
     fn expr(value: &Expr) -> bool {
-        if matches!(value,Expr::Unary{op,..} if core_ir::rust_floats::cast_kind(op).is_some()) {
+        if matches!(value,Expr::Unary{op,..} if core_ir::rust_floats::cast_kind(op).is_some() || core_ir::rust_floats::from_bits_kind(op).is_some())
+        {
             return true;
         }
         if matches!(value, Expr::Ident(name) if primitive_member(name, IntegerSemantics::Word64).is_some())
@@ -2772,7 +2824,8 @@ mod tests {
                 Kind {
                     bits: 64,
                     signed: true,
-                    source: false
+                    source: false,
+                    pointer_sized: false,
                 }
             )
             .is_invalid()
@@ -4409,5 +4462,76 @@ mod direct_cast_context_tests {
             }
         });
         assert_eq!(calls, 1, "{module:?}");
+    }
+}
+
+#[cfg(test)]
+mod ieee_integer_identity_tests {
+    use super::*;
+    #[test]
+    fn ieee_pointer_identity_roundtrips_without_changing_physical_widths() {
+        for semantics in [IntegerSemantics::Word32, IntegerSemantics::Word64] {
+            for (pointer, fixed) in if semantics == IntegerSemantics::Word32 {
+                [("usize", "u32"), ("isize", "i32")]
+            } else {
+                [("usize", "u64"), ("isize", "i64")]
+            } {
+                let pointer = Kind::parse(pointer, semantics).unwrap();
+                let fixed = Kind::parse(fixed, semantics).unwrap();
+                assert!(pointer.same_width(fixed));
+                assert!(!pointer.source_compatible(fixed));
+                assert_eq!(typ_kind(&pointer.typ(), semantics), Some(pointer));
+                assert_eq!(typ_kind(&fixed.typ(), semantics), Some(fixed));
+                assert!(kind_mismatch(pointer, fixed).is_invalid());
+                let weak = Kind {
+                    source: false,
+                    ..fixed
+                };
+                assert!(weak.source_compatible(pointer));
+                assert_eq!(weak.prefer_source(pointer), pointer);
+            }
+        }
+    }
+    #[test]
+    fn ieee_from_bits_supplies_integer_context_without_coercing_owned_sources() {
+        for (width, suffix) in [(32, "u32"), (64, "u64")] {
+            let mut module =
+                crate::compiler::rust_front::parse_rust_source("fn main()->i64{42}").unwrap();
+            let Decl::Function { body, .. } = &mut module.decls[0] else {
+                panic!()
+            };
+            *body = vec![Stmt::Expr(Expr::Unary {
+                op: format!("#rust-float-from-bits-f{width}"),
+                expr: Box::new(Expr::Unary {
+                    op: "rust-integer-literal".into(),
+                    expr: Box::new(Expr::IntLit(0)),
+                }),
+            })];
+            assert!(has_metadata(&module));
+            normalize(&TypeChecker, &mut module, IntegerSemantics::Word64);
+            assert!(
+                TypeChecker.typed_proof_nodes(&module.decls).is_empty(),
+                "{suffix}: {module:?}"
+            );
+            assert!(
+                matches!(&module.decls[0],Decl::Function{body,..}if matches!(&body[0],Stmt::Expr(Expr::Unary{op,..})if op==&format!("bits-to-float-f{width}")))
+            );
+        }
+        for semantics in [IntegerSemantics::Word32, IntegerSemantics::Word64] {
+            let source = "fn main()->i32{let value=0usize;let bits=f32::from_bits(value);42}";
+            let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let module = super::super::normalize_module_with_semantics(
+                crate::parser_registry::ParserId::Rust,
+                &module,
+                semantics,
+            );
+            assert!(
+                TypeChecker
+                    .typed_proof_nodes(&module.decls)
+                    .values()
+                    .any(core_ir::type_proofs::ResolutionFailure::is_invalid),
+                "{semantics:?}: {module:?}"
+            );
+        }
     }
 }

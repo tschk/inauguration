@@ -164,15 +164,44 @@ Canonical Int64 `>>` and `>>=` preserve the sign bit at runtime, matching shared
 
 Rust `as f32` and `as f64` preserve explicit precision conversion for canonical floating values. `f32` conversion rounds to IEEE single precision, then widens into the internal Float64 word; `f64` conversion preserves that word. Both native CPUs and C projection use this representation. Rust `f64` annotations normalize to the canonical floating type, and explicit `f32`/`f64` literal suffixes retain their precision, including decimal literals without a point. Overflowing source literals remain refused; floating-width conversion itself can produce infinity or subnormal values.
 
-Integer-to-floating casts and full typed `f32` binding/arithmetic semantics remain pending. The shared width operations require canonical Float operands rather than guessing the representation of named types.
+Owned Rust floating bindings and represented arithmetic retain their source precision until normalization erases the private width metadata. The shared width operations require canonical Float operands rather than guessing the representation of named types.
 
 ## Saturating floating-to-integer casts
 
 Rust numeric casts retain their target until typed normalization can resolve the source, including fields, indexed vector values, and function results. Canonical floating operands cast to signed or unsigned 8-, 16-, 32-, or 64-bit integers use `float-saturate-*` unary IR operations. They truncate toward zero, clamp to the destination range, and map NaN to zero. Unsigned 64-bit results retain their bits in the existing Int64 word. The operand is evaluated once. Constant folding, C projection, and the AArch64/x86_64 native emitters share these semantics; 32-bit x86 emission remains refused.
 
-Raw integer-width operations still require integral operands. C's existing `float-to-int` operation retains its finite, in-range contract. Rust integer-to-floating casts and complete Rust overflow/panic semantics remain pending.
+Raw integer-width operations still require integral operands. C's existing `float-to-int` operation retains its finite, in-range contract. Complete Rust overflow/panic semantics remain outside this conversion contract.
+
+## Rust associated function lookup
+
+Concrete source-owned calls such as `Factory::value()` resolve against the receiver's nominal identity and the caller's visible traits before IR function facts are collected. Inherent methods take priority. A unique applicable trait implementation retains its exact receiver/trait namespace, including through receiver type aliases and trait import aliases. Trait positions reject type aliases and require a declared trait member; competing visible candidates are rejected rather than selected by name or iteration order. Known-false cfg methods are omitted.
+
+Conditional applicability, unrepresented generic implementations, local ownership, trait defaults without emitted implementations and incomplete source catalogs remain explicit refusal boundaries. Concrete explicit UFCS resolves the owned receiver/trait pair to the same emitted implementation namespace without requiring a trait import.
+
+## Integer-to-floating casts
+
+Rust integer-to-floating casts retain the source signedness and destination precision. Canonical `int-to-float` / `uint-to-float` produce Float64; `int-to-float-f32` / `uint-to-float-f32` round directly from the signed or unsigned 64-bit integer to Float32 before widening into the Float64 carrier. This avoids double rounding through Float64. Unsigned sources retain their complete word bits. These operations require resolved integer operands and evaluate them once.
+
+## Floating bit conversions
+
+Rust primitive `f32` / `f64` `from_bits` and `to_bits` methods lower to four unary operations:
+
+| Operation | Input | Result |
+| --- | --- | --- |
+| `float-to-bits-f32` | Float64 carrier | zero-extended Float32 bits in Int |
+| `bits-to-float-f32` | low 32 bits of Int | Float32 value in the Float64 carrier |
+| `float-to-bits-f64` | Float | identical raw bits in Int |
+| `bits-to-float-f64` | Int | identical raw bits in Float |
+
+Float32 NaNs embed their sign and fraction bits directly in the Float64 carrier. Bit conversions and source-value transfers preserve the quiet/signaling bit and payload without numeric NaN conversion. Transfers compose the two Float32 bit operations, evaluating the source once. Same-width Rust casts preserve the value; cross-width numeric casts promise NaN classification rather than payload identity.
+
+`from_bits` requires the exact Rust unsigned primitive (`u32` or `u64`), with contextual inference for unsuffixed integers. It does not coerce signed integers, a different width, or `usize`. `to_bits` retains its exact unsigned result type until integer normalization. Proven reference receivers support dot-method autodereference; by-value associated calls retain their ordinary argument contract. Nominal methods and shadowed primitive paths do not acquire primitive behavior.
+
+Constant folding, bounded static evaluation, scalar/array/flat-record global data and C projection preserve raw bits. Non-finite constants remain integer bit constructors rather than non-finite Float literals. Native runtime conversions use the existing 64-bit carriers; unsupported target layouts remain refused. C projection uses alias-safe bit copies, exact finite hexadecimal constants and explicit infinity/NaN constants. Source identifiers that collide with compiler builtins are escaped consistently across declarations and references.
 
 ## Rust integer casts
+
+Direct unsuffixed integer literals infer their source kind from an integer cast, including unary operators and block result edges. Out-of-range or unsigned-negative sources are rejected before execution. Independently inferred bindings and arithmetic keep their own source types. Explicitly typed sources retain ordinary narrowing behavior.
 
 Explicit Rust casts to signed and unsigned 8-, 16-, 32-, and 64-bit integers truncate low bits and then sign- or zero-extend into the canonical Int64 word. Boolean operands become zero or one. `isize`/`usize` resolve to the selected target word. Shared bit operations implement these conversions for both native backends and C projection, with one evaluation of the operand. Rust integer declarations and suffixed literals retain their exact widths through contextual literal inference, calls, fields, and container values. Unsigned division, remainder, comparisons, and right shifts use the shared integer operations; narrow bitwise and shift results retain their source width. Thumb supports the represented 8-, 16-, and 32-bit casts and refuses wider values. Thumb binary scratch storage follows the transformed expression depth, including cast expansion and Harden expressions; lazy operators do not reserve an extra pair. Functions exceeding the existing 508-byte local-frame encoding remain refused. Primitive `wrapping_add`, `wrapping_sub`, and `wrapping_mul` use the same width-preserving operations at runtime and in bounded constant evaluation, after user-defined method resolution. Constant overflow in ordinary arithmetic and invalid constant shift counts refuse before width conversion; dynamic overflow/panic behavior remains incomplete. Existing untyped runtime builtins retain their canonical integer compatibility path.
 

@@ -41,8 +41,34 @@ fn signed_word_from_bits(bits: &str) -> String {
     format!("{bits} <= INT64_MAX ? (int64_t){bits} : -INT64_C(1) - (int64_t)(UINT64_MAX - {bits})")
 }
 
+fn float_constant(bits: u64) -> String {
+    let sign = if bits >> 63 == 0 { "" } else { "-" };
+    let exponent = (bits >> 52) & 0x7ff;
+    let fraction = bits & 0x000f_ffff_ffff_ffff;
+    if exponent == 0x7ff {
+        if fraction == 0 {
+            return format!("{sign}__builtin_inf()");
+        }
+        let builtin = if fraction & (1 << 51) == 0 {
+            "__builtin_nans"
+        } else {
+            "__builtin_nan"
+        };
+        return format!(
+            "{sign}{builtin}(\"0x{:x}\")",
+            fraction & 0x0007_ffff_ffff_ffff
+        );
+    }
+    if exponent == 0 {
+        format!("{sign}0x0.{fraction:013x}p-1022")
+    } else {
+        format!("{sign}0x1.{fraction:013x}p{}", exponent as i32 - 1023)
+    }
+}
+
 fn sanitize_ident(name: &str) -> String {
-    name.chars()
+    let sanitized: String = name
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' {
                 c
@@ -50,7 +76,18 @@ fn sanitize_ident(name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    // Reserve compiler builtin references, including inside source lexical scopes.
+    if sanitized.starts_with("__builtin_") || sanitized.starts_with("in_user_symbol_") {
+        use std::fmt::Write;
+        let mut escaped = String::from("in_user_symbol_");
+        for byte in name.bytes() {
+            let _ = write!(escaped, "{byte:02x}");
+        }
+        escaped
+    } else {
+        sanitized
+    }
 }
 
 fn escape_c_string(s: &str) -> String {
@@ -558,7 +595,64 @@ impl Ctx {
         self.func_names.contains(name)
     }
 
+    fn float_bit_expression(&mut self, op: &str, operand: &Expr) -> String {
+        let to_bits = crate::core_ir::float_to_bits_width(op);
+        let width = to_bits
+            .or_else(|| crate::core_ir::bits_to_float_width(op))
+            .unwrap();
+        let expected = if to_bits.is_some() {
+            Typ::Float
+        } else {
+            Typ::Int
+        };
+        if TypeChecker::new()
+            .checked_expr_type(operand, &self.facts, &self.types)
+            .map(|typ| typ.canonical())
+            != Some(expected)
+        {
+            self.fail("c-backend: float bit operation has an invalid operand type".into());
+            return "0".into();
+        }
+        if self.global_initializer {
+            self.fail(
+                "c-backend: float bit operation in a global initializer requires constant folding"
+                    .into(),
+            );
+            return "0".into();
+        }
+        let value = self.fresh("float_bit_value");
+        let bits = self.fresh("float_bits");
+        let result = self.fresh("float_bit_result");
+        let narrow = self.fresh("float_narrow");
+        let source = self.expr_str(operand);
+        if width == 64 {
+            return if to_bits.is_some() {
+                let signed = signed_word_from_bits(&bits);
+                format!(
+                    "__extension__({{ double {value} = ({source}); uint64_t {bits}; __builtin_memcpy(&{bits}, &{value}, 8); {signed}; }})"
+                )
+            } else {
+                format!(
+                    "__extension__({{ uint64_t {bits} = (uint64_t)({source}); double {result}; __builtin_memcpy(&{result}, &{bits}, 8); {result}; }})"
+                )
+            };
+        }
+        if to_bits.is_some() {
+            let magnitude = self.fresh("float_magnitude");
+            format!(
+                "__extension__({{ double {value} = ({source}); uint64_t {bits}; __builtin_memcpy(&{bits}, &{value}, 8); uint64_t {magnitude} = {bits} & UINT64_C(0x7fffffffffffffff); uint32_t {result}; if ({magnitude} > UINT64_C(0x7ff0000000000000)) {{ {result} = (uint32_t)({bits} >> 32) & UINT32_C(0x80000000); uint32_t {narrow} = (uint32_t)({bits} >> 29) & UINT32_C(0x007fffff); {result} |= UINT32_C(0x7f800000) | ({narrow} ? {narrow} : UINT32_C(1)); }} else if ({magnitude} > UINT64_C(0x47efffffe0000000)) {{ {result} = ((uint32_t)({bits} >> 32) & UINT32_C(0x80000000)) | ({magnitude} < UINT64_C(0x47effffff0000000) ? UINT32_C(0x7f7fffff) : UINT32_C(0x7f800000)); }} else {{ float {narrow} = (float){value}; __builtin_memcpy(&{result}, &{narrow}, 4); }} (int64_t){result}; }})"
+            )
+        } else {
+            format!(
+                "__extension__({{ uint32_t {value} = (uint32_t)({source}); double {result}; if (({value} & UINT32_C(0x7f800000)) == UINT32_C(0x7f800000) && ({value} & UINT32_C(0x007fffff))) {{ uint64_t {bits} = ((uint64_t)({value} & UINT32_C(0x80000000)) << 32) | UINT64_C(0x7ff0000000000000) | ((uint64_t)({value} & UINT32_C(0x007fffff)) << 29); __builtin_memcpy(&{result}, &{bits}, 8); }} else {{ float {narrow}; __builtin_memcpy(&{narrow}, &{value}, 4); {result} = (double){narrow}; }} {result}; }})"
+            )
+        }
+    }
+
     fn expr_str(&mut self, expr: &Expr) -> String {
+        if let Some(bits) = crate::core_ir::constant_float_bits(expr) {
+            return float_constant(bits);
+        }
         match expr {
             Expr::Conditional {
                 cond,
@@ -574,18 +668,7 @@ impl Ctx {
             Expr::Block { .. } => unreachable!("block values rejected by C backend scan"),
             Expr::UnitLit => unreachable!("unit values refused by C backend scan"),
             Expr::IntLit(n) => integer_literal(*n),
-            Expr::FloatLit(f) => {
-                let bits = f.0;
-                if bits.is_finite() {
-                    format!("{:?}", bits)
-                } else if bits.is_nan() {
-                    "(0.0/0.0)".into()
-                } else if bits.is_sign_negative() {
-                    "(-1.0/0.0)".into()
-                } else {
-                    "(1.0/0.0)".into()
-                }
-            }
+            Expr::FloatLit(f) => float_constant(f.0.to_bits()),
             Expr::BoolLit(b) => {
                 if *b {
                     "1".into()
@@ -851,6 +934,11 @@ impl Ctx {
                     return format!(
                         "(({element}*){helper}(({source}), UINT64_C({count}), {element_size}))"
                     );
+                }
+                if crate::core_ir::float_to_bits_width(op).is_some()
+                    || crate::core_ir::bits_to_float_width(op).is_some()
+                {
+                    return self.float_bit_expression(op, expr);
                 }
                 if crate::core_ir::integer_cast_spec(op).is_some() {
                     let mut operand = expr.as_ref().clone();

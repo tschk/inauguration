@@ -162,6 +162,12 @@ pub(crate) fn metadata_present(decls: &[super::Decl], mode: MetadataKind) -> boo
     }
     fn expr(value: &Expr, mode: MetadataKind) -> bool {
         match value {
+            Expr::Ident(name)
+                if mode == MetadataKind::RustFloats
+                    && super::rust_floats::bit_method(name).is_some() =>
+            {
+                return true;
+            }
             Expr::Unary { op, .. }
                 if mode == MetadataKind::RustFloats
                     && super::rust_floats::inferred_type(op).is_some() =>

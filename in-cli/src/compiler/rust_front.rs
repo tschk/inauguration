@@ -1876,6 +1876,15 @@ fn resolve_impl_type(
     resolve(value, owner, implementation, &mut HashSet::new())
 }
 
+fn impl_method_symbol(implementation: &syn::ItemImpl, method: &syn::Ident) -> String {
+    let owner = compact_rust_tokens(&implementation.self_ty);
+    if let Some((_, path, _)) = &implementation.trait_ {
+        format!("{owner}::{}::{method}", compact_rust_tokens(path))
+    } else {
+        format!("{owner}::{method}")
+    }
+}
+
 fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
     let _type_parameters = type_aliases::generic_scope(&i.generics);
     let _primitive_roots = PrimitiveRootScope::new(primitive_root_generics(&i.generics), true);
@@ -1884,24 +1893,18 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
     let mut decls = Vec::new();
     for item in &i.items {
         if let syn::ImplItem::Fn(method) = item {
+            let method_presence = type_aliases::attrs_presence(&method.attrs);
+            if method_presence == type_aliases::Presence::Inactive {
+                continue;
+            }
             let _type_parameters = type_aliases::generic_scope(&method.sig.generics);
             let _primitive_roots =
                 PrimitiveRootScope::new(primitive_root_generics(&method.sig.generics), true);
             let f = method.clone();
             let signature_locals = signature_length_locals(&f.sig);
             let _length_shadows = LengthShadowScope::new(&signature_locals);
-            let method_name = if let Some((_, trait_path, _)) = &i.trait_ {
-                // Trait methods occupy their receiver/trait namespace, never the free-function namespace.
-                format!(
-                    "{}::{}::{}",
-                    self_type,
-                    compact_rust_tokens(trait_path),
-                    f.sig.ident
-                )
-            } else {
-                // Inherent impl: `Type::method_name` (matches Rust path syntax)
-                format!("{}::{}", self_type, f.sig.ident)
-            };
+            // Trait methods retain their receiver/trait namespace.
+            let method_name = impl_method_symbol(i, &f.sig.ident);
             // Prepend self param if present
             let params: Vec<(String, Typ)> = f
                 .sig
@@ -1946,7 +1949,23 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
                 local_types.insert(pname.clone(), type_to_string(pty));
                 local_types.insert(format!("{LENGTH_LOCAL}{pname}"), String::new());
             }
-            let body = lower_block_with_types(&f.block, &mut local_types);
+            let mut body = lower_block_with_types(&f.block, &mut local_types);
+            if let Some((_, trait_path, _)) = &i.trait_
+                && let Some(failure) = type_aliases::trait_path_failure(trait_path)
+            {
+                body.insert(0, Stmt::Expr(Expr::Ident(failure.symbol())));
+            }
+            if method_presence == type_aliases::Presence::Conditional {
+                body.insert(
+                    0,
+                    Stmt::Expr(Expr::Ident(
+                        crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                            "source impl method depends on unresolved cfg predicates".into(),
+                        )
+                        .symbol(),
+                    )),
+                );
+            }
             let mut declaration = Decl::Function {
                 name: method_name,
                 params,
@@ -2013,6 +2032,15 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
                             || crate::typecheck::rust_integers::wrapping_operator(member)
                                 .is_some()) =>
                 {
+                    format!("{owner}::{member}")
+                }
+                Ok(owner)
+                    if crate::core_ir::rust_floats::kind(&owner).is_some()
+                        && matches!(member, "from_bits" | "to_bits") =>
+                {
+                    let Typ::Named(owner) = owner else {
+                        return None;
+                    };
                     format!("{owner}::{member}")
                 }
                 Ok(Typ::Named(owner))
@@ -2473,6 +2501,46 @@ fn rust_integer_constant(path: &syn::Path, call_target: bool) -> Option<String> 
         );
     }
     Some(format!("#rust-integer-{kind}::{}", member.ident))
+}
+
+fn rust_float_member(path: &syn::Path, call_target: bool) -> Option<String> {
+    let mut owner = path.clone();
+    let member = owner.segments.pop()?.into_value();
+    if rust_float_path(&owner).is_some() && ambiguous_primitive_root(&owner) {
+        return Some(
+            crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                "shadowed primitive float root requires namespace resolution".into(),
+            )
+            .symbol(),
+        );
+    }
+    let resolved = match type_aliases::resolve_value_owner(&owner) {
+        Ok(Some(typ)) => typ,
+        Err(proof) => return Some(proof.symbol()),
+        _ => return None,
+    };
+    let kind = crate::core_ir::rust_floats::kind(&resolved)?;
+    if owner.leading_colon.is_some() && owner.segments.len() == 1 {
+        return Some(
+            crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                "absolute bare primitive float owner is unresolved".into(),
+            )
+            .symbol(),
+        );
+    }
+    if call_target
+        && matches!(member.arguments, syn::PathArguments::None)
+        && matches!(member.ident.to_string().as_str(), "to_bits" | "from_bits")
+    {
+        Some(format!("#rust-float-{}::{}", kind.name(), member.ident))
+    } else {
+        Some(
+            crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                "primitive float associated value is unsupported".into(),
+            )
+            .symbol(),
+        )
+    }
 }
 
 // Resolve explicit vector type arguments while their source lexical scope is still active.
@@ -3141,6 +3209,75 @@ fn tuple_let_names(pattern: &syn::Pat, names: &mut HashSet<String>) -> bool {
     }
 }
 
+// Unsupported matching still creates lexical binders. Leaving them absent would
+// resolve later reads to an outer variable and invent contradictory source types.
+fn unsupported_pattern_shadows(
+    pattern: &syn::Pat,
+    initializer: &str,
+    local_types: &mut HashMap<String, String>,
+    out: &mut Vec<Stmt>,
+) {
+    let proof = crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+        "local pattern matching requires owned source lowering".into(),
+    );
+    out.push(Stmt::Expr(Expr::Ident(proof.symbol())));
+    let bindings = length_pattern_locals(pattern, &HashMap::new());
+    let mut names: Vec<_> = bindings
+        .keys()
+        .filter_map(|name| name.strip_prefix(LENGTH_LOCAL).map(str::to_string))
+        .collect();
+    names.sort();
+    for name in names {
+        local_types.remove(&name);
+        local_types.insert(format!("{LENGTH_LOCAL}{name}"), String::new());
+        // The source binder is initialized by matching, but its projection is
+        // unsupported. A failure call is no invented runtime value; execution
+        // contracts reject it while definite initialization can track the bind.
+        out.push(Stmt::Let(
+            name,
+            Some(proof.clone().typ()),
+            Expr::Call {
+                callee: Box::new(Expr::Ident(proof.symbol())),
+                args: vec![Expr::Ident(initializer.into())],
+            },
+        ));
+    }
+}
+fn lower_unsupported_local_pattern(
+    pattern: &syn::Pat,
+    initializer: &syn::Expr,
+    local_types: &mut HashMap<String, String>,
+    out: &mut Vec<Stmt>,
+) {
+    // Preserve the whole initializer's annotation as well as its old lexical
+    // scope. The whole pattern type is not the type of each nested binder.
+    let typ = local_decl_type(pattern, local_types);
+    let value = lower_expr_with_types(initializer, local_types);
+    let name = format!("#unsupported-pattern-initializer-{}", out.len());
+    out.push(Stmt::Let(name.clone(), typ, value));
+    unsupported_pattern_shadows(pattern, &name, local_types, out);
+}
+fn tuple_bindings_supported(pattern: &syn::Pat) -> bool {
+    match pattern {
+        syn::Pat::Ident(value) => value.by_ref.is_none() && value.subpat.is_none(),
+        syn::Pat::Tuple(value) => value.elems.iter().all(tuple_bindings_supported),
+        syn::Pat::Type(value) => tuple_bindings_supported(&value.pat),
+        syn::Pat::Paren(value) => tuple_bindings_supported(&value.pat),
+        syn::Pat::Wild(_) | syn::Pat::Rest(_) => true,
+        _ => false,
+    }
+}
+fn simple_local_pattern(pattern: &syn::Pat) -> bool {
+    match pattern {
+        syn::Pat::Ident(value) => value.subpat.is_none(),
+        syn::Pat::Type(value) => simple_local_pattern(&value.pat),
+        syn::Pat::Paren(value) => simple_local_pattern(&value.pat),
+        syn::Pat::Reference(value) => simple_local_pattern(&value.pat),
+        syn::Pat::Wild(_) => true,
+        _ => false,
+    }
+}
+
 fn borrowed_tuple_initializer(expr: &syn::Expr) -> bool {
     match expr {
         syn::Expr::Reference(_) => true,
@@ -3229,11 +3366,17 @@ fn lower_block_inner_with_types_go(
                     if tuple_let_pattern(&local.pat) {
                         let mut names = HashSet::new();
                         if !tuple_let_names(&local.pat, &mut names)
+                            || !tuple_bindings_supported(&local.pat)
                             || borrowed_tuple_initializer(&init.expr)
                         {
-                            out.push(Stmt::Expr(Expr::Ident(
-                                "#unsupported-tuple-let-pattern".into(),
-                            )));
+                            // The initializer sees the OLD scope. Only afterward
+                            // do unsupported patterns shadow their actual binders.
+                            lower_unsupported_local_pattern(
+                                &local.pat,
+                                &init.expr,
+                                local_types,
+                                &mut out,
+                            );
                             continue;
                         }
                         if unit_tuple_pattern(&local.pat)
@@ -3263,7 +3406,16 @@ fn lower_block_inner_with_types_go(
                         lower_tuple_let_bindings(&local.pat, Expr::Ident(name), &mut out);
                         continue;
                     }
-                    // For destructuring patterns (Err(e), Some(x), etc.), use a temp name
+                    if !simple_local_pattern(&local.pat) {
+                        lower_unsupported_local_pattern(
+                            &local.pat,
+                            &init.expr,
+                            local_types,
+                            &mut out,
+                        );
+                        continue;
+                    }
+                    // Plain binding lowering follows after unsupported destructuring.
                     let is_simple = pattern_name(&local.pat).is_some();
                     let name = if is_simple {
                         pattern_name(&local.pat).unwrap_or_else(|| "_pat".to_string())
@@ -3908,9 +4060,21 @@ fn lower_expr_with_types_inner(
             let path = compact_rust_tokens(&scoped_path);
             Expr::Ident(if let Some(receiver) = &p.qself {
                 // Match the receiver/trait identity used for impl declarations, including UFCS.
-                format!("{}::{path}", compact_rust_tokens(&receiver.ty))
+                if call_target
+                    && let Some(resolved) = type_aliases::resolve_trait_ufcs(receiver, &p.path)
+                {
+                    resolved.unwrap_or_else(|proof| proof.symbol())
+                } else {
+                    format!("{}::{path}", compact_rust_tokens(&receiver.ty))
+                }
             } else {
-                rust_integer_constant(&p.path, call_target).unwrap_or(path)
+                if call_target && let Some(resolved) = type_aliases::resolve_trait_static(&p.path) {
+                    resolved.unwrap_or_else(|proof| proof.symbol())
+                } else {
+                    rust_integer_constant(&p.path, call_target)
+                        .or_else(|| rust_float_member(&p.path, call_target))
+                        .unwrap_or(path)
+                }
             })
         }
         syn::Expr::Reference(r) => Expr::Unary {
@@ -5400,6 +5564,106 @@ fn main() {
         assert!(
             !src.contains("Ident(\"collect\")"),
             "collect should not remain a call: {src}"
+        );
+    }
+
+    #[test]
+    fn unsupported_local_patterns_shadow_actual_binders_after_the_initializer() {
+        for source in [
+            "fn helper(len:u64)->i64{let Ok(len)=usize::try_from(len) else{return 7;};let end:usize=len;end as i64}",
+            "fn helper(len:u64,align:u64)->i64{let (Ok(align),Ok(len))=(usize::try_from(align),usize::try_from(len)) else{return 7;};let end:usize=len+align;end as i64}",
+            "struct Pair{value:usize}fn helper(value:u64)->i64{let Pair{value}=Pair{value:value as usize};let end:usize=value;end as i64}",
+        ] {
+            let mut parsed = parse_rust_source(source).unwrap();
+            let body = parsed
+                .decls
+                .iter()
+                .find_map(|declaration| match declaration {
+                    Decl::Function { name, body, .. } if name == "helper" => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(body.iter().any(|statement|matches!(statement,Stmt::Let(_,Some(typ),Expr::Call{callee,args}) if crate::core_ir::type_proofs::failure_in_type(typ).is_some_and(|proof|!proof.is_invalid()) && matches!(callee.as_ref(),Expr::Ident(name)if crate::core_ir::type_proofs::decode(name).is_some()) && matches!(args.as_slice(),[Expr::Ident(_)]))),"{body:?}");
+            assert!(!body.iter().any(|statement|matches!(statement,Stmt::Let(name,_,_)if matches!(name.as_str(),"Ok"|"Pair"))),"constructor is not a binder: {body:?}");
+            crate::core_bindings::normalize_decls(&mut parsed.decls);
+            let normalized =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            let proofs =
+                crate::typecheck::TypeChecker::new().typed_proof_functions(&normalized.decls);
+            assert!(
+                proofs
+                    .get("helper")
+                    .is_some_and(|proof| !proof.is_invalid()),
+                "{source}: {proofs:?}"
+            );
+        }
+        let source = "fn source(value:u64)->Result<usize,()>{Ok(value as usize)}fn helper(value:u64)->i64{let Ok(value)=source(value) else{return 7;};let end:usize=value;end as i64}";
+        let mut parsed = parse_rust_source(source).unwrap();
+        let mut count = 0;
+        crate::core_opt::map_decl_exprs_mut(&mut parsed.decls, &mut |expression| {
+            if matches!(expression,Expr::Call{callee,..}if matches!(callee.as_ref(),Expr::Ident(name)if name=="source"))
+            {
+                count += 1;
+            }
+        });
+        assert_eq!(
+            count, 1,
+            "initializer is lowered once under its old binding scope"
+        );
+    }
+    #[test]
+    fn opaque_pattern_projection_binders_obey_definite_initialization() {
+        let good=parse_rust_source("fn helper(len:u64)->i64{let untouched:i64;let Ok(len)=usize::try_from(len)else{return 7;};len as i64}").unwrap();
+        crate::core_ir_verifier::check_definite_initialization(&good).unwrap();
+        let bad=parse_rust_source("fn helper(len:u64)->i64{let missing:i64;let Ok(len)=usize::try_from(len)else{return 7;};missing}").unwrap();
+        assert!(
+            crate::core_ir_verifier::check_definite_initialization(&bad).is_err(),
+            "an unrelated truly uninitialized local must remain rejected"
+        );
+    }
+    #[test]
+    fn unsupported_pattern_initializers_retain_whole_annotation_contracts() {
+        let source = "type Cycle=Cycle;fn helper(value:u64)->i64{let Some(value):Cycle=Some(value as usize);42}";
+        let parsed = parse_rust_source(source).unwrap();
+        let body = parsed
+            .decls
+            .iter()
+            .find_map(|declaration| match declaration {
+                Decl::Function { name, body, .. } if name == "helper" => Some(body),
+                _ => None,
+            })
+            .unwrap();
+        assert!(body.iter().any(|statement|matches!(statement,Stmt::Let(_,Some(typ),_)if crate::core_ir::type_proofs::failure_in_type(typ).is_some_and(|proof|proof.is_invalid()))),"annotation is retained on the actual initializer, not individual binders: {body:?}");
+        // Independent definite initializer mismatch must outrank unsupported
+        // matching even when no alias declaration preflight supplies a proof.
+        let parsed =
+            parse_rust_source("fn helper()->i64{let Some(value):[i64;0]=[42i64];42}").unwrap();
+        let normalized =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        let proofs = crate::typecheck::TypeChecker::new().typed_proof_functions(&normalized.decls);
+        assert!(
+            proofs.get("helper").is_some_and(|proof| proof.is_invalid()),
+            "{proofs:?}"
+        );
+    }
+    #[test]
+    fn unsupported_pattern_shadows_preserve_independent_invalid_integer_proofs() {
+        let source = "fn helper(value:u64)->i64{let bad:i8=128;let Ok(value)=usize::try_from(value) else{return 7;};let end:usize=value;bad as i64+end as i64}";
+        let parsed = parse_rust_source(source).unwrap();
+        let normalized =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+        let proofs = crate::typecheck::TypeChecker::new().typed_proof_functions(&normalized.decls);
+        assert!(
+            proofs.get("helper").is_some_and(|proof| proof.is_invalid()),
+            "{proofs:?}"
+        );
+        let control=parse_rust_source("fn helper(value:u64)->usize{let value:usize=value as usize;value}fn main()->i64{helper(42) as i64}").unwrap();
+        let control =
+            crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &control);
+        assert!(
+            crate::typecheck::TypeChecker::new()
+                .typed_proof_functions(&control.decls)
+                .is_empty()
         );
     }
 
@@ -7377,5 +7641,68 @@ mod direct_integer_cast_source_tests {
                 "{source}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ieee_primitive_path_tests {
+    use super::*;
+    #[test]
+    fn ieee_bit_method_paths_use_owned_primitive_aliases_and_keep_nominal_decoys() {
+        let mut module=parse_rust_source("type Number=f32;fn main()->i64{let first=f32::from_bits(0u32);let second=Number::from_bits(1u32);let third=::core::primitive::f64::from_bits(0u64);42}").unwrap();
+        let mut names = vec![];
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |value| {
+            if let Expr::Call { callee, .. } = value
+                && let Expr::Ident(name) = callee.as_ref()
+                && crate::core_ir::rust_floats::bit_method(name).is_some()
+            {
+                names.push(name.clone());
+            }
+        });
+        assert_eq!(
+            names,
+            vec![
+                "#rust-float-f32::from_bits",
+                "#rust-float-f32::from_bits",
+                "#rust-float-f64::from_bits"
+            ]
+        );
+        let mut nominal=parse_rust_source("struct Number;impl Number{fn from_bits(value:u32)->i64{42}}fn main()->i64{Number::from_bits(0u32)}").unwrap();
+        let mut private = 0;
+        crate::core_opt::map_decl_exprs_mut(&mut nominal.decls, &mut |value| {
+            if let Expr::Ident(name) = value
+                && crate::core_ir::rust_floats::bit_method(name).is_some()
+            {
+                private += 1;
+            }
+        });
+        assert_eq!(private, 0);
+        // The shadowed source module is not a proven primitive owner. Preserve
+        // its ordinary path for normal namespace/call validation downstream.
+        let mut shadowed = parse_rust_source(
+            "mod core{}fn main()->i64{let value=core::primitive::f32::from_bits(0u32);42}",
+        )
+        .unwrap();
+        let mut original = false;
+        crate::core_opt::map_decl_exprs_mut(&mut shadowed.decls, &mut |value| {
+            if let Expr::Ident(name) = value {
+                assert!(
+                    crate::core_ir::rust_floats::bit_method(name).is_none(),
+                    "{name}"
+                );
+                original |= name == "core::primitive::f32::from_bits";
+            }
+        });
+        assert!(original, "{shadowed:?}");
+        // Method values have no implemented function-pointer contract, unlike
+        // primitive calls, and retain an explicit Unsupported source proof.
+        let method_value =
+            parse_rust_source("fn main()->i64{let method=f32::from_bits;42}").unwrap();
+        let proofs = crate::typecheck::TypeChecker::new().typed_proof_nodes(&method_value.decls);
+        assert!(!proofs.is_empty(), "{method_value:?}");
+        assert!(
+            proofs.values().all(|proof| !proof.is_invalid()),
+            "{proofs:?}"
+        );
     }
 }

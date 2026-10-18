@@ -2608,6 +2608,7 @@ fn scalar_expr_type_with_bindings(
             if op == "~"
                 || op == "bool-to-int"
                 || op == "float-to-int"
+                || crate::core_ir::float_to_bits_width(op).is_some()
                 || crate::core_ir::integer_cast_spec(op).is_some()
                 || crate::core_ir::saturating_float_cast_spec(op).is_some() =>
         {
@@ -2615,6 +2616,7 @@ fn scalar_expr_type_with_bindings(
         }
         Expr::Unary { op, .. }
             if crate::core_ir::integer_float_cast_spec(op).is_some()
+                || crate::core_ir::bits_to_float_width(op).is_some()
                 || matches!(op.as_str(), "float-cast-f32" | "float-cast-f64") =>
         {
             Some(Typ::Float)
@@ -4306,6 +4308,70 @@ fn lower_field_access(
     }
 }
 
+// RAX carries the source bits. NaNs use integer-only paths so signaling,
+// payload and sign survive transfers; only non-NaNs use numeric conversion.
+fn emit_f32_bit_cast(emitter: &mut CodeEmitter, from_float: bool) {
+    emitter.emit_insns(&x86_64::push_r(RCX));
+    emitter.emit_insns(&x86_64::push_r(RDX));
+    let (exponent, fraction) = if from_float {
+        (0x7ff0_0000_0000_0000u64, 0x000f_ffff_ffff_ffffu64)
+    } else {
+        emitter.emit_insns(&x86_64::load_i64(RCX, 0xffff_ffff));
+        emitter.emit_insns(&x86_64::and_rr(RAX, RCX));
+        (0x7f80_0000, 0x007f_ffff)
+    };
+    emitter.emit_insns(&x86_64::mov_rr(RDX, RAX));
+    emitter.emit_insns(&x86_64::load_i64(RCX, exponent as i64));
+    emitter.emit_insns(&x86_64::and_rr(RDX, RCX));
+    emitter.emit_insns(&x86_64::cmp_rr(RDX, RCX));
+    let finite = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(5, 0));
+    emitter.emit_insns(&x86_64::mov_rr(RDX, RAX));
+    emitter.emit_insns(&x86_64::load_i64(RCX, fraction as i64));
+    emitter.emit_insns(&x86_64::and_rr(RDX, RCX));
+    emitter.emit_insns(&x86_64::test_rr(RDX, RDX));
+    let infinity = emitter.len();
+    emitter.emit_insns(&x86_64::jcc_near(4, 0));
+    if from_float {
+        emitter.emit_insns(&x86_64::shr_reg_imm(RDX, 29));
+        emitter.emit_insns(&x86_64::test_rr(RDX, RDX));
+        let nonzero = emitter.len();
+        emitter.emit_insns(&x86_64::jcc_near(5, 0));
+        // An arbitrary f64 NaN must never narrow to infinity.
+        emitter.emit_insns(&x86_64::load_i64(RDX, 1));
+        emitter.patch_u32(nonzero + 2, emitter.len() - nonzero - 6);
+        emitter.emit_insns(&x86_64::shr_reg_imm(RAX, 32));
+        emitter.emit_insns(&x86_64::load_i64(RCX, 0x8000_0000));
+        emitter.emit_insns(&x86_64::and_rr(RAX, RCX));
+        emitter.emit_insns(&x86_64::or_rr(RAX, RDX));
+        emitter.emit_insns(&x86_64::load_i64(RCX, 0x7f80_0000));
+    } else {
+        emitter.emit_insns(&x86_64::shl_reg_imm(RDX, 29));
+        emitter.emit_insns(&x86_64::load_i64(RCX, 0x8000_0000));
+        emitter.emit_insns(&x86_64::and_rr(RAX, RCX));
+        emitter.emit_insns(&x86_64::shl_reg_imm(RAX, 32));
+        emitter.emit_insns(&x86_64::or_rr(RAX, RDX));
+        emitter.emit_insns(&x86_64::load_i64(RCX, 0x7ff0_0000_0000_0000));
+    }
+    emitter.emit_insns(&x86_64::or_rr(RAX, RCX));
+    let done = emitter.len();
+    emitter.emit_insns(&x86_64::jmp_rel32(0));
+    emitter.patch_u32(finite + 2, emitter.len() - finite - 6);
+    emitter.patch_u32(infinity + 2, emitter.len() - infinity - 6);
+    if from_float {
+        emitter.emit_insns(&x86_64::movq_xmm_gpr(0, RAX, true));
+        emitter.emit_insns(&x86_64::convert_scalar_float(0, 0, true));
+        emitter.emit_insns(&x86_64::movd_xmm_gpr(0, RAX, false));
+    } else {
+        emitter.emit_insns(&x86_64::movd_xmm_gpr(0, RAX, true));
+        emitter.emit_insns(&x86_64::convert_scalar_float(0, 0, false));
+        emitter.emit_insns(&x86_64::movq_xmm_gpr(0, RAX, false));
+    }
+    emitter.patch_u32(done + 1, emitter.len() - done - 5);
+    emitter.emit_insns(&x86_64::pop_r(RDX));
+    emitter.emit_insns(&x86_64::pop_r(RCX));
+}
+
 // RAX is the already-evaluated Int64 source; preserve the sticky-bit scratch.
 fn emit_integer_float_cast(emitter: &mut CodeEmitter, bits: u8, signed: bool) {
     let convert = if bits == 32 {
@@ -4422,6 +4488,25 @@ fn lower_unary_expr(
             &Expr::FloatLit(crate::core_ir::FloatVal(0.0)),
             pending_calls,
         );
+    }
+    if let Some((width, expected)) = crate::core_ir::float_to_bits_width(op)
+        .map(|width| (width, Typ::Float))
+        .or_else(|| crate::core_ir::bits_to_float_width(op).map(|width| (width, Typ::Int)))
+    {
+        if x86_64::is_32bit() || scalar_expr_type(expr, ctx) != Some(expected) {
+            return Err(
+                "x86_64-lower: IEEE bit conversion requires a resolved 64-bit scalar carrier"
+                    .into(),
+            );
+        }
+        lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
+        if width == 32 {
+            emit_f32_bit_cast(emitter, crate::core_ir::float_to_bits_width(op).is_some());
+        }
+        if target_reg != RAX {
+            emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+        }
+        return Ok(());
     }
     if crate::core_ir::integer_cast_spec(op).is_some() {
         let value = match scalar_expr_type(expr, ctx) {
@@ -7324,6 +7409,149 @@ mod integer_float_cast_tests {
             let displacement =
                 u32::from_le_bytes(code[jump + 1..jump + 5].try_into().unwrap()) as usize;
             assert_eq!(jump + 5 + displacement, direct + conversion.len());
+        }
+    }
+}
+
+#[cfg(test)]
+mod ieee_bit_cast_tests {
+    use super::*;
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            x86_64::set_32bit(self.0);
+        }
+    }
+    fn module(op: &str, operand: Typ) -> UnifiedModule {
+        let result = if op.starts_with("float-to-bits") {
+            Typ::Int
+        } else {
+            Typ::Float
+        };
+        UnifiedModule::new(vec![Decl::Function {
+            name: "convert".into(),
+            params: vec![("value".into(), operand)],
+            ret: result,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Unary {
+                op: op.into(),
+                expr: Box::new(Expr::Ident("value".into())),
+            }))],
+        }])
+    }
+    #[test]
+    fn ieee_bit_conversions_lower_owned_native_and_jit_with_strict_operand_domains() {
+        let _restore = Restore(x86_64::is_32bit());
+        x86_64::set_32bit(false);
+        for (op, input) in [
+            ("float-to-bits-f32", Typ::Float),
+            ("float-to-bits-f64", Typ::Float),
+            ("bits-to-float-f32", Typ::Int),
+            ("bits-to-float-f64", Typ::Int),
+        ] {
+            for result in [
+                lower_module(&module(op, input.clone()), "convert"),
+                lower_native_module(&module(op, input), "convert"),
+            ] {
+                let result = result.expect("owned IEEE conversion");
+                assert!(result.externs.is_empty() && result.extern_calls.is_empty());
+                if op == "float-to-bits-f32" {
+                    let extract = x86_64::movd_xmm_gpr(0, RAX, false);
+                    assert!(
+                        result
+                            .code
+                            .windows(extract.len())
+                            .any(|bytes| bytes == extract)
+                    );
+                }
+                if op.ends_with("f64") {
+                    assert!(
+                        !result.code.windows(2).any(|bytes| bytes == [0x0f, 0x5a]),
+                        "f64 reinterpretation must not convert"
+                    );
+                }
+            }
+            for wrong in [
+                Typ::Bool,
+                Typ::String,
+                if op.starts_with("float-to-bits") {
+                    Typ::Int
+                } else {
+                    Typ::Float
+                },
+            ] {
+                assert!(
+                    lower_native_module(&module(op, wrong), "convert").is_err(),
+                    "{op}"
+                );
+            }
+            x86_64::set_32bit(true);
+            assert!(
+                lower_module(
+                    &module(
+                        op,
+                        if op.starts_with("float-to-bits") {
+                            Typ::Float
+                        } else {
+                            Typ::Int
+                        }
+                    ),
+                    "convert"
+                )
+                .is_err()
+            );
+            x86_64::set_32bit(false);
+        }
+    }
+    #[test]
+    fn f32_nan_paths_bypass_float_conversions_and_restore_scratch_registers() {
+        let _restore = Restore(x86_64::is_32bit());
+        x86_64::set_32bit(false);
+        for from_float in [false, true] {
+            let mut emitter = CodeEmitter::new();
+            emit_f32_bit_cast(&mut emitter, from_float);
+            let bytes = &emitter.bytes;
+            assert_eq!(&bytes[..2], &[0x51, 0x52]);
+            assert_eq!(&bytes[bytes.len() - 2..], &[0x5a, 0x59]);
+            let exponent = if from_float {
+                0x7ff0_0000_0000_0000u64
+            } else {
+                0x7f80_0000u64
+            };
+            let mut prefix = vec![];
+            if !from_float {
+                prefix.extend(x86_64::load_i64(RCX, 0xffff_ffff));
+                prefix.extend(x86_64::and_rr(RAX, RCX));
+            }
+            prefix.extend(x86_64::mov_rr(RDX, RAX));
+            prefix.extend(x86_64::load_i64(RCX, exponent as i64));
+            prefix.extend(x86_64::and_rr(RDX, RCX));
+            prefix.extend(x86_64::cmp_rr(RDX, RCX));
+            let branch = 2 + prefix.len();
+            assert_eq!(&bytes[branch..branch + 2], &[0x0f, 0x85]);
+            let numeric = branch
+                + 6
+                + u32::from_le_bytes(bytes[branch + 2..branch + 6].try_into().unwrap()) as usize;
+            let jump = numeric - 5;
+            assert_eq!(bytes[jump], 0xe9);
+            let restore = jump
+                + 5
+                + u32::from_le_bytes(bytes[jump + 1..jump + 5].try_into().unwrap()) as usize;
+            assert_eq!(
+                restore,
+                bytes.len() - 2,
+                "NaN path must skip all FP conversion and rejoin restore"
+            );
+            assert!(!bytes[2..jump].windows(2).any(|part| part == [0x0f, 0x5a]));
+            let numeric_start = if from_float {
+                x86_64::movq_xmm_gpr(0, RAX, true)
+            } else {
+                x86_64::movd_xmm_gpr(0, RAX, true)
+            };
+            assert_eq!(
+                &bytes[numeric..numeric + numeric_start.len()],
+                numeric_start.as_slice()
+            );
         }
     }
 }
