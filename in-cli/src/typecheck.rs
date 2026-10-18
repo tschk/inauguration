@@ -1,5 +1,6 @@
 mod rigid_values;
 mod rust_arrays;
+mod rust_floats;
 mod rust_generics;
 pub(crate) mod rust_integers;
 mod type_proofs;
@@ -94,12 +95,22 @@ fn resolved_closure_type(typ: &Typ) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ResolvePolicy {
     Ordinary,
+    ClosureValidate,
     CValues,
     RustFixedArrays,
     RustArrayInference,
     RustArrayValidate,
+    RustFloatInference,
+    RustFloatValidate,
+    RustFloatLower,
 }
 impl ResolvePolicy {
+    fn floats(self) -> bool {
+        matches!(
+            self,
+            Self::RustFloatInference | Self::RustFloatValidate | Self::RustFloatLower
+        )
+    }
     fn arrays(self) -> bool {
         matches!(
             self,
@@ -112,10 +123,12 @@ pub(crate) struct Facts {
     functions: HashMap<String, (Vec<(String, Typ)>, Typ)>,
     structs: HashMap<String, Vec<(String, Typ)>>,
     closures: HashMap<String, String>,
+    closure_environments: std::collections::HashSet<String>,
     unary_methods: Option<crate::boundary_ir::UnaryMethodBindings>,
     unary_method_errors: std::cell::RefCell<Vec<String>>,
     require_resolved_inline_values: bool,
     array_constraints: std::cell::RefCell<rust_arrays::Constraints>,
+    float_constraints: std::cell::RefCell<rust_floats::Constraints>,
 }
 
 impl Facts {
@@ -130,7 +143,8 @@ impl Facts {
     }
 
     fn closure_target(&self, captures: &str) -> Option<&str> {
-        if !self.structs.get(captures)?.is_empty() {
+        if !self.structs.get(captures)?.is_empty() && !self.closure_environments.contains(captures)
+        {
             return None;
         }
         let target = self.closures.get(captures)?;
@@ -292,6 +306,12 @@ impl TypeChecker {
                 break;
             }
         }
+        let _ = self.resolve_typed_operators(
+            module,
+            ResolvePolicy::ClosureValidate,
+            Some(closures),
+            None,
+        );
     }
 
     /// Resolve only frontend-proven operator bindings. Other normalization
@@ -317,6 +337,12 @@ impl TypeChecker {
         }
     }
 
+    fn resolve_rust_floats(&self, module: &mut UnifiedModule, policy: ResolvePolicy) {
+        if crate::core_ir::rust_floats::present(&module.decls) {
+            let _ = self.resolve_typed_operators(module, policy, None, None);
+        }
+    }
+
     fn resolve_typed_operators(
         &self,
         module: &mut UnifiedModule,
@@ -330,6 +356,8 @@ impl TypeChecker {
         facts.unary_methods = unary_methods.cloned();
         if let Some(closures) = closures {
             facts.closures = closures.clone();
+            facts.closure_environments =
+                closure_inference::proven_environments(module, &facts, closures);
         }
         let globals: HashMap<String, Typ> = module
             .decls
@@ -340,6 +368,7 @@ impl TypeChecker {
             })
             .collect();
         let generated: std::collections::HashSet<_> = facts.closures.values().cloned().collect();
+        let mut float_invalid = None;
         // Nested closures are appended before their parents during lifting.
         for closure_phase in [true, false] {
             if closure_phase && generated.is_empty() {
@@ -357,6 +386,25 @@ impl TypeChecker {
                         let mut env = globals.clone();
                         env.extend(params.iter().cloned());
                         let initial = env.clone();
+                        if policy.floats() {
+                            *facts.float_constraints.borrow_mut() = Default::default();
+                            for (name, typ) in &initial {
+                                facts.float_constraints.borrow_mut().bind(name, typ);
+                            }
+                            loop {
+                                facts.float_constraints.borrow_mut().reset_changed();
+                                self.resolve_typed_body(
+                                    body,
+                                    &facts,
+                                    &mut initial.clone(),
+                                    Some(ret),
+                                    ResolvePolicy::RustFloatInference,
+                                );
+                                if !facts.float_constraints.borrow().changed() {
+                                    break;
+                                }
+                            }
+                        }
                         if policy.arrays() {
                             *facts.array_constraints.borrow_mut() = Default::default();
                             for (name, typ) in &initial {
@@ -377,6 +425,20 @@ impl TypeChecker {
                             }
                         }
                         self.resolve_typed_body(body, &facts, &mut env, Some(ret), policy);
+                        if policy.floats()
+                            && let Some(proof) =
+                                facts.float_constraints.borrow().failure().filter(|proof| {
+                                    policy == ResolvePolicy::RustFloatLower || proof.is_invalid()
+                                })
+                        {
+                            if proof.is_invalid() {
+                                float_invalid = crate::core_ir::type_proofs::prefer_failure(
+                                    float_invalid,
+                                    Some(proof.clone()),
+                                );
+                            }
+                            body.insert(0, Stmt::Expr(Expr::Ident(proof.symbol())));
+                        }
                         if policy.arrays() {
                             let proof = facts.array_constraints.borrow().failure();
                             if let Some(proof) = proof.filter(|proof| {
@@ -404,6 +466,32 @@ impl TypeChecker {
                         init: Some(expr),
                         ..
                     } if !closure_phase => {
+                        if policy.floats() {
+                            *facts.float_constraints.borrow_mut() = Default::default();
+                            for (name, typ) in &globals {
+                                facts.float_constraints.borrow_mut().bind(name, typ);
+                            }
+                            loop {
+                                facts.float_constraints.borrow_mut().reset_changed();
+                                self.resolve_typed_expr(
+                                    expr,
+                                    &facts,
+                                    &globals,
+                                    ResolvePolicy::RustFloatInference,
+                                    None,
+                                );
+                                self.finish_typed_value(
+                                    ResolvePolicy::RustFloatInference,
+                                    expr,
+                                    Some(typ),
+                                    &facts,
+                                    &globals,
+                                );
+                                if !facts.float_constraints.borrow().changed() {
+                                    break;
+                                }
+                            }
+                        }
                         if policy.arrays() {
                             *facts.array_constraints.borrow_mut() = Default::default();
                             for (name, typ) in &globals {
@@ -450,6 +538,20 @@ impl TypeChecker {
                                 **expr = Expr::Ident(proof.symbol());
                             }
                         }
+                        if policy.floats()
+                            && let Some(proof) =
+                                facts.float_constraints.borrow().failure().filter(|proof| {
+                                    policy == ResolvePolicy::RustFloatLower || proof.is_invalid()
+                                })
+                        {
+                            if proof.is_invalid() {
+                                float_invalid = crate::core_ir::type_proofs::prefer_failure(
+                                    float_invalid,
+                                    Some(proof.clone()),
+                                );
+                            }
+                            **expr = Expr::Ident(proof.symbol());
+                        }
                         if policy == ResolvePolicy::CValues {
                             self.resolve_c_value(expr, typ, &facts, &globals);
                         }
@@ -457,6 +559,10 @@ impl TypeChecker {
                     _ => {}
                 }
             }
+        }
+        if let Some(proof) = float_invalid
+            && !module.decls.iter().any(|decl| matches!(decl, Decl::Global { name, .. } if name == "#rust-source-float-validation")) {
+            module.decls.push(Decl::Global { name: "#rust-source-float-validation".into(), typ: proof.typ(), init: None, mutable: false, constant_value: false });
         }
         let old_len = module.decls.len();
         crate::core_ir::tuples::register(module);
@@ -654,6 +760,11 @@ impl TypeChecker {
         )? {
             returns.push(Typ::Void);
         }
+        if let Some(typ) =
+            rust_floats::join_types(&returns.iter().cloned().map(Some).collect::<Vec<_>>())
+        {
+            return Some(typ);
+        }
         let typ = returns.first()?.canonical();
         returns
             .iter()
@@ -815,7 +926,7 @@ impl TypeChecker {
         facts: &Facts,
         env: &HashMap<String, Typ>,
     ) -> Option<Typ> {
-        if policy.arrays() {
+        if policy.arrays() || policy.floats() {
             // Propagate destination constraints through value results using the
             // existing scope walker. No second source-body traversal is maintained.
             if policy != ResolvePolicy::RustFixedArrays {
@@ -861,7 +972,11 @@ impl TypeChecker {
                     _ => {}
                 }
             }
-            rust_arrays::finish_value(self, expr, expected, facts, env, policy)
+            if policy.floats() {
+                rust_floats::finish_value(self, expr, expected, facts, env, policy)
+            } else {
+                rust_arrays::finish_value(self, expr, expected, facts, env, policy)
+            }
         } else {
             self.expr_type(expr, facts, env)
         }
@@ -1018,8 +1133,11 @@ impl TypeChecker {
                 self.resolve_typed_expr(child, facts, env, policy, return_type);
             });
         }
-        if policy.arrays() {
-            if let Expr::Call { callee, args } = expr
+        if policy.arrays() || policy.floats() {
+            let handled_float_call =
+                policy.floats() && rust_floats::finish_call(self, expr, facts, env, policy);
+            if !handled_float_call
+                && let Expr::Call { callee, args } = expr
                 && let Expr::Ident(name) = callee.as_ref()
                 && let Some((params, _)) = facts.functions.get(name)
             {
@@ -1034,15 +1152,28 @@ impl TypeChecker {
                     .cloned()
                     .or_else(|| crate::core_ir::tuples::fields(name));
                 if let Some(schema) = schema {
+                    let tuple = crate::core_ir::tuples::fields(name).is_some();
                     for (name, value) in fields {
                         if let Some((_, expected)) = schema.iter().find(|(field, _)| field == name)
                         {
+                            if policy == ResolvePolicy::RustFloatLower
+                                && tuple
+                                && rust_floats::has_weak_float(expected)
+                            {
+                                continue;
+                            }
                             self.finish_typed_value(policy, value, Some(expected), facts, env);
                         }
                     }
                 }
             }
-            rust_arrays::check_join(self, expr, facts, env, policy);
+            if policy.arrays() {
+                rust_arrays::check_join(self, expr, facts, env, policy);
+            }
+        }
+        if policy.floats() {
+            rust_floats::finish_expr(self, expr, facts, env, policy);
+            return c_kind;
         }
         if policy.arrays() {
             return c_kind;
@@ -1275,6 +1406,23 @@ impl TypeChecker {
             if let Some(function) = captures.and_then(|captures| facts.closure_target(captures)) {
                 args.insert(0, callee.as_ref().clone());
                 **callee = Expr::Ident(function.to_string());
+            } else if policy == ResolvePolicy::ClosureValidate
+                && captures.is_some_and(|captures| {
+                    facts.closures.contains_key(captures)
+                        && facts
+                            .structs
+                            .get(captures)
+                            .is_some_and(|fields| !fields.is_empty())
+                })
+            {
+                // Keep an unsupported environment from becoming callable after optimization.
+                *expr = Expr::Ident(
+                    crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                        "captured closure requires a stable read-only scalar environment".into(),
+                    )
+                    .symbol(),
+                );
+                return c_kind;
             }
             if let Expr::Ident(name) = callee.as_ref() {
                 if let Some(op) = name
@@ -1553,18 +1701,52 @@ impl TypeChecker {
         return_type: Option<&Typ>,
         policy: ResolvePolicy,
     ) {
-        if !policy.arrays() {
+        if !policy.arrays() && !policy.floats() {
             vector_inference::infer(self, body, facts, env, return_type);
         }
         for stmt in body {
             match stmt {
                 Stmt::Declare(name, typ) => {
+                    if policy.floats() {
+                        facts.float_constraints.borrow_mut().bind(name, typ);
+                    }
                     if policy.arrays() {
                         facts.array_constraints.borrow_mut().bind(name, typ);
                     }
                     env.insert(name.clone(), typ.clone());
                 }
                 Stmt::Let(name, typ, expr) => {
+                    if policy.floats() {
+                        if let Some(annotation) = typ.as_ref() {
+                            facts.float_constraints.borrow_mut().bind(name, annotation);
+                        }
+                        self.resolve_typed_expr(expr, facts, env, policy, return_type);
+                        let expected = facts
+                            .float_constraints
+                            .borrow()
+                            .get(name)
+                            .or_else(|| typ.clone());
+                        if let Some(inferred) =
+                            self.finish_typed_value(policy, expr, expected.as_ref(), facts, env)
+                        {
+                            facts.float_constraints.borrow_mut().bind(name, &inferred);
+                            let selected = facts
+                                .float_constraints
+                                .borrow()
+                                .get(name)
+                                .unwrap_or(inferred);
+                            // Closure lifting needs proven captured-local widths before erasure.
+                            if matches!(
+                                policy,
+                                ResolvePolicy::RustFloatValidate | ResolvePolicy::RustFloatLower
+                            ) && crate::core_ir::rust_floats::kind(&selected).is_some()
+                            {
+                                *typ = Some(selected.clone());
+                            }
+                            env.insert(name.clone(), selected);
+                        }
+                        continue;
+                    }
                     if policy.arrays() {
                         if let Some(annotation) = typ.as_ref() {
                             facts.array_constraints.borrow_mut().bind(name, annotation);
@@ -1639,6 +1821,23 @@ impl TypeChecker {
                     }
                 }
                 Stmt::Assign(name, expr) => {
+                    if policy.floats() {
+                        if let Some(original) = env.get(name) {
+                            facts.float_constraints.borrow_mut().bind(name, original);
+                        }
+                        self.resolve_typed_expr(expr, facts, env, policy, return_type);
+                        let expected = facts
+                            .float_constraints
+                            .borrow()
+                            .get(name)
+                            .or_else(|| env.get(name).cloned());
+                        if let Some(inferred) =
+                            self.finish_typed_value(policy, expr, expected.as_ref(), facts, env)
+                        {
+                            facts.float_constraints.borrow_mut().bind(name, &inferred);
+                        }
+                        continue;
+                    }
                     if policy.arrays() {
                         if let Some(original) = env.get(name) {
                             facts.array_constraints.borrow_mut().bind(name, original);
@@ -1681,12 +1880,15 @@ impl TypeChecker {
                 }
                 Stmt::Expr(expr) | Stmt::Throw(expr) => {
                     self.resolve_typed_expr(expr, facts, env, policy, return_type);
+                    if policy.floats() {
+                        self.finish_typed_value(policy, expr, None, facts, env);
+                    }
                 }
                 Stmt::IndexAssign { base, index, value } => {
                     for expr in [&mut *base, &mut *index, &mut *value] {
                         self.resolve_typed_expr(expr, facts, env, policy, return_type);
                     }
-                    if policy.arrays() {
+                    if policy.arrays() || policy.floats() {
                         let expected = self.expr_type(
                             &Expr::Index {
                                 base: Box::new(base.clone()),
@@ -1724,7 +1926,7 @@ impl TypeChecker {
                     for expr in [&mut *base, &mut *value] {
                         self.resolve_typed_expr(expr, facts, env, policy, return_type);
                     }
-                    if policy.arrays() {
+                    if policy.arrays() || policy.floats() {
                         let expected = self.expr_type(
                             &Expr::Field {
                                 base: Box::new(base.clone()),
@@ -1927,10 +2129,12 @@ impl TypeChecker {
             functions,
             structs,
             closures: HashMap::new(),
+            closure_environments: Default::default(),
             unary_methods: None,
             unary_method_errors: std::cell::RefCell::new(Vec::new()),
             require_resolved_inline_values: false,
             array_constraints: Default::default(),
+            float_constraints: Default::default(),
         }
     }
 
@@ -3020,6 +3224,7 @@ impl TypeChecker {
                     .map(|(_, typ)| typ.clone())
                     .collect();
                 rust_arrays::join_types(&live)
+                    .or_else(|| rust_floats::join_types(&live))
                     .or_else(|| crate::core_ir::match_value_type(arms, types))
             }
             Expr::Conditional {
@@ -3035,6 +3240,7 @@ impl TypeChecker {
                     .map(|(_, typ)| typ)
                     .collect();
                 rust_arrays::join_types(&live)
+                    .or_else(|| rust_floats::join_types(&live))
                     .or_else(|| crate::core_ir::conditional_type(then_expr, left, else_expr, right))
             }
             Expr::Block { body, result } => {
@@ -3068,9 +3274,10 @@ impl TypeChecker {
                 .get(name)
                 .map(|original| {
                     facts
-                        .array_constraints
+                        .float_constraints
                         .borrow()
                         .get(name)
+                        .or_else(|| facts.array_constraints.borrow().get(name))
                         .unwrap_or_else(|| original.clone())
                 })
                 .or_else(|| facts.functions.contains_key(name).then_some(Typ::Int))
@@ -3136,6 +3343,9 @@ impl TypeChecker {
                 if crate::core_ir::rust_references::value_kind(op).is_some() =>
             {
                 crate::core_ir::rust_references::value_type(op, self.expr_type(expr, facts, env)?)
+            }
+            Expr::Unary { op, .. } if crate::core_ir::rust_floats::inferred_type(op).is_some() => {
+                crate::core_ir::rust_floats::inferred_type(op)
             }
             Expr::Unary { op, expr, .. } => match op.as_str() {
                 op if op
@@ -3205,6 +3415,9 @@ impl TypeChecker {
                     op,
                     "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "xor" | "<<" | ">>"
                 ) {
+                    if let Some(joined) = rust_floats::join_types(&[left.clone(), right.clone()]) {
+                        return Some(joined);
+                    }
                     let rust_kind = |typ: &Option<Typ>| matches!(typ, Some(Typ::Named(name)) if crate::core_ir::rust_integer_type_name(name).is_some());
                     if rust_kind(&left) {
                         return left;
@@ -3243,6 +3456,9 @@ impl TypeChecker {
                 }
             }
             Expr::Call { callee, args } => {
+                if let Some(typ) = rust_floats::call_type(self, expr, facts, env) {
+                    return Some(typ);
+                }
                 if let Expr::Ident(name) = callee.as_ref() {
                     if name == "c-numeric-cast"
                         && !facts.functions.contains_key(name)
@@ -3722,15 +3938,81 @@ pub fn normalize_module_with_semantics(
         });
     }
     if parser_id == ParserId::Rust {
+        TypeChecker::new().resolve_rust_floats(&mut normalized, ResolvePolicy::RustFloatValidate);
         rust_arrays::validate(&TypeChecker::new(), &mut normalized);
         rust_generics::normalize(&mut normalized);
         rust_arrays::normalize(&TypeChecker::new(), &mut normalized);
+        // Stage stores after array value copies, before float source facts are erased.
+        crate::lower_core::lower_value_spills(&mut normalized.decls);
         TypeChecker::new().resolve_complements(&mut normalized);
+        crate::lower_core::lower_closures(&mut normalized);
+        TypeChecker::new().resolve_rust_floats(&mut normalized, ResolvePolicy::RustFloatLower);
+        erase_rust_float_metadata(&mut normalized);
         rust_integers::normalize(&TypeChecker::new(), &mut normalized, semantics);
         crate::lower_core::lower_inline_constants_with_semantics(&mut normalized.decls, semantics);
         refuse_rust_array_tuple_values(&mut normalized);
     }
     normalized
+}
+
+fn erase_rust_float_metadata(module: &mut UnifiedModule) {
+    let parameters: HashMap<_, Vec<_>> = module
+        .decls
+        .iter()
+        .filter_map(|decl| {
+            let Decl::Function { name, params, .. } = decl else {
+                return None;
+            };
+            Some((
+                name.clone(),
+                params
+                    .iter()
+                    .filter_map(|(name, typ)| {
+                        (crate::core_ir::rust_floats::kind(typ)
+                            == Some(crate::core_ir::rust_floats::Kind::F32))
+                        .then_some(name.clone())
+                    })
+                    .collect(),
+            ))
+        })
+        .collect();
+    crate::core_ir::tuples::project_declarations(&mut module.decls, |decls| {
+        crate::core_bindings::rewrite_named_types(decls, &|name| {
+            crate::core_ir::rust_floats::is_proof(name).then_some(Typ::Float)
+        });
+        crate::core_opt::map_decl_exprs_mut(decls, &mut |expr| {
+            // Contextual result edges have finished; remaining literals use Rust's default.
+            if matches!(expr, Expr::Unary { op, .. } if crate::core_ir::rust_floats::is_literal(op))
+            {
+                match crate::core_ir::rust_floats::materialize_literal(expr, None) {
+                    Ok(Some(value)) => *expr = Expr::FloatLit(crate::core_ir::FloatVal(value)),
+                    Err(proof) => *expr = Expr::Ident(proof.symbol()),
+                    Ok(None) => {}
+                }
+            }
+            if matches!(expr, Expr::Unary { op, .. } if crate::core_ir::rust_floats::value_kind(op).is_some())
+                && let Expr::Unary { expr: value, .. } = expr
+            {
+                *expr = (**value).clone();
+            }
+        });
+    });
+    for decl in &mut module.decls {
+        if let Decl::Function { name, body, .. } = decl
+            && let Some(params) = parameters.get(name)
+        {
+            let initializers = params.iter().map(|name| {
+                Stmt::Assign(
+                    name.clone(),
+                    Expr::Unary {
+                        op: "float-cast-f32".into(),
+                        expr: Box::new(Expr::Ident(name.clone())),
+                    },
+                )
+            });
+            body.splice(0..0, initializers);
+        }
+    }
 }
 
 /// Dynamic Array headers cannot implement Rust fixed-array tuple value copies.
@@ -4140,6 +4422,38 @@ fn normalize_parser_type(parser_id: ParserId, typ: &Typ) -> Typ {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn float_array_copy_preserves_source_type_until_lowering() {
+        let source = "fn main()->i64{let original=[1.0f32,16777217.0];let mut copied=original;copied[0]=2.0;if original[0]==1.0 && copied[0]==2.0 && original[1]==16777216.0 && copied[1]==16777216.0{42}else{7}}";
+        let mut module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        let normalized = super::normalize_module(crate::parser_registry::ParserId::Rust, &module);
+        assert!(
+            !crate::core_ir::type_proofs::present(&normalized.decls),
+            "full normalization: {normalized:#?}"
+        );
+        assert!(
+            !crate::core_ir::rust_floats::present(&normalized.decls),
+            "leftover source metadata: {normalized:#?}"
+        );
+        let repeated = super::normalize_module(crate::parser_registry::ParserId::Rust, &normalized);
+        assert!(
+            !crate::core_ir::type_proofs::present(&repeated.decls),
+            "repeated normalization: {repeated:#?}"
+        );
+        let checker = super::TypeChecker::new();
+        checker.resolve_rust_floats(&mut module, super::ResolvePolicy::RustFloatValidate);
+        super::rust_arrays::validate(&checker, &mut module);
+        super::rust_generics::normalize(&mut module);
+        super::rust_arrays::normalize(&checker, &mut module);
+        checker.resolve_complements(&mut module);
+        let before = format!("{module:#?}");
+        checker.resolve_rust_floats(&mut module, super::ResolvePolicy::RustFloatLower);
+        assert!(
+            !crate::core_ir::type_proofs::present(&module.decls),
+            "before: {before}\nafter: {module:#?}"
+        );
+    }
+
     use super::uses_family_typecheck;
     use crate::parser_registry::ParserId;
 

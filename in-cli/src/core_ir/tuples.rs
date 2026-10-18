@@ -36,9 +36,9 @@ enum Shape {
 
 impl Shape {
     fn from_type(typ: &Typ) -> Self {
-        // Preserve source proofs until reference and integer operator resolution.
+        // Preserve source proofs until reference and numeric operator resolution.
         if super::rust_references::has_reference_proof(typ)
-            || matches!(typ, Typ::Named(name) if super::rust_integer_type_name(name).is_some())
+            || matches!(typ, Typ::Named(name) if super::rust_integer_type_name(name).is_some() || super::rust_floats::is_proof(name))
         {
             return Self::Core(typ.clone());
         }

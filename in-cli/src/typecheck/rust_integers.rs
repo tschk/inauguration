@@ -698,7 +698,9 @@ impl Pass<'_> {
             Some(
                 Typ::Bool | Typ::Float | Typ::String | Typ::Array(_) | Typ::Vector(_) | Typ::Void,
             ) => true,
-            Some(Typ::Named(name)) => self.facts.structs.contains_key(&name),
+            Some(Typ::Named(name)) => {
+                core_ir::rust_floats::is_proof(&name) || self.facts.structs.contains_key(&name)
+            }
             _ => false,
         }
     }
@@ -1895,6 +1897,9 @@ mod tests {
             r#"fn main(args:Vec<String>)->i64{u8::wrapping_add("x",1);42}"#,
             "fn main()->i64{if false{u8::wrapping_add(true,1);}42}",
             "fn main()->i64{if false{u8::wrapping_add(1,1.0);}42}",
+            "fn main()->i64{if false{u8::wrapping_add(1.0f32,1);}42}",
+            "fn main()->i64{if false{u8::wrapping_add(1,1.0f64 as f32);}42}",
+            "fn main()->i64{let value:f32=1.0;if false{u8::wrapping_add(1,value);}42}",
         ] {
             let module = resolved(source, IntegerSemantics::Word64);
             assert!(
@@ -1903,6 +1908,29 @@ mod tests {
                     .values()
                     .any(|proof| proof.is_invalid()),
                 "{source}: {module:?}"
+            );
+        }
+        for kind in [
+            core_ir::rust_floats::Kind::F32,
+            core_ir::rust_floats::Kind::F64,
+        ] {
+            let mut module = constant_module(
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("#rust-integer-u8::wrapping_add".into())),
+                    args: vec![
+                        Expr::IntLit(1),
+                        core_ir::rust_floats::value(Expr::FloatLit(core_ir::FloatVal(1.0)), kind),
+                    ],
+                },
+                Typ::Int,
+            );
+            normalize(&TypeChecker::new(), &mut module, IntegerSemantics::Word64);
+            assert!(
+                TypeChecker::new()
+                    .typed_proof_nodes(&module.decls)
+                    .values()
+                    .any(|proof| proof.is_invalid()),
+                "private float value {kind:?}: {module:?}"
             );
         }
         for source in [

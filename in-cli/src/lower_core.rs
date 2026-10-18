@@ -99,6 +99,7 @@ pub fn desugar_module_with_semantics(
 ) {
     if crate::typecheck::rust_integers::has_metadata(module)
         || crate::core_ir::rust_arrays::has_metadata(module)
+        || crate::core_ir::rust_floats::present(&module.decls)
     {
         *module = crate::typecheck::normalize_module_with_semantics(
             crate::parser_registry::ParserId::Rust,
@@ -115,8 +116,6 @@ pub fn desugar_module_with_semantics(
     lower_named_constants_with_semantics(&mut new_decls, semantics);
     lower_value_spills(&mut new_decls);
 
-    let mut closure_counter = 0usize;
-    let mut extra_decls: Vec<Decl> = Vec::new();
     let mut for_counter = 0usize;
     let declared_names = crate::core_bindings::module_names(&new_decls);
     let mut for_names = declared_names.clone();
@@ -136,11 +135,36 @@ pub fn desugar_module_with_semantics(
             bound.extend(params.iter().map(|(name, _)| name.clone()));
             collect_bound_names_in_body(body, &mut bound);
             desugar_for_loops(body, &mut for_counter, &for_names, &bound);
+        }
+    }
+    module.decls = new_decls;
+    lower_closures(module);
+}
+
+/// Lift closure values with their source type facts still available to callers.
+/// Existing generated declarations are reserved, so repeated lowering is safe.
+pub(crate) fn lower_closures(module: &mut UnifiedModule) {
+    let mut closure_counter = 0usize;
+    let mut extra_decls = Vec::new();
+    let declared_names = crate::core_bindings::module_names(&module.decls);
+    let mut names = declared_names.clone();
+    names.extend(module.decls.iter().filter_map(|decl| match decl {
+        Decl::Struct { name, .. } => Some(name.clone()),
+        _ => None,
+    }));
+    for decl in &module.decls {
+        if let Decl::Function { params, body, .. } = decl {
+            names.extend(params.iter().map(|(name, _)| name.clone()));
+            crate::core_bindings::reserve_body(body, &mut names);
+        }
+    }
+    for decl in &mut module.decls {
+        if let Decl::Function { body, .. } = decl {
             desugar_closures_in_body(
                 body,
                 &mut closure_counter,
                 &mut extra_decls,
-                &for_names,
+                &names,
                 &declared_names,
             );
         }
@@ -157,9 +181,7 @@ pub fn desugar_module_with_semantics(
             _ => None,
         })
         .collect();
-    new_decls.extend(extra_decls);
-
-    module.decls = new_decls;
+    module.decls.extend(extra_decls);
     crate::typecheck::TypeChecker::new().resolve_closure_calls(module, &closures);
 }
 
@@ -834,14 +856,26 @@ fn collect_free_vars(body: &[Stmt], params: &[(String, Typ)]) -> Vec<String> {
 
 fn rewrite_captures_in_body(body: &mut [Stmt], captures: &HashSet<&str>) {
     for stmt in body {
+        if let Stmt::Assign(name, value) = stmt
+            && captures.contains(name.as_str())
+        {
+            // Captured stores must name the same environment place as captured reads.
+            rewrite_captures_in_expr(value, captures);
+            *stmt = Stmt::FieldAssign {
+                base: Expr::Ident("self".into()),
+                name: name.clone(),
+                value: std::mem::replace(value, Expr::UnitLit),
+            };
+            continue;
+        }
         match stmt {
             Stmt::Declare(_, _) => {}
-            Stmt::Let(_, _, e)
-            | Stmt::Assign(_, e)
-            | Stmt::FieldAssign { value: e, .. }
-            | Stmt::Return(Some(e))
-            | Stmt::Expr(e) => {
+            Stmt::Let(_, _, e) | Stmt::Assign(_, e) | Stmt::Return(Some(e)) | Stmt::Expr(e) => {
                 rewrite_captures_in_expr(e, captures);
+            }
+            Stmt::FieldAssign { base, value, .. } => {
+                rewrite_captures_in_expr(base, captures);
+                rewrite_captures_in_expr(value, captures);
             }
             Stmt::IndexAssign {
                 base, index, value, ..
@@ -2439,7 +2473,7 @@ mod tests {
                 "return-type-mismatch",
             ),
             (
-                "fn main()->i64 { let x=42; let f=||x; f() }",
+                "fn main()->i64 { let mut x=41; let mut f=||{x+=1;x}; f() }",
                 "unresolved-symbol",
             ),
             (
@@ -2987,10 +3021,7 @@ mod tests {
                 _ => None,
             })
             .expect("captures struct should exist");
-        assert!(
-            cap_struct.contains(&("x".into(), Typ::Named("Any".into()))),
-            "captures struct should have x field, got: {cap_struct:?}"
-        );
+        assert_eq!(cap_struct, vec![("x".into(), Typ::Int)]);
     }
 
     #[test]
@@ -3030,15 +3061,10 @@ mod tests {
                 _ => None,
             })
             .expect("captures struct should exist");
-        assert!(
-            cap_struct.contains(&("x".into(), Typ::Named("Any".into()))),
-            "captures struct should have x field"
+        assert_eq!(
+            cap_struct,
+            vec![("x".into(), Typ::Int), ("y".into(), Typ::Int)]
         );
-        assert!(
-            cap_struct.contains(&("y".into(), Typ::Named("Any".into()))),
-            "captures struct should have y field"
-        );
-        assert_eq!(cap_struct.len(), 2);
     }
 
     #[test]

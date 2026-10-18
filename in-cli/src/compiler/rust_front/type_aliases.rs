@@ -1186,7 +1186,16 @@ fn primitive(parts: &[String], generic: bool) -> Result<Resolved, Failure> {
     }
     match builtin {
         Some("bool") => return Ok(Resolved::Type(Typ::Bool)),
-        Some("f32" | "f64") => return Ok(Resolved::Type(Typ::Float)),
+        Some("f32") => {
+            return Ok(Resolved::Type(crate::core_ir::rust_floats::typ(
+                crate::core_ir::rust_floats::Kind::F32,
+            )));
+        }
+        Some("f64") => {
+            return Ok(Resolved::Type(crate::core_ir::rust_floats::typ(
+                crate::core_ir::rust_floats::Kind::F64,
+            )));
+        }
         _ => {}
     }
     match integer {

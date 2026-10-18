@@ -869,7 +869,12 @@ mod tests {
         integer(&root, "u8<>", "u8");
         integer(&root, "Shadow", "u16");
         assert_eq!(resolved(&root, "bool<>"), Ok(Some(Typ::Bool)));
-        assert_eq!(resolved(&root, "f64<>"), Ok(Some(Typ::Float)));
+        assert_eq!(
+            resolved(&root, "f64<>"),
+            Ok(Some(crate::core_ir::rust_floats::typ(
+                crate::core_ir::rust_floats::Kind::F64
+            )))
+        );
         let _scope = root.enter();
         assert_eq!(
             resolve_value_owner(&syn::parse_str("u8::<>").unwrap()),
@@ -1028,8 +1033,14 @@ mod tests {
         let _scope = root.enter();
         for (path, typ) in [
             ("Identity<bool>", Typ::Bool),
-            ("Identity<f64>", Typ::Float),
-            ("Identity<core::primitive::f32>", Typ::Float),
+            (
+                "Identity<f64>",
+                crate::core_ir::rust_floats::typ(crate::core_ir::rust_floats::Kind::F64),
+            ),
+            (
+                "Identity<core::primitive::f32>",
+                crate::core_ir::rust_floats::typ(crate::core_ir::rust_floats::Kind::F32),
+            ),
         ] {
             assert_eq!(resolved(&root, path), Ok(Some(typ)));
             assert!(source_type_owned(&syn::parse_str(path).unwrap()).unwrap());

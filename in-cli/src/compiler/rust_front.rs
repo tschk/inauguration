@@ -8,7 +8,7 @@ use crate::boundary_ir::{
 };
 use crate::boundary_verify::boundary_ir_verify;
 use crate::core_ir::{CatchArm, Expr, LoopKind, MatchArm, MatchValueArm, Stmt, Typ};
-use crate::core_ir::{Decl, FloatVal, UnifiedModule};
+use crate::core_ir::{Decl, UnifiedModule};
 use quote::ToTokens;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
@@ -1441,6 +1441,15 @@ fn abi_type_for(ty: &syn::Type, layout_specs: &RustLayoutSpecs, packed: bool) ->
     match ty {
         syn::Type::Path(tp) => {
             if tp.qself.is_none()
+                && let Some(resolved) = type_aliases::resolve(&tp.path).ok()?
+                && let Some(kind) = crate::core_ir::rust_floats::kind(&resolved)
+            {
+                return Some(match kind {
+                    crate::core_ir::rust_floats::Kind::F32 => scalar_abi("float", 4, 4),
+                    crate::core_ir::rust_floats::Kind::F64 => scalar_abi("f64", 8, 8),
+                });
+            }
+            if tp.qself.is_none()
                 && let Some(Typ::Named(name)) = type_aliases::resolve(&tp.path).ok()?
                 && let Some(kind) = crate::core_ir::rust_integer_type_name(&name)
             {
@@ -2068,6 +2077,9 @@ fn lower_enum(e: &syn::ItemEnum) -> Option<Decl> {
 }
 
 fn type_to_string(ty: &Typ) -> String {
+    if let Some(kind) = crate::core_ir::rust_floats::kind(ty) {
+        return kind.name().into();
+    }
     if let Typ::Named(name) = ty
         && let Some(reference) = crate::core_ir::rust_references::decode(name)
     {
@@ -2505,6 +2517,18 @@ fn scoped_vector_path(
     Ok(result)
 }
 
+fn rust_float_path(path: &syn::Path) -> Option<crate::core_ir::rust_floats::Kind> {
+    let spelling = compact_rust_tokens(path);
+    let qualified = spelling.strip_prefix("::").unwrap_or(&spelling);
+    let name = match spelling.as_str() {
+        "f32" | "f64" => spelling.as_str(),
+        _ => qualified
+            .strip_prefix("core::primitive::")
+            .or_else(|| qualified.strip_prefix("std::primitive::"))?,
+    };
+    crate::core_ir::rust_floats::Kind::parse(name)
+}
+
 fn rust_integer_literal(value: i64, suffix: &str) -> Expr {
     Expr::Unary {
         op: if suffix.is_empty() {
@@ -2562,7 +2586,11 @@ fn map_type(ty: &syn::Type) -> Typ {
                 }
                 Some("String" | "str") => Typ::String,
                 Some("bool") => Typ::Bool,
-                Some("f64") => Typ::Float,
+                Some("f32" | "f64") if type_aliases::current().is_none() => {
+                    rust_float_path(&tp.path)
+                        .map(crate::core_ir::rust_floats::typ)
+                        .unwrap_or_else(|| Typ::Named(nominal_path_name(&tp.path)))
+                }
                 Some("AtomicU32" | "AtomicU64" | "AtomicUsize" | "Ordering") => Typ::Named(
                     tp.path
                         .segments
@@ -3582,6 +3610,50 @@ fn lower_expr_in_position(
     out
 }
 
+/// Rust directly cast decimal literals retain target precision, including
+/// parentheses and unary negation. An intervening binding or arithmetic
+/// expression instead has its independently inferred source width.
+fn direct_float_literal_cast(
+    source: &syn::Expr,
+    target: crate::core_ir::rust_floats::Kind,
+) -> Option<Expr> {
+    fn unparenthesized(mut source: &syn::Expr) -> &syn::Expr {
+        loop {
+            source = match source {
+                syn::Expr::Paren(value) => &value.expr,
+                syn::Expr::Group(value) => &value.expr,
+                _ => return source,
+            };
+        }
+    }
+    let source = unparenthesized(source);
+    let (source, negative) = match source {
+        syn::Expr::Unary(value) if matches!(value.op, syn::UnOp::Neg(_)) => {
+            (unparenthesized(&value.expr), true)
+        }
+        _ => (source, false),
+    };
+    let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Float(value),
+        ..
+    }) = source
+    else {
+        return None;
+    };
+    if !value.suffix().is_empty() {
+        return None;
+    }
+    let value = crate::core_ir::rust_floats::literal(value.base10_digits(), Some(target));
+    Some(if negative {
+        Expr::Unary {
+            op: crate::core_ir::rust_references::NEGATE_VALUE.into(),
+            expr: Box::new(value),
+        }
+    } else {
+        value
+    })
+}
+
 fn lower_expr_with_types_inner(
     expr: &syn::Expr,
     local_types: &mut HashMap<String, String>,
@@ -3597,16 +3669,10 @@ fn lower_expr_with_types_inner(
                 {
                     return Expr::Ident(token);
                 }
-                let value = if i.suffix() == "f32" {
-                    i.base10_parse::<f32>().map(f64::from)
-                } else {
-                    i.base10_parse::<f64>()
-                };
-                value
-                    .ok()
-                    .filter(|value| value.is_finite())
-                    .map(|value| Expr::FloatLit(FloatVal(value)))
-                    .unwrap_or(Expr::Ident(token))
+                crate::core_ir::rust_floats::literal(
+                    i.base10_digits(),
+                    crate::core_ir::rust_floats::Kind::parse(i.suffix()),
+                )
             }
             syn::Lit::Int(i) => {
                 let suffix = i.suffix();
@@ -3640,16 +3706,13 @@ fn lower_expr_with_types_inner(
                 }
             }
             syn::Lit::Float(value) => {
-                let parsed = match value.suffix() {
-                    "f32" => value.base10_parse::<f32>().map(f64::from),
-                    "" | "f64" => value.base10_parse::<f64>(),
-                    _ => return Expr::Ident(value.to_token_stream().to_string()),
-                };
-                parsed
-                    .ok()
-                    .filter(|value| value.is_finite())
-                    .map(|value| Expr::FloatLit(FloatVal(value)))
-                    .unwrap_or_else(|| Expr::Ident(value.to_token_stream().to_string()))
+                if !matches!(value.suffix(), "" | "f32" | "f64") {
+                    return Expr::Ident(value.to_token_stream().to_string());
+                }
+                crate::core_ir::rust_floats::literal(
+                    value.base10_digits(),
+                    crate::core_ir::rust_floats::Kind::parse(value.suffix()),
+                )
             }
             syn::Lit::Bool(b) => Expr::BoolLit(b.value),
             syn::Lit::Str(s) => Expr::StringLit(s.value()),
@@ -3943,13 +4006,20 @@ fn lower_expr_with_types_inner(
             index: Box::new(lower_expr_with_types(&index.index, local_types)),
         },
         syn::Expr::Cast(cast) => {
-            let value = lower_expr_with_types(&cast.expr, local_types);
+            let target_type = map_type(&cast.ty);
+            if let Some(failure) = crate::core_ir::type_proofs::failure_in_type(&target_type) {
+                return Expr::Ident(failure.symbol());
+            }
+            let floating_target = crate::core_ir::rust_floats::kind(&target_type);
             let target = cast.ty.to_token_stream().to_string().replace(' ', "");
             let target = target.strip_prefix("::").unwrap_or(&target);
             let target = target
                 .strip_prefix("core::primitive::")
                 .or_else(|| target.strip_prefix("std::primitive::"))
                 .unwrap_or(target);
+            let value = floating_target
+                .and_then(|kind| direct_float_literal_cast(&cast.expr, kind))
+                .unwrap_or_else(|| lower_expr_with_types(&cast.expr, local_types));
             let op = format!("int-cast-{target}");
             if crate::core_ir::integer_cast_spec(&op).is_some() {
                 Expr::Unary {
@@ -3961,11 +4031,8 @@ fn lower_expr_with_types_inner(
                         expr: Box::new(value),
                     }),
                 }
-            } else if matches!(target, "f32" | "f64") {
-                Expr::Unary {
-                    op: format!("numeric-cast-{target}"),
-                    expr: Box::new(value),
-                }
+            } else if let Some(kind) = floating_target {
+                crate::core_ir::rust_floats::cast(value, kind)
             } else {
                 Expr::Call {
                     callee: Box::new(Expr::Ident("unsupported-rust-cast".into())),
@@ -4187,6 +4254,7 @@ fn lower_expr_with_types_inner(
 mod tests {
     use super::*;
     use crate::boundary_ir::{BoundaryRepr, BoundaryTransfer};
+    use crate::core_ir::FloatVal;
 
     #[test]
     fn unused_alias_declaration_failures_survive_source_artifact_assembly() {
@@ -5786,7 +5854,7 @@ mod integer_metadata_tests {
         }
         let expression: syn::Expr = syn::parse_str("next() as f32").unwrap();
         assert!(
-            matches!(lower_expr_with_types(&expression, &mut HashMap::new()), Expr::Unary {op, expr} if op == "numeric-cast-f32" && matches!(expr.as_ref(), Expr::Call {..}))
+            matches!(lower_expr_with_types(&expression, &mut HashMap::new()), Expr::Unary {op, expr} if crate::core_ir::rust_floats::cast_kind(&op)==Some(crate::core_ir::rust_floats::Kind::F32) && matches!(expr.as_ref(), Expr::Call {..}))
         );
     }
 
@@ -6842,5 +6910,104 @@ mod fixed_array_metadata_tests {
             failure,
             Some(crate::core_ir::type_proofs::ResolutionFailure::Invalid(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod floating_source_metadata_tests {
+    use super::*;
+    use crate::core_ir::rust_floats::{self, Kind};
+
+    const DECIMAL: &str = "1.0000000596046447753906250000001";
+    fn lower(source: &str) -> Expr {
+        lower_expr_with_types(&syn::parse_str(source).unwrap(), &mut HashMap::new())
+    }
+    #[test]
+    fn float_literals_keep_original_decimal_digits_and_suffix_identity() {
+        for (source, digits, suffix) in [
+            (DECIMAL, DECIMAL, None),
+            ("1_000.000_000_059f32", "1000.000000059", Some(Kind::F32)),
+            ("42f32", "42", Some(Kind::F32)),
+            ("42f64", "42", Some(Kind::F64)),
+            ("0.1f64", "0.1", Some(Kind::F64)),
+            ("1e39f32", "1e39", Some(Kind::F32)),
+        ] {
+            let value = lower(source);
+            let info = rust_floats::literal_info(&value).unwrap();
+            assert_eq!((info.digits, info.suffix), (digits, suffix), "{source}");
+        }
+    }
+    #[test]
+    fn float_type_annotations_and_source_aliases_preserve_both_widths() {
+        let nominal = map_type(&syn::parse_quote!(owned::f32));
+        assert!(rust_floats::kind(&nominal).is_none());
+
+        for (source, kind) in [
+            ("f32", Kind::F32),
+            ("f64", Kind::F64),
+            ("core::primitive::f32", Kind::F32),
+        ] {
+            let typ = map_type(&syn::parse_str(source).unwrap());
+            assert_eq!(typ, rust_floats::typ(kind));
+            assert_eq!(type_to_string(&typ), kind.name());
+        }
+        let module=parse_rust_artifact_source("type Identity<T>=T;fn narrow(value:Identity<f32>)->Identity<f32>{value}fn wide(value:Identity<f64>)->Identity<f64>{value}","floattypes").unwrap();
+        for (name, kind) in [("narrow", Kind::F32), ("wide", Kind::F64)] {
+            let function = module
+                .semantic
+                .decls
+                .iter()
+                .find(|decl| matches!(decl,Decl::Function{name:actual,..}if actual==name))
+                .unwrap();
+            let Decl::Function { params, ret, .. } = function else {
+                unreachable!()
+            };
+            assert_eq!(
+                (params[0].1.clone(), ret.clone()),
+                (rust_floats::typ(kind), rust_floats::typ(kind))
+            );
+        }
+    }
+    #[test]
+    fn only_direct_unsuffixed_literal_casts_acquire_the_target_precision() {
+        for source in [
+            format!("{DECIMAL} as f32"),
+            format!("({DECIMAL}) as f32"),
+            format!("(-{DECIMAL}) as f32"),
+        ] {
+            let Expr::Unary { op, mut expr } = lower(&source) else {
+                panic!("cast")
+            };
+            assert_eq!(rust_floats::cast_kind(&op), Some(Kind::F32));
+            if let Expr::Unary { op, expr: inner } = expr.as_ref()
+                && op == crate::core_ir::rust_references::NEGATE_VALUE
+            {
+                expr = inner.clone();
+            }
+            let info = rust_floats::literal_info(&expr).unwrap();
+            assert_eq!(
+                (info.digits, info.suffix),
+                (DECIMAL, Some(Kind::F32)),
+                "{source}"
+            );
+        }
+        for (source, suffix) in [
+            (format!("{DECIMAL}f64 as f32"), Some(Kind::F64)),
+            (format!("({DECIMAL}+0.0) as f32"), None),
+        ] {
+            let Expr::Unary { op, expr } = lower(&source) else {
+                panic!("cast")
+            };
+            assert_eq!(rust_floats::cast_kind(&op), Some(Kind::F32));
+            let literal = match expr.as_ref() {
+                Expr::Binary { lhs, .. } => lhs.as_ref(),
+                other => other,
+            };
+            assert_eq!(rust_floats::literal_info(literal).unwrap().suffix, suffix);
+        }
+        let Expr::Unary { expr, .. } = lower("value as f32") else {
+            panic!("cast")
+        };
+        assert_eq!(*expr, Expr::Ident("value".into()));
     }
 }

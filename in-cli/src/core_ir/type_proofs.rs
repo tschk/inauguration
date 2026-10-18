@@ -101,6 +101,7 @@ pub(crate) fn failure_in_type(value: &Typ) -> Option<ResolutionFailure> {
 pub(crate) enum MetadataKind {
     TypeFailures,
     RustFixedArrays,
+    RustFloats,
 }
 
 pub(crate) fn present(decls: &[super::Decl]) -> bool {
@@ -113,6 +114,7 @@ pub(crate) fn metadata_present(decls: &[super::Decl], mode: MetadataKind) -> boo
     use super::{Decl, Expr, Stmt};
     fn named(name: &str, mode: MetadataKind) -> bool {
         (mode == MetadataKind::TypeFailures && decode(name).is_some())
+            || (mode == MetadataKind::RustFloats && super::rust_floats::is_proof(name))
             || super::rust_arrays::decode(name).is_some_and(|array| {
                 mode == MetadataKind::RustFixedArrays || typ(&array.element, mode)
             })
@@ -138,6 +140,7 @@ pub(crate) fn metadata_present(decls: &[super::Decl], mode: MetadataKind) -> boo
             "in-tuple-",
             "#rust-reference-type:",
             "#rust-fixed-array:",
+            "#rust-float-",
         ]
         .iter()
         .any(|prefix| source.contains(prefix))
@@ -159,6 +162,12 @@ pub(crate) fn metadata_present(decls: &[super::Decl], mode: MetadataKind) -> boo
     }
     fn expr(value: &Expr, mode: MetadataKind) -> bool {
         match value {
+            Expr::Unary { op, .. }
+                if mode == MetadataKind::RustFloats
+                    && super::rust_floats::inferred_type(op).is_some() =>
+            {
+                return true;
+            }
             Expr::Unary { op, .. }
                 if mode == MetadataKind::RustFixedArrays
                     && (super::rust_arrays::value_length(op).is_some()

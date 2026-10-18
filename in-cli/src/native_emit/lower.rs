@@ -233,6 +233,19 @@ fn build_assembly(
 /// Handles `std::process::exit` → `_exit` (C ABI in libSystem) and
 /// raw source names → C ABI symbols with a leading underscore on macOS.
 pub fn native_link_name(name: &str) -> String {
+    if name.starts_with('#') {
+        // Private IR names can contain JSON and arbitrary UTF-8. Encode every byte
+        // before legacy cleanup so distinct internal names remain distinct. The
+        // letter-leading namespace is disjoint from all public mappings below,
+        // which start with an underscore; private functions have no C ABI name.
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut symbol = String::from("in$private$");
+        for byte in name.bytes() {
+            symbol.push(char::from(HEX[usize::from(byte >> 4)]));
+            symbol.push(char::from(HEX[usize::from(byte & 15)]));
+        }
+        return symbol;
+    }
     // Clean up spaces (rust_front may produce "std :: process :: exit" instead of "std::process::exit")
     let cleaned = name.replace(' ', "");
     match cleaned.as_str() {
@@ -250,6 +263,55 @@ pub fn native_link_name(name: &str) -> String {
                 return "_unknown".to_string();
             }
             format!("_{asm_safe}")
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_link_name_tests {
+    use super::native_link_name;
+
+    #[test]
+    fn private_names_preserve_full_identity_in_assembly_safe_symbols() {
+        let f32_name =
+            r##"#rust-specialization:id:#rust-generic-arguments:[{"Named":"#rust-float-f32"}]"##;
+        let f64_name =
+            r##"#rust-specialization:id:#rust-generic-arguments:[{"Named":"#rust-float-f64"}]"##;
+        let f32_symbol = native_link_name(f32_name);
+        assert_ne!(f32_symbol, native_link_name(f64_name));
+        assert_eq!(f32_symbol, native_link_name(f32_name));
+        assert!(f32_symbol.starts_with("in$private$"));
+        assert!(
+            f32_symbol
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'.'))
+        );
+        assert_eq!(native_link_name("#"), "in$private$23");
+        assert_eq!(native_link_name("#é"), "in$private$23c3a9");
+        assert_ne!(native_link_name("#a b"), native_link_name("#ab"));
+        assert_ne!(native_link_name("#é"), native_link_name("#e"));
+        // Even public source names containing '$' retain their ABI underscore.
+        assert_ne!(native_link_name("#"), native_link_name("in$private$23"));
+        assert_eq!(native_link_name("in$private$23"), "_in$private$23");
+    }
+
+    #[test]
+    fn public_and_standard_shim_names_keep_existing_mappings() {
+        for (source, expected) in [
+            ("std::process::exit", "_exit"),
+            ("std::process::abort", "_exit"),
+            ("std :: io :: _print", "_printf"),
+            ("print", "_printf"),
+            ("make-point", "_make_point"),
+            ("module::helper", "_module.helper"),
+            (
+                "serde_json::from_str::<BenchMetric>",
+                "_serde_json.from_str.BenchMetric",
+            ),
+            ("", "_unknown"),
+            ("...", "_unknown"),
+        ] {
+            assert_eq!(native_link_name(source), expected, "{source}");
         }
     }
 }

@@ -10542,3 +10542,275 @@ fn rust_unused_generic_alias_parameters_refuse_before_entry_pruning() {
         fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+fn rust_f32_values_preserve_source_width_and_rounding() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main()->i64{let a:f32=16777216.0;let b:f32=1.0;if a+b==16777216.0{42}else{7}}",
+        "fn main()->i64{let a=16777216f32;let b=1f32;if a+b==16777216f32{42}else{7}}",
+        "fn main()->i64{let a:f32=16777216.0;let b:f32=1.0;if a+b-a==0.0{42}else{7}}",
+        "fn main()->i64{let a:f64=16777216.0;let b:f64=1.0;if a+b==16777217.0{42}else{7}}",
+        "fn check(x:f32)->bool{x==16777216.0}fn main()->i64{if check(16777217.0){42}else{7}}",
+        "fn add(x:f32,y:f32)->f32{x+y}fn main()->i64{if add(16777216.0,1.0)==16777216.0{42}else{7}}",
+        "fn main()->i64{let x:f32=16777217.0;if x==16777216.0{42}else{7}}",
+        "fn main()->i64{let x:f32=1.0000000596046447753906250000001;if x==1.00000011920928955078125f32{42}else{7}}",
+    ] {
+        let path = temp_path("rust-f32-source-width.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("rust-f32-source-width-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{source}: {report:?}");
+                assert!(report.degradations.is_empty(), "{source}: {report:?}");
+                assert!(report.external_invocations.is_empty());
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started, "{source}: {report:?}");
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(42)),
+                        "{source}: {report:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{source}: {report:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_f32_aggregate_values_preserve_width() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main()->i64{let values:[f32;1]=[16777217.0];if values[0]==16777216.0{42}else{7}}",
+        "fn main()->i64{let original=[1.0f32,16777217.0];let mut copied=original;copied[0]=2.0;if original[0]==1.0 && copied[0]==2.0 && original[1]==16777216.0 && copied[1]==16777216.0{42}else{7}}",
+        "fn main()->i64{let values=[0.1,0.2];if values[0]+values[1]==0.30000000000000004f64{42}else{7}}",
+        "fn main()->i64{let values:[f32;2]=[16777217.0;2];if values[0]==16777216.0 && values[1]==16777216.0{42}else{7}}",
+        "struct Row{value:f32}fn main()->i64{let mut row=Row{value:16777216.0};row.value=row.value+1.0;if row.value==16777216.0{42}else{7}}",
+        "fn main()->i64{let mut values=(16777216.0f32,0.0f32);values.1=values.0+1.0;if values.1==16777216.0{42}else{7}}",
+        "fn main()->i64{let a=[1.0000000596046447753906250000001];let x:f32=a[0];if x==1.00000011920928955078125f32{42}else{7}}",
+        "fn main()->i64{let a:[f32;1]=[1.0000000596046447753906250000001];let x:f32=a[0];if x==1.00000011920928955078125f32{42}else{7}}",
+        "fn main()->i64{let p=(1.0000000596046447753906250000001,);let x:f32=p.0;if x==1.00000011920928955078125f32{42}else{7}}",
+        "fn main()->i64{let p:(f32,)=(1.0000000596046447753906250000001,);let x:f32=p.0;if x==1.00000011920928955078125f32{42}else{7}}",
+        "fn main()->i64{let p=(1.0000000596046447753906250000001,);let q=(1.0000000596046447753906250000001,);let x:f32=p.0;let y:f64=q.0;if x==1.00000011920928955078125f32 && (y as f32)==1.0f32{42}else{7}}",
+        "fn main()->i64{let p=((1.0000000596046447753906250000001,),);let x:f32=p.0.0;if x==1.00000011920928955078125f32{42}else{7}}",
+        "fn main()->i64{let a=[1.0000000596046447753906250000001];let b=a;let x:f32=b[0];if x==1.00000011920928955078125f32{42}else{7}}",
+        "static mut COUNT:i64=0;fn main()->i64{let p=({unsafe{COUNT+=1;}1.0000000596046447753906250000001},);let x:f32=p.0;if x==1.00000011920928955078125f32 && unsafe{COUNT==1}{42}else{7}}",
+    ] {
+        let path = temp_path("rust-f32-aggregate.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("rust-f32-aggregate-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{source}: {report:?}");
+                assert!(report.degradations.is_empty(), "{source}: {report:?}");
+                assert!(report.external_invocations.is_empty());
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started, "{source}: {report:?}");
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(42)),
+                        "{source}: {report:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{source}: {report:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+    for source in [
+        "fn unused(){let values=[1.0f32,2.0f64];}fn main()->i64{42}",
+        "fn main()->i64{let p=(1.0f64,);if false{let _x:f32=p.0;}42}",
+    ] {
+        let path = temp_path("rust-f32-mixed-array.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                for entry in [None, Some("main")] {
+                    let out = temp_path("rust-f32-mixed-array-out");
+                    let mut request =
+                        default_request(path.clone(), target, entry, Some(out.clone()));
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(!report.success, "{source}: {report:?}");
+                    assert_eq!(
+                        report.reason_code.as_deref(),
+                        Some("rust-invalid-associated-type"),
+                        "{source}: {report:?}"
+                    );
+                    assert!(!report.execution_started);
+                    assert_eq!(report.eval_result, None);
+                    assert_eq!(report.eval_exit_code, None);
+                    assert_eq!(report.artifact_path, None);
+                    assert_eq!(report.executable_path, None);
+                    assert_eq!(report.abi_path, None);
+                    assert!(report.external_invocations.is_empty());
+                    assert!(!out.exists());
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_f32_generic_call_contexts_preserve_precision() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn id<T>(x:T)->T{x}fn main()->i64{if id(1.0f32)==1.0f32{42}else{7}}",
+        "fn id<T>(x:T)->T{x}fn main()->i64{let x:f32=id(16777217.0);if x==16777216.0{42}else{7}}",
+        "fn id<T>(x:T)->T{x}fn main()->i64{let x=id::<f32>(16777217.0);if x==16777216.0{42}else{7}}",
+        "fn first<T>(a:T,b:T)->T{a}fn main()->i64{if first(16777217.0,0.0f32)==16777216.0f32{42}else{7}}",
+        "fn second<T>(a:T,b:T)->T{b}fn main()->i64{if second(0.0f32,16777217.0)==16777216.0f32{42}else{7}}",
+        "fn id<T>(x:T)->T{x}fn main()->i64{let id=|value:f32|->f32{42.0};if id(1.0)==42.0f32{42}else{7}}",
+        "fn main()->i64{let a=1.0000000596046447753906250000001;let f=||->f32{a};if f()==1.00000011920928955078125f32{42}else{7}}",
+        "fn main()->i64{let a:f32=1.0000000596046447753906250000001;let f=||->f32{a};if f()==1.00000011920928955078125f32{42}else{7}}",
+        "fn main()->i64{let x=42;let f=||x;f()}",
+        "fn main()->i64{let a:f32=20.0;let b:i64=22;let f=||{(a as i64)+b};f()}",
+        "fn main()->i64{let factory=|x:f32|move ||x;let f=factory(42.0f32);if f()==42.0f32{42}else{7}}",
+    ] {
+        let path = temp_path("rust-f32-generic-context.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("rust-f32-generic-context-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{source}: {report:?}");
+                assert!(report.degradations.is_empty(), "{source}: {report:?}");
+                assert!(report.external_invocations.is_empty());
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started, "{source}: {report:?}");
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(42)),
+                        "{source}: {report:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{source}: {report:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+    let source = "fn id<T>(x:T)->T{x}fn main()->i64{let x:f32=id(1.0f64);42}";
+    let path = temp_path("rust-f32-generic-mismatch.rs");
+    fs::write(&path, source).unwrap();
+    for target in [CompileTarget::Jit, CompileTarget::Native] {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for entry in [None, Some("main")] {
+                let out = temp_path("rust-f32-generic-mismatch-out");
+                let mut request = default_request(path.clone(), target, entry, Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(!report.success, "{source}: {report:?}");
+                assert_eq!(
+                    report.reason_code.as_deref(),
+                    Some("rust-invalid-associated-type"),
+                    "{source}: {report:?}"
+                );
+                assert!(!report.execution_started);
+                assert_eq!(report.eval_result, None);
+                assert_eq!(report.eval_exit_code, None);
+                assert_eq!(report.artifact_path, None);
+                assert_eq!(report.executable_path, None);
+                assert_eq!(report.abi_path, None);
+                assert!(report.external_invocations.is_empty());
+                assert!(!out.exists());
+            }
+        }
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn mutable_captured_closures_refuse_before_execution() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let path = temp_path("mutable-capture.rs");
+    fs::write(
+        &path,
+        "fn main()->i64{let mut x=41;let mut f=||{x+=1;x};f()}",
+    )
+    .unwrap();
+    for target in [CompileTarget::Jit, CompileTarget::Native] {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let out = temp_path("mutable-capture-out");
+            let mut request =
+                default_request(path.clone(), target, Some("main"), Some(out.clone()));
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(!report.success, "{report:?}");
+            assert!(!report.execution_started, "{report:?}");
+            assert_eq!(report.eval_result, None);
+            assert_eq!(report.eval_exit_code, None);
+            assert_eq!(report.artifact_path, None);
+            assert_eq!(report.executable_path, None);
+            assert_eq!(report.abi_path, None);
+            assert!(report.external_invocations.is_empty());
+            assert!(!out.exists());
+        }
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn captured_environment_refusal_survives_native_normalization() {
+    let source = "fn main()->i64{let mut x=41;let mut f=||{x+=1;x};f()}";
+    let mut module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+    crate::lower_core::desugar_module(&mut module);
+    module = crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &module);
+    let before = format!("{module:#?}");
+    assert!(
+        crate::core_ir::type_proofs::present(&module.decls),
+        "missing environment refusal: {before}"
+    );
+    super::optimize_retained_module(
+        &mut module,
+        &Default::default(),
+        Some("main"),
+        EmitProfile::Default,
+        false,
+        crate::integer_semantics::IntegerSemantics::Word64,
+    )
+    .unwrap();
+    assert!(
+        crate::core_ir::type_proofs::present(&module.decls),
+        "before: {before}\nafter: {module:#?}"
+    );
+}

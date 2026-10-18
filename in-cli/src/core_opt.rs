@@ -1679,7 +1679,16 @@ fn is_propagatable_const(e: &Expr) -> bool {
     )
 }
 
-fn collect_assigned_names(s: &Stmt, assigned: &mut HashSet<String>) {
+pub(crate) fn place_root(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Ident(name) => Some(name),
+        Expr::Field { base, .. } | Expr::Index { base, .. } => place_root(base),
+        Expr::Unary { expr, .. } => place_root(expr),
+        _ => None,
+    }
+}
+
+pub(crate) fn collect_assigned_names(s: &Stmt, assigned: &mut HashSet<String>) {
     let mut stmt = s.clone();
     map_stmt_mut(&mut stmt, &mut |expr| {
         if let Expr::Block { body, .. } = expr {
@@ -1696,8 +1705,8 @@ fn collect_assigned_names(s: &Stmt, assigned: &mut HashSet<String>) {
         // be treated as assigned (otherwise constant propagation would inline
         // the initializer and the store would write to a discarded temporary).
         Stmt::IndexAssign { base, .. } | Stmt::FieldAssign { base, .. } => {
-            if let Expr::Ident(n) = base {
-                assigned.insert(n.clone());
+            if let Some(name) = place_root(base) {
+                assigned.insert(name.to_owned());
             }
         }
         Stmt::If {

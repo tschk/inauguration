@@ -51,9 +51,136 @@ pub(super) fn infer(
             {
                 *params = inferred.clone();
             }
+            if let Decl::Struct { name, fields, .. } = decl
+                && closures.contains_key(name)
+                && let Some(inferred) = facts.structs.get(name)
+            {
+                *fields = inferred.clone();
+            }
         }
     }
     changed
+}
+
+/// The current record ABI supports immutable scalar capture snapshots only.
+/// Mutable/by-reference environments need a real shared-place ABI before dispatch.
+pub(super) fn proven_environments(
+    module: &mut UnifiedModule,
+    facts: &Facts,
+    closures: &HashMap<String, String>,
+) -> HashSet<String> {
+    fn scalar(typ: &Typ) -> bool {
+        matches!(typ, Typ::Int | Typ::Float | Typ::Bool)
+            || matches!(typ, Typ::Named(name) if crate::core_ir::rust_integer_type_name(name).is_some())
+            || crate::core_ir::rust_floats::kind(typ).is_some()
+    }
+    fn borrowed(expr: &Expr) -> Option<&str> {
+        match expr {
+            Expr::Unary { op, expr }
+                if crate::core_ir::rust_references::value_kind(op).is_some() =>
+            {
+                crate::core_opt::place_root(expr)
+            }
+            Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW) => {
+                args.first().and_then(crate::core_opt::place_root)
+            }
+            _ => None,
+        }
+    }
+    let mut candidates: HashSet<_> = closures
+        .keys()
+        .filter(|name| {
+            facts.structs.get(*name).is_some_and(|fields| {
+                !fields.is_empty() && fields.iter().all(|(_, typ)| scalar(typ))
+            })
+        })
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        return candidates;
+    }
+    let globals: HashSet<_> = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Global { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut seen = HashSet::new();
+    let mut vetoed = HashSet::new();
+    let mut readonly = HashSet::new();
+    for decl in &mut module.decls {
+        if let Decl::Global {
+            init: Some(init), ..
+        } = decl
+        {
+            // A global constructor has no enclosing local snapshot proof.
+            crate::core_opt::map_expr_mut(init, &mut |expr| {
+                if let Expr::StructInit { name, .. } = expr
+                    && closures.contains_key(name)
+                {
+                    vetoed.insert(name.clone());
+                }
+            });
+        }
+        let Decl::Function {
+            name, params, body, ..
+        } = decl
+        else {
+            continue;
+        };
+        let mut assigned = HashSet::new();
+        for stmt in body.iter() {
+            crate::core_opt::collect_assigned_names(stmt, &mut assigned);
+        }
+        let mut borrows = HashSet::new();
+        for stmt in body.iter_mut() {
+            crate::core_opt::map_stmt_exprs_mut(stmt, &mut |expr| {
+                if let Some(name) = borrowed(expr) {
+                    borrows.insert(name.to_owned());
+                }
+            });
+        }
+        if let Some((receiver, _)) = params.first()
+            && !assigned.contains(receiver)
+            && !borrows.contains(receiver)
+        {
+            readonly.insert(name.clone());
+        }
+        for stmt in body.iter_mut() {
+            crate::core_opt::map_stmt_exprs_mut(stmt, &mut |expr| {
+                let Expr::StructInit { name, fields } = expr else {
+                    return;
+                };
+                if !closures.contains_key(name) {
+                    return;
+                }
+                seen.insert(name.clone());
+                let schema = facts.structs.get(name);
+                let mut field_names = HashSet::new();
+                let safe = schema.is_some_and(|schema| {
+                    fields.len() == schema.len()
+                        && fields.iter().all(|(field, value)| {
+                            field_names.insert(field)
+                                && schema.iter().any(|(name, _)| name == field)
+                                && matches!(value, Expr::Ident(source) if !assigned.contains(source) && !borrows.contains(source) && !globals.contains(source))
+                        })
+                });
+                if !safe {
+                    vetoed.insert(name.clone());
+                }
+            });
+        }
+    }
+    candidates.retain(|schema| {
+        seen.contains(schema)
+            && !vetoed.contains(schema)
+            && closures
+                .get(schema)
+                .is_some_and(|target| readonly.contains(target))
+    });
+    candidates
 }
 
 pub(super) fn argument_type(
@@ -168,6 +295,29 @@ fn expression_constraints(
     crate::core_ir::for_each_expr_child(expr, &mut |child| {
         expression_constraints(checker, child, facts, generated, env, changed)
     });
+    if let Expr::StructInit { name, fields } = expr
+        && facts.closures.contains_key(name)
+    {
+        let actual: Vec<_> = fields
+            .iter()
+            .map(|(field, value)| (field, argument_type(checker, value, facts, env)))
+            .collect();
+        if let Some(schema) = facts.structs.get_mut(name) {
+            for (field, actual) in actual {
+                let Some(actual) = actual else { continue };
+                let Some((_, expected)) = schema.iter_mut().find(|(name, _)| name == field) else {
+                    continue;
+                };
+                let unknown = matches!(expected, Typ::Named(name) if name == "Any" || name == "_");
+                let stronger_float = *expected == crate::core_ir::rust_floats::weak_type()
+                    && crate::core_ir::rust_floats::kind(&actual).is_some();
+                if (unknown || stronger_float) && *expected != actual {
+                    *expected = actual;
+                    *changed = true;
+                }
+            }
+        }
+    }
     let Expr::Call { callee, args } = expr else {
         return;
     };
@@ -343,5 +493,204 @@ mod tests {
         };
         assert_eq!(argument_type(&checker, &expr, &facts, &env), Some(Typ::Int));
         assert_eq!(env.get("value"), Some(&Typ::Bool));
+    }
+
+    #[test]
+    fn generated_capture_fields_keep_source_float_width_without_mutating_user_schemas() {
+        use crate::core_ir::rust_floats::{self, Kind};
+        let function = |name: &str, params, ret, body| Decl::Function {
+            name: name.into(),
+            params,
+            ret,
+            body,
+            type_params: vec![],
+        };
+        let mut module = UnifiedModule::new(vec![
+            Decl::Struct {
+                name: "captures".into(),
+                fields: vec![("value".into(), Typ::Named("Any".into()))],
+                type_params: vec![],
+            },
+            Decl::Struct {
+                name: "User".into(),
+                fields: vec![("value".into(), Typ::Named("Any".into()))],
+                type_params: vec![],
+            },
+            function(
+                "closure",
+                vec![("self".into(), Typ::Named("captures".into()))],
+                rust_floats::typ(Kind::F32),
+                vec![Stmt::Return(Some(Expr::Field {
+                    base: Box::new(Expr::Ident("self".into())),
+                    name: "value".into(),
+                }))],
+            ),
+            function(
+                "main",
+                vec![],
+                Typ::Int,
+                vec![
+                    Stmt::Let(
+                        "outer".into(),
+                        Some(rust_floats::typ(Kind::F32)),
+                        rust_floats::literal("1", Some(Kind::F32)),
+                    ),
+                    Stmt::Expr(Expr::StructInit {
+                        name: "captures".into(),
+                        fields: vec![("value".into(), Expr::Ident("outer".into()))],
+                    }),
+                    Stmt::Expr(Expr::StructInit {
+                        name: "User".into(),
+                        fields: vec![("value".into(), Expr::Ident("outer".into()))],
+                    }),
+                    Stmt::Return(Some(Expr::IntLit(42))),
+                ],
+            ),
+        ]);
+        let closures = HashMap::from([("captures".into(), "closure".into())]);
+        assert!(infer(&TypeChecker::new(), &mut module, &closures));
+        let Decl::Struct { fields, .. } = &module.decls[0] else {
+            panic!()
+        };
+        assert_eq!(fields[0].1, rust_floats::typ(Kind::F32));
+        let Decl::Struct { fields, .. } = &module.decls[1] else {
+            panic!()
+        };
+        assert_eq!(fields[0].1, Typ::Named("Any".into()));
+        assert!(!infer(&TypeChecker::new(), &mut module, &closures));
+    }
+
+    #[test]
+    fn capture_snapshot_proof_requires_readonly_unborrowed_scalar_sources() {
+        use crate::core_ir::rust_floats::{self, Kind};
+        let scalar = rust_floats::typ(Kind::F32);
+        let constructor = || {
+            Stmt::Expr(Expr::StructInit {
+                name: "caps".into(),
+                fields: vec![("value".into(), Expr::Ident("outer".into()))],
+            })
+        };
+        let function = |name: &str, params, body| Decl::Function {
+            name: name.into(),
+            params,
+            ret: scalar.clone(),
+            body,
+            type_params: vec![],
+        };
+        let base = UnifiedModule::new(vec![
+            Decl::Struct {
+                name: "caps".into(),
+                fields: vec![("value".into(), scalar.clone())],
+                type_params: vec![],
+            },
+            function(
+                "closure",
+                vec![("self".into(), Typ::Named("caps".into()))],
+                vec![Stmt::Return(Some(Expr::Field {
+                    base: Box::new(Expr::Ident("self".into())),
+                    name: "value".into(),
+                }))],
+            ),
+            function(
+                "main",
+                vec![],
+                vec![
+                    Stmt::Let(
+                        "outer".into(),
+                        Some(scalar.clone()),
+                        Expr::FloatLit(crate::core_ir::FloatVal(1.0)),
+                    ),
+                    constructor(),
+                ],
+            ),
+        ]);
+        let closures = HashMap::from([("caps".into(), "closure".into())]);
+        let check = |mut module: UnifiedModule| {
+            let facts = TypeChecker::new().collect_facts(&module);
+            proven_environments(&mut module, &facts, &closures).contains("caps")
+        };
+        assert!(check(base.clone()));
+        for change in 0..8 {
+            let mut module = base.clone();
+            match change {
+                0 => {
+                    if let Decl::Function { body, .. } = &mut module.decls[2] {
+                        body.push(Stmt::Assign(
+                            "outer".into(),
+                            Expr::FloatLit(crate::core_ir::FloatVal(2.0)),
+                        ));
+                    }
+                }
+                1 => {
+                    if let Decl::Function { body, .. } = &mut module.decls[1] {
+                        body.push(Stmt::FieldAssign {
+                            base: Expr::Ident("self".into()),
+                            name: "value".into(),
+                            value: Expr::FloatLit(crate::core_ir::FloatVal(2.0)),
+                        });
+                    }
+                }
+                2 | 3 => {
+                    if let Decl::Function { body, .. } = &mut module.decls[2] {
+                        let value = Expr::Ident("outer".into());
+                        let borrow = if change == 2 {
+                            Expr::Call {
+                                callee: Box::new(Expr::Ident(crate::core_ir::BORROW.into())),
+                                args: vec![value],
+                            }
+                        } else {
+                            Expr::Unary {
+                                op: crate::core_ir::rust_references::SHARED_VALUE.into(),
+                                expr: Box::new(value),
+                            }
+                        };
+                        body.push(Stmt::Let("alias".into(), None, borrow));
+                    }
+                }
+                4 => {
+                    if let Decl::Struct { fields, .. } = &mut module.decls[0] {
+                        fields[0].1 = Typ::Named("Any".into());
+                    }
+                }
+                5 => {
+                    if let Decl::Function { body, .. } = &mut module.decls[1] {
+                        body.push(Stmt::Expr(Expr::Call {
+                            callee: Box::new(Expr::Ident(crate::core_ir::BORROW.into())),
+                            args: vec![Expr::Field {
+                                base: Box::new(Expr::Ident("self".into())),
+                                name: "value".into(),
+                            }],
+                        }));
+                    }
+                }
+                6 => {
+                    if let Decl::Function { body, .. } = &mut module.decls[1] {
+                        body.push(Stmt::FieldAssign {
+                            base: Expr::Field {
+                                base: Box::new(Expr::Ident("self".into())),
+                                name: "value".into(),
+                            },
+                            name: "nested".into(),
+                            value: Expr::FloatLit(crate::core_ir::FloatVal(2.0)),
+                        });
+                    }
+                }
+                7 => {
+                    // A local constructor reading a global is not a stable local snapshot.
+                    if let Decl::Function { body, .. } = &mut module.decls[2] {
+                        body.remove(0);
+                    }
+                    module.decls.push(Decl::Global {
+                        name: "outer".into(),
+                        typ: scalar.clone(),
+                        init: Some(Box::new(Expr::FloatLit(crate::core_ir::FloatVal(1.0)))),
+                        mutable: true,
+                        constant_value: false,
+                    });
+                }
+                _ => unreachable!(),
+            }
+            assert!(!check(module), "unsafe capture variant {change}");
+        }
     }
 }

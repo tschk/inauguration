@@ -2,6 +2,7 @@
 
 pub(crate) mod array_copy;
 pub(crate) mod rust_arrays;
+pub(crate) mod rust_floats;
 pub(crate) mod rust_generics;
 pub(crate) mod rust_references;
 pub(crate) mod tuples;
@@ -206,6 +207,7 @@ impl Typ {
             return Typ::Array(Box::new(array.element.canonical()));
         }
         match self {
+            Typ::Named(name) if rust_floats::is_proof(name) => Typ::Float,
             Typ::Named(name)
                 if integer_type_name(name).is_some() || rust_integer_type_name(name).is_some() =>
             {
@@ -231,6 +233,7 @@ impl Typ {
         match self {
             Typ::Named(name)
                 if rust_integer_type_name(name).is_some()
+                    || rust_floats::is_proof(name)
                     || rust_references::decode(name).is_some()
                     || rust_arrays::decode(name).is_some() =>
             {

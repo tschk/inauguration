@@ -13,7 +13,7 @@ fn fixed(typ: &Typ) -> Option<rust_arrays::FixedArray> {
 }
 fn scalar(typ: &Typ) -> bool {
     matches!(typ, Typ::Int | Typ::Float | Typ::Bool)
-        || matches!(typ, Typ::Named(name) if crate::core_ir::rust_integer_type_name(name).is_some())
+        || matches!(typ, Typ::Named(name) if crate::core_ir::rust_integer_type_name(name).is_some() || crate::core_ir::rust_floats::is_proof(name))
 }
 fn fresh(expr: &Expr) -> bool {
     matches!(expr, Expr::Unary { op, .. } if rust_arrays::value_length(op).is_some())
@@ -65,7 +65,11 @@ impl Constraints {
             crate::core_ir::type_proofs::prefer_failure(self.failure.take(), Some(proof));
     }
 }
-fn merge_element(left: &Typ, right: &Typ, length: usize) -> Result<Typ, ResolutionFailure> {
+pub(super) fn merge_element(
+    left: &Typ,
+    right: &Typ,
+    length: usize,
+) -> Result<Typ, ResolutionFailure> {
     if left == right {
         return Ok(left.clone());
     }
@@ -85,6 +89,13 @@ fn merge_element(left: &Typ, right: &Typ, length: usize) -> Result<Typ, Resoluti
             merge_element(&left.element, &right.element, left.length)?,
             left.length,
         ));
+    }
+    if let Some(joined) = super::rust_floats::join_types(&[Some(left.clone()), Some(right.clone())])
+    {
+        return match crate::core_ir::type_proofs::failure_in_type(&joined) {
+            Some(proof) => Err(proof),
+            None => Ok(joined),
+        };
     }
     let integer = |typ: &Typ| {
         matches!(typ, Typ::Int)
