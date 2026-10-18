@@ -2529,6 +2529,48 @@ fn rust_float_path(path: &syn::Path) -> Option<crate::core_ir::rust_floats::Kind
     crate::core_ir::rust_floats::Kind::parse(name)
 }
 
+// Cast context follows unary operators and block tails to an unsuffixed literal.
+// Preserve the negative operator before folding would erase it (notably -0).
+fn direct_unsuffixed_integer_sign(expr: &syn::Expr) -> Option<bool> {
+    let mut expr = expr;
+    let mut negative = false;
+    loop {
+        match expr {
+            syn::Expr::Paren(value) => expr = &value.expr,
+            syn::Expr::Group(value) => expr = &value.expr,
+            syn::Expr::Block(value) => {
+                let syn::Stmt::Expr(tail, None) = value.block.stmts.last()? else {
+                    return None;
+                };
+                expr = tail;
+            }
+            syn::Expr::Unsafe(value) => {
+                let syn::Stmt::Expr(tail, None) = value.block.stmts.last()? else {
+                    return None;
+                };
+                expr = tail;
+            }
+            syn::Expr::Const(value) => {
+                let syn::Stmt::Expr(tail, None) = value.block.stmts.last()? else {
+                    return None;
+                };
+                expr = tail;
+            }
+            syn::Expr::Unary(value)
+                if matches!(value.op, syn::UnOp::Neg(_) | syn::UnOp::Not(_)) =>
+            {
+                negative |= matches!(value.op, syn::UnOp::Neg(_));
+                expr = &value.expr;
+            }
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(value),
+                ..
+            }) if value.suffix().is_empty() => return Some(negative),
+            _ => return None,
+        }
+    }
+}
+
 fn rust_integer_literal(value: i64, suffix: &str) -> Expr {
     Expr::Unary {
         op: if suffix.is_empty() {
@@ -3795,7 +3837,7 @@ fn lower_expr_with_types_inner(
                         expr: Box::new(Expr::IntLit(magnitude as i64)),
                     };
                 }
-                let value = if suffix == "u64" {
+                let value = if matches!(suffix, "u64" | "usize") {
                     i.base10_parse::<u64>().map(|value| value as i64).ok()
                 } else {
                     i.base10_parse::<i64>().ok()
@@ -4141,7 +4183,15 @@ fn lower_expr_with_types_inner(
                 .and_then(|kind| direct_float_literal_cast(&cast.expr, kind))
                 .unwrap_or_else(|| lower_expr_with_types(&cast.expr, local_types));
             let op = format!("int-cast-{target}");
-            if crate::core_ir::integer_cast_spec(&op).is_some() {
+            if let Some((_, signed)) = crate::core_ir::integer_cast_spec(&op) {
+                if !signed && direct_unsuffixed_integer_sign(&cast.expr) == Some(true) {
+                    return Expr::Ident(
+                        crate::core_ir::type_proofs::ResolutionFailure::Invalid(
+                            "unary negation requires a signed Rust integer source".into(),
+                        )
+                        .symbol(),
+                    );
+                }
                 Expr::Unary {
                     // Retain the source integer result kind even when generic
                     // cast normalization erases its numeric-cast operation.
@@ -5671,7 +5721,7 @@ fn main() {
                 Some(1),
             ),
             (
-                "fn main() -> i64 { return (170 as ::core::primitive::i8) as i64; }",
+                "fn main() -> i64 { return (170i64 as ::core::primitive::i8) as i64; }",
                 Some(-86),
             ),
             ("fn main() -> i64 { return (42 as i128) as i64; }", None),
@@ -7249,6 +7299,81 @@ mod opaque_macro_dependency_tests {
                         .map(|name| Expr::Ident(name.into()))
                         .collect(),
                 },
+                "{source}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod direct_integer_cast_source_tests {
+    use super::*;
+    #[test]
+    fn unsigned_direct_negative_literal_casts_keep_source_invalidity_before_folding() {
+        for source in [
+            "-1 as u8",
+            "(-1) as u8",
+            "-0 as u8",
+            "(-0) as u8",
+            "-(0) as u8",
+            "-(-1) as u8",
+            "(-(-1)) as u8",
+            "!(-0) as u8",
+            "-{0} as u8",
+            "{-0} as u8",
+            "unsafe{-0} as u8",
+            "const{-0} as u8",
+        ] {
+            let expression = syn::parse_str(source).unwrap();
+            let lowered = lower_expr_with_types(&expression, &mut HashMap::new());
+            assert!(
+                matches!(&lowered,Expr::Ident(name)if crate::core_ir::type_proofs::decode(name).is_some_and(|proof|proof.is_invalid())),
+                "{source}: {lowered:?}"
+            );
+        }
+        for source in [
+            "(-1i32) as u8",
+            "(-0i32) as u8",
+            "-1 as i64",
+            "true as u8",
+            "'Ā' as u8",
+            "value as u8",
+            "(1+2) as u8",
+        ] {
+            let expression = syn::parse_str(source).unwrap();
+            let lowered = lower_expr_with_types(&expression, &mut HashMap::new());
+            assert!(
+                !matches!(&lowered,Expr::Ident(name)if crate::core_ir::type_proofs::decode(name).is_some_and(|proof|proof.is_invalid())),
+                "{source}: {lowered:?}"
+            );
+        }
+    }
+    #[test]
+    fn explicit_usize_high_half_retains_unsigned_literal_bits() {
+        let expression = syn::parse_str("18446744073709551615usize").unwrap();
+        let lowered = lower_expr_with_types(&expression, &mut HashMap::new());
+        assert_eq!(
+            lowered,
+            Expr::Unary {
+                op: "rust-integer-literal-usize".into(),
+                expr: Box::new(Expr::IntLit(-1))
+            }
+        );
+        for source in [
+            "1",
+            "!(1)",
+            "-(-1)",
+            "((-0))",
+            "{1}",
+            "unsafe{1}",
+            "const{1}",
+        ] {
+            assert!(direct_unsuffixed_integer_sign(&syn::parse_str(source).unwrap()).is_some());
+        }
+        for source in ["1u8", "(-1i64)", "value", "{let x=1;x}", "1+2", "next()"] {
+            assert_eq!(
+                direct_unsuffixed_integer_sign(&syn::parse_str(source).unwrap()),
+                None,
                 "{source}"
             );
         }

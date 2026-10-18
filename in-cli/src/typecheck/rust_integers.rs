@@ -438,6 +438,42 @@ fn aggregate_value(expr: &Expr) -> bool {
         || matches!(expr,Expr::Call{callee,..}if matches!(callee.as_ref(),Expr::Ident(name)if name==core_ir::tuples::VALUE))
 }
 
+// Raw private Rust literals establish source origin; canonical literals and
+// explicit suffixes must retain their independently inferred source types.
+pub(super) fn direct_unsuffixed_cast_source(mut expr: &Expr) -> bool {
+    loop {
+        match expr {
+            Expr::Block {
+                result: Some(result),
+                ..
+            } => expr = result,
+            Expr::Call { callee, args }
+                if matches!(callee.as_ref(),Expr::Ident(name) if name==core_ir::INLINE_CONST)
+                    && matches!(args.as_slice(), [Expr::Block { .. }]) =>
+            {
+                expr = &args[0]
+            }
+            Expr::Unary { op, expr: value }
+                if matches!(
+                    op.as_str(),
+                    "-" | "complement" | "~" | "bitnot" | core_ir::rust_references::NEGATE_VALUE
+                ) =>
+            {
+                expr = value
+            }
+            Expr::Unary { op, expr: value }
+                if matches!(
+                    op.as_str(),
+                    "rust-integer-literal" | "rust-integer-literal-magnitude"
+                ) =>
+            {
+                return matches!(value.as_ref(), Expr::IntLit(_));
+            }
+            _ => return false,
+        }
+    }
+}
+
 struct Pass<'a> {
     checker: &'a TypeChecker,
     facts: &'a Facts,
@@ -1100,7 +1136,9 @@ impl Pass<'_> {
                                 !kind.signed && kind.bits == 64
                             } else {
                                 kind.contains(*integer)
-                                    || (!kind.signed && kind.bits == 64 && suffix == Some("u64"))
+                                    || (!kind.signed
+                                        && kind.bits == 64
+                                        && matches!(suffix, Some("u64" | "usize")))
                             };
                             bad |= !fits;
                             if !fits && kind.supported(self.semantics) {
@@ -1193,12 +1231,15 @@ impl Pass<'_> {
                     self.unresolved_width = false;
                     self.active_place = None;
                 }
-                let inner = self.expression(
-                    value,
-                    if cast.is_some() { None } else { expected },
-                    env,
-                    ret,
-                );
+                let source_expected =
+                    if name.starts_with("numeric-cast-") && direct_unsuffixed_cast_source(value) {
+                        target
+                    } else if cast.is_some() {
+                        None
+                    } else {
+                        expected
+                    };
+                let inner = self.expression(value, source_expected, env, ret);
                 self.unresolved_width = outer_unresolved;
                 self.active_place = outer_place;
                 if let Some(paths) = outer_paths {
@@ -4197,5 +4238,176 @@ mod unresolved_width_context_tests {
                 "marker {source}: {module:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod direct_cast_context_tests {
+    use super::*;
+    use core_ir::type_proofs::ResolutionFailure;
+
+    fn normalized(source: &str, semantics: IntegerSemantics) -> UnifiedModule {
+        let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+        super::super::normalize_module_with_semantics(
+            crate::parser_registry::ParserId::Rust,
+            &module,
+            semantics,
+        )
+    }
+    fn invalid(module: &UnifiedModule) -> bool {
+        TypeChecker::new()
+            .typed_proof_nodes(&module.decls)
+            .values()
+            .any(ResolutionFailure::is_invalid)
+    }
+    #[test]
+    fn direct_integer_casts_contextualize_only_pending_unsuffixed_literals() {
+        for expression in [
+            "2147483648 as i64",
+            "({2147483648}) as i64",
+            "{let x=0;2147483648} as i64",
+            "-{2147483648} as i64",
+            "unsafe{2147483648} as i64",
+            "const{2147483648} as i64",
+            "const{let x=0;2147483648} as i64",
+            "{let v=-1;0} as u8",
+            "2147483648 as u32",
+            "18446744073709551615 as u64",
+            "18446744073709551615 as usize",
+            "(((2147483648))) as i64",
+            "-2147483649 as i64",
+            "(-2147483649) as i64",
+            "-9223372036854775808 as i64",
+            "(-(-2147483648)) as i64",
+            "!2147483648 as i64",
+            "(!2147483648) as i64",
+            "256i64 as u8",
+            "18446744073709551615u64 as i64",
+            "(-1i32) as u64",
+            "18446744073709551615usize",
+            "0usize",
+            "4294967295usize",
+        ] {
+            for cold in [false, true] {
+                let source = if cold {
+                    format!("fn main()->i64{{if false{{let value={expression};}}42}}")
+                } else {
+                    format!("fn main()->i64{{let value={expression};42}}")
+                };
+                let module = normalized(&source, IntegerSemantics::Word64);
+                assert!(
+                    TypeChecker::new()
+                        .typed_proof_nodes(&module.decls)
+                        .is_empty(),
+                    "{source}: {module:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn direct_cast_context_preserves_source_range_and_independent_errors() {
+        for expression in [
+            "256 as u8",
+            "1_000 as u8",
+            "128 as i8",
+            "-129 as i8",
+            "(-129) as i8",
+            "18446744073709551615 as i64",
+            "18446744073709551615 as u32",
+            "2147483648 as i32",
+            "-1 as u8",
+            "(-1) as u8",
+            "-1 as u64",
+            "-0 as u8",
+            "-{0} as u8",
+            "{-0} as u8",
+            "unsafe{-0} as u8",
+            "const{-0} as u8",
+            "unsafe{let bad=2147483648;0} as i64",
+            "const{let bad=2147483648;0} as i64",
+            "{let bad=2147483648;0} as i64",
+            "{let bad:i8=128;0} as i64",
+            "(-0) as u8",
+            "-(0) as u8",
+            "-(-1) as u8",
+            "(-(-1)) as u8",
+            "!256 as u8",
+            "(!256) as u8",
+            "{let prior=2147483648;prior as i64}",
+            "(2147483648+0) as i64",
+            "2147483648 as f32",
+            "2147483648 as f64",
+        ] {
+            for cold in [false, true] {
+                let source = if cold {
+                    format!("fn main()->i64{{if false{{let value={expression};}}42}}")
+                } else {
+                    format!("fn main()->i64{{let value={expression};42}}")
+                };
+                let module = normalized(&source, IntegerSemantics::Word64);
+                assert!(invalid(&module), "{source}: {module:?}");
+            }
+        }
+        for expression in [
+            "18446744073709551615usize",
+            "4294967296usize",
+            "18446744073709551615 as usize",
+        ] {
+            let module = normalized(
+                &format!("fn main()->i32{{let value={expression};42}}"),
+                IntegerSemantics::Word32,
+            );
+            assert!(invalid(&module), "{expression}: {module:?}");
+        }
+    }
+    #[test]
+    fn contextual_literal_classifier_does_not_claim_canonical_or_owned_sources() {
+        let pending = Expr::Unary {
+            op: "rust-integer-literal".into(),
+            expr: Box::new(Expr::IntLit(1)),
+        };
+        assert!(direct_unsuffixed_cast_source(&pending));
+        assert!(direct_unsuffixed_cast_source(&Expr::Unary {
+            op: "complement".into(),
+            expr: Box::new(pending.clone())
+        }));
+        for value in [
+            Expr::IntLit(1),
+            Expr::Ident("value".into()),
+            Expr::Unary {
+                op: "rust-integer-literal-i64".into(),
+                expr: Box::new(Expr::IntLit(1)),
+            },
+            Expr::Unary {
+                op: "rust-integer-value-i64".into(),
+                expr: Box::new(pending.clone()),
+            },
+            Expr::Unary {
+                op: "int-cast-i64".into(),
+                expr: Box::new(pending.clone()),
+            },
+            Expr::Block {
+                body: vec![],
+                result: Some(Box::new(Expr::Ident("value".into()))),
+            },
+            Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(pending.clone()),
+                rhs: Box::new(pending.clone()),
+            },
+        ] {
+            assert!(!direct_unsuffixed_cast_source(&value), "{value:?}");
+        }
+        let source =
+            "fn source()->i64{256i64}fn main()->i64{let result={source();2147483648} as i64;42}";
+        let mut module = normalized(source, IntegerSemantics::Word64);
+        let mut calls = 0;
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+            if matches!(expr,Expr::Call{callee,..}if matches!(callee.as_ref(),Expr::Ident(name)if name=="source"))
+            {
+                calls += 1;
+            }
+        });
+        assert_eq!(calls, 1, "{module:?}");
     }
 }

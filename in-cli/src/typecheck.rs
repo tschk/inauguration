@@ -1517,11 +1517,13 @@ impl TypeChecker {
             && let Some(target) = op.strip_prefix("numeric-cast-")
         {
             let integer = format!("int-cast-{target}");
+            // Rust literal source inference must precede canonical cast lowering.
             match closure_inference::argument_type(self, value, facts, env)
                 .map(|typ| typ.canonical())
             {
                 Some(Typ::Int | Typ::Bool)
-                    if crate::core_ir::integer_cast_spec(&integer).is_some() =>
+                    if crate::core_ir::integer_cast_spec(&integer).is_some()
+                        && !rust_integers::direct_unsuffixed_cast_source(value) =>
                 {
                     *op = integer
                 }

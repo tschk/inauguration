@@ -10975,3 +10975,121 @@ fn rust_integer_float_casts_preserve_default_integer_range_refusals() {
         fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+fn rust_integer_literal_casts_infer_source_types_and_preserve_explicit_sources() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main()->i64{let value=2147483648 as i64;if value==2147483648i64{42}else{7}}",
+        "fn main()->i64{let value=2147483648 as u32;if value==2147483648u32{42}else{7}}",
+        "fn main()->i64{let value=18446744073709551615 as u64;if value==u64::MAX{42}else{7}}",
+        "fn main()->i64{let value=18446744073709551615 as usize;if value==usize::MAX{42}else{7}}",
+        "fn main()->i64{let value=(-2147483649) as i64;if value==(-2147483649i64){42}else{7}}",
+        "fn main()->i64{let value=-9223372036854775808 as i64;if value==i64::MIN{42}else{7}}",
+        "fn main()->i64{let value=(!2147483648) as i64;if value==(-2147483649i64){42}else{7}}",
+        "fn main()->i64{let value=(-(-2147483648)) as i64;if value==2147483648i64{42}else{7}}",
+        "fn main()->i64{let value=256i64 as u8;if value==0u8{42}else{7}}",
+        "fn main()->i64{let value=(-1i32) as u64;if value==u64::MAX{42}else{7}}",
+        "fn main()->i64{let value=18446744073709551615usize as u64;if value==u64::MAX{42}else{7}}",
+        "fn main()->i64{if (true as u8)==1u8{42}else{7}}",
+        "fn main()->i64{let mut count=0;let value={count+=1;256i64} as u8;if value==0u8 && count==1{42}else{7}}",
+        "fn main()->i64{let mut count=0;let value={count+=1;2147483648} as i64;if value==2147483648i64 && count==1{42}else{7}}",
+        "fn main()->i64{let value=-{2147483648} as i64;if value==(-2147483648i64){42}else{7}}",
+        "fn main()->i64{let value={let prior=-1;0} as u8;if value==0u8{42}else{7}}",
+        "fn main()->i64{let mut count=0;let value=(unsafe{count+=1;2147483648}) as i64;if value==2147483648i64 && count==1{42}else{7}}",
+        "fn main()->i64{let value=(const{2147483648}) as i64;if value==2147483648i64{42}else{7}}",
+    ] {
+        let path = temp_path("rust-integer-literal-cast.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path("rust-integer-literal-cast-out");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{source} {profile:?}: {report:?}");
+                assert!(report.degradations.is_empty(), "{source}: {report:?}");
+                assert!(report.external_invocations.is_empty());
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started, "{source}: {report:?}");
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(42)),
+                        "{source} {profile:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{source} {profile:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_integer_literal_casts_refuse_invalid_sources_before_execution() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for source in [
+        "fn main()->i64{let value=256 as u8;42}",
+        "fn main()->i64{if false{let value=128 as i8;}42}",
+        "fn main()->i64{let value=(-129) as i8;42}",
+        "fn main()->i64{let value=(!256) as u8;42}",
+        "fn main()->i64{let value=-1 as u64;42}",
+        "fn main()->i64{let value=(-0) as u8;42}",
+        "fn main()->i64{let value=-(0) as u8;42}",
+        "fn main()->i64{if false{let value=(-(-1)) as u8;}42}",
+        "fn main()->i64{let value=18446744073709551615 as i64;42}",
+        "fn main()->i64{let value=18446744073709551615 as u32;42}",
+        "fn main()->i64{let value=2147483648 as i32;42}",
+        "fn main()->i64{let prior=2147483648;let value=prior as i64;42}",
+        "fn main()->i64{let value=(2147483648+0) as i64;42}",
+        "fn main()->i64{let value=2147483648 as f64;42}",
+        "fn unused()->u8{256 as u8}fn main()->i64{42}",
+        "fn main()->i64{let value={-0} as u8;42}",
+        "fn main()->i64{let value=-{0} as u8;42}",
+        "fn main()->i64{let value={let prior=2147483648;0} as i64;42}",
+        "fn main()->i64{let value={if 2147483648==0{};0} as i64;42}",
+        "fn main()->i64{let value=(unsafe{-0}) as u8;42}",
+        "fn main()->i64{let value=(const{-0}) as u8;42}",
+        "fn main()->i64{let value=(const{let prior=2147483648;0}) as i64;42}",
+    ] {
+        let path = temp_path("rust-integer-literal-cast-invalid.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                for entry in [None, Some("main")] {
+                    let out = temp_path("rust-integer-literal-cast-invalid-out");
+                    let mut request =
+                        default_request(path.clone(), target, entry, Some(out.clone()));
+                    request.profile = profile;
+                    let report = compile_owned(&request);
+                    assert!(!report.success, "{source} {profile:?}: {report:?}");
+                    assert_eq!(
+                        report.reason_code.as_deref(),
+                        Some("rust-invalid-associated-type"),
+                        "{source}: {report:?}"
+                    );
+                    assert!(!report.execution_started);
+                    assert_eq!(report.eval_result, None);
+                    assert_eq!(report.eval_exit_code, None);
+                    assert_eq!(report.artifact_path, None);
+                    assert_eq!(report.executable_path, None);
+                    assert_eq!(report.abi_path, None);
+                    assert!(report.external_invocations.is_empty());
+                    assert!(!out.exists());
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
