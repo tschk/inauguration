@@ -572,6 +572,20 @@ mod tests {
     }
 
     #[test]
+    fn test_doc_href() {
+        assert_eq!(doc_href("index", "about"), "about.html");
+        assert_eq!(doc_href("index", "nested/page"), "nested/page.html");
+        assert_eq!(doc_href("nested/page", "index"), "../index.html");
+        assert_eq!(doc_href("nested/page1", "nested/page2"), "page2.html");
+        assert_eq!(
+            doc_href("nested1/page", "nested2/page"),
+            "../nested2/page.html"
+        );
+        assert_eq!(doc_href("index", "index"), "index.html");
+        assert_eq!(doc_href("nested/page", "nested/page"), "page.html");
+    }
+
+    #[test]
     fn test_render_nav_nested_class() {
         let pages = vec![
             ("benchmarks/README".to_string(), "Overview".to_string()),
