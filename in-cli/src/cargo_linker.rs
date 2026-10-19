@@ -348,12 +348,17 @@ fn dependency_function_aliases(
         {
             continue;
         }
-        let args: Vec<Expr> = params.iter().map(|(n, _)| Expr::Ident(n.clone())).collect();
+        let mut cloned_params = Vec::with_capacity(params.len());
+        let mut args = Vec::with_capacity(params.len());
+        for (n, t) in params {
+            cloned_params.push((n.clone(), t.clone()));
+            args.push(Expr::Ident(n.clone()));
+        }
         aliases.push((
             name.clone(),
             Decl::Function {
                 name: qualified,
-                params: params.clone(),
+                params: cloned_params,
                 ret: ret.clone(),
                 body: vec![Stmt::Return(Some(Expr::Call {
                     callee: Box::new(Expr::Ident(name.clone())),
