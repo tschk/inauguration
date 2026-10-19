@@ -19,7 +19,7 @@ const indexRoute: RouteArtifact = {
   clientEntries: [],
 };
 
-async function serveIndex(request: Request): Promise<Response> {
+export async function serveIndex(request: Request): Promise<Response> {
   const ctx: RenderContext = {
     request,
     route: indexRoute,
