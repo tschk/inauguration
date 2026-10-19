@@ -153,31 +153,19 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
 
     let mut multi_sources: Vec<(String, String)> = Vec::new(); // (path, source)
     if is_multi {
-        // Scan for .in, .c, .cpp, .rs files in directory
-        if let Ok(dir) = std::fs::read_dir(&request.path) {
-            for entry in dir.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension() {
-                        if ext == "in" || ext == "c" || ext == "cpp" || ext == "rs" {
-                            if let Ok(src) = fs::read_to_string(&path) {
-                                multi_sources.push((path.to_string_lossy().to_string(), src));
-                            }
-                        }
-                    }
-                }
+        match discover_multi_sources(&request.path) {
+            Ok(sources) => multi_sources = sources,
+            Err(err) => {
+                return OwnedCompileReport {
+                    reason_code: Some("frontend-parse-failed".to_string()),
+                    reason: Some(format!(
+                        "no source files found in {}",
+                        request.path.display()
+                    )),
+                    error: Some(err),
+                    ..base_report(request, jobs, started)
+                };
             }
-        }
-        if multi_sources.is_empty() {
-            return OwnedCompileReport {
-                reason_code: Some("frontend-parse-failed".to_string()),
-                reason: Some(format!(
-                    "no source files found in {}",
-                    request.path.display()
-                )),
-                error: Some("no .in, .c, .cpp, or .rs files found".to_string()),
-                ..base_report(request, jobs, started)
-            };
         }
     }
 
@@ -268,145 +256,22 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     };
 
     // Resolve multi-file imports for .in sources
-    let mut pkg_entry: Option<String> = None;
-    if primary_path.extension().is_some_and(|e| e == "in") {
-        let source_dir = primary_path.parent().map(PathBuf::from).unwrap_or_default();
-        let mut import_resolver = crate::module_resolver::ModuleResolver::new();
-        import_resolver.add_search_path(source_dir.clone());
-        import_resolver.add_search_path(PathBuf::from("."));
-
-        // Check for package manifest to set name and dependency search paths
-        if let Some(pkg) = crate::package_manifest::compile_context_for_source(&request.path) {
-            report.package_name = Some(pkg.name);
-            pkg_entry = pkg.entry;
-            for dep in pkg.dependency_search_paths {
-                import_resolver.add_search_path(dep);
-            }
-        }
-
-        match import_resolver.resolve_imports(&source) {
-            Ok(imported) => {
-                for imp in imported {
-                    module.decls.extend(imp.decls);
-                }
-                // Re-inline constants after merging imported modules.
-                // Constants from imported files (e.g. FB_COLOR_WHITE in fb.in)
-                // are not inlined into functions in the importing file (e.g.
-                // compositor.in) during per-file parsing, because the constant
-                // decls are only merged here. Without this re-inline pass, those
-                // Expr::Ident references are treated as uninitialized global
-                // variables by the native lowering, producing 0 instead of the
-                // constant value.
-                crate::in_lang_parse::inline_const_values(&mut module);
-            }
-            Err(e) => {
-                if request.debug {
-                    eprintln!("[import] warning: {e}");
-                }
-                report.reason_code = Some("import-resolution-failed".to_string());
-                report.reason = Some(e.clone());
-                report.error = Some(e);
-            }
-        }
-    }
+    let pkg_entry = resolve_in_imports(request, primary_path, &source, &mut module, &mut report);
 
     // ponytail: link cargo dependencies + crate root for Rust sources
     let is_rust_source = primary_path.extension().is_some_and(|e| e == "rs");
     if is_rust_source {
-        let project_dir = crate::cargo_linker::find_crate_dir(primary_path).unwrap_or_else(|| {
-            primary_path
-                .parent()
-                .unwrap_or(Path::new("."))
-                .to_path_buf()
-        });
-        let skip_deps = std::env::var_os("IN_CARGO_LINK")
-            .map(|v| v == "0")
-            .unwrap_or(false);
-        let deps = if skip_deps {
-            Vec::new()
-        } else {
-            std::thread::Builder::new()
-                .name("in-cargo-link".into())
-                .stack_size(64 * 1024 * 1024)
-                .spawn({
-                    let project_dir = project_dir.clone();
-                    move || crate::cargo_linker::compile_cargo_dependency_artifacts(&project_dir)
-                })
-                .ok()
-                .and_then(|h| h.join().ok())
-                .unwrap_or_default()
-        };
-        if request.debug {
-            eprintln!("[cargo-link] {} dependency crates", deps.len());
-        }
-        if !deps.is_empty() {
-            if let Err(error) =
-                merge_retained_dependency_artifacts(&mut module, &mut unary_methods, deps)
-            {
-                report.reason_code = Some("dependency-resolution-failed".into());
-                report.reason = Some(error.clone());
-                report.error = Some(error);
-                return finalize_report(report, started, &cwd, &frontend_hash);
-            }
-        }
-        // Also compile the crate's library root (lib.rs) to make crate-local
-        // functions available (e.g. inauguration::agent_mode::analyze_path)
-        let crate_root = crate::cargo_linker::find_crate_root(&project_dir);
-        if let Ok(ref root) = crate_root {
-            // Directory inputs already schedule each listed source for its normal
-            // parse stage. Do not reload the exact same crate root as a dependency.
-            let canonical_root = root.canonicalize().ok();
-            let root_in_inputs = std::iter::once(primary_path)
-                .chain(multi_sources.iter().map(|(path, _)| Path::new(path)))
-                .any(|source| {
-                    source == root
-                        || canonical_root
-                            .as_ref()
-                            .is_some_and(|root| source.canonicalize().ok().as_ref() == Some(root))
-                });
-            if !root_in_inputs && request.debug {
-                eprintln!("[cargo-link] crate root {}", root.display());
-            }
-            if !root_in_inputs {
-                let root_path = root.clone();
-                let parsed = std::thread::Builder::new()
-                    .name("in-crate-root".into())
-                    .stack_size(32 * 1024 * 1024)
-                    .spawn(move || crate::compiler::rust_front::parse_rust_artifact(&root_path))
-                    .and_then(|h| h.join().map_err(|_| std::io::Error::other("join")))
-                    .ok();
-                match parsed {
-                    Some(Ok(crate_module)) => {
-                        let crate_name = crate::cargo_linker::crate_package_name(&project_dir)
-                            .or_else(|| {
-                                project_dir
-                                    .file_stem()
-                                    .map(|s| s.to_string_lossy().into_owned())
-                            })
-                            .unwrap_or_default();
-                        if let Err(error) = merge_retained_dependency_artifacts(
-                            &mut module,
-                            &mut unary_methods,
-                            vec![(crate_name, crate_module)],
-                        ) {
-                            report.reason_code = Some("dependency-resolution-failed".into());
-                            report.reason = Some(error.clone());
-                            report.error = Some(error);
-                            return finalize_report(report, started, &cwd, &frontend_hash);
-                        }
-                    }
-                    Some(Err(err)) => {
-                        if request.debug {
-                            eprintln!("[cargo-link] crate root parse failed: {err}");
-                        }
-                    }
-                    None => {
-                        if request.debug {
-                            eprintln!("[cargo-link] crate root parse panicked (skipped)");
-                        }
-                    }
-                }
-            }
+        if let Err(error) = link_cargo_dependencies(
+            request,
+            primary_path,
+            &multi_sources,
+            &mut module,
+            &mut unary_methods,
+        ) {
+            report.reason_code = Some("dependency-resolution-failed".into());
+            report.reason = Some(error.clone());
+            report.error = Some(error);
+            return finalize_report(report, started, &cwd, &frontend_hash);
         }
     }
 
@@ -616,35 +481,9 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         report.call_edge_count = verify_report.call_edges.len();
     }
 
-    if reuse_cache && let Some(mut cached) = compile_cache::read_cached_report(&cwd, &frontend_hash)
-    {
-        let requested_out = request.out.as_ref().map(|path| path.display().to_string());
-        let cached_out = cached
-            .executable_path
-            .clone()
-            .or_else(|| cached.artifact_path.clone());
-        if cached.target == target_label(request.target)
-            && cached.entry == request.entry
-            && cached.target_triple == request.target_triple
-            && cached.module_id == request.module_id
-            && cached.linkage == linkage_label(request.linkage)
-            && emit_label(request.emit.as_ref()) == emit_label(None)
-            && requested_out == cached_out
-        {
-            // Report-only cache must still materialize artifacts; missing out files
-            // force a full rebuild so product link steps don't see a green phantom.
-            let artifact_present = requested_out
-                .as_ref()
-                .map(|p| std::path::Path::new(p).is_file())
-                .unwrap_or(true);
-            if artifact_present {
-                cached.cache_hit = true;
-                cached.jobs = jobs;
-                cached.timing_micros = started.elapsed().as_micros();
-                cached.timing_waves_us = Some(timing_waves_for_jobs(jobs, cached.timing_micros));
-                cached.frontend_hash = Some(frontend_hash);
-                return cached;
-            }
+    if reuse_cache {
+        if let Some(cached) = check_cache(request, &cwd, &frontend_hash, jobs, started) {
+            return cached;
         }
     }
 
@@ -1027,6 +866,200 @@ pub(crate) fn optimize_retained_module(
     // native scalar-domain validation refuses their unsupported execution.
     crate::core_ir::rust_references::erase_declarations(&mut module.decls);
     Ok(())
+}
+
+fn discover_multi_sources(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut multi_sources = Vec::new();
+    if let Ok(dir) = std::fs::read_dir(path) {
+        for entry in dir.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    if ext == "in" || ext == "c" || ext == "cpp" || ext == "rs" {
+                        if let Ok(src) = fs::read_to_string(&path) {
+                            multi_sources.push((path.to_string_lossy().to_string(), src));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if multi_sources.is_empty() {
+        return Err("no .in, .c, .cpp, or .rs files found".to_string());
+    }
+    Ok(multi_sources)
+}
+
+fn check_cache(
+    request: &OwnedCompileRequest,
+    cwd: &Path,
+    frontend_hash: &str,
+    jobs: usize,
+    started: Instant,
+) -> Option<OwnedCompileReport> {
+    let mut cached = compile_cache::read_cached_report(cwd, frontend_hash)?;
+    let requested_out = request.out.as_ref().map(|path| path.display().to_string());
+    let cached_out = cached
+        .executable_path
+        .clone()
+        .or_else(|| cached.artifact_path.clone());
+    if cached.target == target_label(request.target)
+        && cached.entry == request.entry
+        && cached.target_triple == request.target_triple
+        && cached.module_id == request.module_id
+        && cached.linkage == linkage_label(request.linkage)
+        && emit_label(request.emit.as_ref()) == emit_label(None)
+        && requested_out == cached_out
+    {
+        // Report-only cache must still materialize artifacts; missing out files
+        // force a full rebuild so product link steps don't see a green phantom.
+        let artifact_present = requested_out
+            .as_ref()
+            .map(|p| std::path::Path::new(p).is_file())
+            .unwrap_or(true);
+        if artifact_present {
+            cached.cache_hit = true;
+            cached.jobs = jobs;
+            cached.timing_micros = started.elapsed().as_micros();
+            cached.timing_waves_us = Some(timing_waves_for_jobs(jobs, cached.timing_micros));
+            cached.frontend_hash = Some(frontend_hash.to_string());
+            return Some(cached);
+        }
+    }
+    None
+}
+
+fn link_cargo_dependencies(
+    request: &OwnedCompileRequest,
+    primary_path: &Path,
+    multi_sources: &[(String, String)],
+    module: &mut crate::core_ir::UnifiedModule,
+    unary_methods: &mut crate::boundary_ir::UnaryMethodBindings,
+) -> Result<(), String> {
+    let project_dir = crate::cargo_linker::find_crate_dir(primary_path).unwrap_or_else(|| {
+        primary_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf()
+    });
+    let skip_deps = std::env::var_os("IN_CARGO_LINK")
+        .map(|v| v == "0")
+        .unwrap_or(false);
+    let deps = if skip_deps {
+        Vec::new()
+    } else {
+        std::thread::Builder::new()
+            .name("in-cargo-link".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn({
+                let project_dir = project_dir.clone();
+                move || crate::cargo_linker::compile_cargo_dependency_artifacts(&project_dir)
+            })
+            .ok()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default()
+    };
+    if request.debug {
+        eprintln!("[cargo-link] {} dependency crates", deps.len());
+    }
+    if !deps.is_empty() {
+        merge_retained_dependency_artifacts(module, unary_methods, deps)?;
+    }
+    // Also compile the crate's library root (lib.rs)
+    let crate_root = crate::cargo_linker::find_crate_root(&project_dir);
+    if let Ok(ref root) = crate_root {
+        let canonical_root = root.canonicalize().ok();
+        let root_in_inputs = std::iter::once(primary_path)
+            .chain(multi_sources.iter().map(|(path, _)| Path::new(path)))
+            .any(|source| {
+                source == root
+                    || canonical_root
+                        .as_ref()
+                        .is_some_and(|root| source.canonicalize().ok().as_ref() == Some(root))
+            });
+        if !root_in_inputs && request.debug {
+            eprintln!("[cargo-link] crate root {}", root.display());
+        }
+        if !root_in_inputs {
+            let root_path = root.clone();
+            let parsed = std::thread::Builder::new()
+                .name("in-crate-root".into())
+                .stack_size(32 * 1024 * 1024)
+                .spawn(move || crate::compiler::rust_front::parse_rust_artifact(&root_path))
+                .and_then(|h| h.join().map_err(|_| std::io::Error::other("join")))
+                .ok();
+            match parsed {
+                Some(Ok(crate_module)) => {
+                    let crate_name = crate::cargo_linker::crate_package_name(&project_dir)
+                        .or_else(|| {
+                            project_dir
+                                .file_stem()
+                                .map(|s| s.to_string_lossy().into_owned())
+                        })
+                        .unwrap_or_default();
+                    merge_retained_dependency_artifacts(
+                        module,
+                        unary_methods,
+                        vec![(crate_name, crate_module)],
+                    )?;
+                }
+                Some(Err(err)) => {
+                    if request.debug {
+                        eprintln!("[cargo-link] crate root parse failed: {err}");
+                    }
+                }
+                None => {
+                    if request.debug {
+                        eprintln!("[cargo-link] crate root parse panicked (skipped)");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_in_imports(
+    request: &OwnedCompileRequest,
+    primary_path: &Path,
+    source: &str,
+    module: &mut crate::core_ir::UnifiedModule,
+    report: &mut OwnedCompileReport,
+) -> Option<String> {
+    let mut pkg_entry: Option<String> = None;
+    if primary_path.extension().is_some_and(|e| e == "in") {
+        let source_dir = primary_path.parent().map(PathBuf::from).unwrap_or_default();
+        let mut import_resolver = crate::module_resolver::ModuleResolver::new();
+        import_resolver.add_search_path(source_dir.clone());
+        import_resolver.add_search_path(PathBuf::from("."));
+
+        // Check for package manifest to set name and dependency search paths
+        if let Some(pkg) = crate::package_manifest::compile_context_for_source(&request.path) {
+            report.package_name = Some(pkg.name);
+            pkg_entry = pkg.entry;
+            for dep in pkg.dependency_search_paths {
+                import_resolver.add_search_path(dep);
+            }
+        }
+
+        match import_resolver.resolve_imports(source) {
+            Ok(imported) => {
+                for imp in imported {
+                    module.decls.extend(imp.decls);
+                }
+                crate::in_lang_parse::inline_const_values(module);
+            }
+            Err(e) => {
+                if request.debug {
+                    eprintln!("[import] warning: {e}");
+                }
+                report.reason_code = Some("import-resolution-failed".to_string());
+                report.reason = Some(e.clone());
+                report.error = Some(e);
+            }
+        }
+    }
+    pkg_entry
 }
 
 #[cfg(test)]
