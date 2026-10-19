@@ -4329,6 +4329,19 @@ mod tests {
     }
 
     #[test]
+    fn optimize_with_profile_sets_keep_all_functions_to_false() {
+        let mut decls = vec![
+            make_fn("main", vec![Stmt::Return(None)]),
+            make_fn("unused", vec![Stmt::Return(None)]),
+        ];
+        optimize_with_profile(&mut decls, Some("main"), EmitProfile::Default);
+        assert_eq!(decls.len(), 1);
+        if let Decl::Function { name, .. } = &decls[0] {
+            assert_eq!(name, "main");
+        }
+    }
+
+    #[test]
     fn optimize_performs_inlining_and_dce() {
         let mut decls = vec![
             make_fn_with_params(
