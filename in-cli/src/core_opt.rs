@@ -4261,6 +4261,45 @@ mod tests {
     // ─── Inlining ──────────────────────────────────────────────────────
 
     #[test]
+    fn test_peephole_x86_64_redundant_mov() {
+        let mut code = vec![0x48, 0x89, 0xC0]; // mov rax, rax
+        peephole_x86_64(&mut code);
+        assert_eq!(code, Vec::<u8>::new());
+
+        let mut code2 = vec![0x48, 0x89, 0xC9]; // mov rcx, rcx
+        peephole_x86_64(&mut code2);
+        assert_eq!(code2, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn test_peephole_x86_64_useful_mov() {
+        let mut code = vec![0x48, 0x89, 0xC8]; // mov rax, rcx
+        peephole_x86_64(&mut code);
+        assert_eq!(code, vec![0x48, 0x89, 0xC8]);
+    }
+
+    #[test]
+    fn test_peephole_x86_64_trailing_nops() {
+        let mut code = vec![0x48, 0x89, 0xC8, 0x66, 0x90, 0x66, 0x90]; // mov rax, rcx followed by nops
+        peephole_x86_64(&mut code);
+        assert_eq!(code, vec![0x48, 0x89, 0xC8]);
+
+        let mut code2 = vec![0x48, 0x89, 0xC8, 0x90, 0x90];
+        peephole_x86_64(&mut code2);
+        assert_eq!(code2, vec![0x48, 0x89, 0xC8, 0x90]);
+    }
+
+    #[test]
+    fn test_peephole_x86_64_jump_offsets() {
+        // EB 03       jmp +3
+        // 48 89 C0    mov rax, rax
+        // 31 C0       xor eax, eax
+        let mut code = vec![0xEB, 0x03, 0x48, 0x89, 0xC0, 0x31, 0xC0];
+        peephole_x86_64(&mut code);
+        assert_eq!(code, vec![0xEB, 0x00, 0x31, 0xC0]);
+    }
+
+    #[test]
     fn inline_small_return_function() {
         let mut decls = vec![
             make_fn_with_params(
