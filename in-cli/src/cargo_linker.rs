@@ -329,6 +329,15 @@ fn dependency_function_aliases(
         return vec![];
     }
     let mut aliases = Vec::new();
+    let prefix = format!("{crate_name}::");
+
+    let mut existing_functions = std::collections::HashSet::new();
+    for d in &dep_module.decls {
+        if let Decl::Function { name, .. } = d {
+            existing_functions.insert(name.as_str());
+        }
+    }
+
     for decl in &dep_module.decls {
         let Decl::Function {
             name, params, ret, ..
@@ -336,24 +345,26 @@ fn dependency_function_aliases(
         else {
             continue;
         };
-        let qualified = if name.starts_with(&format!("{crate_name}::")) {
-            continue;
-        } else {
-            format!("{crate_name}::{name}")
-        };
-        if dep_module
-            .decls
-            .iter()
-            .any(|d| matches!(d, Decl::Function { name: n, .. } if n == &qualified))
-        {
+        if name.starts_with(&prefix) {
             continue;
         }
-        let args: Vec<Expr> = params.iter().map(|(n, _)| Expr::Ident(n.clone())).collect();
+        let qualified = format!("{prefix}{name}");
+        if existing_functions.contains(qualified.as_str()) {
+            continue;
+        }
+
+        let mut cloned_params = Vec::with_capacity(params.len());
+        let mut args = Vec::with_capacity(params.len());
+        for (n, t) in params {
+            args.push(Expr::Ident(n.clone()));
+            cloned_params.push((n.clone(), t.clone()));
+        }
+
         aliases.push((
             name.clone(),
             Decl::Function {
                 name: qualified,
-                params: params.clone(),
+                params: cloned_params,
                 ret: ret.clone(),
                 body: vec![Stmt::Return(Some(Expr::Call {
                     callee: Box::new(Expr::Ident(name.clone())),
