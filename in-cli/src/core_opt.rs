@@ -2899,6 +2899,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_optimize_with_profile_removes_dead_code_and_inlines() {
+        let source = "
+fn unused_function() -> Int {
+    return 42;
+}
+
+fn inline_me() -> Int {
+    return 10;
+}
+
+fn main() -> Int {
+    let a = 5 + 5;
+    let b = inline_me();
+    let c = a + b;
+    if false {
+        return 99;
+    }
+    return c;
+}
+";
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        optimize_with_profile(&mut module.decls, Some("main"), EmitProfile::Default);
+
+        let has_unused = module
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "unused_function"));
+        assert!(!has_unused, "unused_function should be removed");
+
+        let has_inlined = module
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "inline_me"));
+        assert!(
+            !has_inlined,
+            "inline_me should be removed after being inlined"
+        );
+
+        let main_fn = module
+            .decls
+            .iter()
+            .find(|d| matches!(d, Decl::Function { name, .. } if name == "main"))
+            .unwrap();
+        if let Decl::Function { body, .. } = main_fn {
+            let string_rep = format!("{:#?}", body);
+            assert!(string_rep.contains("IntLit(\n            20,\n        )"));
+        } else {
+            panic!("main is not a function");
+        }
+    }
+
+    #[test]
     fn hardened_link_surfaces_preserve_exports_and_external_names() {
         let source = "extern asm fn external_answer()->Int\nfn other_export()->Int{return 20;}\nfn main()->Int{return external_answer()+other_export();}";
         for keep_all in [false, true] {
