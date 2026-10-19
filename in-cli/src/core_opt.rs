@@ -2895,6 +2895,66 @@ fn harden_hash_symbols(decls: &mut [Decl], entry: Option<&str>) {
 }
 
 #[cfg(test)]
+mod peephole_x86_64_tests {
+    use super::*;
+
+    #[test]
+    fn removes_redundant_mov_and_trailing_nops() {
+        let mut code = vec![
+            0x48, 0x89, 0xc0, // mov rax, rax
+            0x90, // nop (1 byte)
+        ];
+        peephole_x86_64(&mut code);
+        assert!(
+            code.is_empty(),
+            "Redundant mov and all trailing NOPs should be removed"
+        );
+    }
+
+    #[test]
+    fn preserves_useful_instructions_and_non_trailing_nops() {
+        let mut code = vec![
+            0x90, // nop (not trailing, should be preserved since we only remove trailing nops)
+            0x48, 0x89, 0xd8, // mov rax, rbx (not redundant)
+            0x89, 0xc0, // mov eax, eax (redundant, should be removed)
+            0x90, // nop (trailing, should be removed)
+        ];
+        peephole_x86_64(&mut code);
+        assert_eq!(
+            code,
+            vec![0x90, 0x48, 0x89, 0xd8],
+            "Only redundant movs and trailing nops should be removed"
+        );
+    }
+
+    #[test]
+    fn adjusts_jump_offsets_across_removed_instructions() {
+        let mut code = vec![
+            0xEB, 0x05, // jmp rel8 (+5 bytes)
+            0x48, 0x89, 0xc0, // mov rax, rax (redundant, length 3)
+            0x90, // nop
+            0x90, // nop
+            0xCC, // int3 (target of jump initially: 2 (jmp len) + 5 = 7. Index 7 is 0xCC. Wait: 2+0+3+1+1 = 7)
+        ];
+        peephole_x86_64(&mut code);
+
+        // Expected changes:
+        // - `mov rax, rax` (length 3) is removed.
+        // - The `jmp` offset should decrease by 3 (from 5 to 2).
+        // - Resulting code: jmp rel8 (+2), nop, nop, int3
+        assert_eq!(
+            code,
+            vec![
+                0xEB, 0x02, // jmp rel8 (+2 bytes)
+                0x90, // nop
+                0x90, // nop
+                0xCC, // int3
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
