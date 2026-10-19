@@ -2309,41 +2309,6 @@ fn find_removable_instructions(code: &[u8], jumps: &[RelJump]) -> Vec<RemoveRang
         }
     }
 
-    let mut i = 0;
-    while i < code.len() {
-        let is_redundant_mov = if i + 1 < code.len() {
-            let (opcode, modrm) = if code[i] == 0x48 && i + 2 < code.len() {
-                (code[i + 1], code[i + 2])
-            } else {
-                (code[i], code[i + 1])
-            };
-            let mod_field = modrm >> 6; // bits 7:6
-            let reg_field = (modrm >> 3) & 7; // bits 5:3
-            let rm_field = modrm & 7; // bits 2:0
-            if mod_field == 3 && reg_field == rm_field {
-                matches!(opcode, 0x89 | 0x8B)
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if is_redundant_mov {
-            let mov_len = if i + 2 < code.len() && code[i] == 0x48 {
-                3
-            } else {
-                2
-            };
-            remove.push(RemoveRange {
-                start: i,
-                len: mov_len,
-            });
-            i += mov_len;
-        } else {
-            i += 1;
-        }
-    }
-
     // Remove trailing `66 90` (2-byte NOP) and `90` (single NOP)
     let mut trailing = 0;
     let mut j = code.len();
@@ -6390,5 +6355,41 @@ mod ieee_bit_folding_tests {
             });
             assert_eq!(extracted, Expr::IntLit(bits as i64));
         }
+    }
+}
+
+#[cfg(test)]
+mod peephole_x86_64_tests {
+    use super::*;
+
+    #[test]
+    fn test_remove_redundant_mov() {
+        let mut code = vec![0x48, 0x89, 0xc0, 0x90, 0x89, 0xc0, 0xC3];
+        peephole_x86_64(&mut code);
+        assert_eq!(code, vec![0x90, 0xC3]);
+    }
+
+    #[test]
+    fn test_remove_trailing_nops() {
+        let mut code = vec![0xC3, 0x90, 0x66, 0x90];
+        peephole_x86_64(&mut code);
+        assert_eq!(code, vec![0xC3]);
+    }
+
+    #[test]
+    fn test_adjust_jump_offsets() {
+        let mut code = vec![
+            0xE8, 0x06, 0x00, 0x00, 0x00, 0x48, 0x89, 0xc0, 0x48, 0x89, 0xc0, 0xC3,
+        ];
+        peephole_x86_64(&mut code);
+        assert_eq!(code, vec![0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3]);
+    }
+
+    #[test]
+    fn test_no_remove_if_jump_target() {
+        let mut code = vec![0xEB, 0x00, 0x48, 0x89, 0xc0, 0xC3];
+        let original = code.clone();
+        peephole_x86_64(&mut code);
+        assert_eq!(code, original);
     }
 }
