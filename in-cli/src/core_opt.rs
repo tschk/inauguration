@@ -139,6 +139,63 @@ pub fn optimize_with_linkage_and_semantics_and_normalizer(
     }
 }
 
+#[cfg(test)]
+mod optimize_with_profile_tests {
+    use super::*;
+    use crate::core_ir::Decl;
+    use crate::emit_profile::EmitProfile;
+
+    #[test]
+    fn optimize_with_profile_delegates_to_linkage_with_keep_all_false() {
+        let source = "fn foo()->Int { return 1; } fn main()->Int { return 2; }";
+
+        let mut module_default = crate::in_lang_parse::parse_in_source(source).unwrap();
+        optimize_with_profile(
+            &mut module_default.decls,
+            Some("main"),
+            EmitProfile::Default,
+        );
+        assert!(
+            !module_default
+                .decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "foo"))
+        );
+        assert!(
+            module_default
+                .decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "main"))
+        );
+
+        let mut module_lean = crate::in_lang_parse::parse_in_source(source).unwrap();
+        optimize_with_profile(&mut module_lean.decls, Some("main"), EmitProfile::Lean);
+        assert!(
+            !module_lean
+                .decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "foo"))
+        );
+        assert!(
+            module_lean
+                .decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "main"))
+        );
+
+        let mut module_harden = crate::in_lang_parse::parse_in_source(source).unwrap();
+        optimize_with_profile(&mut module_harden.decls, Some("main"), EmitProfile::Harden);
+        assert_eq!(
+            module_harden
+                .decls
+                .iter()
+                .filter(|d| matches!(d, Decl::Function { .. }))
+                .count(),
+            1
+        );
+    }
+}
+
 /// Qualify frontend constant references after lexical binding normalization.
 pub(crate) fn rewrite_constant_references(decls: &mut [Decl], names: &HashMap<String, String>) {
     let mut rewrite = |expr: &mut Expr| {
