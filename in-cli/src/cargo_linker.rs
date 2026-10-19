@@ -621,6 +621,26 @@ mod tests {
     }
 
     #[test]
+    fn test_get_manifest_success() {
+        let temp = TempDirGuard::new();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"test-pkg\"\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .unwrap();
+
+        let manifest = get_manifest(&temp.path).unwrap();
+        assert_eq!(manifest.package_name.as_deref(), Some("test-pkg"));
+        assert_eq!(manifest.lib_path.as_deref(), Some("src/lib.rs"));
+    }
+
+    #[test]
+    fn test_get_manifest_missing_file() {
+        let temp = TempDirGuard::new();
+        assert!(get_manifest(&temp.path).is_none());
+    }
+
+    #[test]
     fn test_compile_cargo_dependencies_finds_and_compiles() -> std::io::Result<()> {
         let temp = TempDirGuard::new();
         let cargo_toml = temp.path.join("Cargo.toml");
