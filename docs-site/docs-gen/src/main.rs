@@ -586,4 +586,15 @@ mod tests {
         assert!(nav_jit_active
             .contains("<li><a href=\"jit.html\" class=\"active doc-nav-nested\">JIT</a></li>"));
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_markdown_io_error() {
+        let (src_dir, _src_guard) = make_temp_dir("src_io_error");
+        std::os::unix::fs::symlink("does_not_exist.md", src_dir.join("broken.md")).unwrap();
+
+        let mut out = Vec::new();
+        let result = collect_markdown(&src_dir, &src_dir, &mut out);
+        assert!(result.is_err());
+    }
 }
