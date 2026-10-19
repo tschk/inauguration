@@ -51,8 +51,17 @@ const fetch = async (request: Request): Promise<Response> => {
       i--;
     }
     pathname = i === pathname.length - 1 ? pathname : pathname.slice(0, i + 1);
+    try {
+      pathname = decodeURIComponent(pathname);
+    } catch {
+      // Ignore malformed URI, it will just not match anything
+    }
   }
   const method = request.method;
+
+  if (pathname.includes("..") || pathname.includes("\0")) {
+    return new Response("Not Found", { status: 404 });
+  }
 
   if (method === "GET" || method === "HEAD") {
     if (pathname === "/") return serveIndex(request);
