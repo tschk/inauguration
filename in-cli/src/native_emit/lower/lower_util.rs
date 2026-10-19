@@ -66,16 +66,21 @@ pub(crate) fn find_field_offset<'a>(
         return Some(offset);
     }
     // Try prefix match for nested structs: "inner" → "inner.val"
-    field_map
-        .iter()
-        .filter_map(|(k, v)| {
-            if k.len() > name.len() && k.starts_with(name) && k.as_bytes()[name.len()] == b'.' {
-                Some(v)
+    let name_len = name.len();
+    let mut min = None;
+    for (k, v) in field_map {
+        let k_bytes = k.as_bytes();
+        if k_bytes.len() > name_len && k_bytes[name_len] == b'.' && k.starts_with(name) {
+            if let Some(m) = min {
+                if v < m {
+                    min = Some(v);
+                }
             } else {
-                None
+                min = Some(v);
             }
-        })
-        .min()
+        }
+    }
+    min
 }
 
 /// Branch condition that tests `op` against flags already set by a compare.
