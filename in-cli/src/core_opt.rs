@@ -4500,6 +4500,27 @@ mod tests {
         assert_eq!(code, vec![0xC3]);
     }
 
+    #[test]
+    fn peephole_removes_redundant_mov() {
+        let mut code = vec![0x48, 0x89, 0xC0]; // mov rax, rax
+        peephole_x86_64(&mut code);
+        assert!(code.is_empty());
+    }
+
+    #[test]
+    fn peephole_adjusts_forward_jump() {
+        let mut code = vec![0xEB, 0x03, 0x48, 0x89, 0xC0, 0xC3]; // jmp +3, mov rax, rax, ret
+        peephole_x86_64(&mut code);
+        assert_eq!(code, vec![0xEB, 0x00, 0xC3]);
+    }
+
+    #[test]
+    fn peephole_adjusts_forward_call() {
+        let mut code = vec![0xE8, 0x03, 0x00, 0x00, 0x00, 0x48, 0x89, 0xC0, 0xC3]; // call +3, mov rax, rax, ret
+        peephole_x86_64(&mut code);
+        assert_eq!(code, vec![0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3]);
+    }
+
     // ─── x86_64 Instruction Length ─────────────────────────────────────
 
     #[test]
