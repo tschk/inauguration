@@ -4397,6 +4397,33 @@ mod tests {
         assert!(decls.is_empty());
     }
 
+    #[test]
+    fn test_optimize() {
+        let mut decls = vec![
+            make_fn(
+                "main",
+                vec![
+                    Stmt::Let("a".into(), Some(Typ::Int), Expr::IntLit(1)),
+                    Stmt::Let("b".into(), Some(Typ::Int), Expr::IntLit(2)),
+                    Stmt::Return(Some(bin(
+                        "+",
+                        Expr::Ident("a".into()),
+                        Expr::Ident("b".into()),
+                    ))),
+                ],
+            ),
+            make_fn("unused", vec![Stmt::Return(None)]),
+        ];
+        optimize(&mut decls);
+        assert_eq!(decls.len(), 1);
+        if let Decl::Function { name, body, .. } = &decls[0] {
+            assert_eq!(name, "main");
+            assert_eq!(body, &vec![Stmt::Return(Some(Expr::IntLit(3)))]);
+        } else {
+            panic!("expected main function");
+        }
+    }
+
     // ─── has_cf ────────────────────────────────────────────────────────
 
     #[test]
