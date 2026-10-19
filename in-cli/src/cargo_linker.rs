@@ -328,6 +328,17 @@ fn dependency_function_aliases(
     if crate_name.is_empty() || crate_name.starts_with("in-") {
         return vec![];
     }
+
+    let prefix = format!("{crate_name}::");
+    let mut existing_qualified = std::collections::HashSet::new();
+    for decl in &dep_module.decls {
+        if let Decl::Function { name, .. } = decl {
+            if name.starts_with(&prefix) {
+                existing_qualified.insert(name.as_str());
+            }
+        }
+    }
+
     let mut aliases = Vec::new();
     for decl in &dep_module.decls {
         let Decl::Function {
@@ -336,19 +347,20 @@ fn dependency_function_aliases(
         else {
             continue;
         };
-        let qualified = if name.starts_with(&format!("{crate_name}::")) {
-            continue;
-        } else {
-            format!("{crate_name}::{name}")
-        };
-        if dep_module
-            .decls
-            .iter()
-            .any(|d| matches!(d, Decl::Function { name: n, .. } if n == &qualified))
-        {
+        if name.starts_with(&prefix) {
             continue;
         }
-        let args: Vec<Expr> = params.iter().map(|(n, _)| Expr::Ident(n.clone())).collect();
+
+        let qualified = format!("{crate_name}::{name}");
+        if existing_qualified.contains(qualified.as_str()) {
+            continue;
+        }
+
+        let mut args = Vec::with_capacity(params.len());
+        for (n, _) in params {
+            args.push(Expr::Ident(n.clone()));
+        }
+
         aliases.push((
             name.clone(),
             Decl::Function {
