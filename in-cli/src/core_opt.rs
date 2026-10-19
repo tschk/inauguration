@@ -2896,6 +2896,61 @@ fn harden_hash_symbols(decls: &mut [Decl], entry: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn optimize_with_profile_end_to_end() {
+        let mut decls = vec![
+            Decl::Function {
+                name: "unused_func".into(),
+                params: vec![],
+                ret: Typ::Void,
+                type_params: vec![],
+                body: vec![Stmt::Return(None)],
+            },
+            Decl::Function {
+                name: "small_helper".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
+            },
+            Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Int,
+                type_params: vec![],
+                body: vec![
+                    Stmt::Let("a".into(), Some(Typ::Int), Expr::IntLit(10)),
+                    Stmt::Let(
+                        "b".into(),
+                        Some(Typ::Int),
+                        Expr::Binary {
+                            op: "+".into(),
+                            lhs: Box::new(Expr::Ident("a".into())),
+                            rhs: Box::new(Expr::IntLit(32)),
+                        },
+                    ),
+                    Stmt::Return(Some(Expr::Call {
+                        callee: Box::new(Expr::Ident("small_helper".into())),
+                        args: vec![],
+                    })),
+                    Stmt::Let("dead".into(), Some(Typ::Int), Expr::IntLit(0)),
+                ],
+            },
+        ];
+
+        optimize_with_profile(&mut decls, Some("main"), EmitProfile::Default);
+
+        assert_eq!(decls.len(), 1);
+
+        if let Decl::Function { name, body, .. } = &decls[0] {
+            assert_eq!(name, "main");
+            assert_eq!(body.len(), 1);
+            assert!(matches!(&body[0], Stmt::Return(Some(Expr::IntLit(42)))));
+        } else {
+            panic!("Expected a function");
+        }
+    }
+
     use super::*;
 
     #[test]
