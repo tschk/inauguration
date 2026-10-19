@@ -102,10 +102,10 @@ fn generate_docs(
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let pages_with_body: Vec<(String, String, String)> = files
-        .iter()
+        .into_iter()
         .map(|(stem, content)| {
-            let (title, body_html) = render_md(content);
-            (stem.clone(), title, body_html)
+            let (title, body_html) = render_md(&content);
+            (stem, title, body_html)
         })
         .collect();
 
