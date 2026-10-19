@@ -586,4 +586,19 @@ mod tests {
         assert!(nav_jit_active
             .contains("<li><a href=\"jit.html\" class=\"active doc-nav-nested\">JIT</a></li>"));
     }
+
+    #[test]
+    fn test_doc_href() {
+        assert_eq!(doc_href("index", "index"), "index.html");
+        assert_eq!(doc_href("index", "about"), "about.html");
+        assert_eq!(doc_href("index", "sub/page"), "sub/page.html");
+        assert_eq!(doc_href("sub/page", "index"), "../index.html");
+        assert_eq!(doc_href("sub/page1", "sub/page2"), "page2.html");
+        assert_eq!(doc_href("sub/page", "sub/page"), "page.html");
+        assert_eq!(doc_href("sub1/page1", "sub2/page2"), "../sub2/page2.html");
+        assert_eq!(
+            doc_href("sub/deep/page", "other/page"),
+            "../other/page.html"
+        );
+    }
 }
