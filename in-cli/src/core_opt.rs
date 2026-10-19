@@ -1234,17 +1234,22 @@ fn remove_dead_functions(decls: &mut Vec<Decl>, entry: Option<&str>) {
     } else {
         called.extend(["kernel_entry".into(), "kernel-entry".into(), "main".into()]);
     }
-    let mut work = called.iter().cloned().collect::<Vec<_>>();
+    let mut work = called.into_iter().collect::<Vec<_>>();
+    let mut called = HashSet::new();
     while let Some(name) = work.pop() {
-        let Some(body) = functions.get(name.as_str()) else {
+        let body_opt = functions.get(name.as_str()).copied();
+        if !called.insert(name) {
+            continue;
+        }
+        let Some(body) = body_opt else {
             continue;
         };
         let mut dependencies = HashSet::new();
-        for statement in *body {
+        for statement in body {
             collect_calls_in_stmt(statement, &mut dependencies);
         }
         for dependency in dependencies {
-            if called.insert(dependency.clone()) {
+            if !called.contains(&dependency) {
                 work.push(dependency);
             }
         }
