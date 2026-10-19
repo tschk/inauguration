@@ -429,6 +429,23 @@ mod tests {
         path: PathBuf,
     }
 
+    #[test]
+    fn test_doc_href() {
+        assert_eq!(doc_href("index", "in-language"), "in-language.html");
+        assert_eq!(
+            doc_href("index", "benchmarks/README"),
+            "benchmarks/README.html"
+        );
+        assert_eq!(doc_href("benchmarks/README", "index"), "../index.html");
+        assert_eq!(doc_href("benchmarks/README", "benchmarks/jit"), "jit.html");
+        // Edge case: from and to are the same file
+        assert_eq!(doc_href("in-language", "in-language"), "in-language.html");
+        assert_eq!(
+            doc_href("benchmarks/README", "benchmarks/README"),
+            "README.html"
+        );
+    }
+
     impl Drop for TempDirGuard {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
