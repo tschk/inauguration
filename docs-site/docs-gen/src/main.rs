@@ -529,6 +529,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_collect_markdown_error() -> io::Result<()> {
+        let (src_dir, _src_guard) = make_temp_dir("src_error");
+        fs::write(src_dir.join("test.md"), "hello")?;
+
+        let mut perms = fs::metadata(src_dir.join("test.md"))?.permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o000);
+        fs::set_permissions(src_dir.join("test.md"), perms)?;
+
+        let mut out = Vec::new();
+        let res = collect_markdown(&src_dir, &src_dir, &mut out);
+
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+
+        // Restore permissions so the directory can be deleted
+        let mut perms = fs::metadata(src_dir.join("test.md"))?.permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(src_dir.join("test.md"), perms)?;
+
+        Ok(())
+    }
+
+    #[test]
     fn test_render_nav_basic_sections() {
         let pages = vec![
             ("in-language".to_string(), "inlang (.in)".to_string()),
