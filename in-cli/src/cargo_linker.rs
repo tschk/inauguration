@@ -911,6 +911,37 @@ direct_dep = { path = "direct_dep" }
     }
 
     #[test]
+    fn test_get_manifest_success() {
+        let temp = TempDirGuard::new();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"test-manifest\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .unwrap();
+
+        let manifest = get_manifest(&temp.path).expect("manifest should be parsed");
+        assert_eq!(manifest.package_name.as_deref(), Some("test-manifest"));
+        assert_eq!(manifest.lib_path.as_deref(), Some("src/lib.rs"));
+    }
+
+    #[test]
+    fn test_get_manifest_no_file() {
+        let temp = TempDirGuard::new();
+        let manifest = get_manifest(&temp.path);
+        assert!(manifest.is_none());
+    }
+
+    #[test]
+    fn test_get_manifest_empty() {
+        let temp = TempDirGuard::new();
+        fs::write(temp.path.join("Cargo.toml"), "").unwrap();
+
+        let manifest = get_manifest(&temp.path).expect("manifest should be parsed");
+        assert_eq!(manifest.package_name, None);
+        assert_eq!(manifest.lib_path, None);
+    }
+
+    #[test]
     fn manifest_rewrites_refresh_package_name_and_library_path() -> std::io::Result<()> {
         let temp = TempDirGuard::new();
         let first = temp.path.join("first.rs");
