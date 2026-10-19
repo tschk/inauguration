@@ -10,7 +10,7 @@ use crate::native_emit::NativeLinkage;
 use crate::native_emit::lower::LoweringDegradation;
 use crate::parser_registry::{self, ParserCli};
 use serde::Serialize;
-use std::fs;
+
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -147,54 +147,9 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     let jobs = jobs_for_request(request);
     let cwd = compile_cache::workspace_cwd_for_path(&request.path);
 
-    // Multi-file project? Check before trying to read a single source.
-    let has_cargo = request.path.join("Cargo.toml").exists();
-    let is_multi = request.path.is_dir() && !has_cargo;
-
-    let mut multi_sources: Vec<(String, String)> = Vec::new(); // (path, source)
-    if is_multi {
-        // Scan for .in, .c, .cpp, .rs files in directory
-        if let Ok(dir) = std::fs::read_dir(&request.path) {
-            for entry in dir.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension() {
-                        if ext == "in" || ext == "c" || ext == "cpp" || ext == "rs" {
-                            if let Ok(src) = fs::read_to_string(&path) {
-                                multi_sources.push((path.to_string_lossy().to_string(), src));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if multi_sources.is_empty() {
-            return OwnedCompileReport {
-                reason_code: Some("frontend-parse-failed".to_string()),
-                reason: Some(format!(
-                    "no source files found in {}",
-                    request.path.display()
-                )),
-                error: Some("no .in, .c, .cpp, or .rs files found".to_string()),
-                ..base_report(request, jobs, started)
-            };
-        }
-    }
-
-    let source = if is_multi {
-        multi_sources[0].1.clone()
-    } else {
-        match fs::read_to_string(&request.path) {
-            Ok(content) => content,
-            Err(err) => {
-                return OwnedCompileReport {
-                    reason_code: Some("frontend-read-failed".to_string()),
-                    reason: Some(err.to_string()),
-                    error: Some(err.to_string()),
-                    ..base_report(request, jobs, started)
-                };
-            }
-        }
+    let (is_multi, multi_sources, source) = match read_compile_sources(request, jobs, started) {
+        Ok(res) => res,
+        Err(report) => return report,
     };
     let mut frontend_hash = compile_cache::source_frontend_hash(&request.path, &source);
     let reuse_cache =
@@ -616,36 +571,8 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         report.call_edge_count = verify_report.call_edges.len();
     }
 
-    if reuse_cache && let Some(mut cached) = compile_cache::read_cached_report(&cwd, &frontend_hash)
-    {
-        let requested_out = request.out.as_ref().map(|path| path.display().to_string());
-        let cached_out = cached
-            .executable_path
-            .clone()
-            .or_else(|| cached.artifact_path.clone());
-        if cached.target == target_label(request.target)
-            && cached.entry == request.entry
-            && cached.target_triple == request.target_triple
-            && cached.module_id == request.module_id
-            && cached.linkage == linkage_label(request.linkage)
-            && emit_label(request.emit.as_ref()) == emit_label(None)
-            && requested_out == cached_out
-        {
-            // Report-only cache must still materialize artifacts; missing out files
-            // force a full rebuild so product link steps don't see a green phantom.
-            let artifact_present = requested_out
-                .as_ref()
-                .map(|p| std::path::Path::new(p).is_file())
-                .unwrap_or(true);
-            if artifact_present {
-                cached.cache_hit = true;
-                cached.jobs = jobs;
-                cached.timing_micros = started.elapsed().as_micros();
-                cached.timing_waves_us = Some(timing_waves_for_jobs(jobs, cached.timing_micros));
-                cached.frontend_hash = Some(frontend_hash);
-                return cached;
-            }
-        }
+    if let Some(cached) = check_cache(request, &cwd, &frontend_hash, reuse_cache, jobs, started) {
+        return cached;
     }
 
     report.semantic_level = "typed-subset".to_string();
@@ -1029,6 +956,103 @@ pub(crate) fn optimize_retained_module(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
+fn read_compile_sources(
+    request: &OwnedCompileRequest,
+    jobs: usize,
+    started: std::time::Instant,
+) -> Result<(bool, Vec<(String, String)>, String), OwnedCompileReport> {
+    let has_cargo = request.path.join("Cargo.toml").exists();
+    let is_multi = request.path.is_dir() && !has_cargo;
+
+    let mut multi_sources: Vec<(String, String)> = Vec::new(); // (path, source)
+    if is_multi {
+        if let Ok(dir) = std::fs::read_dir(&request.path) {
+            for entry in dir.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(ext) = path.extension() {
+                        if ext == "in" || ext == "c" || ext == "cpp" || ext == "rs" {
+                            if let Ok(src) = std::fs::read_to_string(&path) {
+                                multi_sources.push((path.to_string_lossy().to_string(), src));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if multi_sources.is_empty() {
+            return Err(OwnedCompileReport {
+                reason_code: Some("frontend-parse-failed".to_string()),
+                reason: Some(format!(
+                    "no source files found in {}",
+                    request.path.display()
+                )),
+                error: Some("no .in, .c, .cpp, or .rs files found".to_string()),
+                ..base_report(request, jobs, started)
+            });
+        }
+    }
+
+    let source = if is_multi {
+        multi_sources[0].1.clone()
+    } else {
+        match std::fs::read_to_string(&request.path) {
+            Ok(content) => content,
+            Err(err) => {
+                return Err(OwnedCompileReport {
+                    reason_code: Some("frontend-read-failed".to_string()),
+                    reason: Some(err.to_string()),
+                    error: Some(err.to_string()),
+                    ..base_report(request, jobs, started)
+                });
+            }
+        }
+    };
+
+    Ok((is_multi, multi_sources, source))
+}
+
+fn check_cache(
+    request: &OwnedCompileRequest,
+    cwd: &std::path::Path,
+    frontend_hash: &str,
+    reuse_cache: bool,
+    jobs: usize,
+    started: std::time::Instant,
+) -> Option<OwnedCompileReport> {
+    if !reuse_cache {
+        return None;
+    }
+    let mut cached = crate::compile_cache::read_cached_report(cwd, frontend_hash)?;
+    let requested_out = request.out.as_ref().map(|path| path.display().to_string());
+    let cached_out = cached
+        .executable_path
+        .clone()
+        .or_else(|| cached.artifact_path.clone());
+    if cached.target == target_label(request.target)
+        && cached.entry == request.entry
+        && cached.target_triple == request.target_triple
+        && cached.module_id == request.module_id
+        && cached.linkage == linkage_label(request.linkage)
+        && emit_label(request.emit.as_ref()) == emit_label(None)
+        && requested_out == cached_out
+    {
+        let artifact_present = requested_out
+            .as_ref()
+            .map(|p| std::path::Path::new(p).is_file())
+            .unwrap_or(true);
+        if artifact_present {
+            cached.cache_hit = true;
+            cached.jobs = jobs;
+            cached.timing_micros = started.elapsed().as_micros();
+            cached.timing_waves_us = Some(timing_waves_for_jobs(jobs, cached.timing_micros));
+            cached.frontend_hash = Some(frontend_hash.to_string());
+            return Some(cached);
+        }
+    }
+    None
+}
 #[cfg(test)]
 mod associated_type_root_tests {
     use super::*;
