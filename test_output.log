@@ -1,0 +1,158 @@
+$ in build --parser in --path apps/in-sample/hello.in (cwd=/app)
+test ok: .in lang compile (hello.in) in 4.598ms
+$ in build --parser in --path apps/in-sample/agent-native.in (cwd=/app)
+test ok: .in lang compile (agent-native.in) in 5.223ms
+ready$ in build --parser in --path apps/in-sample/try_catch.in (cwd=/app)
+test ok: .in lang compile (try_catch.in) in 4.972ms
+$ in compile --path apps/icore-sample/min.icore --target jit --out /dev/null (cwd=/app)
+test ok: .icore compile in 4.214ms
+$ in compile --path in-cli/src/main.rs --target jit --out /dev/null (cwd=/app)
+test ok: self-host compile in 470042.807ms
+$ in build --parser in --path apps/polyglot-sample/sample.in (cwd=/app)
+test ok: owned polyglot compile in 4.771ms
+$ in compile --path apps/native-artifact-sample/answer.in --target jit --out /dev/null (cwd=/app)
+test ok: native answer sample in 4.179ms
+$ bash scripts/check-polyglot-sample.sh (cwd=/app)
+polyglot ok: apps/polyglot-sample/sample.icore
+polyglot ok: apps/polyglot-sample/sample.swift
+polyglot ok: apps/polyglot-sample/sample.rs
+polyglot ok: apps/polyglot-sample/sample.in
+polyglot ok: apps/polyglot-sample/sample.c
+polyglot ok: apps/polyglot-sample/sample.v
+polyglot ok: apps/polyglot-sample/sample.go
+polyglot ok: apps/polyglot-sample/sample.cpp
+polyglot ok: apps/polyglot-sample/Sample.groovy
+polyglot ok: apps/polyglot-sample/Sample.java
+polyglot ok: apps/polyglot-sample/sample.ts
+polyglot ok: apps/polyglot-sample/sample.js
+polyglot ok: apps/polyglot-sample/Sample.kt
+polyglot ok: apps/polyglot-sample/Program.cs
+polyglot ok: apps/polyglot-sample/sample.rb
+polyglot ok: apps/polyglot-sample/sample.py
+polyglot ok: apps/polyglot-sample/sample.zig
+polyglot ok: apps/polyglot-sample/sample.dart
+polyglot ok: apps/polyglot-sample/sample.ml
+polyglot ok: apps/polyglot-sample/sample.php
+polyglot ok: apps/polyglot-sample/sample.lua
+polyglot ok: apps/polyglot-sample/sample.scala
+polyglot ok: apps/polyglot-sample/sample.nim
+polyglot ok: apps/polyglot-sample/sample.odin
+polyglot ok: apps/polyglot-sample/sample.ha
+polyglot ok: apps/polyglot-sample/sample.hc
+polyglot ok: apps/polyglot-sample/sample.cr
+polyglot ok: apps/polyglot-sample/sample.d
+polyglot ok: apps/polyglot-sample/sample.clj
+polyglot ok: apps/polyglot-sample/sample.vb
+test ok: polyglot samples (scripts/check-polyglot-sample.sh) in 8680.116ms
+$ bash scripts/check-graph-polyglot-sample.sh (cwd=/app)
+graph ok: apps/polyglot-sample/sample.in
+graph ok: apps/polyglot-sample/sample.rs
+graph ok: apps/polyglot-sample/sample.go
+graph ok: apps/polyglot-sample/sample.c
+graph ok: apps/polyglot-sample/sample.cpp
+graph ok: apps/polyglot-sample/Sample.java
+graph ok: apps/polyglot-sample/sample.js
+graph ok: apps/polyglot-sample/sample.ts
+graph ok: apps/polyglot-sample/sample.py
+graph ok: apps/polyglot-sample/sample.rb
+graph ok: apps/polyglot-sample/sample.zig
+graph ok: apps/polyglot-sample/sample.lua
+graph ok: apps/polyglot-sample/sample.hc
+test ok: polyglot graph samples (scripts/check-graph-polyglot-sample.sh) in 3901.636ms
+$ bash scripts/check-eval-polyglot-sample.sh (cwd=/app)
+eval ok: in
+eval ok: c
+eval ok: cpp
+eval ok: java
+eval ok: kotlin
+eval ok: scala
+eval ok: csharp
+expected fsharp expr eval to be 3, got:
+[warn] eval: fsharp failed (pre-existing)
+expected vb expr eval to be 3, got:
+[warn] eval: vb failed (pre-existing)
+eval ok: python
+expected ruby expr eval to be 3, got:
+[warn] eval: ruby failed (pre-existing)
+expected php expr eval to be 3, got:
+[warn] eval: php failed (pre-existing)
+expected perl expr eval to be 3, got:
+[warn] eval: perl failed (pre-existing)
+eval ok: javascript
+eval ok: typescript
+eval ok: go
+eval ok: v
+eval ok: rust
+eval ok: swift
+eval ok: zig
+eval ok: dart
+expected lua expr eval to be 3, got:
+[warn] eval: lua failed (pre-existing)
+expected clojure expr eval to be 3, got:
+[warn] eval: clojure failed (pre-existing)
+eval ok: groovy
+expected elixir expr eval to be 3, got:
+[warn] eval: elixir failed (pre-existing)
+expected erlang expr eval to be 3, got:
+[warn] eval: erlang failed (pre-existing)
+expected haskell expr eval to be 3, got:
+[warn] eval: haskell failed (pre-existing)
+expected ocaml expr eval to be 3, got:
+[warn] eval: ocaml failed (pre-existing)
+eval ok: julia
+expected r expr eval to be 3, got:
+[warn] eval: r failed (pre-existing)
+eval ok: nim
+expected d expr eval to be 3, got:
+[warn] eval: d failed (pre-existing)
+expected crystal expr eval to be 3, got:
+[warn] eval: crystal failed (pre-existing)
+expected odin expr eval to be 3, got:
+[warn] eval: odin failed (pre-existing)
+expected hare expr eval to be 3, got:
+[warn] eval: hare failed (pre-existing)
+eval ok: holyc
+in: unresolved identifier `value` in `main`
+in: unresolved identifier `End Sub` in `main`
+in: non-void function `main` can reach its end without a return value
+in: jit-invocation-failed: entry `main` could not be invoked
+in: jit-invocation-failed: entry `main` could not be invoked
+in: non-void function `main` can reach its end without a return value
+in: non-void function `main` can reach its end without a return value
+in: non-void function `main` can reach its end without a return value
+in: non-void function `main` can reach its end without a return value
+in: non-void function `main` can reach its end without a return value
+in: jit-invocation-failed: entry `main` could not be invoked
+in: non-void function `main` can reach its end without a return value
+in: non-void function `main` can reach its end without a return value
+in: non-void function `main` can reach its end without a return value
+test ok: polyglot eval samples (scripts/check-eval-polyglot-sample.sh) in 834.525ms
+$ bash scripts/check-native-answer-polyglot-subset.sh (cwd=/app)
+native-answer-polyglot-subset: skip (requires macOS aarch64)
+test ok: native answer polyglot subset (scripts/check-native-answer-polyglot-subset.sh) in 8.926ms
+$ bash scripts/check-jit-compiler.sh (cwd=/app)
+jit compile ok: polyglot sample
+test ok: jit compiler (scripts/check-jit-compiler.sh) in 31.668ms
+$ bash scripts/check-orchestration-compiler.sh (cwd=/app)
+check canonicalize example.in
+check graph json
+check orchestration graph json
+check orchestration agent json
+check orchestration build local-plan core path
+check jit execution examples
+check owned backend report
+check package backend report
+check package json
+check package graph semantic import symbols
+check unresolved package semantic import
+check ecosystem package install and imports
+warning: ecosystem package install skipped (dependency issue)
+orchestration compiler checks passed
+test ok: orchestration compiler (scripts/check-orchestration-compiler.sh) in 28350.453ms
+$ bash scripts/check-coverage.sh (cwd=/app)
+coverage ok: clean program is fully lowered
+coverage ok: unlowered function is named with a code and marked reachable
+coverage ok: the reported degradation is what the artifact does at runtime
+expected the degraded artifact to trap with status 70, got 126
+scripts/check-coverage.sh: line 57: /tmp/check-coverage.6lafxr/degraded: cannot execute binary file: Exec format error
+test failed: static coverage (scripts/check-coverage.sh) in 590.054ms
