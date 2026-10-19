@@ -4316,6 +4316,19 @@ mod tests {
     }
 
     #[test]
+    fn optimize_with_entry_with_none_behaves_like_optimize() {
+        let mut decls = vec![
+            make_fn("kernel_entry", vec![Stmt::Return(None)]),
+            make_fn("unused", vec![Stmt::Return(None)]),
+        ];
+        optimize_with_entry(&mut decls, None);
+        assert_eq!(decls.len(), 1);
+        if let Decl::Function { name, .. } = &decls[0] {
+            assert_eq!(name, "kernel_entry");
+        }
+    }
+
+    #[test]
     fn optimize_with_entry_keeps_specified_entry() {
         let mut decls = vec![
             make_fn("custom_entry", vec![Stmt::Return(None)]),
