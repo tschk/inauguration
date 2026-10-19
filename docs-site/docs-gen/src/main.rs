@@ -572,6 +572,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_collect_markdown_error_path() {
+        let (src_dir, _src_guard) = make_temp_dir("src_error");
+        std::os::unix::fs::symlink("does_not_exist.md", src_dir.join("broken.md")).unwrap();
+        let mut files = Vec::new();
+        assert!(collect_markdown(&src_dir, &src_dir, &mut files).is_err());
+    }
+
+    #[test]
     fn test_render_nav_nested_class() {
         let pages = vec![
             ("benchmarks/README".to_string(), "Overview".to_string()),
