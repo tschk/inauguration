@@ -4329,6 +4329,74 @@ mod tests {
     }
 
     #[test]
+    fn optimize_with_entry_applies_full_pipeline() {
+        let decls = vec![
+            make_fn_with_params(
+                "inline_me",
+                vec![],
+                Typ::Int,
+                vec![
+                    Stmt::Let("a".into(), Some(Typ::Int), Expr::IntLit(10)),
+                    Stmt::Return(Some(ident("a"))),
+                ],
+            ),
+            make_fn_with_params(
+                "custom_entry",
+                vec![],
+                Typ::Int,
+                vec![
+                    Stmt::Return(Some(call("inline_me", vec![]))),
+                    Stmt::Let("b".into(), Some(Typ::Int), Expr::IntLit(20)),
+                ],
+            ),
+        ];
+
+        let mut with_some = decls.clone();
+        optimize_with_entry(&mut with_some, Some("custom_entry"));
+        assert_eq!(with_some.len(), 1);
+        if let Decl::Function { name, body, .. } = &with_some[0] {
+            assert_eq!(name, "custom_entry");
+            assert_eq!(body, &vec![Stmt::Return(Some(Expr::IntLit(10)))]);
+        } else {
+            panic!("expected custom_entry function");
+        }
+
+        // When entry is None, optimize_with_profile assumes static linkage or kernels and the entry is left to other rules.
+        // Wait, if no entry is given, the default entry points ("kernel_entry", "main", etc.) are kept, and others discarded.
+        // Let's modify the fixture to use "main" so we can test the None case.
+        let decls_main = vec![
+            make_fn_with_params(
+                "inline_me",
+                vec![],
+                Typ::Int,
+                vec![
+                    Stmt::Let("a".into(), Some(Typ::Int), Expr::IntLit(10)),
+                    Stmt::Return(Some(ident("a"))),
+                ],
+            ),
+            make_fn_with_params(
+                "main",
+                vec![],
+                Typ::Int,
+                vec![
+                    Stmt::Return(Some(call("inline_me", vec![]))),
+                    Stmt::Let("b".into(), Some(Typ::Int), Expr::IntLit(20)),
+                ],
+            ),
+        ];
+
+        let mut with_none = decls_main.clone();
+        optimize_with_entry(&mut with_none, None);
+        assert_eq!(with_none.len(), 1);
+        if let Decl::Function { name, body, .. } = &with_none[0] {
+            assert_eq!(name, "main");
+            assert_eq!(body, &vec![Stmt::Return(Some(Expr::IntLit(10)))]);
+        } else {
+            panic!("expected main function");
+        }
+    }
+
+    #[test]
     fn optimize_performs_inlining_and_dce() {
         let mut decls = vec![
             make_fn_with_params(
