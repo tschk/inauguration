@@ -102,16 +102,16 @@ fn generate_docs(
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let pages_with_body: Vec<(String, String, String)> = files
-        .iter()
+        .into_iter()
         .map(|(stem, content)| {
-            let (title, body_html) = render_md(content);
-            (stem.clone(), title, body_html)
+            let (title, body_html) = render_md(&content);
+            (stem, title, body_html)
         })
         .collect();
 
-    let pages: Vec<(String, String)> = pages_with_body
+    let pages: Vec<(&str, &str)> = pages_with_body
         .iter()
-        .map(|(stem, title, _)| (stem.clone(), title.clone()))
+        .map(|(stem, title, _)| (stem.as_str(), title.as_str()))
         .collect();
 
     fs::create_dir_all(out_dir)?;
@@ -283,8 +283,8 @@ fn nav_link_class(key: &str, current: &str) -> String {
     String::new()
 }
 
-fn render_nav(pages: &[(String, String)], current: &str) -> String {
-    let present: HashSet<&str> = pages.iter().map(|(k, _)| k.as_str()).collect();
+fn render_nav(pages: &[(&str, &str)], current: &str) -> String {
+    let present: HashSet<&str> = pages.iter().map(|(k, _)| *k).collect();
 
     let mut out = String::from("<nav aria-label=\"Documentation\" class=\"doc-nav\">");
     for (section, entries) in NAV_SECTIONS {
@@ -315,7 +315,7 @@ fn render_nav(pages: &[(String, String)], current: &str) -> String {
         .collect();
     let mut extras = String::new();
     for (web_key, page_title) in pages {
-        if listed.contains(web_key.as_str()) {
+        if listed.contains(web_key) {
             continue;
         }
         let href = doc_href(current, web_key);
@@ -531,11 +531,8 @@ mod tests {
     #[test]
     fn test_render_nav_basic_sections() {
         let pages = vec![
-            ("in-language".to_string(), "inlang (.in)".to_string()),
-            (
-                "multi-frontend-ir".to_string(),
-                "Multi-front Core IR".to_string(),
-            ),
+            ("in-language", "inlang (.in)"),
+            ("multi-frontend-ir", "Multi-front Core IR"),
         ];
         let nav = render_nav(&pages, "in-language");
 
@@ -552,8 +549,8 @@ mod tests {
     #[test]
     fn test_render_nav_more_section() {
         let pages = vec![
-            ("in-language".to_string(), "inlang (.in)".to_string()),
-            ("custom-page".to_string(), "Custom Page Title".to_string()),
+            ("in-language", "inlang (.in)"),
+            ("custom-page", "Custom Page Title"),
         ];
         let nav = render_nav(&pages, "in-language");
 
@@ -563,7 +560,7 @@ mod tests {
 
     #[test]
     fn test_render_nav_empty_pages() {
-        let pages: Vec<(String, String)> = vec![];
+        let pages: Vec<(&str, &str)> = vec![];
         let nav = render_nav(&pages, "in-language");
         assert_eq!(
             nav,
@@ -573,10 +570,7 @@ mod tests {
 
     #[test]
     fn test_render_nav_nested_class() {
-        let pages = vec![
-            ("benchmarks/README".to_string(), "Overview".to_string()),
-            ("benchmarks/jit".to_string(), "JIT".to_string()),
-        ];
+        let pages = vec![("benchmarks/README", "Overview"), ("benchmarks/jit", "JIT")];
 
         let nav = render_nav(&pages, "benchmarks/README");
         assert!(nav.contains("<li><a href=\"README.html\" class=\"active\">Overview</a></li>"));
