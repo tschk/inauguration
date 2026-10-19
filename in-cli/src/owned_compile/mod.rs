@@ -10,7 +10,7 @@ use crate::native_emit::NativeLinkage;
 use crate::native_emit::lower::LoweringDegradation;
 use crate::parser_registry::{self, ParserCli};
 use serde::Serialize;
-use std::fs;
+
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -147,53 +147,15 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     let jobs = jobs_for_request(request);
     let cwd = compile_cache::workspace_cwd_for_path(&request.path);
 
-    // Multi-file project? Check before trying to read a single source.
-    let has_cargo = request.path.join("Cargo.toml").exists();
-    let is_multi = request.path.is_dir() && !has_cargo;
-
-    let mut multi_sources: Vec<(String, String)> = Vec::new(); // (path, source)
-    if is_multi {
-        // Scan for .in, .c, .cpp, .rs files in directory
-        if let Ok(dir) = std::fs::read_dir(&request.path) {
-            for entry in dir.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension() {
-                        if ext == "in" || ext == "c" || ext == "cpp" || ext == "rs" {
-                            if let Ok(src) = fs::read_to_string(&path) {
-                                multi_sources.push((path.to_string_lossy().to_string(), src));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if multi_sources.is_empty() {
+    let (is_multi, multi_sources, source) = match discover_sources(request) {
+        Ok(res) => res,
+        Err((code, msg)) => {
             return OwnedCompileReport {
-                reason_code: Some("frontend-parse-failed".to_string()),
-                reason: Some(format!(
-                    "no source files found in {}",
-                    request.path.display()
-                )),
-                error: Some("no .in, .c, .cpp, or .rs files found".to_string()),
+                reason_code: Some(code),
+                reason: Some(msg.clone()),
+                error: Some(msg),
                 ..base_report(request, jobs, started)
             };
-        }
-    }
-
-    let source = if is_multi {
-        multi_sources[0].1.clone()
-    } else {
-        match fs::read_to_string(&request.path) {
-            Ok(content) => content,
-            Err(err) => {
-                return OwnedCompileReport {
-                    reason_code: Some("frontend-read-failed".to_string()),
-                    reason: Some(err.to_string()),
-                    error: Some(err.to_string()),
-                    ..base_report(request, jobs, started)
-                };
-            }
         }
     };
     let mut frontend_hash = compile_cache::source_frontend_hash(&request.path, &source);
@@ -616,35 +578,9 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         report.call_edge_count = verify_report.call_edges.len();
     }
 
-    if reuse_cache && let Some(mut cached) = compile_cache::read_cached_report(&cwd, &frontend_hash)
-    {
-        let requested_out = request.out.as_ref().map(|path| path.display().to_string());
-        let cached_out = cached
-            .executable_path
-            .clone()
-            .or_else(|| cached.artifact_path.clone());
-        if cached.target == target_label(request.target)
-            && cached.entry == request.entry
-            && cached.target_triple == request.target_triple
-            && cached.module_id == request.module_id
-            && cached.linkage == linkage_label(request.linkage)
-            && emit_label(request.emit.as_ref()) == emit_label(None)
-            && requested_out == cached_out
-        {
-            // Report-only cache must still materialize artifacts; missing out files
-            // force a full rebuild so product link steps don't see a green phantom.
-            let artifact_present = requested_out
-                .as_ref()
-                .map(|p| std::path::Path::new(p).is_file())
-                .unwrap_or(true);
-            if artifact_present {
-                cached.cache_hit = true;
-                cached.jobs = jobs;
-                cached.timing_micros = started.elapsed().as_micros();
-                cached.timing_waves_us = Some(timing_waves_for_jobs(jobs, cached.timing_micros));
-                cached.frontend_hash = Some(frontend_hash);
-                return cached;
-            }
+    if reuse_cache {
+        if let Some(cached) = check_and_return_cache(request, &cwd, &frontend_hash, jobs, started) {
+            return cached;
         }
     }
 
@@ -698,60 +634,16 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
 
     if let Some(OwnedEmit::Sci { base }) = request.emit {
         let entry_name = effective_entry.as_deref().unwrap_or("main");
-        let triple = request
-            .target_triple
-            .as_deref()
-            .unwrap_or("x86_64-unknown-none");
-        if !triple.contains("x86_64") {
-            let err = format!("SCI emit requires an x86_64 target triple, got `{triple}`");
-            report.reason_code = Some("sci-target-unsupported".to_string());
-            report.reason = Some(err.clone());
-            report.error = Some(err);
-            return finalize_report(report, started, &cwd, &frontend_hash);
-        }
-        let out_path = match request.out.as_ref() {
-            Some(path) => path,
-            None => {
-                let err = "SCI emit requires --out".to_string();
-                report.reason_code = Some("sci-missing-output".to_string());
-                report.reason = Some(err.clone());
-                report.error = Some(err);
-                return finalize_report(report, started, &cwd, &frontend_hash);
-            }
-        };
-        crate::native_emit::x86_64::set_32bit(false);
-        match crate::native_emit::sci::emit_sci_binary(&module, entry_name, base) {
-            Ok(bytes) => {
-                if let Err(err) = std::fs::write(out_path, &bytes) {
-                    let err = format!("write SCI binary `{}`: {err}", out_path.display());
-                    report.reason_code = Some("sci-write-failed".to_string());
-                    report.reason = Some(err.clone());
-                    report.error = Some(err);
-                    return finalize_report(report, started, &cwd, &frontend_hash);
-                }
-                metadata::emit_component_metadata_sidecar(&module, entry_name, out_path);
-                report.success = true;
-                report.backend_level = "owned-native-subset-freestanding".to_string();
-                report.runtime_level = "sci-component".to_string();
-                report.reason_code = Some("native-x86_64-sci-binary".to_string());
-                report.reason = Some(
-                    "inauguration owns SCI component binary emission for freestanding x86_64"
-                        .to_string(),
-                );
-                report.artifact_path = Some(out_path.display().to_string());
-                if cfg!(unix) {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ =
-                        std::fs::set_permissions(out_path, std::fs::Permissions::from_mode(0o755));
-                }
-            }
-            Err(err) => {
-                report.reason_code = Some("sci-lowering-failed".to_string());
-                report.reason = Some(err.clone());
-                report.error = Some(err);
-            }
-        }
-        return finalize_report(report, started, &cwd, &frontend_hash);
+        return emit_sci_binary_if_requested(
+            request,
+            base,
+            &module,
+            entry_name,
+            started,
+            &cwd,
+            &frontend_hash,
+            report,
+        );
     }
 
     match request.target {
@@ -836,6 +728,161 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         }
     }
 
+    check_and_report_degradations(&mut report);
+
+    finalize_report(report, started, &cwd, &frontend_hash)
+}
+
+fn discover_sources(
+    request: &OwnedCompileRequest,
+) -> Result<(bool, Vec<(String, String)>, String), (String, String)> {
+    let has_cargo = request.path.join("Cargo.toml").exists();
+    let is_multi = request.path.is_dir() && !has_cargo;
+
+    let mut multi_sources: Vec<(String, String)> = Vec::new(); // (path, source)
+    if is_multi {
+        // Scan for .in, .c, .cpp, .rs files in directory
+        if let Ok(dir) = std::fs::read_dir(&request.path) {
+            for entry in dir.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(ext) = path.extension() {
+                        if ext == "in" || ext == "c" || ext == "cpp" || ext == "rs" {
+                            if let Ok(src) = std::fs::read_to_string(&path) {
+                                multi_sources.push((path.to_string_lossy().to_string(), src));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if multi_sources.is_empty() {
+            return Err((
+                "frontend-parse-failed".to_string(),
+                format!("no source files found in {}", request.path.display()),
+            ));
+        }
+    }
+
+    let source = if is_multi {
+        multi_sources[0].1.clone()
+    } else {
+        match std::fs::read_to_string(&request.path) {
+            Ok(content) => content,
+            Err(err) => {
+                return Err(("frontend-read-failed".to_string(), err.to_string()));
+            }
+        }
+    };
+
+    Ok((is_multi, multi_sources, source))
+}
+
+fn check_and_return_cache(
+    request: &OwnedCompileRequest,
+    cwd: &std::path::Path,
+    frontend_hash: &str,
+    jobs: usize,
+    started: Instant,
+) -> Option<OwnedCompileReport> {
+    let mut cached = crate::compile_cache::read_cached_report(cwd, frontend_hash)?;
+    let requested_out = request.out.as_ref().map(|path| path.display().to_string());
+    let cached_out = cached
+        .executable_path
+        .clone()
+        .or_else(|| cached.artifact_path.clone());
+    if cached.target == target_label(request.target)
+        && cached.entry == request.entry
+        && cached.target_triple == request.target_triple
+        && cached.module_id == request.module_id
+        && cached.linkage == linkage_label(request.linkage)
+        && emit_label(request.emit.as_ref()) == emit_label(None)
+        && requested_out == cached_out
+    {
+        // Report-only cache must still materialize artifacts; missing out files
+        // force a full rebuild so product link steps don't see a green phantom.
+        let artifact_present = requested_out
+            .as_ref()
+            .map(|p| std::path::Path::new(p).is_file())
+            .unwrap_or(true);
+        if artifact_present {
+            cached.cache_hit = true;
+            cached.jobs = jobs;
+            cached.timing_micros = started.elapsed().as_micros();
+            cached.timing_waves_us = Some(timing_waves_for_jobs(jobs, cached.timing_micros));
+            cached.frontend_hash = Some(frontend_hash.to_string());
+            return Some(cached);
+        }
+    }
+    None
+}
+
+fn emit_sci_binary_if_requested(
+    request: &OwnedCompileRequest,
+    base: u64,
+    module: &crate::core_ir::UnifiedModule,
+    entry_name: &str,
+    started: Instant,
+    cwd: &std::path::Path,
+    frontend_hash: &str,
+    mut report: OwnedCompileReport,
+) -> OwnedCompileReport {
+    let triple = request
+        .target_triple
+        .as_deref()
+        .unwrap_or("x86_64-unknown-none");
+    if !triple.contains("x86_64") {
+        let err = format!("SCI emit requires an x86_64 target triple, got `{triple}`");
+        report.reason_code = Some("sci-target-unsupported".to_string());
+        report.reason = Some(err.clone());
+        report.error = Some(err);
+        return finalize_report(report, started, cwd, frontend_hash);
+    }
+    let out_path = match request.out.as_ref() {
+        Some(path) => path,
+        None => {
+            let err = "SCI emit requires --out".to_string();
+            report.reason_code = Some("sci-missing-output".to_string());
+            report.reason = Some(err.clone());
+            report.error = Some(err);
+            return finalize_report(report, started, cwd, frontend_hash);
+        }
+    };
+    crate::native_emit::x86_64::set_32bit(false);
+    match crate::native_emit::sci::emit_sci_binary(module, entry_name, base) {
+        Ok(bytes) => {
+            if let Err(err) = std::fs::write(out_path, &bytes) {
+                let err = format!("write SCI binary `{}`: {err}", out_path.display());
+                report.reason_code = Some("sci-write-failed".to_string());
+                report.reason = Some(err.clone());
+                report.error = Some(err);
+                return finalize_report(report, started, cwd, frontend_hash);
+            }
+            metadata::emit_component_metadata_sidecar(module, entry_name, out_path);
+            report.success = true;
+            report.backend_level = "owned-native-subset-freestanding".to_string();
+            report.runtime_level = "sci-component".to_string();
+            report.reason_code = Some("native-x86_64-sci-binary".to_string());
+            report.reason = Some(
+                "inauguration owns SCI component binary emission for freestanding x86_64"
+                    .to_string(),
+            );
+            report.artifact_path = Some(out_path.display().to_string());
+            if cfg!(unix) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(out_path, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        Err(err) => {
+            report.reason_code = Some("sci-lowering-failed".to_string());
+            report.reason = Some(err.clone());
+            report.error = Some(err);
+        }
+    }
+    finalize_report(report, started, cwd, frontend_hash)
+}
+
+fn check_and_report_degradations(report: &mut OwnedCompileReport) {
     // Code the lowerer could not compile is trapped rather than miscompiled, so
     // the artifact is still produced. Callers that require a fully compiled
     // artifact opt in with `IN_STRICT_LOWERING`.
@@ -883,8 +930,6 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         ));
         report.error = report.reason.clone();
     }
-
-    finalize_report(report, started, &cwd, &frontend_hash)
 }
 
 fn merge_retained_dependency_artifacts(
