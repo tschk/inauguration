@@ -77,6 +77,18 @@ pub(crate) fn failure_in_type(value: &Typ) -> Option<ResolutionFailure> {
     match value {
         Typ::Named(name) => {
             let mut failure = decode(name);
+            if let Some(signature) = super::rust_callables::signature_of(value) {
+                signature.visit_types(&mut |child| {
+                    failure = prefer_failure(failure.take(), failure_in_type(child));
+                });
+            } else if super::rust_callables::is_encoded(name) {
+                failure = prefer_failure(
+                    failure,
+                    Some(ResolutionFailure::Unsupported(
+                        "malformed Rust callable signature".into(),
+                    )),
+                );
+            }
             if let Some(array) = super::rust_arrays::decode(name) {
                 failure = prefer_failure(failure, failure_in_type(&array.element));
             }
@@ -102,6 +114,7 @@ pub(crate) enum MetadataKind {
     TypeFailures,
     RustFixedArrays,
     RustFloats,
+    RustCallables,
 }
 
 pub(crate) fn present(decls: &[super::Decl]) -> bool {
@@ -114,6 +127,18 @@ pub(crate) fn metadata_present(decls: &[super::Decl], mode: MetadataKind) -> boo
     use super::{Decl, Expr, Stmt};
     fn named(name: &str, mode: MetadataKind) -> bool {
         (mode == MetadataKind::TypeFailures && decode(name).is_some())
+            || (mode == MetadataKind::RustCallables && super::rust_callables::is_encoded(name))
+            || super::rust_callables::decode(name)
+                .or_else(|| super::rust_callables::decode_item(name).map(|item| item.signature))
+                .is_some_and(|signature| {
+                    let mut found = false;
+                    signature.visit_types(&mut |child| found |= typ(child, mode));
+                    found
+                })
+            || (mode == MetadataKind::TypeFailures
+                && super::rust_callables::is_encoded(name)
+                && super::rust_callables::decode(name).is_none()
+                && super::rust_callables::decode_item(name).is_none())
             || (mode == MetadataKind::RustFloats && super::rust_floats::is_proof(name))
             || super::rust_arrays::decode(name).is_some_and(|array| {
                 mode == MetadataKind::RustFixedArrays || typ(&array.element, mode)
@@ -180,6 +205,42 @@ pub(crate) fn metadata_present(decls: &[super::Decl], mode: MetadataKind) -> boo
                         || op == super::rust_arrays::PENDING_REPEAT) =>
             {
                 return true;
+            }
+            Expr::Unary { op, .. } if super::rust_callables::is_alias_origin(op) => {
+                if mode == MetadataKind::RustCallables
+                    || (mode == MetadataKind::TypeFailures
+                        && super::rust_callables::decode_alias_origin(op).is_none())
+                {
+                    return true;
+                }
+            }
+            Expr::Unary { op, .. } if super::rust_callables::is_cast(op) => {
+                if mode == MetadataKind::RustCallables {
+                    return true;
+                }
+                if let Some(signature) = super::rust_callables::decode_cast(op) {
+                    let mut found = false;
+                    signature.visit_types(&mut |child| found |= typ(child, mode));
+                    if found {
+                        return true;
+                    }
+                } else if mode == MetadataKind::TypeFailures {
+                    return true;
+                }
+            }
+            Expr::Unary { op, .. } if super::rust_callables::is_declaration(op) => {
+                if mode == MetadataKind::RustCallables {
+                    return true;
+                }
+                if let Some(signature) = super::rust_callables::decode_declaration(op) {
+                    let mut found = false;
+                    signature.visit_types(&mut |child| found |= typ(child, mode));
+                    if found {
+                        return true;
+                    }
+                } else if mode == MetadataKind::TypeFailures {
+                    return true;
+                }
             }
             Expr::Unary { op, .. }
                 if super::rust_generics::decode_arguments(op)

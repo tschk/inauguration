@@ -60,6 +60,27 @@ pub(crate) fn fallible_functions<'a>(
     fallible.into_iter().map(str::to_owned).collect()
 }
 
+/// Conservative proof for projections lacking the owned error-carrier ABI.
+/// Reuse the native effect scan, including checked places/operations and
+/// structured throw/propagate edges, without introducing another AST walker.
+pub(crate) fn expression_requires_error_abi(
+    expression: &Expr,
+    fallible_functions: &HashSet<String>,
+    declared_functions: &HashSet<String>,
+) -> bool {
+    let mut calls = HashSet::new();
+    let mut checked = false;
+    let mut fallible = false;
+    scan_expr(expression, &mut calls, &mut checked, &mut fallible, true);
+    fallible
+        || checked
+        || calls.iter().any(|callee| {
+            fallible_functions.contains(*callee)
+                || (matches!(*callee, "invoke" | "invoke1" | "invoke2")
+                    && !declared_functions.contains(*callee))
+        })
+}
+
 fn scan_expr<'a>(
     expr: &'a Expr,
     calls: &mut HashSet<&'a str>,
@@ -416,5 +437,37 @@ mod tests {
             fallible_functions(functions),
             HashSet::from(["fail".into(), "first".into(), "second".into()])
         );
+    }
+    #[test]
+    fn projected_operand_error_proof_reuses_structured_effects_and_symbol_ownership() {
+        let declared = HashSet::from(["invoke".into(), "fallible".into()]);
+        let fallible = HashSet::from(["fallible".into()]);
+        let call = |name: &str| Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args: vec![],
+        };
+        assert!(!expression_requires_error_abi(
+            &call("invoke"),
+            &fallible,
+            &declared
+        ));
+        assert!(expression_requires_error_abi(
+            &call("invoke1"),
+            &fallible,
+            &declared
+        ));
+        assert!(expression_requires_error_abi(
+            &call("fallible"),
+            &fallible,
+            &declared
+        ));
+        assert!(expression_requires_error_abi(
+            &Expr::Block {
+                body: vec![Stmt::Throw(Expr::IntLit(9))],
+                result: Some(Box::new(Expr::IntLit(42)))
+            },
+            &fallible,
+            &declared
+        ));
     }
 }

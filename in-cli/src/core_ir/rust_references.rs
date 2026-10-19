@@ -73,6 +73,39 @@ pub(crate) fn receiver_identity(value: &Typ) -> Option<String> {
 /// Source proof equality deliberately ignores the context-specific old runtime
 /// representation. It must never equate an owned value and a borrow.
 pub(crate) fn same_source_type(left: &Typ, right: &Typ) -> bool {
+    if let (Typ::Named(left), Typ::Named(right)) = (left, right)
+        && (super::rust_callables::is_encoded(left) || super::rust_callables::is_encoded(right))
+    {
+        let (left, right) = match (
+            super::rust_callables::decode_item(left),
+            super::rust_callables::decode_item(right),
+        ) {
+            (Some(left), Some(right)) if left.identity == right.identity => {
+                (left.signature, right.signature)
+            }
+            (None, None) => {
+                let (Some(left), Some(right)) = (
+                    super::rust_callables::decode(left),
+                    super::rust_callables::decode(right),
+                ) else {
+                    return false;
+                };
+                (left, right)
+            }
+            _ => return false,
+        };
+        return left.abi == right.abi
+            && left.unsafe_call == right.unsafe_call
+            && left.variadic == right.variadic
+            && left.bound_lifetimes == right.bound_lifetimes
+            && left.parameters.len() == right.parameters.len()
+            && left
+                .parameters
+                .iter()
+                .zip(&right.parameters)
+                .all(|(left, right)| same_source_type(left, right))
+            && same_source_type(&left.result, &right.result);
+    }
     match (left, right) {
         (Typ::Named(left), Typ::Named(right)) => match (decode(left), decode(right)) {
             (Some(left), Some(right)) => {
@@ -516,6 +549,81 @@ mod declaration_reference_tests {
         assert!(matches!(
             &body[0],
             crate::core_ir::Stmt::Declare(_, Typ::String)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod callable_source_equality_tests {
+    use super::*;
+    #[test]
+    fn callable_source_equality_preserves_children_and_ignores_only_reference_runtime() {
+        let integer = Typ::Named("#rust-integer-i64".into());
+        let callback = |runtime| {
+            super::super::rust_callables::typ(super::super::rust_callables::Signature {
+                abi: super::super::rust_callables::Abi::Rust,
+                unsafe_call: false,
+                variadic: false,
+                bound_lifetimes: false,
+                parameters: vec![typ(ReferenceType {
+                    mutable: false,
+                    referent: integer.clone(),
+                    runtime,
+                })],
+                result: integer.clone(),
+            })
+        };
+        assert!(same_source_type(
+            &callback(Typ::Int),
+            &callback(Typ::Named("old-pointer".into()))
+        ));
+        let Typ::Named(name) = callback(Typ::Int) else {
+            unreachable!()
+        };
+        let mut different = super::super::rust_callables::decode(&name).unwrap();
+        different.result = Typ::Named("#rust-integer-u64".into());
+        assert!(!same_source_type(
+            &Typ::Named(name),
+            &super::super::rust_callables::typ(different)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod callable_item_source_equality_tests {
+    use super::*;
+    use crate::core_ir::rust_callables::{self, Abi, Item, Signature};
+    #[test]
+    fn items_compare_origin_and_exact_source_children_without_runtime_fields() {
+        let signature = |runtime| Signature {
+            abi: Abi::Rust,
+            unsafe_call: false,
+            variadic: false,
+            bound_lifetimes: false,
+            parameters: vec![typ(ReferenceType {
+                mutable: false,
+                referent: Typ::Named("#rust-integer-i64".into()),
+                runtime,
+            })],
+            result: Typ::Bool,
+        };
+        let item = |identity: &str, runtime| {
+            rust_callables::item_type(Item {
+                identity: identity.into(),
+                signature: signature(runtime),
+            })
+        };
+        assert!(same_source_type(
+            &item("owner::f", Typ::Int),
+            &item("owner::f", Typ::Bool)
+        ));
+        assert!(!same_source_type(
+            &item("owner::f", Typ::Int),
+            &item("owner::g", Typ::Int)
+        ));
+        assert!(!same_source_type(
+            &item("owner::f", Typ::Int),
+            &rust_callables::typ(signature(Typ::Int))
         ));
     }
 }

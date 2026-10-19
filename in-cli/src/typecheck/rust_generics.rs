@@ -39,6 +39,12 @@ pub(super) fn infer_call(
     let names = parameters.iter().cloned().collect::<HashSet<_>>();
     let mut bindings = HashMap::new();
     let mut failures = None;
+    if let Some(expected) = expected {
+        failures = crate::core_ir::type_proofs::prefer_failure(
+            failures,
+            unify_source(result, expected, &names, &mut bindings, 0).err(),
+        );
+    }
     for ((_, declared), actual) in signature.iter().zip(arguments) {
         if let Some(actual) = actual {
             failures = crate::core_ir::type_proofs::prefer_failure(
@@ -50,12 +56,6 @@ pub(super) fn infer_call(
                 unify_source(declared, actual, &names, &mut bindings, 0).err(),
             );
         }
-    }
-    if let Some(expected) = expected {
-        failures = crate::core_ir::type_proofs::prefer_failure(
-            failures,
-            unify_source(result, expected, &names, &mut bindings, 0).err(),
-        );
     }
     if let Some(failure) = failures {
         return Some(Err(failure));
@@ -86,7 +86,7 @@ pub(super) fn infer_call(
     };
     for ((_, declared), actual) in params.iter().zip(arguments) {
         if let Some(actual) = actual {
-            if !crate::core_ir::rust_references::same_source_type(declared, actual) {
+            if !source_argument_agrees(declared, actual) {
                 return Some(Err(source_conflict(
                     declared,
                     actual,
@@ -135,7 +135,7 @@ fn explicit_result_failure(
     let Decl::Function { ret, .. } = projected else {
         unreachable!()
     };
-    if !owned_type(&ret, 0) || crate::core_ir::rust_references::same_source_type(&ret, expected) {
+    if !owned_type(&ret, 0) || source_argument_agrees(expected, &ret) {
         return None;
     }
     Some(source_conflict(
@@ -228,6 +228,14 @@ fn owned_type(typ: &Typ, depth: usize) -> bool {
         Typ::Int | Typ::Float | Typ::Generic(_) => false,
         Typ::Array(item) | Typ::Vector(item) => owned_type(item, depth + 1),
         Typ::Named(name) => {
+            if crate::core_ir::rust_callables::is_encoded(name) {
+                let Some(signature) = crate::core_ir::rust_callables::signature_of(typ) else {
+                    return false;
+                };
+                let mut owned = signature.ordinary_rust_form();
+                signature.visit_types(&mut |child| owned &= owned_type(child, depth + 1));
+                return owned;
+            }
             if typ == &crate::core_ir::rust_floats::weak_type() {
                 return false;
             }
@@ -246,6 +254,29 @@ fn owned_type(typ: &Typ, depth: usize) -> bool {
     }
 }
 
+// Directional destination agreement. Function items retain identity everywhere
+// except a proven ordinary fn-pointer destination; generic T itself is not one.
+fn source_argument_agrees(expected: &Typ, actual: &Typ) -> bool {
+    if crate::core_ir::rust_references::same_source_type(expected, actual) {
+        return true;
+    }
+    let (Typ::Named(expected_name), Typ::Named(actual_name)) = (expected, actual) else {
+        return false;
+    };
+    let (Some(expected), Some(actual)) = (
+        crate::core_ir::rust_callables::decode(expected_name),
+        crate::core_ir::rust_callables::decode_item(actual_name),
+    ) else {
+        return false;
+    };
+    expected.ordinary_rust_form()
+        && actual.signature.ordinary_rust_form()
+        && crate::core_ir::rust_references::same_source_type(
+            &crate::core_ir::rust_callables::typ(expected),
+            &crate::core_ir::rust_callables::typ(actual.signature),
+        )
+}
+
 fn unify_source(
     declared: &Typ,
     actual: &Typ,
@@ -259,7 +290,7 @@ fn unify_source(
     if let Typ::Generic(name) = declared {
         if names.contains(name) && owned_type(actual, depth) {
             if let Some(previous) = bindings.get(name) {
-                if !crate::core_ir::rust_references::same_source_type(previous, actual) {
+                if !source_argument_agrees(previous, actual) {
                     return Err(source_conflict(
                         previous,
                         actual,
@@ -277,6 +308,62 @@ fn unify_source(
             unify_source(left, right, names, bindings, depth + 1)
         }
         (Typ::Named(left), Typ::Named(right)) => {
+            if crate::core_ir::rust_callables::is_encoded(left)
+                || crate::core_ir::rust_callables::is_encoded(right)
+            {
+                let (Some(left_signature), Some(right_signature)) = (
+                    crate::core_ir::rust_callables::signature_of(declared),
+                    crate::core_ir::rust_callables::signature_of(actual),
+                ) else {
+                    return Err(ResolutionFailure::Unsupported(
+                        "generic callable source form is not owned".into(),
+                    ));
+                };
+                let mut failure = (!left_signature.ordinary_rust_form()
+                    || !right_signature.ordinary_rust_form())
+                .then(|| {
+                    ResolutionFailure::Unsupported(
+                        "generic callable ABI/safety/lifetime obligations are not owned".into(),
+                    )
+                });
+                // Items are nominal source identities, not structural pointers.
+                if let Some(left_item) = crate::core_ir::rust_callables::decode_item(left) {
+                    if crate::core_ir::rust_callables::decode_item(right)
+                        .is_none_or(|right_item| left_item.identity != right_item.identity)
+                    {
+                        failure = crate::core_ir::type_proofs::prefer_failure(
+                            failure,
+                            Some(ResolutionFailure::Invalid(
+                                "distinct Rust function item types".into(),
+                            )),
+                        );
+                    }
+                }
+                if left_signature.parameters.len() != right_signature.parameters.len() {
+                    failure = crate::core_ir::type_proofs::prefer_failure(
+                        failure,
+                        Some(ResolutionFailure::Invalid(
+                            "generic callable parameter count differs".into(),
+                        )),
+                    );
+                }
+                for (declared, actual) in left_signature
+                    .parameters
+                    .iter()
+                    .zip(&right_signature.parameters)
+                    .chain(std::iter::once((
+                        &left_signature.result,
+                        &right_signature.result,
+                    )))
+                {
+                    failure = crate::core_ir::type_proofs::prefer_failure(
+                        failure,
+                        unify_source(declared, actual, names, bindings, depth + 1).err(),
+                    );
+                }
+                return failure.map_or(Ok(()), Err);
+            }
+
             if let (Some(left), Some(right)) = (
                 crate::core_ir::rust_arrays::decode(left),
                 crate::core_ir::rust_arrays::decode(right),
@@ -702,6 +789,14 @@ fn contains_generic(typ: &Typ) -> bool {
         Typ::Generic(_) => true,
         Typ::Array(item) | Typ::Vector(item) => contains_generic(item),
         Typ::Named(name) => {
+            if crate::core_ir::rust_callables::is_encoded(name) {
+                let Some(signature) = crate::core_ir::rust_callables::signature_of(typ) else {
+                    return true;
+                };
+                let mut unresolved = false;
+                signature.visit_types(&mut |child| unresolved |= contains_generic(child));
+                return unresolved;
+            }
             crate::core_ir::rust_arrays::decode(name)
                 .is_some_and(|array| contains_generic(&array.element))
                 || crate::core_ir::rust_references::decode(name)
@@ -1048,7 +1143,19 @@ fn apply_alias_arguments(declaration: &mut Decl, arguments: &[Typ]) {
         _ => None,
     };
     let Some(target) = target else { return };
+    let specialized_origin = format!(
+        "#rust-specialization:{target}:{}",
+        rust_generics::arguments(arguments)
+    );
     crate::core_opt::map_decl_exprs_mut(std::slice::from_mut(declaration), &mut |expression| {
+        if let Expr::Unary { op, expr } = expression
+            && crate::core_ir::rust_callables::decode_alias_origin(op).as_deref()
+                == Some(target.as_str())
+            && matches!(expr.as_ref(), Expr::UnitLit)
+        {
+            *op = crate::core_ir::rust_callables::alias_origin(&specialized_origin);
+            return;
+        }
         if let Expr::Call { callee, .. } = expression
             && matches!(callee.as_ref(), Expr::Ident(name) if name == &target)
         {
@@ -1647,5 +1754,91 @@ mod reachable_template_proof_tests {
             proven_operator_result_failure(&reference(false), Some(&integer))
                 .is_some_and(|failure| failure.is_invalid())
         );
+    }
+}
+
+#[cfg(test)]
+mod callable_item_generic_tests {
+    use super::*;
+    use crate::core_ir::rust_callables::{self, Abi, Item, Signature};
+    fn signature(child: Typ) -> Signature {
+        Signature {
+            abi: Abi::Rust,
+            unsafe_call: false,
+            variadic: false,
+            bound_lifetimes: false,
+            parameters: vec![child.clone()],
+            result: child,
+        }
+    }
+    fn integer() -> Typ {
+        Typ::Named("#rust-integer-i64".into())
+    }
+    fn item(name: &str) -> Typ {
+        rust_callables::item_type(Item {
+            identity: name.into(),
+            signature: signature(integer()),
+        })
+    }
+    #[test]
+    fn pointer_formals_unify_item_children_and_substitute_nested_signature() {
+        let declared = rust_callables::typ(signature(Typ::Generic("T".into())));
+        let actual = item("a");
+        let mut bindings = HashMap::new();
+        unify_source(
+            &declared,
+            &actual,
+            &HashSet::from(["T".into()]),
+            &mut bindings,
+            0,
+        )
+        .unwrap();
+        assert_eq!(bindings.get("T"), Some(&integer()));
+        assert!(contains_generic(&declared));
+        assert!(owned_type(&actual, 0));
+        let mut projection = Decl::Function {
+            name: "test".into(),
+            params: vec![("f".into(), declared)],
+            ret: Typ::Void,
+            body: vec![],
+            type_params: vec![],
+        };
+        crate::core_bindings::substitute_type_parameters(&mut projection, &bindings);
+        let Decl::Function { params, .. } = projection else {
+            panic!()
+        };
+        assert!(source_argument_agrees(&params[0].1, &actual));
+    }
+    #[test]
+    fn generic_item_binding_keeps_identity_unless_destination_already_proves_pointer() {
+        let generic = Typ::Generic("T".into());
+        let names = HashSet::from(["T".into()]);
+        let mut bindings = HashMap::new();
+        unify_source(&generic, &item("a"), &names, &mut bindings, 0).unwrap();
+        assert!(
+            unify_source(&generic, &item("b"), &names, &mut bindings, 0)
+                .unwrap_err()
+                .is_invalid()
+        );
+        let pointer = rust_callables::typ(signature(integer()));
+        let mut contextual = HashMap::new();
+        unify_source(&generic, &pointer, &names, &mut contextual, 0).unwrap();
+        unify_source(&generic, &item("a"), &names, &mut contextual, 0).unwrap();
+        unify_source(&generic, &item("b"), &names, &mut contextual, 0).unwrap();
+        assert_eq!(contextual.get("T"), Some(&pointer));
+        assert!(!source_argument_agrees(&item("a"), &pointer));
+    }
+    #[test]
+    fn callable_child_contradiction_dominates_unowned_form() {
+        let left = rust_callables::typ(signature(Typ::Bool));
+        let mut right = signature(integer());
+        right.unsafe_call = true;
+        let right = rust_callables::typ(right);
+        assert!(
+            unify_source(&left, &right, &HashSet::new(), &mut HashMap::new(), 0)
+                .unwrap_err()
+                .is_invalid()
+        );
+        assert!(!owned_type(&right, 0));
     }
 }

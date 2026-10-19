@@ -5477,6 +5477,40 @@ fn main()->Int{#print(argument());#print_int(7);#print("\n");return print("ignor
 
     #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn conditional_item_join_and_dynamic_callable_evaluation_order() {
+        for source in [
+            "fn a()->i64{42}fn b()->i64{7}fn main()->i64{let f=if std::hint::black_box(true){a}else{b};f()}",
+            "static mut ORDER:i64=0;fn a()->i64{42}fn b()->i64{7}fn choose(flag:bool)->fn()->i64{unsafe{ORDER=ORDER*10+1;}if flag{a}else{b}}fn arg(tag:i64)->i64{unsafe{ORDER=ORDER*10+tag;}if tag==2{20}else{22}}fn main()->i64{let answer=choose(std::hint::black_box(true))();if answer==42 && unsafe{ORDER}==1{42}else{7}}",
+            "static mut ORDER:i64=0;fn a(a0:i64)->i64{a0}fn b(a0:i64)->i64{7}fn choose(flag:bool)->fn(i64)->i64{unsafe{ORDER=ORDER*10+1;}if flag{a}else{b}}fn arg(tag:i64)->i64{unsafe{ORDER=ORDER*10+tag;}42}fn main()->i64{let answer=choose(std::hint::black_box(true))(arg(2));if answer==42 && unsafe{ORDER}==12{42}else{7}}",
+            "static mut ORDER:i64=0;fn a(a0:i64,a1:i64)->i64{a0+a1}fn b(a0:i64,a1:i64)->i64{7}fn choose(flag:bool)->fn(i64,i64)->i64{unsafe{ORDER=ORDER*10+1;}if flag{a}else{b}}fn arg(tag:i64)->i64{unsafe{ORDER=ORDER*10+tag;}if tag==2{20}else{22}}fn main()->i64{let answer=choose(std::hint::black_box(true))(arg(2),arg(3));if answer==42 && unsafe{ORDER}==123{42}else{7}}",
+            "fn id<T>(x:T)->T{x}use id as alias;fn main()->i64{let pick=alias::<i64>;pick(42i64)}",
+            "fn id<T>(x:T)->T{x}use id as alias;fn same<T>(a:T,_b:T)->T{a}fn main()->i64{same(id::<i64>,alias::<i64>)(42i64)}",
+        ] {
+            for profile in [
+                crate::emit_profile::EmitProfile::Default,
+                crate::emit_profile::EmitProfile::Lean,
+                crate::emit_profile::EmitProfile::Harden,
+            ] {
+                let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+                let mut module = crate::typecheck::normalize_module(
+                    crate::parser_registry::ParserId::Rust,
+                    &parsed,
+                );
+                crate::lower_core::desugar_module(&mut module);
+                crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
+                let report = crate::core_ir_verifier::verify_for_entry(&module, "main");
+                assert!(report.ok, "{source}: {report:?}; {module:?}");
+                assert_eq!(
+                    invoke_module(&module, profile, &[]),
+                    Some(42),
+                    "{source} {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn declared_symbol_names_are_not_replaced_by_fabricated_values() {
         for name in ["bad value", "bad..value", "данные", "正常"] {
             use crate::core_ir::{Decl, Expr, Stmt, Typ, UnifiedModule};

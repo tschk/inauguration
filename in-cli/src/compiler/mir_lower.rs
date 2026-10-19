@@ -16,6 +16,14 @@ macro_rules! need {
 /// are not represented by the scalar typed-to-machine pass.
 pub fn lower_to_mir(module: &UnifiedModule) -> Result<MirModule, String> {
     crate::core_ir_verifier::check_execution_contracts(module)?;
+    if crate::core_ir::type_proofs::metadata_present(
+        &module.decls,
+        crate::core_ir::type_proofs::MetadataKind::RustCallables,
+    ) {
+        return Err(
+            "pending Rust callable source metadata requires normalization before emission".into(),
+        );
+    }
     let verified = crate::core_ir_verifier::verify_module(
         module,
         &crate::core_ir_verifier::VerifyOptions {

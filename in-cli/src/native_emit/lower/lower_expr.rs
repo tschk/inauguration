@@ -1738,7 +1738,8 @@ fn native_expr_type_with_bindings(
                     Some(Typ::Array(Box::new(elem.clone())))
                 }
                 _ => None,
-            }),
+            })
+            .or_else(|| functions.contains_key(name).then_some(Typ::Int)),
         Expr::Index { base, .. } => {
             match native_expr_type_with_bindings(base, ctx, functions, bindings)?.canonical() {
                 Typ::Array(item) | Typ::Vector(item) => Some(*item),

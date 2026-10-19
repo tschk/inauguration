@@ -15,7 +15,11 @@ pub(crate) fn prepared_native_module_with_semantics(
 ) -> Cow<'_, UnifiedModule> {
     let original = module;
     let normalized = (crate::typecheck::rust_integers::has_metadata(module)
-        || crate::core_ir::rust_arrays::has_metadata(module))
+        || crate::core_ir::rust_arrays::has_metadata(module)
+        || crate::core_ir::type_proofs::metadata_present(
+            &module.decls,
+            crate::core_ir::type_proofs::MetadataKind::RustCallables,
+        ))
     .then(|| {
         crate::typecheck::normalize_module_with_semantics(
             crate::parser_registry::ParserId::Rust,

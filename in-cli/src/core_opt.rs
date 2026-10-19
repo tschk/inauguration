@@ -849,7 +849,7 @@ fn has_cf(stmts: &[Stmt]) -> bool {
 }
 
 // Callers normalize lexical bindings before collecting value references.
-fn detect_ptr_refs(decls: &[Decl], out: &mut Vec<String>) {
+pub(crate) fn detect_ptr_refs(decls: &[Decl], out: &mut Vec<String>) {
     for decl in decls {
         match decl {
             Decl::Function { body, .. } => ptr_in_stmts(body, out),

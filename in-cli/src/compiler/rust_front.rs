@@ -222,6 +222,68 @@ fn lower_file_items_at(
             }
         });
     }
+    if owns_crate_root {
+        let private_root_fns: HashSet<String> = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(function)
+                    if matches!(function.vis, syn::Visibility::Inherited)
+                        && function.sig.generics.params.is_empty() =>
+                {
+                    Some(function.sig.ident.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        if !private_root_fns.is_empty() {
+            let mut referenced = HashSet::new();
+            crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| match expr {
+                Expr::Ident(name) => {
+                    referenced.insert(name.clone());
+                    if let Some(tail) = name.rsplit("::").next() {
+                        referenced.insert(tail.to_owned());
+                    }
+                }
+                Expr::Unary { op, .. } => {
+                    if let Some(target) = crate::core_ir::rust_callables::decode_alias_origin(op) {
+                        if let Some(tail) = target.rsplit("::").next() {
+                            referenced.insert(tail.to_owned());
+                        }
+                        referenced.insert(target);
+                    }
+                }
+                _ => {}
+            });
+            for decl in &mut module.decls {
+                if let Decl::Function {
+                    name,
+                    body,
+                    type_params,
+                    ..
+                } = decl
+                    && type_params.is_empty()
+                    && private_root_fns.contains(name)
+                    && !referenced.contains(name)
+                    && let Some(Stmt::Expr(Expr::Unary { op, expr })) = body.first()
+                    && matches!(expr.as_ref(), Expr::UnitLit)
+                    && let Some(signature) = crate::core_ir::rust_callables::decode_declaration(op)
+                {
+                    let mut retain = !signature.ordinary_rust_form();
+                    signature.visit_types(&mut |typ| {
+                        retain |= crate::core_ir::type_proofs::failure_in_type(typ).is_some()
+                            || matches!(
+                                typ,
+                                Typ::Named(name) if crate::core_ir::rust_callables::is_encoded(name)
+                            );
+                    });
+                    if !retain {
+                        body.remove(0);
+                    }
+                }
+            }
+        }
+    }
     register_explicit_vector_constructors(module);
     refuse_static_array_value_uses(module);
     crate::typecheck::rust_integers::mark_declaration_origins(&mut module.decls);
@@ -1062,6 +1124,25 @@ fn prefix_module_decls(mut decls: Vec<Decl>, module: &str, file: &syn::File) -> 
         .flatten()
         .collect();
     rewrite_global_references(&mut decls, &globals, file);
+    // Local free functions and exact forwarding aliases need the same lexical
+    // value binding protection as globals before this module receives its prefix.
+    // Qualified methods/nested declarations keep the existing nominal path walk.
+    let functions: HashMap<String, String> = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Function { name, .. } if !name.contains("::") => Some([
+                (name.clone(), format!("{module}::{name}")),
+                (format!("self::{name}"), format!("{module}::{name}")),
+            ]),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    // Provenance targets declarations independently of runtime parameter shadows.
+    crate::core_ir::rust_callables::rewrite_alias_origins(&mut decls, &|name| {
+        functions.get(name).cloned()
+    });
+    rewrite_global_references(&mut decls, &functions, file);
     // Prefix old lexical names bottom-up; crate paths stay deferred until the root.
     let nominal_names: HashMap<_, _> = decls
         .iter()
@@ -1351,7 +1432,8 @@ fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str, file: &syn::File, ro
             let contracts = body.iter().filter(|statement| matches!(statement,
                 Stmt::Expr(Expr::Unary { op, expr })
                     if (op == crate::core_ir::rust_generics::CONSTRAINTS
-                        || crate::core_ir::rust_generics::is_neg_bounds(op))
+                        || crate::core_ir::rust_generics::is_neg_bounds(op)
+                        || crate::core_ir::rust_callables::is_declaration(op))
                         && matches!(expr.as_ref(), Expr::UnitLit)
             )).cloned().collect::<Vec<_>>();
             Some((name.clone(), params.clone(), ret.clone(), type_params.clone(), owned, contracts))
@@ -1361,8 +1443,11 @@ fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str, file: &syn::File, ro
         return;
     };
     let args: Vec<Expr> = params.iter().map(|(n, _)| Expr::Ident(n.clone())).collect();
-    let callee = Expr::Ident(target);
-    let mut body = Vec::new();
+    let callee = Expr::Ident(target.clone());
+    let mut body = vec![Stmt::Expr(Expr::Unary {
+        op: crate::core_ir::rust_callables::alias_origin(&target),
+        expr: Box::new(Expr::UnitLit),
+    })];
     if source_template && !type_params.is_empty() {
         body.push(Stmt::Expr(Expr::Unary {
             op: crate::core_ir::rust_generics::ALIAS.into(),
@@ -1372,8 +1457,8 @@ fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str, file: &syn::File, ro
             op: crate::core_ir::rust_generics::TEMPLATE.into(),
             expr: Box::new(Expr::UnitLit),
         }));
-        body.extend(contracts);
     }
+    body.extend(contracts);
     body.push(Stmt::Return(Some(Expr::Call {
         callee: Box::new(callee),
         args,
@@ -1906,6 +1991,20 @@ fn resolve_impl_type(
                 {
                     return Ok(Typ::Generic(name));
                 }
+                if let Some(failure) =
+                    crate::core_ir::type_proofs::failure_in_type(&Typ::Named(name.clone()))
+                {
+                    return Err(failure);
+                }
+                if let Some(mut signature) = crate::core_ir::rust_callables::decode(&name) {
+                    signature.parameters = signature
+                        .parameters
+                        .into_iter()
+                        .map(|parameter| resolve(parameter, owner, implementation, active))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    signature.result = resolve(signature.result, owner, implementation, active)?;
+                    return Ok(crate::core_ir::rust_callables::typ(signature));
+                }
                 if let Some(array) = crate::core_ir::rust_arrays::decode(&name) {
                     return Ok(crate::core_ir::rust_arrays::typ(
                         resolve(array.element, owner, implementation, active)?,
@@ -2257,6 +2356,19 @@ fn lower_fn_with_types(f: syn::ItemFn, local_types: &mut HashMap<String, String>
         syn::ReturnType::Type(_, ty) => map_type(ty),
     };
     let mut body = lower_block_with_types(&f.block, local_types);
+    match type_aliases::source_callable_signature(&f.sig) {
+        Ok(signature) => body.insert(
+            0,
+            Stmt::Expr(Expr::Unary {
+                op: crate::core_ir::rust_callables::declaration(&signature),
+                expr: Box::new(Expr::UnitLit),
+            }),
+        ),
+        Err(failure) if failure.is_invalid() => {
+            body.insert(0, Stmt::Expr(Expr::Ident(failure.symbol())))
+        }
+        Err(_) => {} // No source callable proof is preferable to a guessed ABI.
+    }
     if !f.sig.generics.params.is_empty() {
         body.insert(
             0,
@@ -2809,6 +2921,9 @@ fn map_type(ty: &syn::Type) -> Typ {
                 Some(_) => Typ::Named(nominal_path_name(&tp.path)),
                 None => Typ::Named(tp.path.to_token_stream().to_string()),
             }
+        }
+        syn::Type::BareFn(_) => {
+            type_aliases::source_signature_type(ty).unwrap_or_else(|failure| failure.typ())
         }
         syn::Type::Infer(_) => Typ::Generic("_".into()),
         syn::Type::Reference(r) => {
@@ -4409,6 +4524,12 @@ fn lower_expr_with_types_inner(
             let target_type = map_type(&cast.ty);
             if let Some(failure) = crate::core_ir::type_proofs::failure_in_type(&target_type) {
                 return Expr::Ident(failure.symbol());
+            }
+            if let Some(signature) = crate::core_ir::rust_callables::signature_of(&target_type) {
+                return crate::core_ir::rust_callables::cast(
+                    lower_expr_with_types(&cast.expr, local_types),
+                    signature,
+                );
             }
             let floating_target = crate::core_ir::rust_floats::kind(&target_type);
             let target = cast.ty.to_token_stream().to_string().replace(' ', "");
@@ -7937,6 +8058,251 @@ mod exact_import_alias_tests {
                 "{:#?}",
                 artifact.semantic
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod nested_callable_prefix_tests {
+    use super::*;
+    fn parsed(source: &str) -> UnifiedModule {
+        parse_rust_artifact_source(source, "nested-callables")
+            .unwrap()
+            .semantic
+    }
+    fn direct_calls(module: &UnifiedModule, name: &str) -> Vec<String> {
+        let mut decl = module
+            .decls
+            .iter()
+            .find(|decl| matches!(decl,Decl::Function{name:found,..}if found==name))
+            .expect("function")
+            .clone();
+        let mut calls = Vec::new();
+        crate::core_opt::map_decl_exprs_mut(std::slice::from_mut(&mut decl), &mut |expr| {
+            if let Expr::Call { callee, .. } = expr
+                && let Expr::Ident(name) = callee.as_ref()
+            {
+                calls.push(name.clone());
+            }
+        });
+        calls
+    }
+    #[test]
+    fn nested_module_alias_calls_retain_exact_forwarding_namespaces() {
+        let module = parsed(
+            "mod outer{mod child{pub fn helper()->i64{42}}use child as values;use values::helper;pub fn entry()->i64{helper()}}fn main()->i64{outer::entry()}",
+        );
+        assert!(
+            direct_calls(&module, "outer::entry").contains(&"outer::helper".into()),
+            "{module:#?}"
+        );
+        assert!(
+            direct_calls(&module, "outer::helper").contains(&"outer::child::helper".into()),
+            "{module:#?}"
+        );
+        assert!(
+            crate::typecheck::TypeChecker::new()
+                .typed_proof_nodes(&module.decls)
+                .is_empty(),
+            "{module:#?}"
+        );
+    }
+    #[test]
+    fn nested_free_functions_do_not_capture_callable_local_or_parameter_shadows() {
+        let module = parsed(
+            "mod outer{fn helper()->i64{7}pub fn local()->i64{let helper=||42;helper()}pub fn parameter(helper:fn()->i64)->i64{helper()}pub fn direct()->i64{helper()}}fn main()->i64{outer::local()}",
+        );
+        for name in ["outer::local", "outer::parameter"] {
+            assert!(
+                !direct_calls(&module, name).contains(&"outer::helper".into()),
+                "{module:#?}"
+            );
+        }
+        assert!(
+            direct_calls(&module, "outer::direct").contains(&"outer::helper".into()),
+            "{module:#?}"
+        );
+    }
+    #[test]
+    fn sibling_free_function_names_stay_in_their_exact_modules() {
+        let module = parsed(
+            "mod left{fn helper()->i64{20}pub fn entry()->i64{helper()}}mod right{fn helper()->i64{22}pub fn entry()->i64{helper()}}fn main()->i64{left::entry()+right::entry()}",
+        );
+        for module_name in ["left", "right"] {
+            assert_eq!(
+                direct_calls(&module, &format!("{module_name}::entry")),
+                vec![format!("{module_name}::helper")]
+            );
+        }
+    }
+    #[test]
+    fn nested_alias_prefixing_preserves_private_and_conditional_source_failures() {
+        let source = "mod outer{mod child{fn hidden()->i64{42}}use child as values;use values::hidden as stolen;pub fn entry()->i64{stolen()}}fn main()->i64{outer::entry()}";
+        if let Ok(artifact) = parse_rust_artifact_source(source, "nested-private") {
+            assert!(
+                crate::typecheck::TypeChecker::new()
+                    .typed_proof_nodes(&artifact.semantic.decls)
+                    .values()
+                    .any(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+                "{:#?}",
+                artifact.semantic
+            );
+        }
+        let module = parsed(
+            "mod outer{#[cfg(feature=\"unknown\")]fn helper()->i64{42}pub fn entry()->i64{helper()}}fn main()->i64{outer::entry()}",
+        );
+        let proofs = crate::typecheck::TypeChecker::new().typed_proof_nodes(&module.decls);
+        assert!(
+            proofs.values().any(|failure| !failure.is_invalid()),
+            "{module:#?}"
+        );
+        assert!(
+            !proofs
+                .values()
+                .any(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+            "{module:#?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod external_callable_nominal_identity_tests {
+    use crate::owned_compile::{CompileTarget, EvalValue, OwnedCompileRequest, compile_owned};
+    #[test]
+    fn external_callback_nominal_identity_is_checked_before_any_record_call() {
+        let directory = std::env::temp_dir().join(format!(
+            "in-external-callable-nominal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("a.rs"),
+            "pub struct Record{pub value:i64}pub type Alias=Record;pub fn source()->Record{Record{value:7}}pub fn address(f:fn()->Alias)->usize{(f as fn()->Record) as usize}").unwrap();
+        std::fs::write(
+            directory.join("b.rs"),
+            "pub struct Record{pub value:i64}pub fn source()->Record{Record{value:7}}",
+        )
+        .unwrap();
+        for (label, source, valid) in [
+            (
+                "wrong",
+                "mod a;mod b;fn main()->i64{if a::address(b::source)!=0{42}else{7}}",
+                false,
+            ),
+            (
+                "same",
+                "mod a;fn main()->i64{if a::address(a::source)!=0{42}else{7}}",
+                true,
+            ),
+        ] {
+            let path = directory.join("main.rs");
+            std::fs::write(&path, source).unwrap();
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                if target == CompileTarget::Native
+                    && !crate::native_backend::native_subset_host_available()
+                {
+                    continue;
+                }
+                for profile in [
+                    crate::emit_profile::EmitProfile::Default,
+                    crate::emit_profile::EmitProfile::Lean,
+                    crate::emit_profile::EmitProfile::Harden,
+                ] {
+                    let out = directory.join(format!("{label}-{target:?}-{profile:?}"));
+                    let request = OwnedCompileRequest {
+                        path: path.clone(),
+                        module_id: "App".into(),
+                        parser: crate::parser_registry::ParserCli::Auto,
+                        target,
+                        entry: Some("main".into()),
+                        out: Some(out.clone()),
+                        linkage: crate::native_emit::NativeLinkage::Executable,
+                        target_triple: None,
+                        jobs: 1,
+                        debug: false,
+                        profile,
+                        emit: None,
+                        base: None,
+                    };
+                    let report = compile_owned(&request);
+                    assert!(report.external_invocations.is_empty(), "{report:?}");
+                    assert!(report.degradations.is_empty(), "{report:?}");
+                    if valid {
+                        assert!(report.success, "{report:?}");
+                        if target == CompileTarget::Jit {
+                            assert!(report.execution_started, "{report:?}");
+                            assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{report:?}");
+                        } else {
+                            assert_eq!(
+                                std::process::Command::new(&out).status().unwrap().code(),
+                                Some(42)
+                            );
+                            std::fs::remove_file(&out).unwrap();
+                        }
+                    } else {
+                        assert!(!report.success, "{report:?}");
+                        assert_eq!(
+                            report.reason_code.as_deref(),
+                            Some("rust-invalid-associated-type"),
+                            "{report:?}"
+                        );
+                        assert!(!report.execution_started, "{report:?}");
+                        assert_eq!(report.eval_result, None);
+                        assert_eq!(report.artifact_path, None);
+                        assert_eq!(report.executable_path, None);
+                        assert_eq!(report.abi_path, None);
+                        assert!(!out.exists());
+                    }
+                }
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod chained_callable_alias_origin_tests {
+    use super::*;
+    #[test]
+    fn chained_alias_provenance_uses_exact_prefixed_declaration_targets() {
+        let artifact=parse_rust_artifact_source(
+            "fn answer()->i64{7}mod outer{mod inner{pub fn answer()->i64{42}}pub use self::inner::answer as first;pub use self::first as pick;pub fn run()->i64{pick()}}fn main()->i64{outer::run()}", "App").unwrap();
+        let origins = |function: &str| {
+            let mut found = Vec::new();
+            let mut declarations = artifact
+                .semantic
+                .decls
+                .iter()
+                .filter(|decl| matches!(decl,Decl::Function{name,..} if name==function))
+                .cloned()
+                .collect::<Vec<_>>();
+            crate::core_opt::map_decl_exprs_mut(&mut declarations, &mut |expression| {
+                if let Expr::Unary { op, .. } = expression
+                    && let Some(target) = crate::core_ir::rust_callables::decode_alias_origin(op)
+                {
+                    found.push(target);
+                }
+            });
+            found
+        };
+        assert_eq!(origins("outer::first"), vec!["outer::inner::answer"]);
+        assert_eq!(origins("outer::pick"), vec!["outer::first"]);
+        let names = artifact
+            .semantic
+            .decls
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::Function { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        for function in ["outer::first", "outer::pick"] {
+            for target in origins(function) {
+                assert!(names.contains(target.as_str()), "{target}");
+            }
         }
     }
 }

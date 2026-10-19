@@ -16,24 +16,35 @@ impl Facts {
                 if !active.insert(name.clone()) {
                     return None;
                 }
-                let result = if let Some(array) = crate::core_ir::rust_arrays::decode(name) {
-                    self.type_proof(&array.element, active)
-                } else if let Some(reference) = crate::core_ir::rust_references::decode(name) {
-                    prefer(
-                        self.type_proof(&reference.referent, active),
-                        self.type_proof(&reference.runtime, active),
-                    )
-                } else if let Some(fields) = crate::core_ir::tuples::fields(name) {
-                    fields.iter().fold(None, |proof, (_, typ)| {
-                        prefer(proof, self.type_proof(typ, active))
-                    })
-                } else if let Some(fields) = self.structs.get(name) {
-                    fields.iter().fold(None, |proof, (_, typ)| {
-                        prefer(proof, self.type_proof(typ, active))
-                    })
-                } else {
-                    None
-                };
+                let result =
+                    if let Some(signature) = crate::core_ir::rust_callables::signature_of(typ) {
+                        let mut failure = None;
+                        signature.visit_types(&mut |child| {
+                            failure = prefer(failure.take(), self.type_proof(child, active));
+                        });
+                        failure
+                    } else if crate::core_ir::rust_callables::is_encoded(name) {
+                        Some(ResolutionFailure::Unsupported(
+                            "malformed Rust callable signature".into(),
+                        ))
+                    } else if let Some(array) = crate::core_ir::rust_arrays::decode(name) {
+                        self.type_proof(&array.element, active)
+                    } else if let Some(reference) = crate::core_ir::rust_references::decode(name) {
+                        prefer(
+                            self.type_proof(&reference.referent, active),
+                            self.type_proof(&reference.runtime, active),
+                        )
+                    } else if let Some(fields) = crate::core_ir::tuples::fields(name) {
+                        fields.iter().fold(None, |proof, (_, typ)| {
+                            prefer(proof, self.type_proof(typ, active))
+                        })
+                    } else if let Some(fields) = self.structs.get(name) {
+                        fields.iter().fold(None, |proof, (_, typ)| {
+                            prefer(proof, self.type_proof(typ, active))
+                        })
+                    } else {
+                        None
+                    };
                 active.remove(name);
                 result
             }

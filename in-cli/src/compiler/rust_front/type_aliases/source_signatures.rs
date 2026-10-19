@@ -4,14 +4,15 @@ use super::*;
 
 struct Context {
     id: usize,
-    implementation: Rc<syn::ItemImpl>,
-    trait_declaration: Rc<syn::ItemTrait>,
+    implementation: Option<Rc<syn::ItemImpl>>,
+    trait_declaration: Option<Rc<syn::ItemTrait>>,
     declaring: Frame,
-    owner: Typ,
+    owner: Option<Typ>,
+    allow_parameters: bool,
     associated: RefCell<HashSet<String>>,
 }
 thread_local! { static CONTEXT: RefCell<Option<Rc<Context>>> = const { RefCell::new(None) }; }
-struct Guard(Option<Rc<Context>>);
+pub(super) struct Guard(Option<Rc<Context>>);
 impl Drop for Guard {
     fn drop(&mut self) {
         CONTEXT.with(|state| {
@@ -35,7 +36,11 @@ fn leaf(name: &str) -> Typ {
 }
 fn constructor(name: &str, arguments: &[Typ]) -> Typ {
     let mut fields = Vec::with_capacity(arguments.len() + 1);
-    fields.push(leaf(name));
+    fields.push(if let Some(identity) = name.strip_prefix("nominal:") {
+        crate::core_ir::source_types::nominal(identity)
+    } else {
+        leaf(name)
+    });
     fields.extend_from_slice(arguments);
     crate::core_ir::tuples::typ(&fields)
 }
@@ -47,25 +52,29 @@ pub(super) fn resolve(
     declaring: &Frame,
     owner: &[String],
 ) -> Result<Typ, Failure> {
-    static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     let context = Rc::new(Context {
-        id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        implementation,
-        trait_declaration,
+        id: next_id(),
+        implementation: Some(implementation),
+        trait_declaration: Some(trait_declaration),
         declaring: declaring.clone(),
-        owner: leaf(&format!("nominal:{}", owner.join("::"))),
+        owner: Some(crate::core_ir::source_types::nominal(&owner.join("::"))),
+        allow_parameters: false,
         associated: RefCell::new(HashSet::new()),
     });
     let _guard = Guard(CONTEXT.with(|state| state.replace(Some(context))));
     let _query = generic_aliases::query()?;
     exact(rhs_type(source, frame, &mut HashSet::new())?)
 }
-fn exact(value: Resolved) -> Result<Typ, Failure> {
+pub(super) fn exact(value: Resolved) -> Result<Typ, Failure> {
     if let Some(failure) = structural_failure(value.clone()) {
         return Err(failure);
     }
     match value.visibility().0 {
-        Resolved::Type(value) if !matches!(value, Typ::Generic(_)) => Ok(value),
+        Resolved::Type(value)
+            if !matches!(value, Typ::Generic(_)) || context()?.allow_parameters =>
+        {
+            Ok(value)
+        }
         _ => Err(unsupported(
             "source signature type identity is not concrete and owned",
         )),
@@ -145,7 +154,7 @@ pub(super) fn nominal(
     }
     let name = format!("nominal:{}", identity.join("::"));
     Ok(Resolved::Type(if args.is_empty() {
-        leaf(&name)
+        crate::core_ir::source_types::nominal(&identity.join("::"))
     } else {
         constructor(&name, &args)
     })
@@ -214,7 +223,9 @@ pub(super) fn rhs_type(
                     ));
                 }
                 if path.path.segments.len() == 1 {
-                    return Ok(Resolved::Type(context.owner.clone()));
+                    return context.owner.clone().map(Resolved::Type).ok_or_else(|| {
+                        unsupported("Self requires an owned source implementation context")
+                    });
                 }
                 if path.path.segments.len() != 2 {
                     return Err(unsupported(
@@ -222,8 +233,10 @@ pub(super) fn rhs_type(
                     ));
                 }
                 let member = path.path.segments[1].ident.to_string();
-                let declarations: Vec<_> = context
-                    .trait_declaration
+                let trait_declaration = context.trait_declaration.as_ref().ok_or_else(|| {
+                    unsupported("associated Self requires an owned source trait context")
+                })?;
+                let declarations: Vec<_> = trait_declaration
                     .items
                     .iter()
                     .filter_map(|item| match item {
@@ -261,8 +274,12 @@ pub(super) fn rhs_type(
                     return Err(Failure::Invalid("cyclic associated signature type".into()));
                 }
                 let result = (|| {
-                    let definitions: Vec<_> = context
-                        .implementation
+                    let implementation = context.implementation.as_ref().ok_or_else(|| {
+                        unsupported(
+                            "associated Self requires an owned source implementation context",
+                        )
+                    })?;
+                    let definitions: Vec<_> = implementation
                         .items
                         .iter()
                         .filter_map(|item| match item {
@@ -334,6 +351,7 @@ pub(super) fn rhs_type(
             .ok_or_else(|| unsupported("signature array length is not owned"))?;
             constructor(&format!("array:{length}"), &[element])
         }
+        syn::Type::BareFn(value) => return generic_aliases::bare_fn(value, frame, active),
         syn::Type::Never(_) => leaf("never"),
         _ => {
             return Err(unsupported(
@@ -410,5 +428,105 @@ mod tests {
         };
         assert_eq!(resolve("R"), resolve("Result<i64,bool>"));
         assert_ne!(resolve("R"), resolve("::core::result::Result<i64,bool>"));
+    }
+}
+
+fn next_id() -> usize {
+    static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+fn source_guard(frame: &Frame) -> Guard {
+    let context = Rc::new(Context {
+        id: next_id(),
+        implementation: None,
+        trait_declaration: None,
+        declaring: frame.clone(),
+        owner: None,
+        allow_parameters: true,
+        associated: RefCell::new(HashSet::new()),
+    });
+    Guard(CONTEXT.with(|state| state.replace(Some(context))))
+}
+/// Bare callable aliases require source identities even in an ordinary alias query.
+/// Preserve an existing trait/source context and the caller's query/recursion state.
+pub(super) fn ensure_source_context(frame: &Frame) -> Option<Guard> {
+    (!active()).then(|| source_guard(frame))
+}
+/// General source query; never reconstruct source identity from map_type output.
+pub(super) fn source_type(source: &syn::Type, frame: &Frame) -> Result<Typ, Failure> {
+    let _context = source_guard(frame);
+    let _query = generic_aliases::query()?;
+    exact(rhs_type(source, frame, &mut HashSet::new())?)
+}
+/// Function items share the same source child collector as bare function types.
+pub(super) fn declaration(
+    signature: &syn::Signature,
+    frame: &Frame,
+) -> Result<crate::core_ir::rust_callables::Signature, Failure> {
+    let _context = source_guard(frame);
+    let _query = generic_aliases::query()?;
+    if signature.inputs.iter().any(|input| match input {
+        syn::FnArg::Typed(input) => attrs_presence(&input.attrs) != Presence::Active,
+        syn::FnArg::Receiver(_) => true,
+    }) {
+        return Err(unsupported(
+            "source callable receiver or parameter cfg requires additional source context",
+        ));
+    }
+    let parameters = signature.inputs.iter().filter_map(|input| {
+        if let syn::FnArg::Typed(value) = input {
+            Some(value.ty.as_ref())
+        } else {
+            None
+        }
+    });
+    let value = generic_aliases::callable(
+        parameters,
+        &signature.output,
+        signature.abi.as_ref(),
+        signature.unsafety.is_some(),
+        signature.variadic.is_some(),
+        signature.generics.lifetimes().next().is_some(),
+        frame,
+        &mut HashSet::new(),
+    )?;
+    let Typ::Named(name) = exact(value)? else {
+        return Err(unsupported("source callable signature was not retained"));
+    };
+    crate::core_ir::rust_callables::decode(&name)
+        .ok_or_else(|| unsupported("source callable signature payload is not owned"))
+}
+#[cfg(test)]
+mod standalone_source_tests {
+    use super::*;
+    #[test]
+    fn general_source_queries_preserve_return_constructors_aliases_and_string_identity() {
+        let file = syn::parse_file("struct Error;type R=Result<i64,Error>;type Callback=fn()->R;")
+            .unwrap();
+        let frame = Frame::root(Catalog::new(&file));
+        let get = |source: &str| source_type(&syn::parse_str(source).unwrap(), &frame).unwrap();
+        assert_eq!(get("R"), get("Result<i64,Error>"));
+        assert_ne!(get("R"), get("i64"));
+        assert_ne!(get("String"), get("str"));
+        assert_eq!(get("Callback"), get("fn()->Result<i64,Error>"));
+        assert_ne!(get("Callback"), get("fn()->i64"));
+        assert!(source_type(&syn::parse_str("unowned::External").unwrap(), &frame).is_err());
+        assert!(source_type(&syn::parse_str("Self").unwrap(), &frame).is_err());
+    }
+    #[test]
+    fn function_item_and_bare_type_use_one_exact_source_signature_mode() {
+        let file = syn::parse_file("struct Error;").unwrap();
+        let frame = Frame::root(Catalog::new(&file));
+        let function: syn::ItemFn =
+            syn::parse_str("fn value(input:i64)->Result<i64,Error>{unreachable!()}").unwrap();
+        let item = declaration(&function.sig, &frame).unwrap();
+        assert_eq!(
+            crate::core_ir::rust_callables::typ(item),
+            source_type(
+                &syn::parse_str("fn(i64)->Result<i64,Error>").unwrap(),
+                &frame
+            )
+            .unwrap()
+        );
     }
 }

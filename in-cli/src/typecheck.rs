@@ -1,5 +1,6 @@
 mod rigid_values;
 mod rust_arrays;
+mod rust_callables;
 mod rust_floats;
 mod rust_generics;
 pub(crate) mod rust_integers;
@@ -104,6 +105,7 @@ enum ResolvePolicy {
     RustFloatValidate,
     RustFloatLower,
     RustGenericArguments,
+    RustCallables { lower: bool, word64: bool },
 }
 impl ResolvePolicy {
     fn floats(self) -> bool {
@@ -112,8 +114,11 @@ impl ResolvePolicy {
             Self::RustFloatInference | Self::RustFloatValidate | Self::RustFloatLower
         )
     }
+    fn callables(self) -> bool {
+        matches!(self, Self::RustCallables { .. })
+    }
     fn destinations(self) -> bool {
-        self.arrays() || self.floats() || self == Self::RustGenericArguments
+        self.arrays() || self.floats() || self == Self::RustGenericArguments || self.callables()
     }
     fn arrays(self) -> bool {
         matches!(
@@ -126,6 +131,8 @@ impl ResolvePolicy {
 pub(crate) struct Facts {
     functions: HashMap<String, (Vec<(String, Typ)>, Typ)>,
     generic_parameters: HashMap<String, Vec<String>>,
+    callable_signatures: HashMap<String, crate::core_ir::rust_callables::Signature>,
+    callable_alias_origins: HashMap<String, Option<String>>,
     neg_implementations: Vec<(String, crate::core_ir::rust_generics::NegImplementation)>,
     structs: HashMap<String, Vec<(String, Typ)>>,
     closures: HashMap<String, String>,
@@ -312,6 +319,23 @@ impl TypeChecker {
     }
 
     /// Resolve type-dependent complement into the canonical boolean or integer operator.
+    pub(crate) fn resolve_rust_callables(
+        &self,
+        module: &mut UnifiedModule,
+        lower: bool,
+        semantics: crate::integer_semantics::IntegerSemantics,
+    ) {
+        self.resolve_typed_operators(
+            module,
+            ResolvePolicy::RustCallables {
+                lower,
+                word64: semantics == crate::integer_semantics::IntegerSemantics::Word64,
+            },
+            None,
+            None,
+        );
+    }
+
     pub(crate) fn resolve_complements(&self, module: &mut UnifiedModule) {
         let _ = self.resolve_typed_operators(module, ResolvePolicy::Ordinary, None, None);
     }
@@ -429,7 +453,8 @@ impl TypeChecker {
                     } if generated.contains(name) == closure_phase => {
                         // Infer only concrete caller bodies. Templates are audited and
                         // traversed after source substitutions by rust_generics.
-                        if policy == ResolvePolicy::RustGenericArguments && !type_params.is_empty()
+                        if (policy == ResolvePolicy::RustGenericArguments || policy.callables())
+                            && !type_params.is_empty()
                         {
                             continue;
                         }
@@ -955,6 +980,7 @@ impl TypeChecker {
     ) -> bool {
         !policy.arrays()
             && policy != ResolvePolicy::RustGenericArguments
+            && !policy.callables()
             && self.resolve_vector_allocation(expr, expected, facts)
     }
 
@@ -1059,6 +1085,7 @@ impl TypeChecker {
         let expected = context.expected();
         let mut scoped_result = None;
         let mut resolved_arguments = None;
+        let mut resolved_callee = None;
         let mut resolved_operands = None;
         let mut resolved_values = None;
         let argument_contexts = if policy.floats() {
@@ -1149,9 +1176,14 @@ impl TypeChecker {
                 .map(|(_, typ)| typ.clone())
                 .collect();
             scoped_result = Some(
-                rust_arrays::join_types(&live)
-                    .or_else(|| rust_floats::join_types(&live))
-                    .or_else(|| crate::core_ir::match_value_type(arms, types.clone())),
+                (if policy.callables() {
+                    rust_callables::join(&live)
+                } else {
+                    None
+                })
+                .or_else(|| rust_arrays::join_types(&live))
+                .or_else(|| rust_floats::join_types(&live))
+                .or_else(|| crate::core_ir::match_value_type(arms, types.clone())),
             );
             resolved_operands = Some(types);
         } else if let Expr::Block { body, result } = expr {
@@ -1194,6 +1226,7 @@ impl TypeChecker {
             self.resolve_typed_body(body, facts, &mut inner, Some(ret), policy);
             if !policy.arrays()
                 && policy != ResolvePolicy::RustGenericArguments
+                && !policy.callables()
                 && matches!(ret, Typ::Generic(name) if name == "_")
                 && params.iter().all(|(_, typ)| resolved_closure_type(typ))
                 && let Some(inferred) = self.infer_closure_return(body, facts, &initial)
@@ -1357,16 +1390,21 @@ impl TypeChecker {
             .map(|(_, typ)| typ)
             .collect();
             scoped_result = Some(
-                rust_arrays::join_types(&live)
-                    .or_else(|| rust_floats::join_types(&live))
-                    .or_else(|| {
-                        crate::core_ir::conditional_type(
-                            then_expr,
-                            left.typ.clone(),
-                            else_expr,
-                            right.typ.clone(),
-                        )
-                    }),
+                (if policy.callables() {
+                    rust_callables::join(&live)
+                } else {
+                    None
+                })
+                .or_else(|| rust_arrays::join_types(&live))
+                .or_else(|| rust_floats::join_types(&live))
+                .or_else(|| {
+                    crate::core_ir::conditional_type(
+                        then_expr,
+                        left.typ.clone(),
+                        else_expr,
+                        right.typ.clone(),
+                    )
+                }),
             );
             resolved_operands = Some(vec![left.typ, right.typ]);
         } else if let Expr::Call { callee, args } = expr {
@@ -1394,11 +1432,48 @@ impl TypeChecker {
             } else {
                 None
             };
-            let params = match callee.as_ref() {
-                Expr::Ident(name) => facts.functions.get(name).map(|(params, _)| params.clone()),
-                _ => None,
+            let lexical_callable = match callee.as_ref() {
+                Expr::Ident(name) => env.get(name).and_then(rust_callables::signature),
+                _ => self
+                    .expr_type(callee, facts, env)
+                    .as_ref()
+                    .and_then(rust_callables::signature),
             };
-            self.resolve_typed_expr(callee, facts, env, policy, return_type);
+            let params: Option<Vec<(String, Typ)>> =
+                if policy.callables() || lexical_callable.is_some() {
+                    rust_callables::callee_signature(callee, facts, env)
+                        .or_else(|| {
+                            self.expr_type(callee, facts, env)
+                                .as_ref()
+                                .and_then(rust_callables::signature)
+                        })
+                        .map(|signature| {
+                            signature
+                                .parameters
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, typ)| (format!("arg{index}"), typ))
+                                .collect()
+                        })
+                } else {
+                    match callee.as_ref() {
+                        Expr::Ident(name) => {
+                            facts.functions.get(name).map(|(params, _)| params.clone())
+                        }
+                        _ => None,
+                    }
+                };
+            let callee_value = self.resolve_typed_expr_context(
+                callee,
+                facts,
+                env,
+                policy,
+                ValueScope {
+                    return_type,
+                    context: ValueContext::Expression(None),
+                },
+            );
+            resolved_callee = Some(callee_value.typ);
             let mut argument_types = Vec::with_capacity(args.len());
             for (index, arg) in args.iter_mut().enumerate() {
                 let destination = if let Some(planned) = argument_contexts
@@ -1551,6 +1626,30 @@ impl TypeChecker {
         let resolved_call_type = resolved_arguments.as_ref().and_then(|types| {
             rust_floats::call_type_with_arguments(self, expr, expected, facts, env, types).map(Some)
         });
+        if let ResolvePolicy::RustCallables { lower, word64 } = policy {
+            let typ = rust_callables::finish(
+                self,
+                expr,
+                context.destination().then_some(expected).flatten(),
+                facts,
+                env,
+                &ResolvedInputs {
+                    actual: scoped_result,
+                    arguments: resolved_arguments.as_deref(),
+                    operands: resolved_operands.as_deref(),
+                    values: resolved_values.as_deref(),
+                },
+                lower,
+                word64,
+                resolved_callee.as_ref(),
+            )
+            .flatten();
+            return ResolvedValue {
+                typ,
+                c_kind,
+                values: resolved_values,
+            };
+        }
         if policy == ResolvePolicy::RustGenericArguments {
             // Affirmative source impl metadata still carries the raw Output here.
             // Resolve before numeric erasure, while ambiguous/unproven operators
@@ -2280,7 +2379,11 @@ impl TypeChecker {
     ) {
         #[cfg(test)]
         TYPED_BODY_VISITS.with(|visits| visits.set(visits.get() + 1));
-        if !policy.arrays() && !policy.floats() && policy != ResolvePolicy::RustGenericArguments {
+        if !policy.arrays()
+            && !policy.floats()
+            && policy != ResolvePolicy::RustGenericArguments
+            && !policy.callables()
+        {
             vector_inference::infer(self, body, facts, env, return_type);
         }
         for stmt in body {
@@ -2295,7 +2398,7 @@ impl TypeChecker {
                     env.insert(name.clone(), typ.clone());
                 }
                 Stmt::Let(name, typ, expr) => {
-                    if policy == ResolvePolicy::RustGenericArguments {
+                    if policy == ResolvePolicy::RustGenericArguments || policy.callables() {
                         let inferred = self.resolve_typed_value(
                             expr,
                             typ.as_ref(),
@@ -2305,6 +2408,10 @@ impl TypeChecker {
                             return_type,
                         );
                         if let Some(selected) = typ.clone().or(inferred) {
+                            if policy.callables() && rust_callables::signature(&selected).is_some()
+                            {
+                                *typ = Some(selected.clone());
+                            }
                             env.insert(name.clone(), selected);
                         }
                         continue;
@@ -2704,6 +2811,8 @@ impl TypeChecker {
         let mut functions: HashMap<String, (Vec<(String, Typ)>, Typ)> = HashMap::new();
         let mut structs: HashMap<String, Vec<(String, Typ)>> = HashMap::new();
         let mut generic_parameters = HashMap::new();
+        let mut callable_signatures = HashMap::new();
+        let mut callable_alias_origins = HashMap::new();
         let mut neg_implementations = Vec::new();
 
         for decl in decls {
@@ -2723,6 +2832,25 @@ impl TypeChecker {
                     ..
                 } => {
                     for statement in body {
+                        if let Stmt::Expr(Expr::Unary { op, expr }) = statement
+                            && matches!(expr.as_ref(), Expr::UnitLit)
+                            && crate::core_ir::rust_callables::is_alias_origin(op)
+                        {
+                            let origin = crate::core_ir::rust_callables::decode_alias_origin(op);
+                            callable_alias_origins
+                                .entry(name.clone())
+                                .and_modify(|existing| {
+                                    *existing = None;
+                                })
+                                .or_insert(origin);
+                        }
+                        if let Stmt::Expr(Expr::Unary { op, expr }) = statement
+                            && matches!(expr.as_ref(), Expr::UnitLit)
+                            && let Some(signature) =
+                                crate::core_ir::rust_callables::decode_declaration(op)
+                        {
+                            callable_signatures.insert(name.clone(), signature);
+                        }
                         if let Stmt::Expr(Expr::Unary { op, expr }) = statement
                             && matches!(expr.as_ref(), Expr::UnitLit)
                             && let Some(proof) =
@@ -2770,6 +2898,8 @@ impl TypeChecker {
         Facts {
             functions,
             generic_parameters,
+            callable_signatures,
+            callable_alias_origins,
             neg_implementations,
             structs,
             closures: HashMap::new(),
@@ -3871,7 +4001,8 @@ impl TypeChecker {
                     .filter(|(arm, _)| !crate::core_ir::expr_diverges(&arm.value))
                     .map(|(_, typ)| typ.clone())
                     .collect();
-                rust_arrays::join_types(&live)
+                rust_callables::join(&live)
+                    .or_else(|| rust_arrays::join_types(&live))
                     .or_else(|| rust_floats::join_types(&live))
                     .or_else(|| crate::core_ir::match_value_type(arms, types))
             }
@@ -3887,7 +4018,8 @@ impl TypeChecker {
                     .filter(|(expr, _)| !crate::core_ir::expr_diverges(expr))
                     .map(|(_, typ)| typ)
                     .collect();
-                rust_arrays::join_types(&live)
+                rust_callables::join(&live)
+                    .or_else(|| rust_arrays::join_types(&live))
                     .or_else(|| rust_floats::join_types(&live))
                     .or_else(|| crate::core_ir::conditional_type(then_expr, left, else_expr, right))
             }
@@ -3928,6 +4060,7 @@ impl TypeChecker {
                         .or_else(|| facts.array_constraints.borrow().get(name))
                         .unwrap_or_else(|| original.clone())
                 })
+                .or_else(|| rust_callables::function_value_type(name, facts))
                 .or_else(|| facts.functions.contains_key(name).then_some(Typ::Int))
                 .or_else(|| is_builtin_fn(name).then(|| builtin_return_type(name))),
             Expr::StructInit { name, .. } => Some(Typ::Named(name.clone())),
@@ -3991,6 +4124,22 @@ impl TypeChecker {
                 if crate::core_ir::rust_references::value_kind(op).is_some() =>
             {
                 crate::core_ir::rust_references::value_type(op, self.expr_type(expr, facts, env)?)
+            }
+            Expr::Unary { op, .. } if crate::core_ir::rust_callables::is_cast(op) => {
+                crate::core_ir::rust_callables::decode_cast(op)
+                    .map(crate::core_ir::rust_callables::typ)
+            }
+            Expr::Unary { op, expr, .. }
+                if crate::core_ir::rust_generics::decode_arguments(op).is_some() =>
+            {
+                let arguments = crate::core_ir::rust_generics::decode_arguments(op)?;
+                let Expr::Ident(name) = expr.as_ref() else {
+                    return None;
+                };
+                if env.contains_key(name) {
+                    return None;
+                }
+                rust_callables::generic_function_value_type(name, &arguments, facts)
             }
             Expr::Unary { op, .. } if crate::core_ir::rust_floats::inferred_type(op).is_some() => {
                 crate::core_ir::rust_floats::inferred_type(op)
@@ -4163,13 +4312,33 @@ impl TypeChecker {
                     {
                         return self.expr_type(value, facts, env);
                     }
+                    if matches!(
+                        name.as_str(),
+                        "std::hint::black_box" | "core::hint::black_box"
+                    ) && !env.contains_key(name)
+                        && !facts.functions.contains_key(name)
+                        && let [value] = args.as_slice()
+                    {
+                        return self.expr_type(value, facts, env);
+                    }
+                    if let Some(local) = env.get(name) {
+                        return rust_callables::signature(local).map(|signature| signature.result);
+                    }
+                    if let Some(signature) = facts.callable_signatures.get(name)
+                        && rust_callables::signature(&signature.result).is_some()
+                    {
+                        return Some(signature.result.clone());
+                    }
                     facts
                         .functions
                         .get(name)
                         .map(|(_, ret)| ret.clone())
                         .or_else(|| is_builtin_fn(name).then(|| builtin_return_type(name)))
                 } else {
-                    None
+                    self.expr_type(callee, facts, env)
+                        .as_ref()
+                        .and_then(rust_callables::signature)
+                        .map(|signature| signature.result)
                 }
             }
             Expr::Closure { .. } => None,
@@ -4609,6 +4778,7 @@ pub fn normalize_module_with_semantics(
         TypeChecker::new().resolve_rust_floats(&mut normalized, ResolvePolicy::RustFloatValidate);
         rust_arrays::validate(&TypeChecker::new(), &mut normalized);
         rust_generics::normalize(&mut normalized);
+        TypeChecker::new().resolve_rust_callables(&mut normalized, false, semantics);
         rust_arrays::normalize(&TypeChecker::new(), &mut normalized);
         // Stage stores after array value copies, before float source facts are erased.
         crate::lower_core::lower_value_spills(&mut normalized.decls);
@@ -4617,10 +4787,112 @@ pub fn normalize_module_with_semantics(
         TypeChecker::new().resolve_rust_floats(&mut normalized, ResolvePolicy::RustFloatLower);
         erase_rust_float_metadata(&mut normalized);
         rust_integers::normalize(&TypeChecker::new(), &mut normalized, semantics);
+        TypeChecker::new().resolve_rust_callables(&mut normalized, true, semantics);
+        erase_rust_callable_metadata(&mut normalized);
         crate::lower_core::lower_inline_constants_with_semantics(&mut normalized.decls, semantics);
         refuse_rust_array_tuple_values(&mut normalized);
     }
     normalized
+}
+
+fn erase_rust_callable_metadata(module: &mut UnifiedModule) {
+    use crate::core_ir::{rust_callables as source, type_proofs::ResolutionFailure};
+    crate::core_bindings::rewrite_named_types(&mut module.decls, &|name| {
+        if !source::is_encoded(name) {
+            return None;
+        }
+        let value = Typ::Named(name.into());
+        if let Some(failure) = crate::core_ir::type_proofs::failure_in_type(&value) {
+            return Some(failure.typ());
+        }
+        if source::signature_of(&value).is_some() {
+            Some(Typ::Int)
+        } else {
+            Some(ResolutionFailure::Unsupported("malformed Rust callable signature".into()).typ())
+        }
+    });
+    for decl in &mut module.decls {
+        if let Decl::Function { body, .. } = decl {
+            body.retain(|statement| {
+                let Stmt::Expr(Expr::Unary { op, expr }) = statement else {
+                    return true;
+                };
+                if !matches!(expr.as_ref(), Expr::UnitLit) {
+                    return true;
+                }
+                if source::decode_alias_origin(op).is_some() {
+                    return false;
+                }
+                if let Some(signature) = source::decode_declaration(op) {
+                    let mut retained_failure = None;
+                    signature.visit_types(&mut |child| {
+                        retained_failure = crate::core_ir::type_proofs::prefer_failure(
+                            retained_failure.take(),
+                            crate::core_ir::type_proofs::failure_in_type(child),
+                        );
+                    });
+                    return retained_failure.is_some();
+                }
+                true
+            });
+        }
+    }
+    let declared_functions: HashSet<String> = module
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Function { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
+        if let Expr::Call { callee, args } = expr
+            && let Expr::Ident(name) = callee.as_ref()
+            && matches!(
+                name.as_str(),
+                "std::hint::black_box" | "core::hint::black_box"
+            )
+            && !declared_functions.contains(name)
+            && args.len() == 1
+        {
+            *expr = args.remove(0);
+            return;
+        }
+        let Expr::Unary { op, expr: child } = expr else {
+            return;
+        };
+        if source::is_declaration(op) || source::is_alias_origin(op) {
+            let valid = (source::decode_declaration(op).is_some()
+                || source::decode_alias_origin(op).is_some())
+                && matches!(child.as_ref(), Expr::UnitLit);
+            let mut retained_failure = None;
+            if let Some(signature) = source::decode_declaration(op) {
+                signature.visit_types(&mut |child| {
+                    retained_failure = crate::core_ir::type_proofs::prefer_failure(
+                        retained_failure.take(),
+                        crate::core_ir::type_proofs::failure_in_type(child),
+                    );
+                });
+            }
+            *expr = if let Some(failure) = retained_failure {
+                Expr::Ident(failure.symbol())
+            } else if valid {
+                Expr::UnitLit
+            } else {
+                Expr::Ident(
+                    ResolutionFailure::Unsupported(
+                        "malformed Rust callable declaration provenance".into(),
+                    )
+                    .symbol(),
+                )
+            };
+        } else if source::is_cast(op) {
+            // Every reached cast must have been checked and lowered by the scoped pass.
+            *expr = Expr::Ident(
+                ResolutionFailure::Unsupported("unresolved Rust callable cast".into()).symbol(),
+            );
+        }
+    });
 }
 
 fn erase_rust_float_metadata(module: &mut UnifiedModule) {

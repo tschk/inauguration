@@ -1625,45 +1625,72 @@ impl Pass<'_> {
                 }
             }
             Expr::Call { callee, args } => {
-                let signature = match callee.as_ref() {
-                    Expr::Ident(name) => self.facts.functions.get(name).cloned().or_else(|| {
-                        crate::core_atomic::signature(name)
-                            .map(|signature| {
-                                (
-                                    signature
-                                        .params
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(index, typ)| (format!("arg{index}"), typ.clone()))
-                                        .collect(),
-                                    signature.ret.clone(),
-                                )
+                let lexical_callable = match callee.as_ref() {
+                    Expr::Ident(name) => env
+                        .get(name)
+                        .and_then(crate::core_ir::rust_callables::signature_of),
+                    _ => self
+                        .checker
+                        .expr_type(callee, self.facts, env)
+                        .as_ref()
+                        .and_then(crate::core_ir::rust_callables::signature_of),
+                };
+                let signature = if let Some(signature) = lexical_callable {
+                    Some((
+                        signature
+                            .parameters
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, typ)| (format!("arg{index}"), typ))
+                            .collect(),
+                        signature.result,
+                    ))
+                } else {
+                    match callee.as_ref() {
+                        Expr::Ident(name) if !env.contains_key(name) => {
+                            self.facts.functions.get(name).cloned().or_else(|| {
+                                crate::core_atomic::signature(name)
+                                    .map(|signature| {
+                                        (
+                                            signature
+                                                .params
+                                                .iter()
+                                                .enumerate()
+                                                .map(|(index, typ)| {
+                                                    (format!("arg{index}"), typ.clone())
+                                                })
+                                                .collect(),
+                                            signature.ret.clone(),
+                                        )
+                                    })
+                                    .or_else(|| {
+                                        let params = if name == core_ir::VECTOR_ALLOCATION
+                                            || name == "range-from"
+                                        {
+                                            vec![Typ::Int]
+                                        } else if matches!(
+                                            name.as_str(),
+                                            "range-exclusive" | "range-inclusive"
+                                        ) {
+                                            vec![Typ::Int, Typ::Int]
+                                        } else {
+                                            crate::core_ir_verifier::intrinsic_param_types(name)?
+                                                .to_vec()
+                                        };
+                                        Some((
+                                            params
+                                                .into_iter()
+                                                .enumerate()
+                                                .map(|(index, typ)| (format!("arg{index}"), typ))
+                                                .collect(),
+                                            Typ::Int,
+                                        ))
+                                    })
                             })
-                            .or_else(|| {
-                                let params = if name == core_ir::VECTOR_ALLOCATION
-                                    || name == "range-from"
-                                {
-                                    vec![Typ::Int]
-                                } else if matches!(
-                                    name.as_str(),
-                                    "range-exclusive" | "range-inclusive"
-                                ) {
-                                    vec![Typ::Int, Typ::Int]
-                                } else {
-                                    crate::core_ir_verifier::intrinsic_param_types(name)?.to_vec()
-                                };
-                                Some((
-                                    params
-                                        .into_iter()
-                                        .enumerate()
-                                        .map(|(index, typ)| (format!("arg{index}"), typ))
-                                        .collect(),
-                                    Typ::Int,
-                                ))
-                            })
-                    }),
-                    Expr::Closure { params, ret, .. } => Some((params.clone(), ret.clone())),
-                    _ => None,
+                        }
+                        Expr::Closure { params, ret, .. } => Some((params.clone(), ret.clone())),
+                        _ => None,
+                    }
                 };
                 let vector_expected = if let Expr::Ident(name) = callee.as_ref()
                     && !self.facts.functions.contains_key(name)

@@ -642,37 +642,7 @@ pub(super) fn rhs_type(
             ))
             .with_dependencies(dependencies))
         }
-        syn::Type::BareFn(function) => {
-            let mut dependencies = Dependencies::default();
-            let mut failure = Some(unsupported(
-                "alias function pointer requires a native function ABI",
-            ));
-            for typ in
-                function
-                    .inputs
-                    .iter()
-                    .map(|argument| &argument.ty)
-                    .chain(match &function.output {
-                        syn::ReturnType::Type(_, typ) => Some(typ.as_ref()),
-                        _ => None,
-                    })
-            {
-                match rhs_type(typ, frame, active) {
-                    Ok(value) => {
-                        dependencies.merge(value.dependencies());
-                        failure = crate::core_ir::type_proofs::prefer_failure(
-                            failure,
-                            structural_failure(value),
-                        );
-                    }
-                    Err(error) => {
-                        dependencies.unknown = true;
-                        failure = crate::core_ir::type_proofs::prefer_failure(failure, Some(error));
-                    }
-                }
-            }
-            Ok(failure_result(failure).with_dependencies(dependencies))
-        }
+        syn::Type::BareFn(function) => bare_fn(function, frame, active),
         syn::Type::Never(_) => Ok(deferred("alias never type lacks a native representation")
             .with_dependencies(Dependencies::default())),
         syn::Type::Paren(value) => rhs_type(&value.elem, frame, active),
@@ -1132,5 +1102,169 @@ mod tests {
                 .iter()
                 .any(Failure::is_invalid)
         );
+    }
+}
+
+// Shared syntax collector for ordinary alias and exact trait-signature queries.
+// Child resolution, dependencies, recursion/fuel and failures stay in rhs_type.
+pub(super) fn bare_fn(
+    function: &syn::TypeBareFn,
+    frame: &Frame,
+    active: &mut HashSet<Key>,
+) -> Result<Resolved, Failure> {
+    if function
+        .inputs
+        .iter()
+        .any(|argument| attrs_presence(&argument.attrs) != Presence::Active)
+    {
+        return Err(unsupported(
+            "callable parameter cfg requires source obligations",
+        ));
+    }
+    callable(
+        function.inputs.iter().map(|argument| &argument.ty),
+        &function.output,
+        function.abi.as_ref(),
+        function.unsafety.is_some(),
+        function.variadic.is_some(),
+        function.lifetimes.is_some(),
+        frame,
+        active,
+    )
+}
+#[allow(clippy::too_many_arguments)] // Flat syntax facts share one existing child resolver.
+pub(super) fn callable<'a>(
+    parameters: impl Iterator<Item = &'a syn::Type>,
+    output: &syn::ReturnType,
+    abi: Option<&syn::Abi>,
+    unsafe_call: bool,
+    variadic: bool,
+    bound_lifetimes: bool,
+    frame: &Frame,
+    active: &mut HashSet<Key>,
+) -> Result<Resolved, Failure> {
+    let _source_context = source_signatures::ensure_source_context(frame);
+    let mut dependencies = Dependencies::default();
+    let mut failure = None;
+    let mut child = |source: &syn::Type| -> Typ {
+        match rhs_type(source, frame, active) {
+            Ok(value) => {
+                dependencies.merge(value.dependencies());
+                failure = crate::core_ir::type_proofs::prefer_failure(
+                    failure.take(),
+                    structural_failure(value.clone()),
+                );
+                let exact = source_signatures::exact(value);
+                match exact {
+                    Ok(typ) => typ,
+                    Err(error) => {
+                        failure = crate::core_ir::type_proofs::prefer_failure(
+                            failure.take(),
+                            Some(error),
+                        );
+                        Typ::Void
+                    }
+                }
+            }
+            Err(error) => {
+                dependencies.unknown = true;
+                failure = crate::core_ir::type_proofs::prefer_failure(failure.take(), Some(error));
+                Typ::Void
+            }
+        }
+    };
+    let parameters = parameters.map(|source| child(source)).collect();
+    let result = match output {
+        syn::ReturnType::Default => Typ::Void,
+        syn::ReturnType::Type(_, typ) => child(typ),
+    };
+    let abi = abi.map_or(crate::core_ir::rust_callables::Abi::Rust, |abi| {
+        match abi
+            .name
+            .as_ref()
+            .map_or_else(|| "C".into(), syn::LitStr::value)
+            .as_str()
+        {
+            "Rust" => crate::core_ir::rust_callables::Abi::Rust,
+            name => crate::core_ir::rust_callables::Abi::Explicit(name.into()),
+        }
+    });
+    let typ = crate::core_ir::rust_callables::typ(crate::core_ir::rust_callables::Signature {
+        abi,
+        unsafe_call,
+        variadic,
+        bound_lifetimes,
+        parameters,
+        result,
+    });
+    if format!("{typ:?}").len() > MAX_TYPE_BYTES {
+        failure = crate::core_ir::type_proofs::prefer_failure(
+            failure,
+            Some(unsupported(
+                "callable alias layout exceeds owned type budget",
+            )),
+        );
+    }
+    Ok(if failure.is_some() {
+        failure_result(failure)
+    } else {
+        Resolved::Type(typ)
+    }
+    .with_dependencies(dependencies))
+}
+
+#[cfg(test)]
+mod callable_alias_tests {
+    use super::*;
+    #[test]
+    fn callable_aliases_keep_semantic_parameters_and_nested_invalids() {
+        let file = syn::parse_file("type Callback<T>=fn(T)->T;type Plain=Callback<u8>;").unwrap();
+        let frame = Frame::root(Catalog::new(&file));
+        let typ = resolve_in(&frame, &syn::parse_str("Plain").unwrap())
+            .unwrap()
+            .unwrap();
+        let Typ::Named(name) = typ else {
+            unreachable!()
+        };
+        let signature = crate::core_ir::rust_callables::decode(&name).unwrap();
+        assert_eq!(
+            signature.parameters,
+            vec![Typ::Named("#rust-integer-u8".into())]
+        );
+        assert_eq!(signature.result, signature.parameters[0]);
+        assert!(validate_declarations(&file, frame.catalog.clone()).is_empty());
+        let bad = syn::parse_file("type Bad=fn(unowned::Unknown)->bool<u8>;").unwrap();
+        assert!(
+            validate_declarations(&bad, Catalog::new(&bad))
+                .iter()
+                .any(Failure::is_invalid)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ordinary_callable_source_context_tests {
+    use super::*;
+    #[test]
+    fn ordinary_callable_alias_children_are_exact_source_types() {
+        let file = syn::parse_file(
+            "type Callback<T>=fn(Result<T,bool>,String)->Result<T,bool>; type Plain=Callback<i64>;",
+        )
+        .unwrap();
+        let frame = Frame::root(Catalog::new(&file));
+        let source = syn::parse_str("Plain").unwrap();
+        let ordinary = resolve_in(&frame, &source).unwrap().unwrap();
+        let exact_source = syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: source,
+        });
+        let exact = source_signatures::source_type(&exact_source, &frame).unwrap();
+        assert!(crate::core_ir::rust_references::same_source_type(
+            &ordinary, &exact
+        ));
+        let signature = crate::core_ir::rust_callables::signature_of(&ordinary).unwrap();
+        assert_ne!(signature.result, Typ::Named("#rust-integer-i64".into()));
+        assert_ne!(signature.parameters[1], Typ::String);
+        assert!(validate_declarations(&file, frame.catalog.clone()).is_empty());
     }
 }

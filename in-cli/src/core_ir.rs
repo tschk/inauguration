@@ -2,9 +2,11 @@
 
 pub(crate) mod array_copy;
 pub(crate) mod rust_arrays;
+pub(crate) mod rust_callables;
 pub(crate) mod rust_floats;
 pub(crate) mod rust_generics;
 pub(crate) mod rust_references;
+pub(crate) mod source_types;
 pub(crate) mod tuples;
 pub(crate) mod type_proofs;
 
@@ -235,7 +237,8 @@ impl Typ {
                 if rust_integer_type_name(name).is_some()
                     || rust_floats::is_proof(name)
                     || rust_references::decode(name).is_some()
-                    || rust_arrays::decode(name).is_some() =>
+                    || rust_arrays::decode(name).is_some()
+                    || rust_callables::is_encoded(name) =>
             {
                 self.clone()
             }

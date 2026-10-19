@@ -1,6 +1,6 @@
 use super::decl::{
-    parse_class_block, parse_component_block, parse_extern_fn_block, parse_fn_block,
-    parse_interface_block, parse_struct_block,
+    has_empty_braces, parse_class_block, parse_component_block, parse_extern_fn_block,
+    parse_fn_block, parse_interface_block, parse_struct_block,
 };
 use super::expr::parse_expr;
 use super::lexer::{is_core_decl_item, normalize_human_in_source, split_top_level_items};
@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 struct ParsedInModule {
     module: UnifiedModule,
     pending_globals: HashSet<String>,
+    empty_brace_fns: HashSet<String>,
 }
 
 fn parse_module_from_blocks<'a>(
@@ -31,6 +32,7 @@ fn parse_module_from_blocks<'a>(
 ) -> Result<ParsedInModule, String> {
     let mut decls = Vec::new();
     let mut pending_globals = HashSet::new();
+    let mut empty_brace_fns = HashSet::new();
     for (start_line, block) in blocks {
         let before = decls.len();
         let line = trim(block);
@@ -39,7 +41,10 @@ fn parse_module_from_blocks<'a>(
         }
         if line.starts_with("interrupt fn ") {
             let blk = block[10..].to_string();
-            let (name, params, ret, body) = parse_fn_block(&blk, *start_line as u32)?;
+            let (name, params, ret, mut body) = parse_fn_block(&blk, *start_line as u32)?;
+            if has_empty_braces(block) {
+                body.clear();
+            }
             crate::core_ir::register_interrupt_fn(&name);
             decls.push(Decl::Function {
                 name: name.clone(),
@@ -50,6 +55,9 @@ fn parse_module_from_blocks<'a>(
             });
         } else if line.starts_with("fn ") {
             let (name, params, ret, body) = parse_fn_block(block, *start_line as u32)?;
+            if has_empty_braces(block) {
+                empty_brace_fns.insert(name.clone());
+            }
             decls.push(Decl::Function {
                 name,
                 params,
@@ -178,6 +186,7 @@ fn parse_module_from_blocks<'a>(
     Ok(ParsedInModule {
         module: UnifiedModule::new(decls),
         pending_globals,
+        empty_brace_fns,
     })
 }
 
@@ -213,6 +222,7 @@ fn parse_in_module_from_items(
     let ParsedInModule {
         mut module,
         pending_globals,
+        empty_brace_fns,
     } = parse_module_from_blocks(
         items.iter().filter(|(_, text)| is_core_decl_item(text)),
         counts,
@@ -260,6 +270,7 @@ fn parse_in_module_from_items(
     Ok(ParsedInModule {
         module,
         pending_globals,
+        empty_brace_fns,
     })
 }
 
@@ -268,7 +279,22 @@ fn finalize_in_module(parsed: ParsedInModule, require_main: bool) -> Result<Unif
     let ParsedInModule {
         mut module,
         mut pending_globals,
+        empty_brace_fns,
     } = parsed;
+    if module
+        .decls
+        .iter()
+        .any(|decl| matches!(decl, Decl::Component { .. }))
+    {
+        for decl in &mut module.decls {
+            if let Decl::Function { name, body, .. } = decl
+                && empty_brace_fns.contains(name)
+                && name != "main"
+            {
+                body.clear();
+            }
+        }
+    }
     if let Some(duplicate) = duplicate_top_level_names(&module).first() {
         return Err(format!(".in: duplicate top-level name: {duplicate}"));
     }
@@ -549,6 +575,7 @@ fn parse_in_file_with_imports(path: &Path) -> Result<ParsedInModule, String> {
     let identity = root.module.identity.clone();
     let mut decls = Vec::new();
     let mut pending_globals = HashSet::new();
+    let mut empty_brace_fns = HashSet::new();
     for parsed in files
         .into_iter()
         .map(|(_, parsed)| parsed)
@@ -556,10 +583,12 @@ fn parse_in_file_with_imports(path: &Path) -> Result<ParsedInModule, String> {
     {
         decls.extend(parsed.module.decls);
         pending_globals.extend(parsed.pending_globals);
+        empty_brace_fns.extend(parsed.empty_brace_fns);
     }
     Ok(ParsedInModule {
         module: UnifiedModule::with_identity(decls, identity),
         pending_globals,
+        empty_brace_fns,
     })
 }
 

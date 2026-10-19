@@ -1283,6 +1283,24 @@ pub(super) fn resolve_in(frame: &Frame, path: &syn::Path) -> Result<Option<Typ>,
         }
     }
 }
+/// Query exact source type identity before ABI/runtime mapping can erase it.
+pub(super) fn source_signature_type(source: &syn::Type) -> Result<Typ, Failure> {
+    let frame = current().ok_or_else(|| unsupported("source signature catalog is not active"))?;
+    source_signatures::source_type(source, &frame)
+}
+pub(super) fn source_callable_signature(
+    signature: &syn::Signature,
+) -> Result<crate::core_ir::rust_callables::Signature, Failure> {
+    if signature.asyncness.is_some() {
+        return Err(unsupported(
+            "async function item requires an owned future ABI",
+        ));
+    }
+    let _scope = generic_scope(&signature.generics);
+    let frame = current().ok_or_else(|| unsupported("source callable catalog is not active"))?;
+    source_signatures::declaration(signature, &frame)
+}
+
 /// Resolve a source module in the type namespace, independently of value-only imports.
 pub(super) fn source_module_path(path: &syn::Path) -> Result<Option<Vec<String>>, Failure> {
     let Some(frame) = current() else {

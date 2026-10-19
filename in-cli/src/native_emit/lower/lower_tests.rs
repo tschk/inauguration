@@ -2983,7 +2983,7 @@ fn indirect_calls_stage_addresses_arguments_and_forward_backward_references() {
             42,
         ),
         (
-            "fn answer(a:i64,b:i64)->i64{a*10+b+30} fn pointer()->i64{if true{return answer;}answer} fn one()->i64{1} fn two()->i64{2} fn main()->i64{invoke2(pointer(),invoke(one),invoke(two))}",
+            "fn answer(a:i64,b:i64)->i64{a*10+b+30} fn pointer()->fn(i64,i64)->i64{if true{return answer;}answer} fn one()->i64{1} fn two()->i64{2} fn main()->i64{invoke2(pointer(),invoke(one),invoke(two))}",
             42,
         ),
         (

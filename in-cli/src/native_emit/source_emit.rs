@@ -14,6 +14,14 @@ const MAX_EMIT_NODES: usize = 100_000;
 
 pub fn emit_source_module(module: &UnifiedModule, lang: SourceLang) -> Result<String, String> {
     crate::core_ir_verifier::check_execution_contracts(module)?;
+    if crate::core_ir::type_proofs::metadata_present(
+        &module.decls,
+        crate::core_ir::type_proofs::MetadataKind::RustCallables,
+    ) {
+        return Err(
+            "pending Rust callable source metadata requires normalization before emission".into(),
+        );
+    }
     // Soft DoS guard: truncate emission rather than hang (lossy printers).
     if !module_within_limits(module, lang)? {
         return Ok(format!(

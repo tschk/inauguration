@@ -73,6 +73,10 @@ pub(super) fn proven_environments(
         matches!(typ, Typ::Int | Typ::Float | Typ::Bool)
             || matches!(typ, Typ::Named(name) if crate::core_ir::rust_integer_type_name(name).is_some())
             || crate::core_ir::rust_floats::kind(typ).is_some()
+            || crate::core_ir::rust_callables::signature_of(typ).is_some_and(|signature| {
+                signature.ordinary_rust_form()
+                    && crate::core_ir::type_proofs::failure_in_type(typ).is_none()
+            })
     }
     fn borrowed(expr: &Expr) -> Option<&str> {
         match expr {

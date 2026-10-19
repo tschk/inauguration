@@ -277,6 +277,34 @@ fn typ(value: &mut Typ, names: &NominalNames<'_>, generics: &HashSet<String>) {
             }
         }
         Typ::Named(name) if !generics.contains(name) => {
+            if let Some(identity) = crate::core_ir::source_types::nominal_identity(name) {
+                if let Some(Typ::Named(target)) = (names.type_name)(identity) {
+                    *value = crate::core_ir::source_types::nominal(&target);
+                }
+                return;
+            }
+            if let Some(mut item) = crate::core_ir::rust_callables::decode_item(name) {
+                if let Some(target) = (names.type_name)(name) {
+                    *value = target;
+                    return;
+                }
+                if let Some(target) = (names.value_name)(&item.identity) {
+                    item.identity = target;
+                }
+                item.signature
+                    .visit_types_mut(&mut |child| typ(child, names, generics));
+                *value = crate::core_ir::rust_callables::item_type(item);
+                return;
+            }
+            if let Some(mut signature) = crate::core_ir::rust_callables::decode(name) {
+                if let Some(target) = (names.type_name)(name) {
+                    *value = target;
+                    return;
+                }
+                signature.visit_types_mut(&mut |child| typ(child, names, generics));
+                *value = crate::core_ir::rust_callables::typ(signature);
+                return;
+            }
             if let Some(mut array) = crate::core_ir::rust_arrays::decode(name) {
                 if let Some(target) = (names.type_name)(name) {
                     *value = target;
@@ -344,6 +372,19 @@ fn pattern(source: &mut String, names: &NominalNames<'_>, generics: &HashSet<Str
 fn expr(value: &mut Expr, names: &NominalNames<'_>, generics: &HashSet<String>) {
     match value {
         Expr::Unary { op, .. } => {
+            if let Some(target) = crate::core_ir::rust_callables::decode_alias_origin(op)
+                && let Some(qualified) = (names.value_name)(&target)
+            {
+                *op = crate::core_ir::rust_callables::alias_origin(&qualified);
+            }
+            if let Some(mut target) = crate::core_ir::rust_callables::decode_cast(op) {
+                target.visit_types_mut(&mut |child| typ(child, names, generics));
+                *op = crate::core_ir::rust_callables::cast_operation(&target);
+            }
+            if let Some(mut signature) = crate::core_ir::rust_callables::decode_declaration(op) {
+                signature.visit_types_mut(&mut |child| typ(child, names, generics));
+                *op = crate::core_ir::rust_callables::declaration(&signature);
+            }
             if let Some(mut arguments) = crate::core_ir::rust_generics::decode_arguments(op) {
                 for argument in &mut arguments {
                     typ(argument, names, generics);
@@ -1403,5 +1444,46 @@ mod generic_substitution_tests {
         let proof = rust_generics::decode_neg_implementation(op).unwrap();
         assert_eq!(proof.receiver, bounds[0].receiver);
         assert_ne!(proof.output, Typ::Named("#rust-integer-u64".into()));
+    }
+}
+
+#[cfg(test)]
+mod source_nominal_namespace_tests {
+    use super::*;
+    #[test]
+    fn hidden_nominal_tags_follow_exact_type_mapping_but_standard_tags_do_not() {
+        let mut declarations = vec![Decl::Function {
+            name: "source".into(),
+            params: vec![],
+            ret: crate::core_ir::rust_callables::typ(crate::core_ir::rust_callables::Signature {
+                abi: crate::core_ir::rust_callables::Abi::Rust,
+                unsafe_call: false,
+                variadic: false,
+                bound_lifetimes: false,
+                parameters: vec![Typ::Named(
+                    "#rust-source-signature:std:string:String".into(),
+                )],
+                result: crate::core_ir::source_types::nominal("Record"),
+            }),
+            body: vec![],
+            type_params: vec![],
+        }];
+        rewrite_nominal_names(
+            &mut declarations,
+            &|name| (name == "Record").then(|| "a::Record".into()),
+            &|_| None,
+        );
+        let Decl::Function { ret, .. } = &declarations[0] else {
+            panic!()
+        };
+        let signature = crate::core_ir::rust_callables::signature_of(ret).unwrap();
+        assert_eq!(
+            signature.result,
+            crate::core_ir::source_types::nominal("a::Record")
+        );
+        assert_eq!(
+            signature.parameters[0],
+            Typ::Named("#rust-source-signature:std:string:String".into())
+        );
     }
 }

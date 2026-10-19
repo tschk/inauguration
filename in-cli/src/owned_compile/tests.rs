@@ -11457,3 +11457,157 @@ fn rust_retained_neg_result_casts_preserve_operand_effects_once() {
         fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+fn rust_nested_function_aliases_preserve_lexical_callable_identity() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let cases = [
+        (
+            "bool-function-address",
+            "static mut CALLS:i64=0;fn flag()->bool{unsafe{CALLS+=1;}true}fn main()->i64{let address=flag as usize;if address!=0 && unsafe{CALLS==0}{42}else{7}}",
+        ),
+        (
+            "float-function-address",
+            "static mut CALLS:i64=0;fn number()->f64{unsafe{CALLS+=1;}7.0}fn main()->i64{let address=number as usize;if address!=0 && unsafe{CALLS==0}{42}else{7}}",
+        ),
+        (
+            "record-function-address",
+            "static mut CALLS:i64=0;struct Record{value:i64}fn record()->Record{unsafe{CALLS+=1;}Record{value:7}}fn main()->i64{let address=record as usize;if address!=0 && unsafe{CALLS==0}{42}else{7}}",
+        ),
+        (
+            "nested-alias",
+            "fn answer()->i64{7}mod outer{mod inner{pub fn answer()->i64{42}}pub use self::inner::answer as pick;pub fn run()->i64{pick()}}fn main()->i64{outer::run()}",
+        ),
+        (
+            "alias-chain",
+            "fn answer()->i64{7}mod outer{mod inner{pub fn answer()->i64{42}}pub use self::inner::answer as first;pub use self::first as pick;pub fn run()->i64{pick()}}fn main()->i64{outer::run()}",
+        ),
+        (
+            "sibling-helper",
+            "fn helper()->i64{7}mod outer{fn helper()->i64{42}pub fn run()->i64{helper()}}fn main()->i64{outer::run()}",
+        ),
+        (
+            "function-value",
+            "fn helper()->i64{7}mod outer{fn helper()->i64{42}pub fn run()->i64{let pick=helper;pick()}}fn main()->i64{outer::run()}",
+        ),
+        (
+            "function-argument",
+            "fn helper()->i64{7}mod outer{fn helper()->i64{42}fn apply(pick:fn()->i64)->i64{pick()}pub fn run()->i64{apply(helper)}}fn main()->i64{outer::run()}",
+        ),
+        (
+            "parameter-shadow",
+            "fn selected()->i64{42}mod outer{fn helper()->i64{7}pub fn run(helper:fn()->i64)->i64{helper()}}fn main()->i64{outer::run(selected)}",
+        ),
+        (
+            "self-ignores-local",
+            "fn selected()->i64{7}mod outer{fn helper()->i64{42}pub fn run(helper:fn()->i64)->i64{self::helper()}}fn main()->i64{outer::run(selected)}",
+        ),
+        (
+            "closure-capture-shadow",
+            "fn selected()->i64{42}mod outer{fn helper()->i64{7}pub fn run(helper:fn()->i64)->i64{let pick=||helper();pick()}}fn main()->i64{outer::run(selected)}",
+        ),
+    ];
+    for (name, source) in cases {
+        let path = temp_path(&format!("rust-nested-function-{name}.rs"));
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path(&format!("rust-nested-function-{name}-out"));
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{name} {target:?} {profile:?}: {report:?}");
+                assert!(report.external_invocations.is_empty(), "{report:?}");
+                assert!(report.degradations.is_empty(), "{report:?}");
+                if target == CompileTarget::Jit {
+                    assert!(report.execution_started, "{report:?}");
+                    assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{report:?}");
+                } else {
+                    assert!(out.is_file(), "{report:?}");
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{name} {profile:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_nested_function_qualification_preserves_privacy_and_conditional_refusal() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    for (name, source) in [
+        (
+            "private-function",
+            "mod hidden{fn answer()->i64{42}}fn main()->i64{hidden::answer()}",
+        ),
+        (
+            "conditional-function",
+            "mod outer{#[cfg(feature=\"optional\")]pub fn answer()->i64{42}pub fn run()->i64{answer()}}fn main()->i64{outer::run()}",
+        ),
+    ] {
+        let path = temp_path(&format!("rust-nested-function-{name}.rs"));
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+                let out = temp_path(&format!("rust-nested-function-{name}-out"));
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(!report.success, "{name} {target:?} {profile:?}: {report:?}");
+                assert!(!report.execution_started, "{report:?}");
+                assert_eq!(report.eval_result, None);
+                assert_eq!(report.eval_exit_code, None);
+                assert_eq!(report.artifact_path, None);
+                assert_eq!(report.executable_path, None);
+                assert_eq!(report.abi_path, None);
+                assert!(report.external_invocations.is_empty(), "{report:?}");
+                if name == "private-function" {
+                    assert_eq!(
+                        report.reason_code.as_deref(),
+                        Some("rust-invalid-associated-type"),
+                        "{report:?}"
+                    );
+                } else {
+                    let reason = report.reason.as_deref().unwrap_or("");
+                    assert!(reason.contains("cfg predicates"), "{report:?}");
+                    if target == CompileTarget::Native {
+                        assert_eq!(
+                            report.reason_code.as_deref(),
+                            Some("native-lowering-failed"),
+                            "{report:?}"
+                        );
+                        assert!(
+                            reason.starts_with(
+                                "unsupported Rust associated type in native callable `"
+                            ),
+                            "{report:?}"
+                        );
+                    } else {
+                        assert_eq!(
+                            report.reason_code.as_deref(),
+                            Some("jit-failed"),
+                            "{report:?}"
+                        );
+                        assert!(
+                            reason.starts_with("jit-lowering-failed: source-type-proof:"),
+                            "{report:?}"
+                        );
+                    }
+                }
+                assert!(!out.exists(), "{report:?}");
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}

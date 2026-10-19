@@ -3297,3 +3297,371 @@ fn ieee_c_builtins_cannot_be_shadowed_by_source_bindings() {
         assert_inferred_c_executes(&module, "return calculate(42);");
     }
 }
+
+#[test]
+fn checked_indirect_c_stages_selector_and_zero_one_two_arguments_once() {
+    fn function(name: &str, params: &[&str], body: Vec<Stmt>) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params: params
+                .iter()
+                .map(|name| ((*name).into(), Typ::Int))
+                .collect(),
+            ret: Typ::Int,
+            body,
+            type_params: vec![],
+        }
+    }
+    fn call(name: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args,
+        }
+    }
+    fn trace(digit: i64) -> Stmt {
+        Stmt::Assign(
+            "trace".into(),
+            Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(Expr::Binary {
+                    op: "*".into(),
+                    lhs: Box::new(Expr::Ident("trace".into())),
+                    rhs: Box::new(Expr::IntLit(10)),
+                }),
+                rhs: Box::new(Expr::IntLit(digit)),
+            },
+        )
+    }
+    for arity in 0..=2 {
+        let params: &[&str] = match arity {
+            0 => &[],
+            1 => &["first"],
+            _ => &["first", "second"],
+        };
+        let expected_trace = [1, 12, 123][arity];
+        let returned = match arity {
+            0 => Expr::IntLit(42),
+            1 => Expr::Ident("first".into()),
+            _ => Expr::Binary {
+                op: "+".into(),
+                lhs: Box::new(Expr::Ident("first".into())),
+                rhs: Box::new(Expr::Ident("second".into())),
+            },
+        };
+        let mut decls = vec![
+            Decl::Global {
+                name: "trace".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(Expr::IntLit(0))),
+                mutable: true,
+                constant_value: false,
+            },
+            function(
+                "target",
+                params,
+                vec![Stmt::If {
+                    cond: Expr::Binary {
+                        op: "==".into(),
+                        lhs: Box::new(Expr::Ident("trace".into())),
+                        rhs: Box::new(Expr::IntLit(expected_trace)),
+                    },
+                    then_body: vec![Stmt::Return(Some(returned))],
+                    else_body: vec![Stmt::Return(Some(Expr::IntLit(7)))],
+                }],
+            ),
+            function(
+                "selector",
+                &[],
+                vec![trace(1), Stmt::Return(Some(Expr::Ident("target".into())))],
+            ),
+        ];
+        let mut args = vec![call("selector", vec![])];
+        for (index, value) in [if arity == 1 { 42 } else { 20 }, 22]
+            .into_iter()
+            .take(arity)
+            .enumerate()
+        {
+            let name = format!("argument_{index}");
+            decls.push(function(
+                &name,
+                &[],
+                vec![
+                    trace(index as i64 + 2),
+                    Stmt::Return(Some(Expr::IntLit(value))),
+                ],
+            ));
+            args.push(call(&name, vec![]));
+        }
+        decls.push(function(
+            "answer",
+            &[],
+            vec![Stmt::Return(Some(call(
+                ["invoke", "invoke1", "invoke2"][arity],
+                args,
+            )))],
+        ));
+        let module = UnifiedModule::new(decls);
+        assert_inferred_c_executes(&module, "return (int)answer();");
+        let emitted = emit_c_module(&module).unwrap();
+        assert!(emitted.contains("__builtin_trap()"), "{emitted}");
+        if arity == 0 {
+            assert!(emitted.contains("int64_t(*)(void)"), "{emitted}");
+        }
+    }
+}
+
+#[test]
+fn checked_indirect_c_refuses_unowned_error_abi_and_wrong_arity() {
+    fn call(name: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args,
+        }
+    }
+    for (operation, args) in [
+        ("invoke", vec![]),
+        ("invoke", vec![Expr::IntLit(1), Expr::IntLit(2)]),
+        ("invoke1", vec![Expr::IntLit(1)]),
+        ("invoke2", vec![Expr::IntLit(1), Expr::IntLit(2)]),
+    ] {
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "answer".into(),
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(call(operation, args)))],
+            type_params: vec![],
+        }]);
+        assert!(emit_c_module(&module).is_err(), "{operation}");
+    }
+    let throwing = Decl::Function {
+        name: "throwing".into(),
+        params: vec![],
+        ret: Typ::Int,
+        body: vec![
+            Stmt::Throw(Expr::IntLit(9)),
+            Stmt::Return(Some(Expr::IntLit(42))),
+        ],
+        type_params: vec![],
+    };
+    let module = UnifiedModule::new(vec![
+        throwing,
+        Decl::Function {
+            name: "answer".into(),
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(call(
+                "invoke",
+                vec![Expr::Ident("throwing".into())],
+            )))],
+            type_params: vec![],
+        },
+    ]);
+    let error = emit_c_module(&module).unwrap_err();
+    assert!(error.contains("may throw"), "{error}");
+    let module = UnifiedModule::new(vec![Decl::Function {
+        name: "answer".into(),
+        params: vec![("address".into(), Typ::Int)],
+        ret: Typ::Int,
+        body: vec![Stmt::Return(Some(call(
+            "invoke",
+            vec![Expr::Ident("address".into())],
+        )))],
+        type_params: vec![],
+    }]);
+    let error = emit_c_module(&module).unwrap_err();
+    assert!(error.contains("nonthrowing owned target pool"), "{error}");
+    let module = UnifiedModule::new(vec![
+        Decl::Function {
+            name: "target".into(),
+            params: vec![("value".into(), Typ::Int)],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::Ident("value".into())))],
+            type_params: vec![],
+        },
+        Decl::Function {
+            name: "argument".into(),
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![
+                Stmt::Throw(Expr::IntLit(9)),
+                Stmt::Return(Some(Expr::IntLit(42))),
+            ],
+            type_params: vec![],
+        },
+        Decl::Function {
+            name: "answer".into(),
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(call(
+                "invoke1",
+                vec![Expr::Ident("target".into()), call("argument", vec![])],
+            )))],
+            type_params: vec![],
+        },
+    ]);
+    let error = emit_c_module(&module).unwrap_err();
+    assert!(
+        error.contains("operand requires the owned error-carrier ABI"),
+        "{error}"
+    );
+}
+
+#[test]
+fn checked_indirect_c_checks_runtime_target_membership_before_calling() {
+    use std::process::Command;
+    if Command::new("clang").arg("--version").output().is_err() {
+        return;
+    }
+    fn function(name: &str, params: Vec<(String, Typ)>, value: Expr) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params,
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(value))],
+            type_params: vec![],
+        }
+    }
+    for incompatible in [false, true] {
+        let safe = function("safe_target", vec![], Expr::IntLit(42));
+        let wrong = function(
+            "wrong_target",
+            vec![("unused".into(), Typ::Int)],
+            Expr::IntLit(7),
+        );
+        let selector = function(
+            "selector",
+            vec![],
+            if incompatible {
+                Expr::Ident("wrong_target".into())
+            } else {
+                Expr::IntLit(42)
+            },
+        );
+        let answer = function(
+            "answer",
+            vec![],
+            Expr::Call {
+                callee: Box::new(Expr::Ident("invoke".into())),
+                args: vec![Expr::Call {
+                    callee: Box::new(Expr::Ident("selector".into())),
+                    args: vec![],
+                }],
+            },
+        );
+        let module = UnifiedModule::new(vec![
+            safe,
+            wrong,
+            selector,
+            answer,
+            Decl::Global {
+                name: "unrelated_address".into(),
+                typ: Typ::Int,
+                init: Some(Box::new(Expr::Ident("safe_target".into()))),
+                mutable: true,
+                constant_value: false,
+            },
+        ]);
+        let c = emit_c_module(&module).unwrap();
+        assert!(c.contains("!= (int64_t)(uintptr_t)&safe_target"), "{c}");
+        assert!(!c.contains("!= (int64_t)(uintptr_t)&wrong_target"), "{c}");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "inauguration-c-invoke-membership-{}-{stamp}-{incompatible}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let source = dir.join("membership.c");
+        std::fs::write(&source, format!("{c}\n#include <signal.h>\n#include <stdlib.h>\nstatic void trapped(int signal_number){{(void)signal_number;_Exit(42);}}\nint main(void){{signal(SIGILL,trapped);signal(SIGTRAP,trapped);(void)answer();return 7;}}\n")).unwrap();
+        for optimization in ["-O0", "-O2"] {
+            let binary = dir.join(format!("membership{optimization}"));
+            let built = Command::new("clang")
+                .args(["-std=gnu11", optimization])
+                .arg(&source)
+                .arg("-o")
+                .arg(&binary)
+                .output()
+                .unwrap();
+            assert!(
+                built.status.success(),
+                "{}",
+                String::from_utf8_lossy(&built.stderr)
+            );
+            assert_eq!(
+                Command::new(&binary).status().unwrap().code(),
+                Some(42),
+                "{incompatible} {optimization}"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn checked_indirect_c_does_not_treat_empty_external_declarations_as_owned_targets() {
+    let module = UnifiedModule::new(vec![
+        Decl::Function {
+            name: "external".into(),
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![],
+            type_params: vec![],
+        },
+        Decl::Function {
+            name: "answer".into(),
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::Call {
+                callee: Box::new(Expr::Ident("invoke".into())),
+                args: vec![Expr::Ident("external".into())],
+            }))],
+            type_params: vec![],
+        },
+    ]);
+    let error = emit_c_module(&module).unwrap_err();
+    assert!(
+        error.contains("no owned nonthrowing signature-compatible target"),
+        "{error}"
+    );
+}
+
+#[test]
+fn c_global_function_addresses_are_declared_before_initializers() {
+    let module = UnifiedModule::new(vec![
+        Decl::Global {
+            name: "callback_address".into(),
+            typ: Typ::Int,
+            mutable: true,
+            constant_value: false,
+            init: Some(Box::new(Expr::Ident("target_after_global".into()))),
+        },
+        Decl::Function {
+            name: "answer".into(),
+            params: vec![],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Call {
+                callee: Box::new(Expr::Ident("invoke1".into())),
+                args: vec![Expr::Ident("callback_address".into()), Expr::IntLit(42)],
+            }))],
+        },
+        Decl::Function {
+            name: "target_after_global".into(),
+            params: vec![("value".into(), Typ::Int)],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Ident("value".into())))],
+        },
+    ]);
+    let c = emit_c_module(&module).unwrap();
+    let declaration = c
+        .find("int64_t target_after_global(int64_t value);")
+        .expect("function declaration");
+    let initializer = c
+        .find("volatile int64_t callback_address =")
+        .expect("global initializer");
+    assert!(declaration < initializer, "{c}");
+    assert_inferred_c_executes(&module, "return (int)answer();");
+}

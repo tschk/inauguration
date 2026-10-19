@@ -160,6 +160,24 @@ pub fn emit_c_module(module: &UnifiedModule) -> Result<String, String> {
             }
         }),
     ));
+    let mut addressed = Vec::new();
+    crate::core_opt::detect_ptr_refs(&module.decls, &mut addressed);
+    ctx.owned_functions = Rc::new(
+        module
+            .decls
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::Function { name, body, .. } if !body.is_empty() => Some(name.clone()),
+                _ => None,
+            })
+            .collect(),
+    );
+    ctx.addressed_functions = Rc::new(
+        addressed
+            .into_iter()
+            .filter(|name| ctx.func_names.contains(name))
+            .collect(),
+    );
     ctx.types = module
         .decls
         .iter()
@@ -330,6 +348,33 @@ static inline int64_t in_float_saturate(double value, unsigned bits, int is_sign
         }
     }
 
+    // Globals may store function addresses, so declare every function before
+    // emitting any initializer, independently of the Core IR declaration order.
+    for decl in &module.decls {
+        if let Decl::Function {
+            name, params, ret, ..
+        } = decl
+        {
+            let ps: Vec<String> = params
+                .iter()
+                .map(|(n, t)| format!("{} {}", ctype(t), sanitize_ident(n)))
+                .collect();
+            ctx.push(&format!(
+                "{} {}({});",
+                ctype(ret),
+                sanitize_ident(name),
+                ps.join(", ")
+            ));
+        }
+    }
+    if module
+        .decls
+        .iter()
+        .any(|d| matches!(d, Decl::Function { .. }))
+    {
+        ctx.line("");
+    }
+
     let has_globals = module
         .decls
         .iter()
@@ -365,31 +410,6 @@ static inline int64_t in_float_saturate(double value, unsigned bits, int is_sign
                 ));
             }
         }
-        ctx.line("");
-    }
-
-    for decl in &module.decls {
-        if let Decl::Function {
-            name, params, ret, ..
-        } = decl
-        {
-            let ps: Vec<String> = params
-                .iter()
-                .map(|(n, t)| format!("{} {}", ctype(t), sanitize_ident(n)))
-                .collect();
-            ctx.push(&format!(
-                "{} {}({});",
-                ctype(ret),
-                sanitize_ident(name),
-                ps.join(", ")
-            ));
-        }
-    }
-    if module
-        .decls
-        .iter()
-        .any(|d| matches!(d, Decl::Function { .. }))
-    {
         ctx.line("");
     }
 
@@ -459,10 +479,18 @@ fn word_failure_return(ret: &Typ) -> Option<&'static str> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InvokeMode {
+    Checked,
+    RawNative,
+}
+
 struct Ctx {
     out: String,
     facts: Rc<Facts>,
     throwing: Rc<HashSet<String>>,
+    addressed_functions: Rc<HashSet<String>>,
+    owned_functions: Rc<HashSet<String>>,
     reserved: Rc<RefCell<HashSet<String>>>,
     types: HashMap<String, Typ>,
     error: Rc<RefCell<Option<String>>>,
@@ -484,6 +512,8 @@ impl Ctx {
             out: String::with_capacity(4096),
             facts,
             throwing: Rc::new(HashSet::new()),
+            addressed_functions: Rc::new(HashSet::new()),
+            owned_functions: Rc::new(HashSet::new()),
             reserved: Rc::new(RefCell::new(HashSet::new())),
             types: HashMap::new(),
             error: Rc::new(RefCell::new(None)),
@@ -1121,6 +1151,8 @@ impl Ctx {
                 ));
                 let mut nested = Ctx::new(self.func_names.clone(), self.facts.clone());
                 nested.throwing = self.throwing.clone();
+                nested.addressed_functions = self.addressed_functions.clone();
+                nested.owned_functions = self.owned_functions.clone();
                 nested.error = self.error.clone();
                 nested.array_copy_helper = self.array_copy_helper.clone();
                 nested.reserved = self.reserved.clone();
@@ -1190,14 +1222,17 @@ impl Ctx {
         }
     }
 
-    fn raw_native_invoke(&mut self, name: &str, args: &[Expr]) -> String {
+    fn indirect_invoke(&mut self, name: &str, args: &[Expr], mode: InvokeMode) -> String {
         if self.global_initializer {
-            self.fail("c-backend: raw native call in a global initializer requires runtime initialization".into());
+            self.fail(
+                "c-backend: indirect call in a global initializer requires runtime initialization"
+                    .into(),
+            );
             return "0".into();
         }
         let expected = match name {
-            "invoke-native" | "invoke_native" => 1,
-            "invoke-native1" | "invoke_native1" => 2,
+            "invoke" | "invoke-native" | "invoke_native" => 1,
+            "invoke1" | "invoke-native1" | "invoke_native1" => 2,
             _ => 3,
         };
         if args.len() != expected {
@@ -1206,12 +1241,14 @@ impl Ctx {
             ));
             return "0".into();
         }
+        let mut known_target = false;
         if let Expr::Ident(target) = &args[0]
             && !self.types.contains_key(target)
             && let Some((params, ret)) = self.facts.function_signature(target)
         {
+            known_target = true;
             if self.throwing.contains(target) {
-                self.fail(format!("c-backend: raw native target `{target}` may throw"));
+                self.fail(format!("c-backend: indirect target `{target}` may throw"));
                 return "0".into();
             }
             if let Some(error) = crate::core_ir_verifier::invoke_signature_error(name, params, ret)
@@ -1220,10 +1257,66 @@ impl Ctx {
                 return "0".into();
             }
         }
+        // C's Throw state is function-local, so it cannot propagate the owned
+        // native error carrier across a call. Unknown checked targets are safe
+        // only within a known nonthrowing addressed-function pool. Raw native
+        // invocation retains its explicit host-ABI contract.
+        if mode == InvokeMode::Checked
+            && !known_target
+            && (self.addressed_functions.is_empty()
+                || self
+                    .addressed_functions
+                    .iter()
+                    .any(|target| self.throwing.contains(target)))
+        {
+            self.fail(
+                "c-backend: checked indirect target has no proven nonthrowing owned target pool"
+                    .into(),
+            );
+            return "0".into();
+        }
+        if mode == InvokeMode::Checked
+            && args.iter().any(|arg| {
+                crate::core_effects::expression_requires_error_abi(
+                    arg,
+                    &self.throwing,
+                    &self.func_names,
+                )
+            })
+        {
+            self.fail(
+                "c-backend: checked indirect operand requires the owned error-carrier ABI".into(),
+            );
+            return "0".into();
+        }
+        let mut admissible_targets = Vec::new();
+        if mode == InvokeMode::Checked {
+            admissible_targets = self
+                .addressed_functions
+                .iter()
+                .filter(|target| {
+                    self.owned_functions.contains(*target) && !self.throwing.contains(*target)
+                })
+                .filter(|target| {
+                    self.facts
+                        .function_signature(target)
+                        .is_some_and(|(params, ret)| {
+                            crate::core_ir_verifier::invoke_signature_error(name, params, ret)
+                                .is_none()
+                        })
+                })
+                .cloned()
+                .collect();
+            admissible_targets.sort();
+            if admissible_targets.is_empty() {
+                self.fail("c-backend: checked indirect call has no owned nonthrowing signature-compatible target".into());
+                return "0".into();
+            }
+        }
         let checker = TypeChecker::new();
         if args.iter().any(|arg| {
             checker
-                .expr_type(arg, &self.facts, &self.types)
+                .checked_expr_type(arg, &self.facts, &self.types)
                 .map(|typ| typ.canonical())
                 != Some(Typ::Int)
         }) {
@@ -1238,7 +1331,25 @@ impl Ctx {
             out.push_str(&format!("int64_t {slot} = {value}; "));
             staged.push(slot);
         }
+        // A C projection traps null; it does not claim native error propagation.
         out.push_str(&format!("if ({} == 0) __builtin_trap(); ", staged[0]));
+        if mode == InvokeMode::Checked {
+            // A global pool is not proof that this runtime pointer belongs to it.
+            // Check exact owned compatible addresses before crossing the C ABI.
+            let outside = admissible_targets
+                .iter()
+                .map(|target| {
+                    format!(
+                        "{} != (int64_t)(uintptr_t)&{}",
+                        staged[0],
+                        sanitize_ident(target)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" && ");
+            out.push_str(&format!("if ({outside}) __builtin_trap(); "));
+        }
+
         let params = if expected == 1 {
             "void".into()
         } else {
@@ -1268,7 +1379,10 @@ impl Ctx {
             return "0".into();
         }
         if crate::core_ir_verifier::is_native_invoke(name) && !self.is_func(name) {
-            return self.raw_native_invoke(name, args);
+            return self.indirect_invoke(name, args, InvokeMode::RawNative);
+        }
+        if matches!(name, "invoke" | "invoke1" | "invoke2") && !self.is_func(name) {
+            return self.indirect_invoke(name, args, InvokeMode::Checked);
         }
         if matches!(name, "array_len" | "array-len")
             && !self.is_func(name)
@@ -1350,31 +1464,6 @@ impl Ctx {
                 a(0),
                 a(1)
             ),
-            "invoke" if args.len() == 1 => {
-                format!("((uint64_t(*)(uint64_t))({}))({})", a(0), a(0))
-            }
-            "invoke" if args.len() == 2 => {
-                format!("((uint64_t(*)(uint64_t))({}))({})", a(0), a(1))
-            }
-            "invoke" if args.len() == 3 => {
-                format!(
-                    "((uint64_t(*)(uint64_t,uint64_t))({}))({}, {})",
-                    a(0),
-                    a(1),
-                    a(2)
-                )
-            }
-            "invoke1" if args.len() == 2 => {
-                format!("((uint64_t(*)(uint64_t))({}))({})", a(0), a(1))
-            }
-            "invoke2" if args.len() == 3 => {
-                format!(
-                    "((uint64_t(*)(uint64_t,uint64_t))({}))({}, {})",
-                    a(0),
-                    a(1),
-                    a(2)
-                )
-            }
             _ => {
                 let as_: Vec<String> = args.iter().map(|a| self.expr_str(a)).collect();
                 format!("{}({})", sanitize_ident(name), as_.join(", "))
@@ -1405,6 +1494,8 @@ fn emit_fn_def(ctx: &mut Ctx, name: &str, params: &[(String, Typ)], ret: &Typ, b
     // Build body into a nested buffer so hoisted closures land before the fn.
     let mut body_ctx = Ctx::new(ctx.func_names.clone(), ctx.facts.clone());
     body_ctx.throwing = ctx.throwing.clone();
+    body_ctx.addressed_functions = ctx.addressed_functions.clone();
+    body_ctx.owned_functions = ctx.owned_functions.clone();
     body_ctx.error = ctx.error.clone();
     body_ctx.array_copy_helper = ctx.array_copy_helper.clone();
     body_ctx.reserved = ctx.reserved.clone();

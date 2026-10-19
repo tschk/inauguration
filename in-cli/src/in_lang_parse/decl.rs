@@ -365,6 +365,21 @@ pub(crate) fn parse_fn_block(
     }
 }
 
+pub(crate) fn has_empty_braces(block: &str) -> bool {
+    let t = trim(block);
+    let rest = t
+        .strip_prefix("interrupt fn ")
+        .or_else(|| t.strip_prefix("fn "))
+        .unwrap_or(t);
+    find_fn_body_open_brace(rest)
+        .and_then(|brace_idx| brace_content_after_open(rest, brace_idx))
+        .is_some_and(|inner| {
+            parse_function_body(inner)
+                .map(|stmts| stmts.is_empty())
+                .unwrap_or(false)
+        })
+}
+
 pub(crate) fn parse_extern_fn_block(block: &str) -> Result<InExternBinding, String> {
     let t = trim(block).trim_end_matches(';').trim();
     if t.contains('{') || t.contains('}') {
@@ -412,5 +427,28 @@ mod empty_definition_tests {
         assert!(matches!(body.as_slice(), [Stmt::Return(None)]));
         let (_, _, _, body) = parse_fn_block("fn external()->Void", 1).unwrap();
         assert!(body.is_empty());
+    }
+
+    #[test]
+    fn empty_brace_interrupt_and_component_import_stubs_stay_bodyless() {
+        let module = crate::in_lang_parse::parse_in_library_source(
+            "component Display {\n  target \"x86_64-unknown-none\"\n  deterministic true\n  checkpoint none\n}\ninterrupt fn pci-read32(bus: Int) -> Int {}\nfn helper-import(x: Int) -> Void {}\nfn entry() -> Int { return pci-read32(0); }",
+        )
+        .unwrap();
+        for name in ["pci-read32", "helper-import"] {
+            let body = module
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Function {
+                        name: fn_name,
+                        body,
+                        ..
+                    } if fn_name == name => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(body.is_empty(), "{name} should remain bodyless: {body:?}");
+        }
     }
 }

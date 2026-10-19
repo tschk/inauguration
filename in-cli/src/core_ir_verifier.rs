@@ -5057,7 +5057,7 @@ mod invoke_value_tests {
                 true,
             ),
             (
-                "fn target()->f64{42.0} fn main()->i64{let pointer:i64=target;42}",
+                "fn target()->f64{42.0} fn main()->i64{let pointer:fn()->f64=target;42}",
                 true,
             ),
             (
