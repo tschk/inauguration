@@ -22,10 +22,8 @@ pub(super) fn parser_preference_from_cli(parser: ParserCli) -> super::types::Age
 }
 
 pub(super) fn resolved_parser_id(resolved: ResolvedBuildParser) -> Option<ParserId> {
-    match resolved {
-        ResolvedBuildParser::CoreIr(id) => Some(id),
-        ResolvedBuildParser::Swift => None,
-    }
+    let ResolvedBuildParser::CoreIr(id) = resolved;
+    Some(id)
 }
 
 pub(super) fn parser_decision(
@@ -33,24 +31,14 @@ pub(super) fn parser_decision(
     preference: &super::types::AgentParserPreference,
     resolved: ResolvedBuildParser,
 ) -> ParserDecision {
-    match resolved {
-        ResolvedBuildParser::CoreIr(id) => ParserDecision {
-            requested: parser_preference_label(preference).to_string(),
-            route: "core_ir".to_string(),
-            parser_id: Some(id.as_str().to_string()),
-            parser_family: Some(id.family_label().to_string()),
-            source_path: path.display().to_string(),
-            reason: "parser_registry resolved source to a Core IR frontend".to_string(),
-        },
-        ResolvedBuildParser::Swift => ParserDecision {
-            requested: parser_preference_label(preference).to_string(),
-            route: "swift_sil_emit".to_string(),
-            parser_id: None,
-            parser_family: Some("Swift SIL emit".to_string()),
-            source_path: path.display().to_string(),
-            reason: "parser_registry did not find a Core IR parser and selected Swift SIL emit"
-                .to_string(),
-        },
+    let ResolvedBuildParser::CoreIr(id) = resolved;
+    ParserDecision {
+        requested: parser_preference_label(preference).to_string(),
+        route: "core_ir".to_string(),
+        parser_id: Some(id.as_str().to_string()),
+        parser_family: Some(id.family_label().to_string()),
+        source_path: path.display().to_string(),
+        reason: "parser_registry resolved source to a Core IR frontend".to_string(),
     }
 }
 
@@ -64,10 +52,6 @@ fn parser_preference_label(preference: &super::types::AgentParserPreference) -> 
 
 pub(super) fn language_level(resolved: ResolvedBuildParser) -> LanguageLevel {
     match resolved {
-        ResolvedBuildParser::Swift => LanguageLevel {
-            level: 2,
-            label: "native Swift subset to SIL".to_string(),
-        },
         ResolvedBuildParser::CoreIr(ParserId::In) => LanguageLevel {
             level: 3,
             label: ".in bounded subset with source diagnostics".to_string(),

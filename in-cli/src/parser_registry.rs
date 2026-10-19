@@ -353,8 +353,6 @@ pub enum ParserCli {
 pub enum ResolvedBuildParser {
     /// Core IR path (implemented: [`ParserId::In`], [`ParserId::Icore`]; stubs: other [`ParserId`]).
     CoreIr(ParserId),
-    /// Deprecated: Swift now routes through Tree-sitter Core IR like all other languages.
-    Swift,
 }
 
 /// `IN_PARSER=in` or `IN_PARSER=icore` forces the matching Core IR front (any file path).
@@ -488,7 +486,6 @@ pub fn parse_with_resolved(
     path: &Path,
 ) -> Result<Option<UnifiedModule>, ParserRegistryError> {
     match resolved {
-        ResolvedBuildParser::Swift => Ok(None),
         ResolvedBuildParser::CoreIr(ParserId::In) => in_lang_parse::parse_in_file(path)
             .map_err(ParserRegistryError::Msg)
             .map(Some),
@@ -869,11 +866,6 @@ mod artifact_route_tests {
                 .unwrap()
                 .unwrap();
         assert!(artifact.unary_methods.is_empty());
-        assert!(
-            parse_artifact_with_resolved(ResolvedBuildParser::Swift, &path)
-                .unwrap()
-                .is_none()
-        );
         std::fs::remove_file(path).unwrap();
     }
 }

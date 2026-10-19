@@ -4616,9 +4616,8 @@ pub fn typecheck_resolved(
     resolved: &ResolvedBuildParser,
     module: &UnifiedModule,
 ) -> Result<(), String> {
-    if let ResolvedBuildParser::CoreIr(parser_id) = resolved
-        && uses_family_typecheck(*parser_id)
-    {
+    let ResolvedBuildParser::CoreIr(parser_id) = resolved;
+    if uses_family_typecheck(*parser_id) {
         return typecheck_for_parser(*parser_id, module);
     }
     typecheck_executable(module)

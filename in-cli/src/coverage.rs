@@ -157,17 +157,14 @@ pub fn coverage_for_path(path: &Path, parser: ParserCli, entry: Option<&str>) ->
         return report;
     }
 
-    let parser_id = match resolved {
-        parser_registry::ResolvedBuildParser::CoreIr(id) => Some(id.as_str().to_string()),
-        parser_registry::ResolvedBuildParser::Swift => None,
-    };
+    let parser_registry::ResolvedBuildParser::CoreIr(id) = resolved;
+    let parser_id = Some(id.as_str().to_string());
 
     let functions_in_source = count_functions(&module);
     crate::lower_core::desugar_module(&mut module);
-    if let parser_registry::ResolvedBuildParser::CoreIr(parser_id) = resolved
-        && crate::typecheck::uses_family_normalization(parser_id)
-    {
-        module = crate::typecheck::normalize_module(parser_id, &module);
+    let parser_registry::ResolvedBuildParser::CoreIr(core_ir_parser_id) = resolved;
+    if crate::typecheck::uses_family_normalization(core_ir_parser_id) {
+        module = crate::typecheck::normalize_module(core_ir_parser_id, &module);
     }
 
     // Same entry choice as a build: the caller's, else `main`, else whatever the
