@@ -1222,7 +1222,8 @@ impl MatchPattern {
                             return Err(format!("tuple pattern arity does not match {typ:?}"));
                         }
                         if !(0..fields.len()).all(|index| {
-                            fields.iter().any(|(name, _)| name == &format!("_{index}"))
+                            let expected_name = format!("_{index}");
+                            fields.iter().any(|(name, _)| name == &expected_name)
                         }) {
                             return Err(format!("invalid tuple pattern schema for {typ:?}"));
                         }
@@ -1240,9 +1241,10 @@ impl MatchPattern {
                         } else {
                             index
                         };
+                        let expected_name = format!("_{index}");
                         &fields
                             .iter()
-                            .find(|(name, _)| name == &format!("_{index}"))
+                            .find(|(name, _)| name == &expected_name)
                             .ok_or_else(|| format!("unknown tuple pattern field {index}"))?
                             .1
                     } else {
@@ -1310,9 +1312,10 @@ impl MatchPattern {
                     } else {
                         index
                     };
+                    let expected_name = format!("_{index}");
                     fields
                         .iter()
-                        .find(|(name, _)| name == &format!("_{index}"))
+                        .find(|(name, _)| name == &expected_name)
                         .is_some_and(|(_, typ)| pattern.irrefutable(typ, schema))
                 })
             }
