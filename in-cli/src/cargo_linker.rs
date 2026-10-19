@@ -840,6 +840,41 @@ direct_dep = { path = "direct_dep" }
     }
 
     #[test]
+    fn test_get_manifest_valid() {
+        let temp = TempDirGuard::new();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"src/my_lib.rs\"\n",
+        )
+        .unwrap();
+
+        let manifest = get_manifest(&temp.path).expect("manifest should be parsed");
+        assert_eq!(manifest.package_name.as_deref(), Some("my-crate"));
+        assert_eq!(manifest.lib_path.as_deref(), Some("src/my_lib.rs"));
+    }
+
+    #[test]
+    fn test_get_manifest_no_cargo_toml() {
+        let temp = TempDirGuard::new();
+        let manifest = get_manifest(&temp.path);
+        assert!(manifest.is_none());
+    }
+
+    #[test]
+    fn test_get_manifest_partial() {
+        let temp = TempDirGuard::new();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"partial-crate\"\n",
+        )
+        .unwrap();
+
+        let manifest = get_manifest(&temp.path).expect("manifest should be parsed");
+        assert_eq!(manifest.package_name.as_deref(), Some("partial-crate"));
+        assert_eq!(manifest.lib_path, None);
+    }
+
+    #[test]
     fn test_find_crate_root_default() {
         let temp = TempDirGuard::new();
         let src_dir = temp.path.join("src");
