@@ -6090,6 +6090,61 @@ mod declaration_optimization_tests {
         }
     }
     #[test]
+    fn optimize_with_profile_applies_inlining_and_dce() {
+        let mut decls = vec![
+            function(
+                "small_func",
+                vec![],
+                vec![Stmt::Return(Some(Expr::IntLit(10)))],
+            ),
+            function(
+                "dead_func",
+                vec![],
+                vec![Stmt::Return(Some(Expr::IntLit(0)))],
+            ),
+            function(
+                "main",
+                vec![],
+                vec![
+                    Stmt::Let(
+                        "x".into(),
+                        None,
+                        Expr::Call {
+                            callee: Box::new(Expr::Ident("small_func".into())),
+                            args: vec![],
+                        },
+                    ),
+                    Stmt::Let(
+                        "y".into(),
+                        None,
+                        Expr::Binary {
+                            op: "+".into(),
+                            lhs: Box::new(Expr::Ident("x".into())),
+                            rhs: Box::new(Expr::IntLit(32)),
+                        },
+                    ),
+                    Stmt::Return(Some(Expr::Ident("y".into()))),
+                ],
+            ),
+        ];
+
+        super::optimize_with_profile(&mut decls, Some("main"), EmitProfile::Default);
+
+        assert_eq!(decls.len(), 1);
+        let Decl::Function { name, body, .. } = &decls[0] else {
+            panic!("main not found")
+        };
+        assert_eq!(name, "main");
+        assert_eq!(
+            body,
+            &vec![
+                Stmt::Let("y".into(), None, Expr::IntLit(42)),
+                Stmt::Return(Some(Expr::Ident("y".into()))),
+            ]
+        );
+    }
+
+    #[test]
     fn profiles_cannot_erase_an_uninitialized_ignored_argument() {
         for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
             let mut module = crate::core_ir::UnifiedModule::new(vec![
