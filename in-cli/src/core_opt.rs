@@ -5013,6 +5013,41 @@ mod tests {
     }
 
     #[test]
+    fn optimize_with_profile_calls_optimize_with_linkage_with_correct_args() {
+        let mut decls = vec![
+            Decl::Function {
+                name: "unused".into(),
+                params: vec![],
+                ret: Typ::Void,
+                body: vec![Stmt::Return(None)],
+                type_params: vec![],
+            },
+            Decl::Function {
+                name: "main".into(),
+                params: vec![],
+                ret: Typ::Void,
+                body: vec![Stmt::Return(None)],
+                type_params: vec![],
+            },
+        ];
+        optimize_with_profile(&mut decls, Some("main"), EmitProfile::Default);
+
+        let names: Vec<_> = decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Function { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(names.contains(&"main"), "Entry point 'main' should be kept");
+        assert!(
+            !names.contains(&"unused"),
+            "Unused function should be removed because keep_all_functions is false"
+        );
+    }
+
+    #[test]
     fn remove_dead_functions_keeps_main_without_explicit_entry() {
         let mut decls = vec![
             Decl::Function {
