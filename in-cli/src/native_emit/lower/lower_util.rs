@@ -62,20 +62,7 @@ pub(crate) fn find_field_offset<'a>(
     field_map: &'a HashMap<String, u32>,
     name: &str,
 ) -> Option<&'a u32> {
-    if let Some(offset) = field_map.get(name) {
-        return Some(offset);
-    }
-    // Try prefix match for nested structs: "inner" → "inner.val"
-    field_map
-        .iter()
-        .filter_map(|(k, v)| {
-            if k.len() > name.len() && k.starts_with(name) && k.as_bytes()[name.len()] == b'.' {
-                Some(v)
-            } else {
-                None
-            }
-        })
-        .min()
+    field_map.get(name)
 }
 
 /// Branch condition that tests `op` against flags already set by a compare.
