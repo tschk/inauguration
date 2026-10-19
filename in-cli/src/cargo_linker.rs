@@ -941,6 +941,65 @@ direct_dep = { path = "direct_dep" }
         assert_eq!(find_crate_root(&temp.path), Ok(second));
         Ok(())
     }
+
+    #[test]
+    fn test_merge_dependency_modules() {
+        let mut main = UnifiedModule::new(vec![]);
+
+        let in_dep = UnifiedModule::new(vec![Decl::Struct {
+            name: "InStruct".into(),
+            fields: vec![],
+            type_params: vec![],
+        }]);
+
+        let ext_dep = UnifiedModule::new(vec![Decl::Function {
+            name: "ext_func".into(),
+            params: vec![],
+            ret: crate::core_ir::Typ::Void,
+            body: vec![],
+            type_params: vec![],
+        }]);
+
+        let empty_dep = UnifiedModule::new(vec![Decl::Function {
+            name: "empty_func".into(),
+            params: vec![],
+            ret: crate::core_ir::Typ::Void,
+            body: vec![],
+            type_params: vec![],
+        }]);
+
+        merge_dependency_modules(
+            &mut main,
+            vec![
+                ("in-core".into(), in_dep),
+                ("my_crate".into(), ext_dep),
+                ("".into(), empty_dep),
+            ],
+        );
+
+        assert_eq!(main.decls.len(), 4);
+
+        assert!(
+            main.decls
+                .iter()
+                .any(|d| matches!(d, Decl::Struct { name, .. } if name == "InStruct"))
+        );
+        assert!(
+            main.decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "ext_func"))
+        );
+        assert!(
+            main.decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "my_crate::ext_func"))
+        );
+        assert!(
+            main.decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "empty_func"))
+        );
+    }
 }
 
 #[cfg(test)]
