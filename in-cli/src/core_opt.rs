@@ -2309,41 +2309,6 @@ fn find_removable_instructions(code: &[u8], jumps: &[RelJump]) -> Vec<RemoveRang
         }
     }
 
-    let mut i = 0;
-    while i < code.len() {
-        let is_redundant_mov = if i + 1 < code.len() {
-            let (opcode, modrm) = if code[i] == 0x48 && i + 2 < code.len() {
-                (code[i + 1], code[i + 2])
-            } else {
-                (code[i], code[i + 1])
-            };
-            let mod_field = modrm >> 6; // bits 7:6
-            let reg_field = (modrm >> 3) & 7; // bits 5:3
-            let rm_field = modrm & 7; // bits 2:0
-            if mod_field == 3 && reg_field == rm_field {
-                matches!(opcode, 0x89 | 0x8B)
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if is_redundant_mov {
-            let mov_len = if i + 2 < code.len() && code[i] == 0x48 {
-                3
-            } else {
-                2
-            };
-            remove.push(RemoveRange {
-                start: i,
-                len: mov_len,
-            });
-            i += mov_len;
-        } else {
-            i += 1;
-        }
-    }
-
     // Remove trailing `66 90` (2-byte NOP) and `90` (single NOP)
     let mut trailing = 0;
     let mut j = code.len();
@@ -4477,6 +4442,48 @@ mod tests {
         let mut code = vec![0xC3, 0x90]; // ret, nop
         peephole_x86_64(&mut code);
         assert_eq!(code, vec![0xC3]);
+    }
+
+    #[test]
+    fn peephole_removes_redundant_mov_32() {
+        let mut code = vec![0x8B, 0xC0]; // mov eax, eax
+        peephole_x86_64(&mut code);
+        assert_eq!(code, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn peephole_removes_redundant_mov_64() {
+        let mut code = vec![0x48, 0x8B, 0xC0]; // mov rax, rax
+        peephole_x86_64(&mut code);
+        assert_eq!(code, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn peephole_preserves_non_redundant_mov() {
+        let mut code = vec![0x8B, 0xC3]; // mov eax, ebx
+        peephole_x86_64(&mut code);
+        assert_eq!(code, vec![0x8B, 0xC3]);
+    }
+
+    #[test]
+    fn peephole_preserves_jump_targets() {
+        // mov eax, eax; jmp rel8 -4
+        // The jmp is at offset 2, length 2, so the next instruction is at 4.
+        // 4 - 4 = 0, which targets the mov instruction.
+        let mut code = vec![0x8B, 0xC0, 0xEB, 0xFC];
+        peephole_x86_64(&mut code);
+        // The mov is the target of the jump, so it must not be removed.
+        assert_eq!(code, vec![0x8B, 0xC0, 0xEB, 0xFC]);
+    }
+
+    #[test]
+    fn peephole_adjusts_jump_offsets() {
+        // jmp rel8 +2 (skips over mov eax, eax to ret)
+        let mut code = vec![0xEB, 0x02, 0x8B, 0xC0, 0xC3];
+        peephole_x86_64(&mut code);
+        // The mov is removed, so the target 0xC3 is now immediately after the jump.
+        // The offset should be adjusted from +2 to +0.
+        assert_eq!(code, vec![0xEB, 0x00, 0xC3]);
     }
 
     #[test]
