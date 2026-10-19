@@ -151,24 +151,9 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     let has_cargo = request.path.join("Cargo.toml").exists();
     let is_multi = request.path.is_dir() && !has_cargo;
 
-    let mut multi_sources: Vec<(String, String)> = Vec::new(); // (path, source)
-    if is_multi {
-        // Scan for .in, .c, .cpp, .rs files in directory
-        if let Ok(dir) = std::fs::read_dir(&request.path) {
-            for entry in dir.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension() {
-                        if ext == "in" || ext == "c" || ext == "cpp" || ext == "rs" {
-                            if let Ok(src) = fs::read_to_string(&path) {
-                                multi_sources.push((path.to_string_lossy().to_string(), src));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if multi_sources.is_empty() {
+    let multi_sources = if is_multi {
+        let sources = discover_multi_sources(&request.path);
+        if sources.is_empty() {
             return OwnedCompileReport {
                 reason_code: Some("frontend-parse-failed".to_string()),
                 reason: Some(format!(
@@ -179,7 +164,10 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                 ..base_report(request, jobs, started)
             };
         }
-    }
+        sources
+    } else {
+        Vec::new()
+    };
 
     let source = if is_multi {
         multi_sources[0].1.clone()
@@ -313,176 +301,32 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     // ponytail: link cargo dependencies + crate root for Rust sources
     let is_rust_source = primary_path.extension().is_some_and(|e| e == "rs");
     if is_rust_source {
-        let project_dir = crate::cargo_linker::find_crate_dir(primary_path).unwrap_or_else(|| {
-            primary_path
-                .parent()
-                .unwrap_or(Path::new("."))
-                .to_path_buf()
-        });
-        let skip_deps = std::env::var_os("IN_CARGO_LINK")
-            .map(|v| v == "0")
-            .unwrap_or(false);
-        let deps = if skip_deps {
-            Vec::new()
-        } else {
-            std::thread::Builder::new()
-                .name("in-cargo-link".into())
-                .stack_size(64 * 1024 * 1024)
-                .spawn({
-                    let project_dir = project_dir.clone();
-                    move || crate::cargo_linker::compile_cargo_dependency_artifacts(&project_dir)
-                })
-                .ok()
-                .and_then(|h| h.join().ok())
-                .unwrap_or_default()
-        };
-        if request.debug {
-            eprintln!("[cargo-link] {} dependency crates", deps.len());
-        }
-        if !deps.is_empty() {
-            if let Err(error) =
-                merge_retained_dependency_artifacts(&mut module, &mut unary_methods, deps)
-            {
-                report.reason_code = Some("dependency-resolution-failed".into());
-                report.reason = Some(error.clone());
-                report.error = Some(error);
-                return finalize_report(report, started, &cwd, &frontend_hash);
-            }
-        }
-        // Also compile the crate's library root (lib.rs) to make crate-local
-        // functions available (e.g. inauguration::agent_mode::analyze_path)
-        let crate_root = crate::cargo_linker::find_crate_root(&project_dir);
-        if let Ok(ref root) = crate_root {
-            // Directory inputs already schedule each listed source for its normal
-            // parse stage. Do not reload the exact same crate root as a dependency.
-            let canonical_root = root.canonicalize().ok();
-            let root_in_inputs = std::iter::once(primary_path)
-                .chain(multi_sources.iter().map(|(path, _)| Path::new(path)))
-                .any(|source| {
-                    source == root
-                        || canonical_root
-                            .as_ref()
-                            .is_some_and(|root| source.canonicalize().ok().as_ref() == Some(root))
-                });
-            if !root_in_inputs && request.debug {
-                eprintln!("[cargo-link] crate root {}", root.display());
-            }
-            if !root_in_inputs {
-                let root_path = root.clone();
-                let parsed = std::thread::Builder::new()
-                    .name("in-crate-root".into())
-                    .stack_size(32 * 1024 * 1024)
-                    .spawn(move || crate::compiler::rust_front::parse_rust_artifact(&root_path))
-                    .and_then(|h| h.join().map_err(|_| std::io::Error::other("join")))
-                    .ok();
-                match parsed {
-                    Some(Ok(crate_module)) => {
-                        let crate_name = crate::cargo_linker::crate_package_name(&project_dir)
-                            .or_else(|| {
-                                project_dir
-                                    .file_stem()
-                                    .map(|s| s.to_string_lossy().into_owned())
-                            })
-                            .unwrap_or_default();
-                        if let Err(error) = merge_retained_dependency_artifacts(
-                            &mut module,
-                            &mut unary_methods,
-                            vec![(crate_name, crate_module)],
-                        ) {
-                            report.reason_code = Some("dependency-resolution-failed".into());
-                            report.reason = Some(error.clone());
-                            report.error = Some(error);
-                            return finalize_report(report, started, &cwd, &frontend_hash);
-                        }
-                    }
-                    Some(Err(err)) => {
-                        if request.debug {
-                            eprintln!("[cargo-link] crate root parse failed: {err}");
-                        }
-                    }
-                    None => {
-                        if request.debug {
-                            eprintln!("[cargo-link] crate root parse panicked (skipped)");
-                        }
-                    }
-                }
-            }
+        if let Err(error) = link_cargo_dependencies(
+            primary_path,
+            &multi_sources,
+            &mut module,
+            &mut unary_methods,
+            request.debug,
+        ) {
+            report.reason_code = Some("dependency-resolution-failed".into());
+            report.reason = Some(error.clone());
+            report.error = Some(error);
+            return finalize_report(report, started, &cwd, &frontend_hash);
         }
     }
 
     // Multi-file project: parse and merge all additional source files
     if is_multi && multi_sources.len() > 1 {
-        let has_c_src = multi_sources
-            .iter()
-            .any(|(p, _)| p.ends_with(".c") || p.ends_with(".cpp"));
-        for (source_path, _source_content) in &multi_sources[1..] {
-            let path = std::path::Path::new(source_path);
-            let resolved = parser_registry::resolve_parser_id(path, request.parser);
-            let artifact = if matches!(
-                resolved,
-                parser_registry::ResolvedBuildParser::CoreIr(parser_registry::ParserId::Rust)
-            ) {
-                crate::compiler::rust_front::parse_rust_module_artifact(path)
-                    .map(Some)
-                    .map_err(parser_registry::ParserRegistryError::Msg)
-            } else {
-                parser_registry::parse_artifact_with_resolved(resolved, path)
-            };
-            if let Some(extra) = match artifact {
-                Ok(artifact) => artifact,
-                Err(error) => {
-                    let error = error.to_string();
-                    report.reason_code = Some("dependency-resolution-failed".into());
-                    report.reason = Some(error.clone());
-                    report.error = Some(error);
-                    return finalize_report(report, started, &cwd, &frontend_hash);
-                }
-            } {
-                // Empty crate name preserves direct-append naming, while keeping
-                // the same receiver/callable-origin proof checks as Cargo merges.
-                if let Err(error) = merge_retained_dependency_artifacts(
-                    &mut module,
-                    &mut unary_methods,
-                    vec![(String::new(), extra)],
-                ) {
-                    report.reason_code = Some("dependency-resolution-failed".into());
-                    report.reason = Some(error.clone());
-                    report.error = Some(error);
-                    return finalize_report(report, started, &cwd, &frontend_hash);
-                }
-            }
-        }
-        // When C/C++ sources are present: strip empty externs and
-        // dedup. Keep only .in's main and C's function bodies.
-        if has_c_src {
-            let mut c_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for decl in &module.decls {
-                if let Decl::Function { name, body, .. } = decl {
-                    if !body.is_empty() && name != "main" {
-                        c_names.insert(name.clone());
-                    }
-                }
-            }
-            let mut kept_main = false;
-            module.decls.retain(|decl| {
-                match decl {
-                    Decl::Function { name, body, .. } => {
-                        // Remove empty externs (C provides bodies, tracked by name)
-                        if body.is_empty() && c_names.contains(name) {
-                            return false;
-                        }
-                        // Remove duplicate main and synthetic C entry wrappers
-                        if name == "main" {
-                            if kept_main {
-                                return false;
-                            }
-                            kept_main = true;
-                        }
-                        true
-                    }
-                    _ => true,
-                }
-            });
+        if let Err(error) = merge_additional_sources(
+            &multi_sources,
+            request.parser,
+            &mut module,
+            &mut unary_methods,
+        ) {
+            report.reason_code = Some("dependency-resolution-failed".into());
+            report.reason = Some(error.clone());
+            report.error = Some(error);
+            return finalize_report(report, started, &cwd, &frontend_hash);
         }
     }
 
@@ -616,35 +460,9 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         report.call_edge_count = verify_report.call_edges.len();
     }
 
-    if reuse_cache && let Some(mut cached) = compile_cache::read_cached_report(&cwd, &frontend_hash)
-    {
-        let requested_out = request.out.as_ref().map(|path| path.display().to_string());
-        let cached_out = cached
-            .executable_path
-            .clone()
-            .or_else(|| cached.artifact_path.clone());
-        if cached.target == target_label(request.target)
-            && cached.entry == request.entry
-            && cached.target_triple == request.target_triple
-            && cached.module_id == request.module_id
-            && cached.linkage == linkage_label(request.linkage)
-            && emit_label(request.emit.as_ref()) == emit_label(None)
-            && requested_out == cached_out
-        {
-            // Report-only cache must still materialize artifacts; missing out files
-            // force a full rebuild so product link steps don't see a green phantom.
-            let artifact_present = requested_out
-                .as_ref()
-                .map(|p| std::path::Path::new(p).is_file())
-                .unwrap_or(true);
-            if artifact_present {
-                cached.cache_hit = true;
-                cached.jobs = jobs;
-                cached.timing_micros = started.elapsed().as_micros();
-                cached.timing_waves_us = Some(timing_waves_for_jobs(jobs, cached.timing_micros));
-                cached.frontend_hash = Some(frontend_hash);
-                return cached;
-            }
+    if reuse_cache {
+        if let Some(cached) = check_cached_report(request, &cwd, &frontend_hash, jobs, started) {
+            return cached;
         }
     }
 
@@ -885,6 +703,221 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     }
 
     finalize_report(report, started, &cwd, &frontend_hash)
+}
+
+fn discover_multi_sources(path: &std::path::Path) -> Vec<(String, String)> {
+    let mut multi_sources = Vec::new();
+    if let Ok(dir) = std::fs::read_dir(path) {
+        for entry in dir.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    if ext == "in" || ext == "c" || ext == "cpp" || ext == "rs" {
+                        if let Ok(src) = std::fs::read_to_string(&path) {
+                            multi_sources.push((path.to_string_lossy().to_string(), src));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    multi_sources
+}
+
+fn check_cached_report(
+    request: &OwnedCompileRequest,
+    cwd: &std::path::Path,
+    frontend_hash: &str,
+    jobs: usize,
+    started: Instant,
+) -> Option<OwnedCompileReport> {
+    if let Some(mut cached) = compile_cache::read_cached_report(cwd, frontend_hash) {
+        let requested_out = request.out.as_ref().map(|path| path.display().to_string());
+        let cached_out = cached
+            .executable_path
+            .clone()
+            .or_else(|| cached.artifact_path.clone());
+        if cached.target == target_label(request.target)
+            && cached.entry == request.entry
+            && cached.target_triple == request.target_triple
+            && cached.module_id == request.module_id
+            && cached.linkage == linkage_label(request.linkage)
+            && emit_label(request.emit.as_ref()) == emit_label(None)
+            && requested_out == cached_out
+        {
+            let artifact_present = requested_out
+                .as_ref()
+                .map(|p| std::path::Path::new(p).is_file())
+                .unwrap_or(true);
+            if artifact_present {
+                cached.cache_hit = true;
+                cached.jobs = jobs;
+                cached.timing_micros = started.elapsed().as_micros();
+                cached.timing_waves_us = Some(timing_waves_for_jobs(jobs, cached.timing_micros));
+                cached.frontend_hash = Some(frontend_hash.to_string());
+                return Some(cached);
+            }
+        }
+    }
+    None
+}
+
+fn link_cargo_dependencies(
+    primary_path: &Path,
+    multi_sources: &[(String, String)],
+    module: &mut crate::core_ir::UnifiedModule,
+    unary_methods: &mut crate::boundary_ir::UnaryMethodBindings,
+    debug: bool,
+) -> Result<(), String> {
+    let project_dir = crate::cargo_linker::find_crate_dir(primary_path).unwrap_or_else(|| {
+        primary_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf()
+    });
+    let skip_deps = std::env::var_os("IN_CARGO_LINK")
+        .map(|v| v == "0")
+        .unwrap_or(false);
+    let deps = if skip_deps {
+        Vec::new()
+    } else {
+        std::thread::Builder::new()
+            .name("in-cargo-link".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn({
+                let project_dir = project_dir.clone();
+                move || crate::cargo_linker::compile_cargo_dependency_artifacts(&project_dir)
+            })
+            .ok()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default()
+    };
+    if debug {
+        eprintln!("[cargo-link] {} dependency crates", deps.len());
+    }
+    if !deps.is_empty() {
+        merge_retained_dependency_artifacts(module, unary_methods, deps)?;
+    }
+    // Also compile the crate's library root (lib.rs) to make crate-local
+    // functions available (e.g. inauguration::agent_mode::analyze_path)
+    let crate_root = crate::cargo_linker::find_crate_root(&project_dir);
+    if let Ok(ref root) = crate_root {
+        // Directory inputs already schedule each listed source for its normal
+        // parse stage. Do not reload the exact same crate root as a dependency.
+        let canonical_root = root.canonicalize().ok();
+        let root_in_inputs = std::iter::once(primary_path)
+            .chain(multi_sources.iter().map(|(path, _)| Path::new(path)))
+            .any(|source| {
+                source == root
+                    || canonical_root
+                        .as_ref()
+                        .is_some_and(|root| source.canonicalize().ok().as_ref() == Some(root))
+            });
+        if !root_in_inputs && debug {
+            eprintln!("[cargo-link] crate root {}", root.display());
+        }
+        if !root_in_inputs {
+            let root_path = root.clone();
+            let parsed = std::thread::Builder::new()
+                .name("in-crate-root".into())
+                .stack_size(32 * 1024 * 1024)
+                .spawn(move || crate::compiler::rust_front::parse_rust_artifact(&root_path))
+                .and_then(|h| h.join().map_err(|_| std::io::Error::other("join")))
+                .ok();
+            match parsed {
+                Some(Ok(crate_module)) => {
+                    let crate_name = crate::cargo_linker::crate_package_name(&project_dir)
+                        .or_else(|| {
+                            project_dir
+                                .file_stem()
+                                .map(|s| s.to_string_lossy().into_owned())
+                        })
+                        .unwrap_or_default();
+                    merge_retained_dependency_artifacts(
+                        module,
+                        unary_methods,
+                        vec![(crate_name, crate_module)],
+                    )?;
+                }
+                Some(Err(err)) => {
+                    if debug {
+                        eprintln!("[cargo-link] crate root parse failed: {err}");
+                    }
+                }
+                None => {
+                    if debug {
+                        eprintln!("[cargo-link] crate root parse panicked (skipped)");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_additional_sources(
+    multi_sources: &[(String, String)],
+    parser: parser_registry::ParserCli,
+    module: &mut crate::core_ir::UnifiedModule,
+    unary_methods: &mut crate::boundary_ir::UnaryMethodBindings,
+) -> Result<(), String> {
+    let has_c_src = multi_sources
+        .iter()
+        .any(|(p, _)| p.ends_with(".c") || p.ends_with(".cpp"));
+    for (source_path, _source_content) in &multi_sources[1..] {
+        let path = std::path::Path::new(source_path);
+        let resolved = parser_registry::resolve_parser_id(path, parser);
+        let artifact = if matches!(
+            resolved,
+            parser_registry::ResolvedBuildParser::CoreIr(parser_registry::ParserId::Rust)
+        ) {
+            crate::compiler::rust_front::parse_rust_module_artifact(path)
+                .map(Some)
+                .map_err(parser_registry::ParserRegistryError::Msg)
+        } else {
+            parser_registry::parse_artifact_with_resolved(resolved, path)
+        };
+        if let Some(extra) = artifact.map_err(|e| e.to_string())? {
+            merge_retained_dependency_artifacts(
+                module,
+                unary_methods,
+                vec![(String::new(), extra)],
+            )?;
+        }
+    }
+    // When C/C++ sources are present: strip empty externs and
+    // dedup. Keep only .in's main and C's function bodies.
+    if has_c_src {
+        let mut c_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for decl in &module.decls {
+            if let Decl::Function { name, body, .. } = decl {
+                if !body.is_empty() && name != "main" {
+                    c_names.insert(name.clone());
+                }
+            }
+        }
+        let mut kept_main = false;
+        module.decls.retain(|decl| {
+            match decl {
+                Decl::Function { name, body, .. } => {
+                    // Remove empty externs (C provides bodies, tracked by name)
+                    if body.is_empty() && c_names.contains(name) {
+                        return false;
+                    }
+                    // Remove duplicate main and synthetic C entry wrappers
+                    if name == "main" {
+                        if kept_main {
+                            return false;
+                        }
+                        kept_main = true;
+                    }
+                    true
+                }
+                _ => true,
+            }
+        });
+    }
+    Ok(())
 }
 
 fn merge_retained_dependency_artifacts(
