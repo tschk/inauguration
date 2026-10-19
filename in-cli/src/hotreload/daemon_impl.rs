@@ -182,10 +182,6 @@ impl SilGraphDetail {
         Self::from_call_edges_with_source(call_edges, SilGraphSource::Subset)
     }
 
-    fn from_swiftc_call_edges(call_edges: Vec<(String, String)>) -> Self {
-        Self::from_call_edges_with_source(call_edges, SilGraphSource::Swiftc)
-    }
-
     fn from_call_edges_with_source(
         call_edges: Vec<(String, String)>,
         nonzero_source: SilGraphSource,
@@ -392,19 +388,11 @@ fn classify_change(path: &str, graph: &mut QueryGraph) -> Vec<String> {
     combined
 }
 
-fn compile_check_swift(_path: &Path) -> bool {
-    true
-}
-
-fn graph_detail_from_sil(sil: &str, swiftc: bool) -> SilGraphDetail {
+fn graph_detail_from_sil(sil: &str) -> SilGraphDetail {
     let artifact = hybrid_sil::parse_textual_sil(sil);
     let cleaned = hybrid_sil::remove_debug_insts(&artifact);
     let call_edges = hybrid_sil::extract_call_graph(&cleaned).call_edges;
-    if swiftc {
-        SilGraphDetail::from_swiftc_call_edges(call_edges)
-    } else {
-        SilGraphDetail::from_call_edges(call_edges)
-    }
+    SilGraphDetail::from_call_edges(call_edges)
 }
 
 fn sil_subset_graph_detail(path: &Path) -> SilGraphDetail {
@@ -412,7 +400,7 @@ fn sil_subset_graph_detail(path: &Path) -> SilGraphDetail {
     match parser_registry::parse_with_resolved(resolved, path) {
         Ok(Some(module)) => {
             let sil = crate::compiler::driver::lower_unified_module(&module, "App");
-            graph_detail_from_sil(&sil, false)
+            graph_detail_from_sil(&sil)
         }
         _ => SilGraphDetail::unavailable(SilGraphSource::NonSwift),
     }
@@ -428,17 +416,9 @@ pub fn compile_check(path: &Path) -> bool {
     if !path.exists() {
         return false;
     }
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if ext == "swift" {
-        return compile_check_swift(path);
-    }
     let resolved = parser_registry::resolve_parser_id(path, ParserCli::Auto);
     match resolved {
-        ResolvedBuildParser::Swift => compile_check_swift(path),
+        ResolvedBuildParser::Swift => true,
         ResolvedBuildParser::CoreIr(_) => parser_registry::parse_with_resolved(resolved, path)
             .map(|m| m.is_some())
             .unwrap_or(false),
@@ -860,18 +840,6 @@ mod tests {
         assert_eq!(graph.reason_tag(), "sil_graph=subset_unavailable");
     }
 
-    #[test]
-    fn swiftc_graph_detail_has_distinct_source_tags() {
-        let graph = SilGraphDetail::from_swiftc_call_edges(vec![(
-            "main".to_string(),
-            "helper".to_string(),
-        )]);
-        assert_eq!(graph.reason_tag(), "sil_graph=swiftc");
-        assert_eq!(graph.edge_count(), Some(1));
-        let empty = SilGraphDetail::from_swiftc_call_edges(vec![]);
-        assert_eq!(empty.reason_tag(), "sil_graph=swiftc_zero_edges");
-        assert_eq!(empty.edge_count(), Some(0));
-    }
 
     #[test]
     fn content_view_prefers_view_body_patch() {

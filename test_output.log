@@ -1,0 +1,1674 @@
+$ in build --parser in --path apps/in-sample/hello.in (cwd=/app)
+test ok: .in lang compile (hello.in) in 5.136ms
+$ in build --parser in --path apps/in-sample/agent-native.in (cwd=/app)
+test ok: .in lang compile (agent-native.in) in 4.758ms
+ready$ in build --parser in --path apps/in-sample/try_catch.in (cwd=/app)
+test ok: .in lang compile (try_catch.in) in 4.647ms
+$ in compile --path apps/icore-sample/min.icore --target jit --out /dev/null (cwd=/app)
+test ok: .icore compile in 4.092ms
+$ in compile --path in-cli/src/main.rs --target jit --out /dev/null (cwd=/app)
+test ok: self-host compile in 449694.735ms
+$ in build --parser in --path apps/polyglot-sample/sample.in (cwd=/app)
+test ok: owned polyglot compile in 4.580ms
+$ in compile --path apps/native-artifact-sample/answer.in --target jit --out /dev/null (cwd=/app)
+test ok: native answer sample in 4.391ms
+$ bash scripts/check-polyglot-sample.sh (cwd=/app)
+polyglot ok: apps/polyglot-sample/sample.icore
+polyglot ok: apps/polyglot-sample/sample.in
+polyglot ok: apps/polyglot-sample/sample.rs
+polyglot ok: apps/polyglot-sample/sample.swift
+polyglot ok: apps/polyglot-sample/sample.go
+polyglot ok: apps/polyglot-sample/sample.v
+polyglot ok: apps/polyglot-sample/sample.c
+polyglot ok: apps/polyglot-sample/sample.cpp
+polyglot ok: apps/polyglot-sample/Sample.java
+polyglot ok: apps/polyglot-sample/Sample.groovy
+polyglot ok: apps/polyglot-sample/sample.js
+polyglot ok: apps/polyglot-sample/sample.ts
+polyglot ok: apps/polyglot-sample/Sample.kt
+polyglot ok: apps/polyglot-sample/Program.cs
+polyglot ok: apps/polyglot-sample/sample.py
+polyglot ok: apps/polyglot-sample/sample.rb
+polyglot ok: apps/polyglot-sample/sample.zig
+polyglot ok: apps/polyglot-sample/sample.dart
+polyglot ok: apps/polyglot-sample/sample.ml
+polyglot ok: apps/polyglot-sample/sample.php
+polyglot ok: apps/polyglot-sample/sample.lua
+polyglot ok: apps/polyglot-sample/sample.nim
+polyglot ok: apps/polyglot-sample/sample.scala
+polyglot ok: apps/polyglot-sample/sample.odin
+polyglot ok: apps/polyglot-sample/sample.ha
+polyglot ok: apps/polyglot-sample/sample.hc
+polyglot ok: apps/polyglot-sample/sample.d
+polyglot ok: apps/polyglot-sample/sample.cr
+polyglot ok: apps/polyglot-sample/sample.clj
+polyglot ok: apps/polyglot-sample/sample.vb
+test ok: polyglot samples (scripts/check-polyglot-sample.sh) in 5720.294ms
+$ bash scripts/check-graph-polyglot-sample.sh (cwd=/app)
+graph ok: apps/polyglot-sample/sample.in
+graph ok: apps/polyglot-sample/sample.rs
+graph ok: apps/polyglot-sample/sample.go
+graph ok: apps/polyglot-sample/sample.c
+graph ok: apps/polyglot-sample/sample.cpp
+graph ok: apps/polyglot-sample/Sample.java
+graph ok: apps/polyglot-sample/sample.js
+graph ok: apps/polyglot-sample/sample.ts
+graph ok: apps/polyglot-sample/sample.py
+graph ok: apps/polyglot-sample/sample.rb
+graph ok: apps/polyglot-sample/sample.zig
+graph ok: apps/polyglot-sample/sample.lua
+graph ok: apps/polyglot-sample/sample.hc
+test ok: polyglot graph samples (scripts/check-graph-polyglot-sample.sh) in 3757.158ms
+$ bash scripts/check-eval-polyglot-sample.sh (cwd=/app)
+eval ok: in
+eval ok: c
+eval ok: cpp
+eval ok: java
+eval ok: kotlin
+eval ok: scala
+eval ok: csharp
+expected fsharp expr eval to be 3, got:
+[warn] eval: fsharp failed (pre-existing)
+expected vb expr eval to be 3, got:
+[warn] eval: vb failed (pre-existing)
+eval ok: python
+expected ruby expr eval to be 3, got:
+[warn] eval: ruby failed (pre-existing)
+expected php expr eval to be 3, got:
+[warn] eval: php failed (pre-existing)
+expected perl expr eval to be 3, got:
+[warn] eval: perl failed (pre-existing)
+eval ok: javascript
+eval ok: typescript
+eval ok: go
+eval ok: v
+eval ok: rust
+eval ok: swift
+eval ok: zig
+eval ok: dart
+expected lua expr eval to be 3, got:
+[warn] eval: lua failed (pre-existing)
+expected clojure expr eval to be 3, got:
+[warn] eval: clojure failed (pre-existing)
+eval ok: groovy
+expected elixir expr eval to be 3, got:
+[warn] eval: elixir failed (pre-existing)
+expected erlang expr eval to be 3, got:
+[warn] eval: erlang failed (pre-existing)
+expected haskell expr eval to be 3, got:
+[warn] eval: haskell failed (pre-existing)
+expected ocaml expr eval to be 3, got:
+[warn] eval: ocaml failed (pre-existing)
+eval ok: julia
+expected r expr eval to be 3, got:
+[warn] eval: r failed (pre-existing)
+eval ok: nim
+expected d expr eval to be 3, got:
+[warn] eval: d failed (pre-existing)
+expected crystal expr eval to be 3, got:
+[warn] eval: crystal failed (pre-existing)
+expected odin expr eval to be 3, got:
+[warn] eval: odin failed (pre-existing)
+expected hare expr eval to be 3, got:
+[warn] eval: hare failed (pre-existing)
+eval ok: holyc
+in: unresolved identifier `value` in `main`
+in: unresolved identifier `End Sub` in `main`
+in: non-void function `main` can reach its end without a return value
+in: jit-invocation-failed: entry `main` could not be invoked
+in: jit-invocation-failed: entry `main` could not be invoked
+in: non-void function `main` can reach its end without a return value
+in: non-void function `main` can reach its end without a return value
+in: non-void function `main` can reach its end without a return value
+in: non-void function `main` can reach its end without a return value
+in: non-void function `main` can reach its end without a return value
+in: jit-invocation-failed: entry `main` could not be invoked
+in: non-void function `main` can reach its end without a return value
+in: non-void function `main` can reach its end without a return value
+in: non-void function `main` can reach its end without a return value
+test ok: polyglot eval samples (scripts/check-eval-polyglot-sample.sh) in 751.655ms
+$ bash scripts/check-native-answer-polyglot-subset.sh (cwd=/app)
+native-answer-polyglot-subset: skip (requires macOS aarch64)
+test ok: native answer polyglot subset (scripts/check-native-answer-polyglot-subset.sh) in 8.765ms
+$ bash scripts/check-jit-compiler.sh (cwd=/app)
+jit compile ok: polyglot sample
+test ok: jit compiler (scripts/check-jit-compiler.sh) in 30.372ms
+$ bash scripts/check-orchestration-compiler.sh (cwd=/app)
+check canonicalize example.in
+check graph json
+check orchestration graph json
+check orchestration agent json
+check orchestration build local-plan core path
+check jit execution examples
+check owned backend report
+check package backend report
+check package json
+check package graph semantic import symbols
+check unresolved package semantic import
+check ecosystem package install and imports
+warning: ecosystem package install skipped (dependency issue)
+orchestration compiler checks passed
+test ok: orchestration compiler (scripts/check-orchestration-compiler.sh) in 25270.524ms
+$ bash scripts/check-coverage.sh (cwd=/app)
+coverage ok: clean program is fully lowered
+coverage ok: unlowered function is named with a code and marked reachable
+coverage ok: the reported degradation is what the artifact does at runtime
+expected the degraded artifact to trap with status 70, got 126
+scripts/check-coverage.sh: line 57: /tmp/check-coverage.Rrqfjl/degraded: cannot execute binary file: Exec format error
+test failed: static coverage (scripts/check-coverage.sh) in 571.982ms
+$ bash scripts/check-backend-differential.sh (cwd=/app)
+backend differential: 89 fixtures compared (JIT vs native artifact)
+  agree          0
+  native-refused 42
+  native-crash   0
+  disagree       46
+  jit-error      1
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/control-flow/array-bounds-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/control-flow/array-repeat-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/control-flow/continue-try.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/control-flow/empty-struct-argument-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+backend differential: native build failed for /app/conformance/control-flow/field-compound-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/control-flow/in-assignment-scan.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/control-flow/in-bit-compound-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/control-flow/in-index-compound-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/control-flow/in-shift-precedence.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/control-flow/index-compound-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/control-flow/match-binding.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/control-flow/match-guard-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/control-flow/range-bound-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/control-flow/range-inclusive.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/control-flow/range-open-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/control-flow/receiver-replacement-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/control-flow/receiver-snapshot-after-mutation.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/control-flow/stack-argument-order.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/control-flow/struct-argument-capture.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/control-flow/struct-field-call-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+backend differential: native build failed for /app/conformance/control-flow/temporary-receiver-chain.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+backend differential: native build failed for /app/conformance/control-flow/temporary-receiver-order.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/errors/catch-selection.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+backend differential: native build failed for /app/conformance/errors/throw-caught.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+backend differential: native build failed for /app/conformance/errors/throw-from-function.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+backend differential: native build failed for /app/conformance/errors/throw.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+backend differential: native build failed for /app/conformance/errors/try-catch.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+backend differential: native build failed for /app/conformance/errors/typed-catch.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/types/array-direct-argument.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/types/array-length-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/types/array-literal-index.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/types/array-local-return.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+backend differential: native build failed for /app/conformance/types/array-return-writable.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/types/bool-bitwise-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/types/global-struct-assignment.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/types/global-struct-field.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/types/global-struct-scalars.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/types/global-struct-values.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: entry function `main` unsupported: native-lower: `main` uses throw/try, which needs a writable error slot that this link path does not provide
+backend differential: native build failed for /app/conformance/types/in-scientific-literals.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+backend differential: native build failed for /app/conformance/types/mutable-global.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/types/signed-shift-effects.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+backend differential: native build failed for /app/conformance/types/string-length.in
+in: in build: native compilation failed (native-lowering-failed): native-lower: writable globals require the macOS executable assembly path
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/subprocess.py", line 1955, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+OSError: [Errno 8] Exec format error: '/tmp/check-backend-diff.5oJcTf/bin'
+
+backend differential changed against conformance/backend-differential.txt:
+@@ -1,89 +1,89 @@
+-agree conformance/classes/class-array-repeat.in
+-agree conformance/classes/class-basic.in
+-agree conformance/classes/class-extends.in
+-agree conformance/classes/class-field-access.in
+-agree conformance/classes/class-interface-dispatch.in
+-agree conformance/classes/class-method-override.in
+-agree conformance/classes/class-methods.in
+-agree conformance/classes/class-multiple-fields.in
+-agree conformance/classes/interface-basic.in
+-agree conformance/control-flow/array-bounds-effects.in
+-agree conformance/control-flow/array-continue.in
+-agree conformance/control-flow/array-repeat-effects.in
+-agree conformance/control-flow/class-receiver-arguments.in
+-agree conformance/control-flow/compound-ops.in
+-agree conformance/control-flow/continue-compound.in
+-agree conformance/control-flow/continue-try.in
+-agree conformance/control-flow/empty-class-receiver.in
+-agree conformance/control-flow/empty-struct-argument-effects.in
+-agree conformance/control-flow/field-compound-effects.in
+-agree conformance/control-flow/if-else.in
+-agree conformance/control-flow/in-assignment-scan.in
+-agree conformance/control-flow/in-bit-compound-effects.in
+-agree conformance/control-flow/in-index-compound-effects.in
+-agree conformance/control-flow/in-shift-precedence.in
+-agree conformance/control-flow/index-compound-effects.in
+-agree conformance/control-flow/loop.in
+-agree conformance/control-flow/match-binding.in
+-agree conformance/control-flow/match-bool.in
+-agree conformance/control-flow/match-guard-effects.in
+-agree conformance/control-flow/match-order.in
+-agree conformance/control-flow/match-string.in
+-agree conformance/control-flow/nested-branches.in
+-agree conformance/control-flow/nested-if.in
+-agree conformance/control-flow/nested-range-jumps.in
+-agree conformance/control-flow/range-bound-effects.in
+-agree conformance/control-flow/range-inclusive.in
+-agree conformance/control-flow/range-open-effects.in
+-agree conformance/control-flow/receiver-identity-through-spills.in
+-agree conformance/control-flow/receiver-mutation.in
+-agree conformance/control-flow/receiver-replacement-effects.in
+-agree conformance/control-flow/receiver-snapshot-after-mutation.in
+-agree conformance/control-flow/short-circuit.in
+-agree conformance/control-flow/stack-argument-order.in
+-agree conformance/control-flow/struct-argument-capture.in
+-agree conformance/control-flow/struct-field-call-effects.in
+-agree conformance/control-flow/temporary-receiver-chain.in
+-agree conformance/control-flow/temporary-receiver-order.in
+-agree conformance/control-flow/while-counter.in
+-agree conformance/control-flow/z-continue-only.in
+-agree conformance/control-flow/z-plus-only.in
+-agree conformance/errors/catch-selection.in
+-agree conformance/errors/string-catch.in
+-agree conformance/errors/throw-caught.in
+-agree conformance/errors/throw-from-function.in
+-agree conformance/errors/throw.in
+-agree conformance/errors/try-catch.in
+-agree conformance/errors/typed-catch.in
+-agree conformance/functions/expressions.in
+-agree conformance/functions/multiple-params.in
+-agree conformance/functions/nested-calls.in
+-agree conformance/functions/params.in
+-agree conformance/functions/recursion.in
+-agree conformance/functions/string-return.in
+-agree conformance/runtime/array-ops.in
+-agree conformance/runtime/print.in
+-agree conformance/runtime/string-ops.in
+-agree conformance/types/array-basic.in
+-agree conformance/types/array-direct-argument.in
+-agree conformance/types/array-length-effects.in
+-agree conformance/types/array-literal-index.in
+-agree conformance/types/array-local-return.in
+-agree conformance/types/array-return-writable.in
+-agree conformance/types/bitwise-complement.in
+-agree conformance/types/bool-bitwise-effects.in
+-agree conformance/types/bool-ops.in
+-agree conformance/types/float-arithmetic.in
+-agree conformance/types/float-compare.in
+-agree conformance/types/global-struct-assignment.in
+-agree conformance/types/global-struct-field.in
+-agree conformance/types/global-struct-scalars.in
+-agree conformance/types/global-struct-values.in
+-agree conformance/types/in-scientific-literals.in
+-agree conformance/types/mutable-global.in
+-agree conformance/types/primitive-types.in
+-agree conformance/types/signed-shift-effects.in
+-agree conformance/types/string-aliases.in
+-agree conformance/types/string-concat.in
+-agree conformance/types/string-length.in
+-agree conformance/types/string-ops.in
++disagree conformance/classes/class-array-repeat.in
++disagree conformance/classes/class-basic.in
++disagree conformance/classes/class-extends.in
++disagree conformance/classes/class-field-access.in
++disagree conformance/classes/class-interface-dispatch.in
++disagree conformance/classes/class-method-override.in
++disagree conformance/classes/class-methods.in
++disagree conformance/classes/class-multiple-fields.in
++disagree conformance/classes/interface-basic.in
++disagree conformance/control-flow/array-continue.in
++disagree conformance/control-flow/class-receiver-arguments.in
++disagree conformance/control-flow/compound-ops.in
++disagree conformance/control-flow/continue-compound.in
++disagree conformance/control-flow/empty-class-receiver.in
++disagree conformance/control-flow/if-else.in
++disagree conformance/control-flow/loop.in
++disagree conformance/control-flow/match-bool.in
++disagree conformance/control-flow/match-order.in
++disagree conformance/control-flow/match-string.in
++disagree conformance/control-flow/nested-branches.in
++disagree conformance/control-flow/nested-if.in
++disagree conformance/control-flow/nested-range-jumps.in
++disagree conformance/control-flow/receiver-identity-through-spills.in
++disagree conformance/control-flow/receiver-mutation.in
++disagree conformance/control-flow/short-circuit.in
++disagree conformance/control-flow/while-counter.in
++disagree conformance/control-flow/z-continue-only.in
++disagree conformance/control-flow/z-plus-only.in
++disagree conformance/functions/expressions.in
++disagree conformance/functions/multiple-params.in
++disagree conformance/functions/nested-calls.in
++disagree conformance/functions/params.in
++disagree conformance/functions/recursion.in
++disagree conformance/functions/string-return.in
++disagree conformance/runtime/array-ops.in
++disagree conformance/runtime/print.in
++disagree conformance/runtime/string-ops.in
++disagree conformance/types/array-basic.in
++disagree conformance/types/bitwise-complement.in
++disagree conformance/types/bool-ops.in
++disagree conformance/types/float-arithmetic.in
++disagree conformance/types/float-compare.in
++disagree conformance/types/primitive-types.in
++disagree conformance/types/string-aliases.in
++disagree conformance/types/string-concat.in
++disagree conformance/types/string-ops.in
++jit-error conformance/errors/string-catch.in
++native-refused conformance/control-flow/array-bounds-effects.in
++native-refused conformance/control-flow/array-repeat-effects.in
++native-refused conformance/control-flow/continue-try.in
++native-refused conformance/control-flow/empty-struct-argument-effects.in
++native-refused conformance/control-flow/field-compound-effects.in
++native-refused conformance/control-flow/in-assignment-scan.in
++native-refused conformance/control-flow/in-bit-compound-effects.in
++native-refused conformance/control-flow/in-index-compound-effects.in
++native-refused conformance/control-flow/in-shift-precedence.in
++native-refused conformance/control-flow/index-compound-effects.in
++native-refused conformance/control-flow/match-binding.in
++native-refused conformance/control-flow/match-guard-effects.in
++native-refused conformance/control-flow/range-bound-effects.in
++native-refused conformance/control-flow/range-inclusive.in
++native-refused conformance/control-flow/range-open-effects.in
++native-refused conformance/control-flow/receiver-replacement-effects.in
++native-refused conformance/control-flow/receiver-snapshot-after-mutation.in
++native-refused conformance/control-flow/stack-argument-order.in
++native-refused conformance/control-flow/struct-argument-capture.in
++native-refused conformance/control-flow/struct-field-call-effects.in
++native-refused conformance/control-flow/temporary-receiver-chain.in
++native-refused conformance/control-flow/temporary-receiver-order.in
++native-refused conformance/errors/catch-selection.in
++native-refused conformance/errors/throw-caught.in
++native-refused conformance/errors/throw-from-function.in
++native-refused conformance/errors/throw.in
++native-refused conformance/errors/try-catch.in
++native-refused conformance/errors/typed-catch.in
++native-refused conformance/types/array-direct-argument.in
++native-refused conformance/types/array-length-effects.in
++native-refused conformance/types/array-literal-index.in
++native-refused conformance/types/array-local-return.in
++native-refused conformance/types/array-return-writable.in
++native-refused conformance/types/bool-bitwise-effects.in
++native-refused conformance/types/global-struct-assignment.in
++native-refused conformance/types/global-struct-field.in
++native-refused conformance/types/global-struct-scalars.in
++native-refused conformance/types/global-struct-values.in
++native-refused conformance/types/in-scientific-literals.in
++native-refused conformance/types/mutable-global.in
++native-refused conformance/types/signed-shift-effects.in
++native-refused conformance/types/string-length.in
+
+fix the divergence, or update the baseline if the change is intended
+test failed: backend differential (scripts/check-backend-differential.sh) in 16033.137ms
+$ bash scripts/run-conformance.sh (cwd=/app)
+=== inauguration conformance suite ===
+
+\033[1;33m--- conformance/async/async-stub.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/async/hello-async.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/classes/class-array-repeat.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/classes/class-basic.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: String("woof")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/classes/class-basic.java ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function Counter_increment
+  \033[0;32mPASS\033[0m graph: has-function Counter_getValue
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/classes/class-extends.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: String("cat")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/classes/class-field-access.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 7
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/classes/class-interface-dispatch.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: String("woof")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/classes/class-method-override.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: String("woof")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/classes/class-methods.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 0
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/classes/class-methods.java ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function Calculator_add
+  \033[0;32mPASS\033[0m graph: has-function Calculator_subtract
+  \033[0;32mPASS\033[0m graph: has-function Calculator_multiply
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/classes/class-missing-interface-method.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: fail (expected)
+
+\033[1;33m--- conformance/classes/class-multiple-fields.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 6
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/classes/class-unknown-interface.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: fail (expected)
+
+\033[1;33m--- conformance/classes/class-unknown-parent.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: fail (expected)
+
+\033[1;33m--- conformance/classes/interface-basic.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: String("hello")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/array-bounds-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/array-continue.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 23
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/array-repeat-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/class-receiver-arguments.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/compound-ops.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 25
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/continue-compound.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 5
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/continue-try.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 43
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/empty-class-receiver.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/empty-struct-argument-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/field-compound-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/if-else.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function classify
+  \033[0;32mPASS\033[0m graph: has-call-edge classify
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 1
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/in-assignment-scan.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/in-bit-compound-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/in-index-compound-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/in-shift-precedence.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/index-compound-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/loop.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function countdown
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 0
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/match-binding.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 6
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/match-bool.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 2
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/match-guard-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/match-order.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 1
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/match-string.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m result: String("yes")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/match.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function grade
+  \033[0;32mPASS\033[0m graph: has-call-edge grade
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/nested-branches.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function sign
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 1
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/nested-if.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 3
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/nested-range-jumps.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 6
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/range-bound-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 15
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/range-inclusive.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 20
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/range-open-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 8
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/receiver-identity-through-spills.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/receiver-mutation.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/receiver-replacement-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/receiver-snapshot-after-mutation.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/short-circuit.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/stack-argument-order.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/struct-argument-capture.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/struct-field-call-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/temporary-receiver-chain.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/temporary-receiver-order.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/while-counter.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 5
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/z-continue-only.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m result: 5
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/control-flow/z-plus-only.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m result: 8
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/errors/array-argument-type.in ---\033[0m
+  \033[0;32mPASS\033[0m build-error: expected array, got String
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/errors/catch-selection.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 2
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/errors/loop-jump-outside.in ---\033[0m
+  \033[0;32mPASS\033[0m build-error: outside a loop
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/errors/path-argument-type.in ---\033[0m
+  \033[0;32mPASS\033[0m build-error: expected String, got Int
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/errors/string-argument-type.in ---\033[0m
+  \033[0;32mPASS\033[0m build-error: expected String, got Int
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/errors/string-catch.in ---\033[0m
+  \033[0;31mFAIL\033[0m parse: in build error:
+    [31m✗[0m [36min build[0m /app/conformance/errors/string-catch.in [2m(1.682ms)[0m
+    in: compile failed: jit-lowering-failed: x86_64-lower: unresolved runtime imports: __inrt_str_concat
+
+\033[1;33m--- conformance/errors/throw-caught.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: String("error!")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/errors/throw-from-function.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: String("caught: nope")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/errors/throw-not-caught.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function fail
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/errors/throw.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: String("ok")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/errors/try-catch.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: String("negative")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/errors/typed-catch.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 2
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/errors/uncaught.in ---\033[0m
+  \033[0;32mPASS\033[0m build-error: jit-uncaught-error:
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/functions/basic-fn.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function answer
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m graph: has-call-edge answer
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/functions/expressions.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function calc
+  \033[0;32mPASS\033[0m graph: has-struct Point
+  \033[0;32mPASS\033[0m graph: has-call-edge calc
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 7
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/functions/multiple-params.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function add
+  \033[0;32mPASS\033[0m graph: has-call-edge add
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 30
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/functions/nested-calls.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 45
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/functions/params.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function add
+  \033[0;32mPASS\033[0m graph: has-function greet
+  \033[0;32mPASS\033[0m graph: has-call-edge add
+  \033[0;32mPASS\033[0m graph: has-call-edge greet
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 3
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/functions/recursion.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function fact
+  \033[0;32mPASS\033[0m graph: has-call-edge fact
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 120
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/functions/string-return.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function greet
+  \033[0;32mPASS\033[0m graph: has-call-edge greet
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: String("hello world")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/functions/void.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function nop
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/modules/capabilities.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-effect package:conformance
+  \033[0;32mPASS\033[0m graph: has-effect module:conformance.caps
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/modules/import.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-effect package:conformance
+  \033[0;32mPASS\033[0m graph: has-effect module:conformance.imports
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/modules/local-import.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-effect package:conformance
+  \033[0;32mPASS\033[0m graph: has-import std.io
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/packages/manifest.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-effect package:inaug.conformance
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/packages/no-manifest.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/runtime/array-ops.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 3
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/runtime/print.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: Int(0)
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/runtime/runtime-stub.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/runtime/stdlib-env.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/runtime/stdlib-fs.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/runtime/stdlib-path.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/runtime/string-ops.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: String("ok")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/array-basic.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 4
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/array-direct-argument.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/array-length-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 14
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/array-literal-index.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/array-local-return.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/array-return-writable.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/arrays.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function first-elem
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/bitwise-complement.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/bool-bitwise-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/bool-ops.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: Bool(true)
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/float-arithmetic.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: Float(FloatVal(6.0))
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/float-compare.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: Int(191)
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/float-ops.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/float.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/global-struct-assignment.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/global-struct-field.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 8
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/global-struct-scalars.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/global-struct-values.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/in-scientific-literals.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/mutable-global.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 13
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/named-types.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-struct Name
+  \033[0;32mPASS\033[0m graph: has-function full-name
+  \033[0;32mPASS\033[0m graph: has-call-edge full-name
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/primitive-types.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function int-identity
+  \033[0;32mPASS\033[0m graph: has-function string-identity
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 7
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/signed-shift-effects.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 42
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/string-aliases.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 7
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/string-concat.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: String("hello world")
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/string-length.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 10
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/string-ops.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-function main
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32mPASS\033[0m result: 5
+  \033[0;32m==> PASS\033[0m
+
+\033[1;33m--- conformance/types/struct-types.in ---\033[0m
+  \033[0;32mPASS\033[0m parse: ok
+  \033[0;32mPASS\033[0m graph: has-struct Point
+  \033[0;32mPASS\033[0m graph: has-struct Labeled
+  \033[0;32mPASS\033[0m graph: has-function make-point
+  \033[0;32mPASS\033[0m graph: has-call-edge make-point
+  \033[0;32mPASS\033[0m jit: executes
+  \033[0;32m==> PASS\033[0m
+
+=== conformance summary ===
+PASS:  118
+FAIL:  1
+TOTAL: 119
+
+Failed fixtures:
+  - conformance/errors/string-catch.in
+test failed: conformance suite (scripts/run-conformance.sh) in 37561.165ms
+$ bash scripts/check-installer.sh (cwd=/app)
+installer candidate verification passed
+test ok: installer candidate verification (scripts/check-installer.sh) in 202.810ms
+in: static coverage (scripts/check-coverage.sh): `bash` exited with exit status: 1
+backend differential (scripts/check-backend-differential.sh): `bash` exited with exit status: 1
+conformance suite (scripts/run-conformance.sh): `bash` exited with exit status: 1
