@@ -129,3 +129,7 @@ harness = false
 [[bench]]
 name = "lower_core"
 harness = false
+
+[[bench]]
+name = "lower_core_desugar_class"
+harness = false
