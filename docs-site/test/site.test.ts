@@ -55,3 +55,22 @@ test("GET unknown path returns 404", async () => {
   const res = await fetch(`${base}/does-not-exist`);
   expect(res.status).toBe(404);
 });
+
+test("GET handles URL parsing edge cases", async () => {
+  const res1 = await fetch(`${base}`);
+  expect(res1.status).toBe(200);
+  const res2 = await fetch(`${base}/?foo=bar`);
+  expect(res2.status).toBe(200);
+  const res3 = await fetch(`${base}/#baz`);
+  expect(res3.status).toBe(200);
+  const res4 = await fetch(`${base}/?foo=bar#baz`);
+  expect(res4.status).toBe(200);
+  const res5 = await fetch(`${base}/static/favicon.svg?foo=bar`);
+  expect(res5.status).toBe(200);
+  const res6 = await fetch(`${base}/static/favicon.svg#baz`);
+  expect(res6.status).toBe(200);
+  const res7 = await fetch(`${base}/static/favicon.svg?foo=bar#baz`);
+  expect(res7.status).toBe(200);
+  const res8 = await fetch(`${base}/static/favicon.svg///`);
+  expect(res8.status).toBe(200);
+});
