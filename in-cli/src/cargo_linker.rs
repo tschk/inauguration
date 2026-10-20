@@ -1100,6 +1100,43 @@ mod retained_artifact_tests {
     }
 
     #[test]
+    fn test_merge_dependency_modules_merges_decls_and_generates_aliases() {
+        let mut main = UnifiedModule::new(vec![callable("main_func", 1)]);
+        let dep1 = UnifiedModule::new(vec![callable("dep1_func", 2)]);
+        let dep2 = UnifiedModule::new(vec![callable("dep2_func", 3)]);
+
+        let deps = vec![("in-dep".into(), dep1), ("dep2".into(), dep2)];
+
+        merge_dependency_modules(&mut main, deps);
+
+        assert_eq!(main.decls.len(), 4);
+
+        let has_main_func = main
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "main_func"));
+        assert!(has_main_func);
+
+        let has_dep1_func = main
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "dep1_func"));
+        assert!(has_dep1_func);
+
+        let has_dep2_func = main
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "dep2_func"));
+        assert!(has_dep2_func);
+
+        let has_dep2_alias = main
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "dep2::dep2_func"));
+        assert!(has_dep2_alias);
+    }
+
+    #[test]
     fn same_named_nominals_from_different_dependencies_refuse_atomically() {
         for receiver in ["Row", "&Row", "&mut Row"] {
             let mut main = CompileArtifact::from_semantic(UnifiedModule::new(vec![record()]));
