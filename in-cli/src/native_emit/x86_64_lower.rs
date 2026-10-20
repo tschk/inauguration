@@ -2969,7 +2969,7 @@ fn lower_builtin_call(
     if ctx
         .functions
         .get(target_name)
-        .is_none_or(|function| function.body.is_empty())
+        .is_some_and(|function| !function.body.is_empty())
     {
         return Ok(false);
     }
@@ -3831,13 +3831,14 @@ fn lower_call_expr(
         super::validate_word32_scalar_signature(&function.params, &function.ret)?;
     }
 
+    let has_override = ctx
+        .functions
+        .get(&target_name)
+        .is_some_and(|function| !function.body.is_empty());
     if matches!(
         target_name.as_str(),
         "vector-push" | "vector-extend" | "vector-clear"
-    ) && ctx
-        .functions
-        .get(&target_name)
-        .is_none_or(|function| function.body.is_empty())
+    ) && !has_override
     {
         let expected_args = if target_name == "vector-clear" { 1 } else { 2 };
         if args.len() != expected_args {
