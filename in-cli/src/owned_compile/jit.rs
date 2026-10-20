@@ -449,11 +449,11 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
             Typ::Int | Typ::Bool | Typ::Float | Typ::String | Typ::Void
         )
     };
-    if entry != requested && {
+    if entry != requested {
         let requested_suffix = format!(".{requested}");
-        !entry.ends_with(&requested_suffix)
-    } {
-        return false;
+        if !entry.ends_with(&requested_suffix) {
+            return false;
+        }
     }
     let Some((params, ret)) = module.decls.iter().find_map(|decl| match decl {
         Decl::Function {

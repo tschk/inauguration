@@ -375,10 +375,12 @@ pub fn native_entry_module(module: &UnifiedModule, entry: &str) -> UnifiedModule
             let Decl::Function { name, body, .. } = decl else {
                 continue;
             };
-            if reachable.contains(name) || {
+            let mut is_reachable = reachable.contains(name);
+            if !is_reachable {
                 let name_suffix = format!("::{name}");
-                reachable.iter().any(|r| r.ends_with(&name_suffix))
-            } {
+                is_reachable = reachable.iter().any(|r| r.ends_with(&name_suffix));
+            }
+            if is_reachable {
                 collect_stmt_calls(body, &mut next);
             }
         }
@@ -393,7 +395,9 @@ pub fn native_entry_module(module: &UnifiedModule, entry: &str) -> UnifiedModule
             .iter()
             .filter(|decl| match decl {
                 Decl::Function { name, .. } => {
-                    reachable.contains(name) || {
+                    if reachable.contains(name) {
+                        true
+                    } else {
                         let name_suffix = format!("::{name}");
                         reachable.iter().any(|r| r.ends_with(&name_suffix))
                     }
