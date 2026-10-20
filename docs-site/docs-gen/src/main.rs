@@ -572,6 +572,25 @@ mod tests {
     }
 
     #[test]
+    fn test_collect_markdown_error_path() -> io::Result<()> {
+        let (src_dir, _src_guard) = make_temp_dir("collect_md_err");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let unreadable_file = src_dir.join("unreadable.md");
+            fs::write(&unreadable_file, "# unreadable")?;
+            let mut perms = fs::metadata(&unreadable_file)?.permissions();
+            perms.set_mode(0o000);
+            fs::set_permissions(&unreadable_file, perms)?;
+
+            let mut out = Vec::new();
+            let res = collect_markdown(&src_dir, &src_dir, &mut out);
+            assert!(res.is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_render_nav_nested_class() {
         let pages = vec![
             ("benchmarks/README".to_string(), "Overview".to_string()),
