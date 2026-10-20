@@ -3957,11 +3957,14 @@ fn lower_call_expr(
     if matches!(
         target_name.as_str(),
         "vector-push" | "vector-extend" | "vector-clear"
-    ) && !ctx
-        .functions
-        .get(&target_name)
-        .is_some_and(|function| !function.body.is_empty())
-    {
+    ) && {
+        #[allow(clippy::nonminimal_bool)]
+        let b = !ctx
+            .functions
+            .get(&target_name)
+            .is_some_and(|function| !function.body.is_empty());
+        b
+    } {
         let expected_args = if target_name == "vector-clear" { 1 } else { 2 };
         if args.len() != expected_args {
             return Err(format!(
