@@ -2899,6 +2899,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_optimize_with_profile() {
+        // Test that optimize_with_profile calls through correctly to linkage-aware optimization
+        // with keep_all_functions=false
+        let source = "
+        fn unused_function()->Int { return 7; }
+        fn used_function()->Int { return 35; }
+        fn main()->Int { return used_function(); }
+        ";
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+            optimize_with_profile(&mut module.decls, Some("main"), profile);
+
+            let has_main = module
+                .decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "main"));
+            let has_unused = module
+                .decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "unused_function"));
+
+            assert!(has_main, "main should be preserved in profile {profile:?}");
+            // Because keep_all_functions = false, unused_function should be removed
+            assert!(
+                !has_unused,
+                "unused_function should be removed by DCE in profile {profile:?}"
+            );
+        }
+    }
+
+    #[test]
     fn hardened_link_surfaces_preserve_exports_and_external_names() {
         let source = "extern asm fn external_answer()->Int\nfn other_export()->Int{return 20;}\nfn main()->Int{return external_answer()+other_export();}";
         for keep_all in [false, true] {
