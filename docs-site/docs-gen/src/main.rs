@@ -590,8 +590,15 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_collect_markdown_io_error() {
+        use std::os::unix::fs::PermissionsExt;
         let (src_dir, _src_guard) = make_temp_dir("src_io_error");
-        std::os::unix::fs::symlink("does_not_exist.md", src_dir.join("broken.md")).unwrap();
+
+        let file_path = src_dir.join("no_perm.md");
+        fs::write(&file_path, "test").unwrap();
+
+        let mut perms = fs::metadata(&file_path).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&file_path, perms).unwrap();
 
         let mut out = Vec::new();
         let result = collect_markdown(&src_dir, &src_dir, &mut out);
