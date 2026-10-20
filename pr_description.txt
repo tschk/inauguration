@@ -1,8 +1,0 @@
-🎯 **What:** The `fetch` handler inside `docs-site/src/server.ts` manually parses URLs via string manipulation, which is error-prone. This change adds targeted edge-case tests to `docs-site/test/site.test.ts` to ensure this parsing works correctly across various inputs.
-📊 **Coverage:** The new tests cover:
-  - URLs with query parameters (`/?query=1`)
-  - URLs with hash fragments (`/#hash`)
-  - URLs with both query parameters and hash fragments (`/?query=1#hash`)
-  - URLs with trailing slashes (`/static/favicon.svg/`)
-  - Root URLs with no trailing slash (`http://localhost`)
-✨ **Result:** Test coverage for URL edge cases has significantly increased. The manual string manipulation logic in `server.ts` is now verified, ensuring paths are correctly resolved regardless of query parameters, fragments, or trailing slashes, thereby protecting against future regressions.
