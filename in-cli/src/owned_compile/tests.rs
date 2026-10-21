@@ -3547,7 +3547,7 @@ fn owned_rust_integer_inference_executes_backward_unsigned_constraints() {
 }
 
 #[test]
-    #[ignore]
+#[ignore]
 fn owned_rust_integer_inference_keeps_valid_selfhost_compile_only() {
     if !super::jit::host_supports_jit() {
         return;
@@ -8881,7 +8881,7 @@ fn logical_not_conditions_preserve_integer_receiver_methods_and_validation() {
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 #[test]
-    #[ignore]
+#[ignore]
 fn array_literal_scalar_values_materialize_once_across_profiles() {
     use crate::emit_profile::EmitProfile;
     let mut nested = "true".to_string();
@@ -9901,7 +9901,7 @@ fn rust_private_module_function_calls_refuse_after_root_binding() {
 }
 
 #[test]
-    #[ignore]
+#[ignore]
 fn rust_explicit_generic_calls_preserve_concrete_kinds_and_scopes() {
     for source in [
         "type Byte=u8;fn choose<Byte>(value:Byte)->Byte{value}fn main()->i64{if choose::<u16>(65535u16)==65535u16 && Byte::MAX==255u8{42}else{7}}",
@@ -9989,7 +9989,7 @@ fn rust_explicit_generic_type_errors_cannot_disappear_in_cold_branches() {
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 #[test]
-    #[ignore]
+#[ignore]
 fn rust_fixed_array_copies_preserve_values_and_effects() {
     for (name, source) in [
         (
@@ -10158,7 +10158,7 @@ fn rust_fixed_array_type_errors_refuse_before_optimization() {
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 #[test]
-    #[ignore]
+#[ignore]
 fn rust_fixed_array_external_constants_keep_copy_semantics() {
     let directory = temp_path("fixed-array-external");
     fs::create_dir(&directory).unwrap();
@@ -11421,7 +11421,7 @@ fn rust_ieee_trait_static_calls_refuse_invalid_source_contracts() {
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 #[test]
-    #[ignore]
+#[ignore]
 fn rust_retained_neg_result_casts_preserve_operand_effects_once() {
     for (name, source) in [
         (
