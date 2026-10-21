@@ -591,7 +591,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     struct TempDirGuard {
         path: PathBuf,
@@ -618,6 +618,29 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn test_get_manifest_valid() {
+        let temp = TempDirGuard::new();
+        let cargo_toml = temp.path.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            "[package]\nname = \"test-pkg\"\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .unwrap();
+
+        let manifest = get_manifest(&temp.path).expect("manifest should be parsed");
+        assert_eq!(manifest.package_name, Some("test-pkg".to_string()));
+        assert_eq!(manifest.lib_path, Some("src/lib.rs".to_string()));
+    }
+
+    #[test]
+    fn test_get_manifest_missing_file() {
+        let temp = TempDirGuard::new();
+        // Do not create Cargo.toml
+        let manifest = get_manifest(&temp.path);
+        assert!(manifest.is_none());
     }
 
     #[test]
