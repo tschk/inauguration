@@ -60,8 +60,8 @@ pub(crate) fn desugar_class_declarations(module: &mut UnifiedModule) {
                         // verification, which would otherwise refuse the bare
                         // name as an unresolved symbol. Locals and params that
                         // shadow a field keep the bare name.
-                        let field_names: HashSet<String> =
-                            fields.iter().map(|(n, _)| n.clone()).collect();
+                        let field_names: HashSet<&str> =
+                            fields.iter().map(|(n, _)| n.as_str()).collect();
                         rewrite_field_refs_in_body(&mut body, &field_names);
                         new_decls.push(Decl::Function {
                             name: mangled,
@@ -479,7 +479,7 @@ fn advance_expr_continues_in_stmt(stmt: &mut Stmt, advance: &Stmt) {
 /// `self.field` (implicit this). `fields` are the enclosing class's field
 /// names; names bound by locals, params, or closures shadow fields and are
 /// left untouched.
-fn rewrite_field_refs_in_body(body: &mut [Stmt], fields: &HashSet<String>) {
+fn rewrite_field_refs_in_body(body: &mut [Stmt], fields: &HashSet<&str>) {
     let mut bound = HashSet::new();
     collect_bound_names_in_body(body, &mut bound);
     for stmt in body {
@@ -566,13 +566,13 @@ fn collect_bound_names_in_expr(expr: &Expr, bound: &mut HashSet<String>) {
     }
 }
 
-fn rewrite_field_refs_in_stmt(stmt: &mut Stmt, fields: &HashSet<String>, bound: &HashSet<String>) {
+fn rewrite_field_refs_in_stmt(stmt: &mut Stmt, fields: &HashSet<&str>, bound: &HashSet<String>) {
     match stmt {
         Stmt::Declare(_, _) => {}
         Stmt::Let(_, _, e) => rewrite_field_refs_in_expr(e, fields, bound),
         Stmt::Assign(name, e) => {
             rewrite_field_refs_in_expr(e, fields, bound);
-            if fields.contains(name) && !bound.contains(name) {
+            if fields.contains(&name.as_str()) && !bound.contains(name) {
                 let value = std::mem::replace(e, Expr::IntLit(0));
                 let field = std::mem::take(name);
                 *stmt = Stmt::FieldAssign {
@@ -644,7 +644,7 @@ fn rewrite_field_refs_in_stmt(stmt: &mut Stmt, fields: &HashSet<String>, bound: 
     }
 }
 
-fn rewrite_field_refs_in_expr(expr: &mut Expr, fields: &HashSet<String>, bound: &HashSet<String>) {
+fn rewrite_field_refs_in_expr(expr: &mut Expr, fields: &HashSet<&str>, bound: &HashSet<String>) {
     match expr {
         Expr::MatchValue { scrutinee, arms } => {
             rewrite_field_refs_in_expr(scrutinee, fields, bound);
@@ -677,7 +677,7 @@ fn rewrite_field_refs_in_expr(expr: &mut Expr, fields: &HashSet<String>, bound: 
             }
         }
         Expr::Ident(n) => {
-            if fields.contains(n) && !bound.contains(n) {
+            if fields.contains(&n.as_str()) && !bound.contains(n) {
                 let field = std::mem::take(n);
                 *expr = Expr::Field {
                     base: Box::new(Expr::Ident("self".into())),
