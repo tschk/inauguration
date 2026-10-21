@@ -591,7 +591,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     struct TempDirGuard {
         path: PathBuf,
@@ -940,6 +940,58 @@ direct_dep = { path = "direct_dep" }
         );
         assert_eq!(find_crate_root(&temp.path), Ok(second));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod merge_dependency_modules_tests {
+    use super::*;
+    use crate::core_ir::{Decl, Expr, Stmt, Typ};
+
+    fn callable(name: &str, value: i64) -> Decl {
+        Decl::Function {
+            name: name.into(),
+            params: vec![],
+            ret: Typ::Int,
+            body: vec![Stmt::Return(Some(Expr::IntLit(value)))],
+            type_params: vec![],
+        }
+    }
+
+    #[test]
+    fn test_merge_dependency_modules_basic() {
+        let mut main = UnifiedModule::new(vec![callable("main_fn", 1)]);
+        let dep1 = UnifiedModule::new(vec![callable("dep1_fn", 2)]);
+        let dep2 = UnifiedModule::new(vec![callable("in-dep2_fn", 3)]);
+
+        merge_dependency_modules(
+            &mut main,
+            vec![("dep1".to_string(), dep1), ("in-dep2".to_string(), dep2)],
+        );
+
+        assert_eq!(main.decls.len(), 4);
+
+        let mut found_main = false;
+        let mut found_dep1 = false;
+        let mut found_dep1_alias = false;
+        let mut found_indep2 = false;
+
+        for decl in &main.decls {
+            if let Decl::Function { name, .. } = decl {
+                match name.as_str() {
+                    "main_fn" => found_main = true,
+                    "dep1_fn" => found_dep1 = true,
+                    "dep1::dep1_fn" => found_dep1_alias = true,
+                    "in-dep2_fn" => found_indep2 = true,
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(found_main, "main_fn not found");
+        assert!(found_dep1, "dep1_fn not found");
+        assert!(found_dep1_alias, "dep1::dep1_fn not found");
+        assert!(found_indep2, "in-dep2_fn not found");
     }
 }
 
