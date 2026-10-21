@@ -130,7 +130,7 @@ fn is_managed_abi_type(typ: &str) -> bool {
     let base = typ.split('<').next().unwrap_or(typ).trim();
     MANAGED_ABI_TYPES
         .iter()
-        .any(|m| base.eq_ignore_ascii_case(m))
+        .any(|m| base.to_ascii_lowercase() == m.to_ascii_lowercase())
 }
 
 fn size_hint_for_type(typ: &str) -> u64 {

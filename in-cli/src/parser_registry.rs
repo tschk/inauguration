@@ -286,9 +286,9 @@ pub fn parser_id_from_magic_token(token: &str) -> Option<ParserId> {
 #[must_use]
 pub fn parser_id_from_cli_token(token: &str) -> Option<ParserId> {
     let token = token.trim();
-    if token.eq_ignore_ascii_case("in") {
+    if token == "in" || token == "In" || token == "IN" {
         Some(ParserId::In)
-    } else if token.eq_ignore_ascii_case("icore") {
+    } else if token == "icore" || token == "Icore" || token == "ICORE" {
         Some(ParserId::Icore)
     } else {
         let lower = token.to_ascii_lowercase();
@@ -360,9 +360,9 @@ pub enum ResolvedBuildParser {
 /// `IN_PARSER=in` or `IN_PARSER=icore` forces the matching Core IR front (any file path).
 fn env_core_ir_parser_override(in_parser_env: Option<&str>) -> Option<ParserId> {
     let s = in_parser_env?;
-    if s.eq_ignore_ascii_case("in") {
+    if s == "in" || s == "In" || s == "IN" {
         Some(ParserId::In)
-    } else if s.eq_ignore_ascii_case("icore") {
+    } else if s == "icore" || s == "Icore" || s == "ICORE" {
         Some(ParserId::Icore)
     } else {
         None

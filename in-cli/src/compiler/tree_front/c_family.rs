@@ -907,8 +907,8 @@ fn c_cast_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
     }
     let specifier = descriptor.child_by_field_name("type")?;
     // The C grammar exposes the reserved _Bool keyword as a type_identifier.
-    if !matches!(specifier.kind(), "primitive_type" | "sized_type_specifier")
-        && !(specifier.kind() == "type_identifier" && node_txt(src, specifier) == "_Bool")
+    if !(matches!(specifier.kind(), "primitive_type" | "sized_type_specifier")
+        || (specifier.kind() == "type_identifier" && node_txt(src, specifier) == "_Bool"))
     {
         return None;
     }
@@ -1025,7 +1025,7 @@ fn c_number_literal(text: &str) -> Option<Expr> {
     let suffix = &text[number.len()..];
     let kind = if suffix.contains(['l', 'L']) {
         None
-    } else if suffix.eq_ignore_ascii_case("u") {
+    } else if suffix == "u" || suffix == "U" {
         (0..=i64::from(u32::MAX)).contains(integer).then_some("u32")
     } else if (0..=i64::from(i32::MAX)).contains(integer) {
         Some("i32")

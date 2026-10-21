@@ -32,7 +32,7 @@ pub fn emit_label(emit: Option<&OwnedEmit>) -> String {
 pub fn path_extension_is(path: &Path, extension: &str) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+        .is_some_and(|value| value.to_ascii_lowercase() == extension.to_ascii_lowercase())
 }
 
 pub fn artifact_stem(path: &Path, fallback: &str) -> String {

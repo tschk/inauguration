@@ -586,4 +586,24 @@ mod tests {
         assert!(nav_jit_active
             .contains("<li><a href=\"jit.html\" class=\"active doc-nav-nested\">JIT</a></li>"));
     }
+
+    #[test]
+    fn test_doc_href_edge_cases() {
+        // Both in root
+        assert_eq!(doc_href("index", "about"), "about.html");
+        assert_eq!(doc_href("index", "index"), "index.html");
+
+        // From root to nested
+        assert_eq!(doc_href("index", "sub/page"), "sub/page.html");
+
+        // From nested to root
+        assert_eq!(doc_href("sub/page", "index"), "../index.html");
+
+        // Both in same nested dir
+        assert_eq!(doc_href("sub/page1", "sub/page2"), "page2.html");
+        assert_eq!(doc_href("sub/page1", "sub/page1"), "page1.html");
+
+        // In different nested dirs (max depth 1 cross-dir links, based on current implementation)
+        assert_eq!(doc_href("sub1/page1", "sub2/page2"), "../sub2/page2.html");
+    }
 }

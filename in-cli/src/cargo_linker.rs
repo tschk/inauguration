@@ -591,14 +591,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
     struct TempDirGuard {
         path: PathBuf,
     }
 
     impl TempDirGuard {
         fn new() -> Self {
+            static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
             let unique = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("system clock before UNIX_EPOCH")
@@ -676,10 +675,11 @@ libc = { path = "dummy-dep" }
 
     #[test]
     fn find_crate_dir_walks_parents() {
+        static TEMP_COUNTER2: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
             "in-crate-walk-{}-{}",
             std::process::id(),
-            TEMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+            TEMP_COUNTER2.fetch_add(1, Ordering::SeqCst)
         ));
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
