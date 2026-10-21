@@ -7384,7 +7384,8 @@ fn owned_structured_producer_field_projections_preserve_values_and_effects() {
                     assert_eq!(
                         std::process::Command::new(&artifact)
                             .status()
-                            .map(|s| s.code()).unwrap_or(Some(42)),
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42)
                     );
                     fs::remove_file(&artifact).unwrap();
@@ -7449,7 +7450,8 @@ fn owned_nested_scalar_leaf_stores_preserve_receivers_types_and_effects() {
                     assert_eq!(
                         std::process::Command::new(&artifact)
                             .status()
-                            .map(|s| s.code()).unwrap_or(Some(42)),
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42)
                     );
                     fs::remove_file(&artifact).unwrap();
@@ -9925,7 +9927,10 @@ fn rust_explicit_generic_calls_preserve_concrete_kinds_and_scopes() {
                     assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
                 } else {
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42)
                     );
                     fs::remove_file(&out).unwrap();
@@ -10071,7 +10076,10 @@ fn rust_fixed_array_copies_preserve_values_and_effects() {
                         "{name}: {report:?}"
                     );
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{name} {profile:?}"
                     );
@@ -10183,7 +10191,10 @@ fn rust_fixed_array_external_constants_keep_copy_semantics() {
                 assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{report:?}");
             } else {
                 assert_eq!(
-                    std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                    std::process::Command::new(&out)
+                        .status()
+                        .map(|s| s.code())
+                        .unwrap_or(Some(42)),
                     Some(42),
                     "{report:?}"
                 );
@@ -10333,7 +10344,10 @@ fn rust_constant_negation_preserves_cold_values_and_nominal_dispatch() {
                         Some(out.to_string_lossy().as_ref())
                     );
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{name} {profile:?}"
                     );
@@ -10486,7 +10500,10 @@ fn rust_unused_alias_declarations_preserve_valid_and_deferred_scopes() {
                     assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
                 } else {
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{source}: {report:?}"
                     );
@@ -10551,7 +10568,10 @@ fn rust_generic_alias_applications_execute_with_source_type_semantics() {
                     );
                 } else {
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{source}: {report:?}"
                     );
@@ -10680,7 +10700,10 @@ fn rust_f32_values_preserve_source_width_and_rounding() {
                     );
                 } else {
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{source}: {report:?}"
                     );
@@ -10734,7 +10757,10 @@ fn rust_f32_aggregate_values_preserve_width() {
                     );
                 } else {
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{source}: {report:?}"
                     );
@@ -10818,7 +10844,10 @@ fn rust_f32_generic_call_contexts_preserve_precision() {
                     );
                 } else {
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{source}: {report:?}"
                     );
@@ -10951,7 +10980,10 @@ fn rust_captured_match_guards_preserve_scope_and_execute() {
                     );
                 } else {
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{source} {profile:?}"
                     );
@@ -11021,7 +11053,10 @@ fn rust_integer_float_casts_preserve_precision_and_sign() {
                     );
                 } else {
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{source} {profile:?}"
                     );
@@ -11123,7 +11158,10 @@ fn rust_integer_literal_casts_infer_source_types_and_preserve_explicit_sources()
                     );
                 } else {
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{source} {profile:?}"
                     );
@@ -11257,7 +11295,10 @@ fn rust_ieee_bit_conversions_preserve_transfers_and_effects() {
                     );
                 } else {
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{source} {profile:?}"
                     );
@@ -11354,7 +11395,10 @@ fn rust_ieee_trait_static_calls_preserve_owned_scope_and_dispatch_priority() {
                     assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{source}");
                 } else {
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{source}"
                     );
@@ -11444,7 +11488,8 @@ fn rust_retained_neg_result_casts_preserve_operand_effects_once() {
                     assert_eq!(
                         std::process::Command::new(&artifact)
                             .status()
-                            .map(|s| s.code()).unwrap_or(Some(42)),
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42)
                     );
                     fs::remove_file(&artifact).unwrap();
@@ -11525,7 +11570,10 @@ fn rust_nested_function_aliases_preserve_lexical_callable_identity() {
                 } else {
                     assert!(out.is_file(), "{report:?}");
                     assert_eq!(
-                        std::process::Command::new(&out).status().map(|s| s.code()).unwrap_or(Some(42)),
+                        std::process::Command::new(&out)
+                            .status()
+                            .map(|s| s.code())
+                            .unwrap_or(Some(42)),
                         Some(42),
                         "{name} {profile:?}"
                     );
