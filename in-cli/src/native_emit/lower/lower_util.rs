@@ -65,16 +65,15 @@ pub(crate) fn find_field_offset<'a>(
     if let Some(offset) = field_map.get(name) {
         return Some(offset);
     }
+
+    let mut prefix = String::with_capacity(name.len() + 1);
+    prefix.push_str(name);
+    prefix.push('.');
+
     // Try prefix match for nested structs: "inner" → "inner.val"
     field_map
         .iter()
-        .filter_map(|(k, v)| {
-            if k.len() > name.len() && k.starts_with(name) && k.as_bytes()[name.len()] == b'.' {
-                Some(v)
-            } else {
-                None
-            }
-        })
+        .filter_map(|(k, v)| k.starts_with(&prefix).then_some(v))
         .min()
 }
 
