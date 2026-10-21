@@ -5365,6 +5365,7 @@ fn lower_expr_into(
             lower_call_expr(emitter, ctx, target_reg, callee, args, pending_calls)
         }
         Expr::StructInit { name, fields, .. } => {
+            ctx.alloc_local(name.as_str(), &Typ::Named(name.clone()))?;
             lower_struct_init(emitter, ctx, name.as_str(), fields, pending_calls)
         }
         Expr::Field { base, name, .. } => {
