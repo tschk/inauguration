@@ -572,7 +572,7 @@ fn rewrite_field_refs_in_stmt(stmt: &mut Stmt, fields: &HashSet<&str>, bound: &H
         Stmt::Let(_, _, e) => rewrite_field_refs_in_expr(e, fields, bound),
         Stmt::Assign(name, e) => {
             rewrite_field_refs_in_expr(e, fields, bound);
-            if fields.contains(name.as_str()) && !bound.contains(name) {
+            if fields.contains(&name.as_str()) && !bound.contains(name) {
                 let value = std::mem::replace(e, Expr::IntLit(0));
                 let field = std::mem::take(name);
                 *stmt = Stmt::FieldAssign {
@@ -677,7 +677,7 @@ fn rewrite_field_refs_in_expr(expr: &mut Expr, fields: &HashSet<&str>, bound: &H
             }
         }
         Expr::Ident(n) => {
-            if fields.contains(n.as_str()) && !bound.contains(n) {
+            if fields.contains(&n.as_str()) && !bound.contains(n) {
                 let field = std::mem::take(n);
                 *expr = Expr::Field {
                     base: Box::new(Expr::Ident("self".into())),
