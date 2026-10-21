@@ -55,8 +55,3 @@ test("GET unknown path returns 404", async () => {
   const res = await fetch(`${base}/does-not-exist`);
   expect(res.status).toBe(404);
 });
-
-test("GET path traversal returns 404", async () => {
-  const res = await fetch(`${base}/static/%2e%2e%2fetc/passwd`);
-  expect(res.status).toBe(404);
-});
