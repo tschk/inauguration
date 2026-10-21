@@ -3954,13 +3954,14 @@ fn lower_call_expr(
         super::validate_word32_scalar_signature(&function.params, &function.ret)?;
     }
 
+    let has_override = ctx
+        .functions
+        .get(&target_name)
+        .map_or(false, |f| !f.body.is_empty());
     if matches!(
         target_name.as_str(),
         "vector-push" | "vector-extend" | "vector-clear"
-    ) && !ctx
-        .functions
-        .get(&target_name)
-        .is_some_and(|function| !function.body.is_empty())
+    ) && !has_override
     {
         let expected_args = if target_name == "vector-clear" { 1 } else { 2 };
         if args.len() != expected_args {
@@ -5303,7 +5304,7 @@ where
             let mut index = ctx.frame_size;
             let name = loop {
                 let name = format!("__native_match_value_{index}");
-                if !ctx.locals.contains_key(&name) && !ctx.globals.contains_key(&name) {
+                if !(ctx.locals.contains_key(&name) || ctx.globals.contains_key(&name)) {
                     break name;
                 }
                 index += 1;
