@@ -650,10 +650,8 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     struct TempDirGuard {
         path: PathBuf,
@@ -669,7 +667,7 @@ mod tests {
                 "inauguration-package-lock-{}-{}-{}",
                 std::process::id(),
                 unique,
-                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+                0
             ));
             fs::create_dir_all(&path).expect("create temp dir");
             Self { path }

@@ -1,0 +1,52 @@
+--- in-cli/src/compiler/rust_front/type_aliases/generic_aliases.rs
++++ in-cli/src/compiler/rust_front/type_aliases/generic_aliases.rs
+@@ -1173,7 +1173,7 @@
+             }
+         }
+     };
+-    let parameters = parameters.map(|source| child(source)).collect();
++    let parameters = parameters.map(&mut child).collect();
+     let result = match output {
+         syn::ReturnType::Default => Typ::Void,
+         syn::ReturnType::Type(_, typ) => child(typ),
+--- in-cli/src/compiler/tree_front/c_family.rs
++++ in-cli/src/compiler/tree_front/c_family.rs
+@@ -907,8 +907,8 @@
+     }
+     let specifier = descriptor.child_by_field_name("type")?;
+     // The C grammar exposes the reserved _Bool keyword as a type_identifier.
+-    if !matches!(specifier.kind(), "primitive_type" | "sized_type_specifier")
+-        && !(specifier.kind() == "type_identifier" && node_txt(src, specifier) == "_Bool")
++    if !(matches!(specifier.kind(), "primitive_type" | "sized_type_specifier")
++        || specifier.kind() == "type_identifier" && node_txt(src, specifier) == "_Bool")
+     {
+         return None;
+     }
+--- in-cli/src/native_emit/lower/lower_expr.rs
++++ in-cli/src/native_emit/lower/lower_expr.rs
+@@ -938,8 +938,8 @@
+     let Some(Typ::Array(elem)) = native_expr_type(expr, ctx, functions) else {
+         return Err("native-lower: array copy requires an Array".into());
+     };
+-    if !matches!(elem.canonical(), Typ::Int | Typ::Float | Typ::Bool)
+-        && !(count == 0 && elem.canonical() == Typ::Void)
++    if !(matches!(elem.canonical(), Typ::Int | Typ::Float | Typ::Bool)
++        || count == 0 && elem.canonical() == Typ::Void)
+     {
+         return Err("native-lower: array copy requires scalar elements".into());
+     }
+--- in-cli/src/native_emit/x86_64_lower.rs
++++ in-cli/src/native_emit/x86_64_lower.rs
+@@ -3834,10 +3834,10 @@
+     if matches!(
+         target_name.as_str(),
+         "vector-push" | "vector-extend" | "vector-clear"
+-    ) && !ctx
++    ) && ctx
+         .functions
+         .get(&target_name)
+-        .is_some_and(|function| !function.body.is_empty())
++        .is_none_or(|function| function.body.is_empty())
+     {
+         let expected_args = if target_name == "vector-clear" { 1 } else { 2 };
+         if args.len() != expected_args {
