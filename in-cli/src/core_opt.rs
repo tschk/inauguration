@@ -4397,6 +4397,26 @@ mod tests {
         assert!(decls.is_empty());
     }
 
+    #[test]
+    fn optimize_with_entry_empty_decls() {
+        let mut decls: Vec<Decl> = vec![];
+        optimize_with_entry(&mut decls, Some("main"));
+        assert!(decls.is_empty());
+    }
+
+    #[test]
+    fn optimize_with_entry_with_none() {
+        let mut decls = vec![
+            make_fn("kernel_entry", vec![Stmt::Return(None)]),
+            make_fn("unused", vec![Stmt::Return(None)]),
+        ];
+        optimize_with_entry(&mut decls, None);
+        assert_eq!(decls.len(), 1);
+        if let Decl::Function { name, .. } = &decls[0] {
+            assert_eq!(name, "kernel_entry");
+        }
+    }
+
     // ─── has_cf ────────────────────────────────────────────────────────
 
     #[test]
