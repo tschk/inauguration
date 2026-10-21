@@ -591,7 +591,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     struct TempDirGuard {
         path: PathBuf,
