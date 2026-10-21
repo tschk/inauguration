@@ -3834,7 +3834,7 @@ fn lower_call_expr(
     let has_override = ctx
         .functions
         .get(&target_name)
-        .is_some_and(|function| !function.body.is_empty());
+        .map_or(false, |f| !f.body.is_empty());
     if matches!(
         target_name.as_str(),
         "vector-push" | "vector-extend" | "vector-clear"
