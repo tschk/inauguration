@@ -1347,7 +1347,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static PACKAGE_MANIFEST_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     struct TempDirGuard {
         path: PathBuf,
@@ -1363,7 +1363,7 @@ mod tests {
                 "inauguration-package-manifest-{}-{}-{}",
                 std::process::id(),
                 unique,
-                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+                PACKAGE_MANIFEST_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(&path).expect("create temp dir");
             Self { path }
