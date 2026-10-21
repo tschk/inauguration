@@ -1347,14 +1347,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
     struct TempDirGuard {
         path: PathBuf,
     }
 
     impl TempDirGuard {
         fn new() -> Self {
+            static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
             let unique = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("system clock before UNIX_EPOCH")
