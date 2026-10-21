@@ -3837,7 +3837,7 @@ fn lower_call_expr(
     ) && ctx
         .functions
         .get(&target_name)
-        .is_none_or(|function| function.body.is_empty())
+        .map_or(true, |function| function.body.is_empty())
     {
         let expected_args = if target_name == "vector-clear" { 1 } else { 2 };
         if args.len() != expected_args {
@@ -3946,7 +3946,7 @@ fn lower_call_expr(
         if ctx
             .functions
             .get(&target_name)
-            .is_none_or(|function| function.body.is_empty())
+            .map_or(true, |function| function.body.is_empty())
             && matches!(
                 base.as_str(),
                 "push"
@@ -3967,7 +3967,7 @@ fn lower_call_expr(
         if ctx
             .functions
             .get(&target_name)
-            .is_none_or(|function| function.body.is_empty())
+            .map_or(true, |function| function.body.is_empty())
             && let Some(wrapper) = jit_stdlib_wrapper(&base)
             && let Some(ptr) = crate::native_emit::native_link::resolve_native_fn(wrapper)
         {
