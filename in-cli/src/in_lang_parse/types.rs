@@ -3,7 +3,7 @@ use crate::core_ir::Typ;
 
 pub(crate) fn parse_in_type(s: &str) -> Typ {
     let s = trim(s);
-    if s.eq_ignore_ascii_case("void") || s == "()" {
+    if s == "void" || s == "Void" || s == "VOID" || s == "()" {
         return Typ::Void;
     }
     if s.starts_with('[') && s.ends_with(']') {

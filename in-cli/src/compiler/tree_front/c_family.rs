@@ -1025,7 +1025,7 @@ fn c_number_literal(text: &str) -> Option<Expr> {
     let suffix = &text[number.len()..];
     let kind = if suffix.contains(['l', 'L']) {
         None
-    } else if suffix.eq_ignore_ascii_case("u") {
+    } else if suffix == "u" || suffix == "U" {
         (0..=i64::from(u32::MAX)).contains(integer).then_some("u32")
     } else if (0..=i64::from(i32::MAX)).contains(integer) {
         Some("i32")

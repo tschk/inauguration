@@ -872,7 +872,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 fn verify_hex_digest(expected: &str, actual: &str, path: &Path, label: &str) -> Result<(), String> {
-    if expected.eq_ignore_ascii_case(actual) {
+    if expected.to_ascii_lowercase() == actual.to_ascii_lowercase() {
         Ok(())
     } else {
         Err(format!("{label} mismatch for {}", path.display()))

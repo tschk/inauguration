@@ -581,7 +581,9 @@ pub(crate) fn parse_eval_parser(
     code: &str,
 ) -> Result<parser_registry::ParserId> {
     match parser.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(value) if value.eq_ignore_ascii_case("auto") => Ok(infer_eval_parser(code)),
+        Some(value) if value == "auto" || value == "Auto" || value == "AUTO" => {
+            Ok(infer_eval_parser(code))
+        }
         Some(value) => parser_registry::parser_id_from_cli_token(value)
             .ok_or_else(|| InError::Message(format!("unknown eval parser `{value}`"))),
         None => Ok(infer_eval_parser(code)),
