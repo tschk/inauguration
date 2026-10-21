@@ -4,6 +4,53 @@ use crate::core_ir::{Decl, LoopKind, MatchPattern, Typ, UnifiedModule};
 use crate::core_ir::{Expr, Stmt, for_each_expr_child};
 use std::collections::{HashMap, HashSet};
 
+pub struct ScopedEnv {
+    layers: Vec<std::collections::HashMap<String, usize>>,
+}
+
+impl Default for ScopedEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScopedEnv {
+    pub fn new() -> Self {
+        ScopedEnv {
+            layers: vec![std::collections::HashMap::new()],
+        }
+    }
+    pub fn push_layer(&mut self) {
+        self.layers.push(std::collections::HashMap::new());
+    }
+    pub fn pop_layer(&mut self) {
+        self.layers.pop();
+    }
+    pub fn get(&self, k: &str) -> Option<&usize> {
+        for layer in self.layers.iter().rev() {
+            if let Some(v) = layer.get(k) {
+                if *v == usize::MAX {
+                    return None;
+                }
+                return Some(v);
+            }
+        }
+        None
+    }
+    pub fn insert(&mut self, k: String, v: usize) {
+        self.layers.last_mut().unwrap().insert(k, v);
+    }
+    pub fn remove(&mut self, k: &str) {
+        self.layers
+            .last_mut()
+            .unwrap()
+            .insert(k.to_string(), usize::MAX);
+    }
+    pub fn contains_key(&self, k: &str) -> bool {
+        self.get(k).is_some()
+    }
+}
+
 #[path = "lower_core/constant_values.rs"]
 mod constant_values;
 #[path = "lower_core/static_initializers.rs"]
@@ -1308,7 +1355,7 @@ fn lower_string_lit(s: &str, ssa: &mut usize, out: &mut String) -> usize {
 
 fn lower_ident(
     name: &str,
-    env: &HashMap<String, usize>,
+    env: &ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     out: &mut String,
@@ -1333,7 +1380,7 @@ fn lower_ident(
 fn lower_unary(
     op: &str,
     expr: &Expr,
-    env: &HashMap<String, usize>,
+    env: &ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     out: &mut String,
@@ -1355,7 +1402,7 @@ fn lower_binary(
     op: &str,
     lhs: &Expr,
     rhs: &Expr,
-    env: &HashMap<String, usize>,
+    env: &ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     out: &mut String,
@@ -1379,7 +1426,7 @@ fn lower_binary(
 fn lower_struct_init(
     name: &str,
     fields: &[(String, Expr)],
-    env: &HashMap<String, usize>,
+    env: &ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     out: &mut String,
@@ -1401,7 +1448,7 @@ fn lower_struct_init(
 fn lower_field_access(
     base: &Expr,
     name: &str,
-    env: &HashMap<String, usize>,
+    env: &ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     out: &mut String,
@@ -1415,7 +1462,7 @@ fn lower_field_access(
 
 fn lower_array_lit(
     items: &[Expr],
-    env: &HashMap<String, usize>,
+    env: &ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     out: &mut String,
@@ -1438,7 +1485,7 @@ fn lower_array_lit(
 fn lower_index_access(
     base: &Expr,
     index: &Expr,
-    env: &HashMap<String, usize>,
+    env: &ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     out: &mut String,
@@ -1454,7 +1501,7 @@ fn lower_index_access(
 fn lower_call(
     callee: &Expr,
     args: &[Expr],
-    env: &HashMap<String, usize>,
+    env: &ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     out: &mut String,
@@ -1501,7 +1548,7 @@ fn lower_closure(ssa: &mut usize, out: &mut String) -> usize {
 
 fn lower_expr(
     e: &Expr,
-    env: &HashMap<String, usize>,
+    env: &ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     out: &mut String,
@@ -1928,7 +1975,7 @@ fn lower_stmts_into(
     finish_with_return: bool,
 ) -> String {
     let mut out = String::new();
-    let mut env: HashMap<String, usize> = HashMap::new();
+    let mut env = ScopedEnv::new();
     let mut direct_env: HashSet<String> = HashSet::new();
     for (idx, (pname, _)) in params.iter().enumerate() {
         let id = *ssa;
@@ -1954,7 +2001,7 @@ fn lower_stmts_with_env(
     ssa: &mut usize,
     finish_with_return: bool,
     implicit_default: bool,
-    env: &mut HashMap<String, usize>,
+    env: &mut ScopedEnv,
     direct_env: &HashSet<String>,
     force_stores: bool,
 ) -> String {
@@ -2101,7 +2148,7 @@ fn lower_if_stmt(
     cond: &Expr,
     then_body: &[Stmt],
     else_body: &[Stmt],
-    env: &mut HashMap<String, usize>,
+    env: &mut ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     finish_with_return: bool,
@@ -2115,29 +2162,31 @@ fn lower_if_stmt(
     let end_label = format!("bb_if_end_{label_id}");
     out.push_str(&format!("cond_br %{cond_id}, {then_label}, {else_label}\n"));
     out.push_str(&format!("label {then_label}\n"));
-    let mut then_env = env.clone();
+    env.push_layer();
     out.push_str(&lower_stmts_with_env(
         then_body,
         ssa,
         finish_with_return,
         false,
-        &mut then_env,
+        env,
         direct_env,
         true,
     ));
+    env.pop_layer();
     out.push_str(&format!("br {end_label}\n"));
     out.push_str(&format!("label {else_label}\n"));
     if !else_body.is_empty() {
-        let mut else_env = env.clone();
+        env.push_layer();
         out.push_str(&lower_stmts_with_env(
             else_body,
             ssa,
             finish_with_return,
             false,
-            &mut else_env,
+            env,
             direct_env,
             true,
         ));
+        env.pop_layer();
     }
     out.push_str(&format!("br {end_label}\n"));
     out.push_str(&format!("label {end_label}\n"));
@@ -2146,7 +2195,7 @@ fn lower_if_stmt(
 fn lower_loop_stmt(
     cond: &Option<Expr>,
     body: &[Stmt],
-    env: &mut HashMap<String, usize>,
+    env: &mut ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     finish_with_return: bool,
@@ -2166,16 +2215,17 @@ fn lower_loop_stmt(
         out.push_str(&format!("br {body_label}\n"));
     }
     out.push_str(&format!("label {body_label}\n"));
-    let mut loop_env = env.clone();
+    env.push_layer();
     out.push_str(&lower_stmts_with_env(
         body,
         ssa,
         finish_with_return,
         false,
-        &mut loop_env,
+        env,
         direct_env,
         true,
     ));
+    env.pop_layer();
     out.push_str(&format!("br {head_label}\n"));
     out.push_str(&format!("label {end_label}\n"));
 }
@@ -2183,7 +2233,7 @@ fn lower_loop_stmt(
 fn lower_match_stmt(
     scrutinee: &Expr,
     arms: &[crate::core_ir::MatchArm],
-    env: &mut HashMap<String, usize>,
+    env: &mut ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     finish_with_return: bool,
@@ -2206,7 +2256,7 @@ fn lower_match_stmt(
             lower_pattern_into(&pattern, scrutinee_id, &arm_label, &next_label, ssa, out);
         out.push_str(&format!("label {arm_label}\n"));
         out.push_str("// match.arm\n");
-        let pre_keys: Vec<String> = env.keys().cloned().collect();
+        env.push_layer();
         for (name, id) in &bindings {
             env.insert(name.clone(), *id);
             out.push_str(&format!("store_var {name} %{id}\n"));
@@ -2220,13 +2270,13 @@ fn lower_match_stmt(
             direct_env,
             true,
         ));
-        env.retain(|k, _| pre_keys.contains(k));
+        env.pop_layer();
         out.push_str(&format!("br {end_label}\n"));
         out.push_str(&format!("label {next_label}\n"));
     }
     if let Some(arm) = default_arm {
         out.push_str("// match.arm\n");
-        let pre_keys: Vec<String> = env.keys().cloned().collect();
+        env.push_layer();
         out.push_str(&lower_stmts_with_env(
             &arm.body,
             ssa,
@@ -2236,7 +2286,7 @@ fn lower_match_stmt(
             direct_env,
             true,
         ));
-        env.retain(|k, _| pre_keys.contains(k));
+        env.pop_layer();
     }
     out.push_str(&format!("label {end_label}\n"));
 }
@@ -2244,7 +2294,7 @@ fn lower_match_stmt(
 fn lower_try_stmt(
     body: &[Stmt],
     catches: &[crate::core_ir::CatchArm],
-    env: &mut HashMap<String, usize>,
+    env: &mut ScopedEnv,
     direct_env: &HashSet<String>,
     ssa: &mut usize,
     finish_with_return: bool,
@@ -2258,7 +2308,7 @@ fn lower_try_stmt(
     let try_end_label = format!("bb_try_end_{label_id}");
     out.push_str(&format!("br {try_body_label}\n"));
     out.push_str(&format!("label {try_body_label}\n"));
-    let pre_keys: Vec<String> = env.keys().cloned().collect();
+    env.push_layer();
     out.push_str(&lower_stmts_with_env(
         body,
         ssa,
@@ -2268,11 +2318,11 @@ fn lower_try_stmt(
         direct_env,
         force_stores,
     ));
-    env.retain(|k, _| pre_keys.contains(k));
+    env.pop_layer();
     out.push_str(&format!("br {try_end_label}\n"));
     out.push_str(&format!("label {try_catch_label}\n"));
     for arm in catches {
-        let pre_keys: Vec<String> = env.keys().cloned().collect();
+        env.push_layer();
         out.push_str(&lower_stmts_with_env(
             &arm.body,
             ssa,
@@ -2282,7 +2332,7 @@ fn lower_try_stmt(
             direct_env,
             force_stores,
         ));
-        env.retain(|k, _| pre_keys.contains(k));
+        env.pop_layer();
     }
     out.push_str(&format!("label {try_end_label}\n"));
 }
