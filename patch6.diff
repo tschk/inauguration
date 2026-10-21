@@ -1,0 +1,6 @@
+--- in-cli/src/native_emit/x86_64_lower.rs
++++ in-cli/src/native_emit/x86_64_lower.rs
+@@ -5367,2 +5367,3 @@
+         Expr::StructInit { name, fields, .. } => {
++            ctx.alloc_local(name.as_str(), &Typ::Named(name.clone()))?;
+             lower_struct_init(emitter, ctx, name.as_str(), fields, pending_calls)

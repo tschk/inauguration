@@ -3957,10 +3957,10 @@ fn lower_call_expr(
     if matches!(
         target_name.as_str(),
         "vector-push" | "vector-extend" | "vector-clear"
-    ) && !ctx
+    ) && ctx
         .functions
         .get(&target_name)
-        .is_some_and(|function| !function.body.is_empty())
+        .is_none_or(|function| function.body.is_empty())
     {
         let expected_args = if target_name == "vector-clear" { 1 } else { 2 };
         if args.len() != expected_args {
@@ -5488,6 +5488,7 @@ fn lower_expr_into(
             lower_call_expr(emitter, ctx, target_reg, callee, args, pending_calls)
         }
         Expr::StructInit { name, fields, .. } => {
+            ctx.alloc_local(name.as_str(), &Typ::Named(name.clone()))?;
             lower_struct_init(emitter, ctx, name.as_str(), fields, pending_calls)
         }
         Expr::Field { base, name, .. } => {
