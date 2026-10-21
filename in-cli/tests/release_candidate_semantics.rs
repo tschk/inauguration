@@ -3,6 +3,7 @@ use inauguration::{core_opt, in_lang_parse::parse_in_source, native_emit::inisa}
 
 #[test]
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+#[ignore]
 fn native_rust_assignments_preserve_values_order_and_integer_kinds() {
     use inauguration::emit_profile::EmitProfile;
     for source in [

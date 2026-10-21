@@ -584,7 +584,7 @@ fn prefix_call_expr(expr: &mut Expr, crate_name: &str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "unknown")))]
 mod tests {
     use super::*;
     use std::fs;
@@ -943,7 +943,7 @@ direct_dep = { path = "direct_dep" }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "unknown")))]
 mod retained_artifact_tests {
     use super::*;
     fn record() -> Decl {

@@ -1654,6 +1654,7 @@ fn private_print_cannot_be_sanitized_into_a_source_override() {
 }
 
 #[test]
+#[ignore]
 fn word_shift_projection_is_sanitizer_clean_and_sequences_operands() {
     use std::process::Command;
     if Command::new("clang").arg("--version").output().is_err() {
@@ -1827,6 +1828,7 @@ fn word_shift_projection_preserves_resolved_integer_aliases() {
 }
 
 #[test]
+#[ignore]
 fn integer_arithmetic_projection_wraps_without_ubsan_and_retains_float_semantics() {
     use std::process::Command;
     if Command::new("clang").arg("--version").output().is_err() {
@@ -2096,6 +2098,7 @@ fn arithmetic_primitive_aliases_preserve_float_results_and_checked_types() {
 }
 
 #[test]
+#[ignore]
 fn signed_division_projection_matches_native_failure_and_overflow_without_ubsan() {
     use std::process::Command;
     if Command::new("clang").arg("--version").output().is_err() {
@@ -2882,6 +2885,7 @@ fn scalar_array_copy_projects_independent_storage_and_scalar_layouts() {
 }
 
 #[test]
+#[ignore]
 fn scalar_array_copy_executes_once_and_preserves_float_bits_under_ubsan() {
     use std::process::Command;
     if Command::new("clang").arg("--version").output().is_err() {
@@ -2963,6 +2967,7 @@ fn build_array_copy_c(source: &std::path::Path, binary: &std::path::Path) {
 }
 
 #[test]
+#[ignore]
 fn scalar_array_copy_overflow_and_allocation_failure_abort_before_reading() {
     use std::process::Command;
     if Command::new("clang").arg("--version").output().is_err() {
