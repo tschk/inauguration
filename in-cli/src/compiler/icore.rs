@@ -56,15 +56,12 @@ struct IcoreParam {
 
 fn parse_typ(s: &str) -> Typ {
     let s = s.trim();
-    if s.eq_ignore_ascii_case("void") {
-        return Typ::Void;
-    }
     match s {
         "Int" => Typ::Int,
         "Float" => Typ::Float,
         "String" => Typ::String,
         "Bool" => Typ::Bool,
-        "Void" => Typ::Void,
+        "Void" | "void" | "VOID" => Typ::Void,
         other => Typ::Named(other.to_string()),
     }
 }

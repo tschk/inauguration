@@ -672,12 +672,12 @@ libc = { path = "dummy-dep" }
 
     #[test]
     fn find_crate_dir_walks_parents() {
-        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "in-crate-walk-{}-{}",
-            std::process::id(),
-            unique
-        ));
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("in-crate-walk-{}-{}", std::process::id(), unique));
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("Cargo.toml"),
