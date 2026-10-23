@@ -721,16 +721,21 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
             }
         };
         crate::native_emit::x86_64::set_32bit(false);
-        match crate::native_emit::sci::emit_sci_binary(&module, entry_name, base) {
-            Ok(bytes) => {
-                if let Err(err) = std::fs::write(out_path, &bytes) {
+        match crate::native_emit::sci::emit_sci_image(&module, entry_name, base) {
+            Ok(image) => {
+                if let Err(err) = std::fs::write(out_path, &image.bytes) {
                     let err = format!("write SCI binary `{}`: {err}", out_path.display());
                     report.reason_code = Some("sci-write-failed".to_string());
                     report.reason = Some(err.clone());
                     report.error = Some(err);
                     return finalize_report(report, started, &cwd, &frontend_hash);
                 }
-                metadata::emit_component_metadata_sidecar(&module, entry_name, out_path);
+                metadata::emit_component_metadata_with_layout(
+                    &module,
+                    entry_name,
+                    out_path,
+                    Some(&image.layout),
+                );
                 report.success = true;
                 report.backend_level = "owned-native-subset-freestanding".to_string();
                 report.runtime_level = "sci-component".to_string();

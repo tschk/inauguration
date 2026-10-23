@@ -7752,7 +7752,8 @@ interface Reader {
 interface Writer {
  fn write(value:Int)->void
 }
-fn main()->Int{return 42;}
+var counter:Int=40;
+fn main()->Int{counter+=1;return counter;}
 "#;
     let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
     let plain = "fn main()->Int{return 42;}";
@@ -7793,8 +7794,39 @@ fn main()->Int{return 42;}
                 } else {
                     assert_eq!(&bytes[..4], b"\x7fELF");
                 }
-                let value: serde_json::Value =
+                let mut value: serde_json::Value =
                     serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
+                if sci {
+                    let layout: crate::boundary_ir::SciLayout =
+                        serde_json::from_value(value["sci_layout"].clone()).unwrap();
+                    use sha2::Digest;
+                    assert_eq!(
+                        layout.artifact_sha256,
+                        sha2::Sha256::digest(&bytes)
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                    );
+                    assert_eq!(layout.image_size, bytes.len() as u64);
+                    assert_eq!(layout.load_base, 0x100000);
+                    assert_eq!(
+                        value["code_sections"],
+                        serde_json::json!([
+                            {"name":".text","offset":layout.text_offset,"size":layout.text_size,"flags":"rx"}
+                        ])
+                    );
+                    assert_eq!(
+                        value["data_sections"],
+                        serde_json::json!([
+                            {"name":".data","offset":layout.data_offset,"size":layout.data_size,"flags":"rw"}
+                        ])
+                    );
+                    assert_eq!(layout.data_size, 8);
+                    assert_eq!((layout.load_base + layout.data_offset) % 4096, 0);
+                    assert_eq!(value["memory"]["static_data"], 8);
+                } else {
+                    assert!(value.get("sci_layout").is_none());
+                }
                 assert_eq!(value["target"], "x86_64-unknown-none");
                 assert_eq!(value["entry"], "main");
                 assert_eq!(
@@ -7812,6 +7844,11 @@ fn main()->Int{return 42;}
                         {"name":"memory","capability_type":"PhysicalMemory","args":["discover","map","protect"]}
                     ])
                 );
+                // Only the declaration metadata is shared between object and
+                // raw SCI artifacts; their lowered byte layouts differ.
+                for field in ["code_sections", "data_sections", "sci_layout", "memory"] {
+                    value.as_object_mut().unwrap().remove(field);
+                }
                 if let Some(expected) = &baseline {
                     assert_eq!(&value, expected);
                 } else {

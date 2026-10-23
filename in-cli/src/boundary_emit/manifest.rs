@@ -65,6 +65,7 @@ mod tests {
             entry: Some("main".to_string()),
             code_sections: vec![],
             data_sections: vec![],
+            sci_layout: None,
             imports: vec![],
             exports: vec![],
             capabilities_required: vec![],

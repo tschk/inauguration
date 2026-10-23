@@ -267,6 +267,9 @@ pub struct ComponentMetadata {
     pub entry: Option<String>,
     pub code_sections: Vec<CodeSection>,
     pub data_sections: Vec<DataSection>,
+    /// Exact raw SCI v2 layout, when this artifact was emitted as SCI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sci_layout: Option<SciLayout>,
     pub imports: Vec<ServiceImport>,
     pub exports: Vec<ServiceExport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -280,6 +283,26 @@ pub struct ComponentMetadata {
     pub checkpoint: String,
     pub deterministic: bool,
     pub provenance: Provenance,
+}
+
+/// Image-relative ranges of a raw SCI artifact, bound to its exact bytes.
+///
+/// Text includes read-only literals. Padding and binding tables are outside
+/// both text and mutable data. Consumers choose and enforce page permissions;
+/// this description does not grant authority or authenticate the producer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SciLayout {
+    pub version: u64,
+    pub image_size: u64,
+    pub load_base: u64,
+    pub page_size: u64,
+    pub text_offset: u64,
+    pub text_size: u64,
+    pub data_offset: u64,
+    pub data_size: u64,
+    pub binding_offset: u64,
+    pub binding_size: u64,
+    pub artifact_sha256: String,
 }
 
 #[cfg(test)]
@@ -454,6 +477,7 @@ mod tests {
                 flags: "rx".to_string(),
             }],
             data_sections: vec![],
+            sci_layout: None,
             imports: vec![],
             exports: vec![],
             capabilities_required: vec![],

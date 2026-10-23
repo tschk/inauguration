@@ -339,3 +339,34 @@ Catch patterns and `for` iterator headers locate their bodies with the shared qu
 ## Component metadata
 
 Native objects and SCI images emit the same canonical `.component-metadata.json` sidecar when the source declares a component. It preserves named capabilities and operations, imports, exports, target, and checkpoint metadata. Replacing a component artifact with a component-free module through these emission paths removes the old generated sidecar. SCI header capability bits retain their existing ordinal encoding; platform packagers apply their own policy to the named declarations.
+
+Raw x86-64 SCI v2 emission also records truthful lowered `.text` (`rx`) and
+initialized `.data` (`rw`) ranges in that sidecar. Offsets are relative to the
+start of the artifact, rather than the entry address. Text includes read-only
+string literals; global slots and their initialized payloads belong to data.
+`memory.static_data` is the actual initialized data size. With no global data,
+the data section list is empty. These SCI sizes do not describe other artifact
+kinds, whose backend metadata remains separate.
+
+The optional `sci_layout` object has layout version 1 and the fields
+`image_size`, `load_base`, `page_size`, `text_offset`, `text_size`, `data_offset`,
+`data_size`, `binding_offset`, `binding_size`, and `artifact_sha256`. The hash is
+lowercase SHA-256 of the exact whole artifact, and `image_size` is its exact byte
+length, including the manifest, padding, binding tables, and symbol names.
+The entry remains `load_base + 64`; the SCI v2 manifest and import/export record
+formats are unchanged. Text begins at offset 64. Zero padding follows text,
+and the data **virtual address** (`load_base + data_offset`) is aligned to 4096
+bytes, even for a load base that is not page aligned. Zero padding follows data
+to another 4096-byte-aligned virtual address at `binding_offset`; binding tables
+and names end at `image_size`. An empty data
+range does not require a writable mapping. The compiler rejects overflowing
+load layouts rather than wrapping addresses.
+
+These descriptors describe bytes, not authority or authenticated provenance.
+A consumer must validate the exact hash, size, ranges, load address, imports,
+and its own policy before mapping an artifact. Import calls are patched before
+final executable permissions are applied. A consumer can map manifest/text
+pages read/execute, data pages read/write without execute, and bindings pages
+read-only without execute; no mutable data shares a text or bindings page.
+Padding alone is not an additional section or
+a permission grant. Emission does not itself install or enforce page permissions.
