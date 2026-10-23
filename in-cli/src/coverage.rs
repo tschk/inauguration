@@ -1,7 +1,8 @@
 //! Static coverage: what compiles to native code, and what blocks the rest.
 //!
-//! The native lowerer traps on constructs it cannot compile instead of
-//! fabricating a value, so a caller can always ask "did everything compile?"
+//! AArch64 records trap degradations; Linux x86_64 rejects unsupported code.
+//! Analysis uses the selected host emitter instead of inventing coverage for
+//! another architecture, so a caller can ask "did everything compile?"
 //! This module answers that per source file, naming every site that did not
 //! compile and grouping the reasons, in the shape of `scriptc coverage`.
 //!
@@ -192,6 +193,31 @@ pub fn coverage_for_path(path: &Path, parser: ParserCli, entry: Option<&str>) ->
     ) {
         return CoverageReport::rejected(path, "coverage-unary-resolution-failed", error);
     }
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        let reachable = crate::owned_compile::native_entry_module(&module, &effective_entry);
+        if let Err(error) =
+            crate::native_emit::elf::lower_x86_executable(&reachable, &effective_entry)
+        {
+            return CoverageReport::rejected(path, "coverage-lowering-failed", error);
+        }
+        let functions_analyzed = count_functions(&reachable);
+        return CoverageReport {
+            schema_version: COVERAGE_SCHEMA_VERSION,
+            path: path.display().to_string(),
+            parser_id,
+            entry: effective_entry,
+            status: CoverageStatus::FullyLowered,
+            functions_in_source,
+            functions_analyzed,
+            functions_lowered: functions_analyzed,
+            functions_not_lowered: 0,
+            unresolved_calls: 0,
+            degradations: Vec::new(),
+            blockers: Vec::new(),
+            reason_code: None,
+            reason: None,
+        };
+    }
     let functions_analyzed = count_functions(&module);
     if functions_analyzed == 0 {
         return CoverageReport::rejected(
@@ -356,6 +382,17 @@ fn main() -> Int {
         let report = coverage_for_path(&path, ParserCli::Auto, None);
         fs::remove_file(&path).unwrap();
 
+        if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            assert_eq!(report.status, CoverageStatus::Rejected, "{report:?}");
+            assert_eq!(report.lowered_fraction(), None);
+            assert!(
+                report.reason.as_deref().is_some_and(
+                    |reason| reason.contains("nested indexing needs static array storage")
+                ),
+                "{report:?}"
+            );
+            return;
+        }
         assert_eq!(report.status, CoverageStatus::Degraded, "{report:?}");
         assert_eq!(report.functions_not_lowered, 1);
         assert_eq!(report.blockers.len(), 1);
@@ -386,6 +423,18 @@ fn main() -> Int {
         let report = coverage_for_path(&path, ParserCli::Auto, None);
         fs::remove_file(&path).unwrap();
 
+        if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            assert_eq!(report.status, CoverageStatus::Rejected, "{report:?}");
+            assert_eq!(report.lowered_fraction(), None);
+            assert!(
+                report
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("unresolved runtime import `missing`")),
+                "{report:?}"
+            );
+            return;
+        }
         assert_eq!(report.status, CoverageStatus::Degraded, "{report:?}");
         assert_eq!(report.unresolved_calls, 1, "{report:?}");
         assert_eq!(report.functions_not_lowered, 0, "{report:?}");

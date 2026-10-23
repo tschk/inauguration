@@ -60,8 +60,7 @@ pub fn compile_native(
         let exit = if request.linkage == NativeLinkage::Executable
             && matches!(
                 target_triple,
-                "x86_64-unknown-linux-gnu"
-                    | "aarch64-unknown-linux-gnu"
+                "aarch64-unknown-linux-gnu"
                     | "armv7-unknown-linux-gnueabihf"
                     | "x86_64-pc-windows-msvc"
             ) {
@@ -98,6 +97,8 @@ pub fn compile_native(
             && target_triple == "x86_64-unknown-linux-gnu"
             && path_extension_is(out_path, "AppDir")
         {
+            let exit = pure_entry_exit_code(&native_module, entry)
+                .ok_or_else(|| "AppDir emission requires a pure scalar exit entry".to_string())?;
             emit_linux_appdir(exit, out_path)?;
             return Ok(NativeCompileResult {
                 artifact_path: out_path.display().to_string(),

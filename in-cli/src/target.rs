@@ -40,7 +40,23 @@ const NATIVE_TARGET: TargetSpec = TargetSpec {
     backend_artifact_supported: false,
 };
 
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const NATIVE_TARGET: TargetSpec = TargetSpec {
+    name: "native",
+    implemented: true,
+    stage: "owned-native-subset",
+    reason_code: "native-x86_64-linux-subset",
+    reason: "inauguration owns x86_64 Linux ELF executable lowering with writable globals, internal calls and process exit; runtime imports fail closed",
+    input_stage: "core-ir",
+    artifact_kind: "elf-executable",
+    host_triple: Some("x86_64-unknown-linux-gnu"),
+    backend_artifact_supported: false,
+};
+
+#[cfg(not(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+)))]
 const NATIVE_TARGET: TargetSpec = TargetSpec {
     name: "native",
     implemented: false,
@@ -388,7 +404,10 @@ pub fn target_spec_by_name(name: &str) -> Option<TargetSpec> {
 
 #[must_use]
 pub fn native_subset_host_available() -> bool {
-    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+    cfg!(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    ))
 }
 
 fn build_target_registry() -> Vec<TargetSpec> {
@@ -556,7 +575,10 @@ mod tests {
         }
     }
 
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    )))]
     #[test]
     fn reports_native_target_contract_on_unsupported_hosts() {
         let spec = native_target_spec();

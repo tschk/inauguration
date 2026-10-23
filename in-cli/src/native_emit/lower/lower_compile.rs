@@ -25,7 +25,14 @@ pub fn compile_native_executable_for_host(
     if !host_supports_native_subset() {
         return Err("native-host-unsupported".to_string());
     }
-    compile_native_executable(module, entry, out_path)
+    compile_native_artifact_for_host_with_report(
+        module,
+        "App",
+        entry,
+        NativeLinkage::Executable,
+        out_path,
+    )
+    .map(|_| ())
 }
 
 pub fn compile_native_artifact_for_host(
@@ -38,7 +45,8 @@ pub fn compile_native_artifact_for_host(
     if !host_supports_native_subset() {
         return Err("native-host-unsupported".to_string());
     }
-    compile_native_artifact(module, module_id, entry, linkage, out_path)
+    compile_native_artifact_for_host_with_report(module, module_id, entry, linkage, out_path)
+        .map(|outcome| outcome.abi_path)
 }
 
 pub fn compile_native_artifact_for_host_with_report(
@@ -50,6 +58,17 @@ pub fn compile_native_artifact_for_host_with_report(
 ) -> Result<NativeArtifactOutcome, String> {
     if !host_supports_native_subset() {
         return Err("native-host-unsupported".to_string());
+    }
+    if cfg!(all(target_os = "linux", target_arch = "x86_64"))
+        && linkage == NativeLinkage::Executable
+    {
+        let bytes = crate::native_emit::elf::lower_x86_executable(module, entry)?;
+        std::fs::write(out_path, bytes)
+            .map_err(|error| format!("native ELF write `{}`: {error}", out_path.display()))?;
+        return Ok(NativeArtifactOutcome {
+            abi_path: None,
+            degradations: Vec::new(),
+        });
     }
     compile_native_artifact_with_report(module, module_id, entry, linkage, out_path)
 }

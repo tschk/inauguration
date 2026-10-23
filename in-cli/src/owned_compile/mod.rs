@@ -24,6 +24,7 @@ mod util;
 mod tests;
 
 pub use jit::resolve_jit_entry;
+pub(crate) use native::native_entry_module;
 pub use report::report_to_json;
 use report::{
     base_report, count_call_edges, count_functions, finalize_report, jobs_for_request,

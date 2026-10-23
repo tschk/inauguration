@@ -73,7 +73,7 @@ fn emit_failure_return(emitter: &mut CodeEmitter, ctx: &mut LowerCtx<'_>) -> Res
     Ok(())
 }
 
-fn patch_absolute_reference(
+pub(crate) fn patch_absolute_reference(
     code: &mut [u8],
     reference: AbsoluteReference,
     base: u64,
@@ -3158,9 +3158,11 @@ fn lower_builtin_call(
             }
             let len = match &args[0] {
                 Expr::ArrayLit(items) => {
-                    for item in items {
-                        lower_expr_into(emitter, ctx, item, target_reg, pending_calls)?;
-                    }
+                    let record = scalar_expr_type(&args[0], ctx)
+                        .map(|typ| record_array_fields(ctx.structs, &typ))
+                        .transpose()?
+                        .flatten();
+                    materialize_array_literal(emitter, ctx, items, pending_calls, record.as_ref())?;
                     items.len() as i64
                 }
                 expr if matches!(
@@ -3938,6 +3940,28 @@ fn lower_call_expr(
         }
         return Ok(());
     }
+    if target_name.strip_prefix(crate::core_ir::METHOD_PREFIX) == Some("len") {
+        if args.len() != 1 || ctx.functions.contains_key(&target_name) {
+            return Err(
+                "x86_64-lower: private len requires exactly one receiver and cannot be declared"
+                    .into(),
+            );
+        }
+        let receiver = scalar_expr_type(&args[0], ctx);
+        let builtin = match receiver.as_ref().map(Typ::canonical) {
+            Some(Typ::String) => "str-len",
+            Some(Typ::Array(_) | Typ::Vector(_)) => "array-len",
+            _ => {
+                return Err(format!(
+                    "x86_64-lower: unsupported len receiver {receiver:?} in `{}`",
+                    ctx.fn_name
+                ));
+            }
+        };
+        if lower_builtin_call(emitter, ctx, builtin, target_reg, args, pending_calls)? {
+            return Ok(());
+        }
+    }
     if crate::core_ir::is_compiler_callee(&target_name) {
         return Err(format!(
             "x86_64-lower: unresolved private compiler operation `{target_name}`"
@@ -4091,7 +4115,8 @@ fn lower_call_expr(
             .functions
             .get(&target_name)
             .is_none_or(|function| function.body.is_empty())
-            && let Some(wrapper) = jit_stdlib_wrapper(&base)
+            && let Some(wrapper) =
+                jit_stdlib_wrapper(&target_name).or_else(|| jit_stdlib_wrapper(&base))
             && let Some(ptr) = crate::native_emit::native_link::resolve_native_fn(wrapper)
         {
             if x86_64::is_32bit() || args.len() > 6 {
@@ -5170,6 +5195,16 @@ fn lower_typed_sequence_value(
             },
         );
     }
+    if matches!(typ.canonical(), Typ::Vector(_))
+        && let Expr::ArrayLit(items) = expr
+    {
+        let offsets = materialize_array_literal(emitter, ctx, items, pending_calls, None)?;
+        lower_heap_array(emitter, ctx, &offsets, pending_calls)?;
+        if target != RAX {
+            emitter.emit_insns(&x86_64::mov_rr(target, RAX));
+        }
+        return Ok(());
+    }
     if let (Some(record), Expr::ArrayLit(items)) = (&record, expr) {
         let offsets = materialize_array_literal(emitter, ctx, items, pending_calls, Some(record))?;
         lower_heap_array(emitter, ctx, &offsets, pending_calls)?;
@@ -5414,6 +5449,14 @@ where
             let empty = ctx.empty_struct_bases.clone();
             let lowered = (|| {
                 for stmt in body {
+                    if let Stmt::Declare(name, _) = stmt {
+                        // Expression blocks own lexical declarations just like
+                        // let bindings; outer planning does not visit these bodies.
+                        ctx.locals.remove(name);
+                        ctx.receiver_pointers.remove(name);
+                        ctx.empty_struct_bases.remove(name);
+                        alloc_declared_locals(ctx, std::slice::from_ref(stmt))?;
+                    }
                     if let Stmt::Let(name, typ, value) = stmt {
                         let resolved = typ
                             .clone()
@@ -5522,7 +5565,12 @@ fn lower_expr_into(
                 return Err("x86_64-lower: unit array elements require a zero-width layout".into());
             }
 
-            let offsets = materialize_array_literal(emitter, ctx, items, pending_calls, None)?;
+            let record = scalar_expr_type(expr, ctx)
+                .map(|typ| record_array_fields(ctx.structs, &typ))
+                .transpose()?
+                .flatten();
+            let offsets =
+                materialize_array_literal(emitter, ctx, items, pending_calls, record.as_ref())?;
             lower_heap_array(emitter, ctx, &offsets, pending_calls)?;
             if target_reg != RAX {
                 emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
@@ -7752,6 +7800,78 @@ mod ieee_bit_cast_tests {
                 lowered.code.windows(expected.len()).any(|w| w == expected),
                 "missing expected opcode sequence {expected:02X?}"
             );
+        }
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64", unix))]
+#[test]
+fn private_length_operations_execute_typed_receivers_once() {
+    for (source, vector) in [
+        (
+            "var calls:Int=0;fn value()->String{calls+=1;return \"λ\";}fn main()->Int{if str-len(value())==2 && calls==1{return 42;}return 7;}",
+            false,
+        ),
+        (
+            "var calls:Int=0;fn value()->[Int]{calls+=1;return [20,22];}fn main()->Int{if array-len(value())==2 && calls==1{return 42;}return 7;}",
+            false,
+        ),
+        (
+            "var calls:Int=0;fn value()->[Int]{calls+=1;return [20,22];}fn main()->Int{if array-len(value())==2 && calls==1{return 42;}return 7;}",
+            true,
+        ),
+    ] {
+        let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        if vector {
+            for declaration in &mut module.decls {
+                if let Decl::Function { name, ret, .. } = declaration
+                    && name == "value"
+                {
+                    *ret = Typ::Vector(Box::new(Typ::Int));
+                }
+            }
+        }
+        crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expression| {
+            if let Expr::Call { callee, .. } = expression
+                && matches!(callee.as_ref(),Expr::Ident(name) if matches!(name.as_str(),"str-len"|"array-len"))
+            {
+                *callee = Box::new(Expr::Ident(format!("{}len", crate::core_ir::METHOD_PREFIX)));
+            }
+        });
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let _profile = antidecomp::ProfileGuard::new(profile);
+            let lowered = lower_module(&module, "main").unwrap();
+            let exports = lowered
+                .exports
+                .iter()
+                .map(|(name, offset)| (name.clone(), *offset, 0))
+                .collect::<Vec<_>>();
+            let relocations = lowered
+                .relocations
+                .iter()
+                .map(|site| (*site, lowered.codegen_base))
+                .collect::<Vec<_>>();
+            let mut runtime = crate::jit_runtime::JitRuntime::new();
+            runtime
+                .load_with_data_relocations(
+                    &lowered.code,
+                    &exports,
+                    &relocations,
+                    &lowered.data,
+                    &lowered.global_relocs,
+                    &lowered.data_relocations,
+                )
+                .unwrap();
+            assert_eq!(
+                unsafe { runtime.invoke("main", &[]) },
+                Some(42),
+                "{source} {profile:?}"
+            );
+            assert!(runtime.invocation_error().is_none());
         }
     }
 }
