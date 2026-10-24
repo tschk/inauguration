@@ -7835,7 +7835,7 @@ fn private_length_operations_execute_typed_receivers_once() {
             if let Expr::Call { callee, .. } = expression
                 && matches!(callee.as_ref(),Expr::Ident(name) if matches!(name.as_str(),"str-len"|"array-len"))
             {
-                *callee = Box::new(Expr::Ident(format!("{}len", crate::core_ir::METHOD_PREFIX)));
+                **callee = Expr::Ident(format!("{}len", crate::core_ir::METHOD_PREFIX));
             }
         });
         for profile in [

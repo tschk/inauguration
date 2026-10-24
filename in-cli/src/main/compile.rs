@@ -826,7 +826,7 @@ fn pack_boot_sections(
         .into_iter()
         .try_fold(0usize, |sum, len| sum.checked_add(len))
         .ok_or_else(|| "boot image section size overflow".to_string())?;
-    if data_base < 0x200000 || data_base % 4096 != 0 {
+    if data_base < 0x200000 || !data_base.is_multiple_of(4096) {
         return Err("boot image data base must be page aligned and at least 0x200000".into());
     }
     let data_offset = usize::try_from(data_base - 0x100000)

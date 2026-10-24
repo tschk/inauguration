@@ -786,9 +786,14 @@ mod tests {
         assert_eq!(data.len(), new_data.len());
         assert_ne!(original, relocated);
         let mut pointers = 0;
-        for (old, new) in data.chunks_exact(8).zip(new_data.chunks_exact(8)) {
-            let old = u64::from_le_bytes(old.try_into().unwrap());
-            let new = u64::from_le_bytes(new.try_into().unwrap());
+        for (old, new) in data
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .zip(new_data.as_chunks::<8>().0)
+        {
+            let old = u64::from_le_bytes(*old);
+            let new = u64::from_le_bytes(*new);
             if (0x200000..0x200000 + data.len() as u64).contains(&old) {
                 assert_eq!(new, old - 0x200000 + 0x301000);
                 pointers += 1;
