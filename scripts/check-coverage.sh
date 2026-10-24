@@ -38,6 +38,30 @@ assert data["degradations"] == [], data
 assert data["unresolved_calls"] == 0, data
 PY
 
+if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
+  echo 'coverage ok: Linux strict lowering reports the same refusal as the build'
+  "${IN_CMD[@]}" coverage --path "$tmp_dir/degraded.in" --json > "$tmp_dir/degraded.json"
+  python3 - "$tmp_dir/degraded.json" <<'PYREPORT'
+import json,sys
+report=json.load(open(sys.argv[1]))
+assert report["status"]=="rejected",report
+assert report["reason_code"]=="coverage-lowering-failed",report
+assert "nested indexing needs static array storage" in report["reason"],report
+assert report["functions_analyzed"]==0 and report["functions_lowered"]==0,report
+assert report["degradations"]==[],report
+PYREPORT
+  if "${IN_CMD[@]}" build --path "$tmp_dir/degraded.in" --out "$tmp_dir/degraded" > "$tmp_dir/build.out" 2> "$tmp_dir/build.err"; then
+    echo 'strict Linux build unexpectedly accepted the rejected coverage input' >&2
+    exit 1
+  fi
+  grep -q 'nested indexing needs static array storage' "$tmp_dir/build.err"
+  [[ ! -e "$tmp_dir/degraded" ]]
+  echo 'coverage ok: Linux fully lowered artifact executes its real result'
+  "${IN_CMD[@]}" build --path "$tmp_dir/clean.in" --out "$tmp_dir/clean" > "$tmp_dir/build.out"
+  status=0
+  "$tmp_dir/clean" || status=$?
+  [[ "$status" -eq 3 ]]
+else
 echo 'coverage ok: unlowered function is named with a code and marked reachable'
 "${IN_CMD[@]}" coverage --path "$tmp_dir/degraded.in" --json > "$tmp_dir/degraded.json"
 python3 - "$tmp_dir/degraded.json" <<'PY'
@@ -62,6 +86,8 @@ if [ "$status" -ne 70 ]; then
   exit 1
 fi
 grep -q 'IN3001' "$tmp_dir/run.err"
+
+fi
 
 echo 'coverage ok: a source that cannot be parsed reports no counts'
 printf 'fn main() -> Int { return 1;\n' > "$tmp_dir/broken.in"

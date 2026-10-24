@@ -26,6 +26,7 @@ const WRAPPERS: &[(&str, &str)] = &[
     ("path-extname", "in_path_extname"),
     ("path-normalize", "in_path_normalize"),
     ("str-concat", "in_str_concat"),
+    (crate::inrt::INRT_STR_CONCAT, "in_str_concat"),
     ("str-eq", "in_str_eq"),
     ("json-stringify", "in_json_stringify"),
     ("str-table-has", "in_str_table_has"),

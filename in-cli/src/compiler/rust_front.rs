@@ -2946,6 +2946,13 @@ fn map_type(ty: &syn::Type) -> Typ {
                 )
             }
         }
+        syn::Type::Slice(slice) => {
+            crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
+                "borrowed Rust slice ABI is not lowered: [{}]",
+                slice.elem.to_token_stream()
+            ))
+            .typ()
+        }
         syn::Type::Array(array) => match fixed_array_length(&array.len) {
             Ok(Some(length)) => crate::core_ir::rust_arrays::typ(map_type(&array.elem), length),
             Ok(None) => crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
@@ -8202,7 +8209,7 @@ mod external_callable_nominal_identity_tests {
             std::fs::write(&path, source).unwrap();
             for target in [CompileTarget::Jit, CompileTarget::Native] {
                 if target == CompileTarget::Native
-                    && !crate::native_backend::native_subset_host_available()
+                    && !crate::native_backend::native_hosted_runtime_available()
                 {
                     continue;
                 }

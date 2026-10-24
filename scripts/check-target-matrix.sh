@@ -183,8 +183,19 @@ if int.from_bytes(data[16:18], "little") != 2:
     raise SystemExit("x86_64 executable is not ET_EXEC")
 if int.from_bytes(data[18:20], "little") != 62:
     raise SystemExit("x86_64 executable is not EM_X86_64")
-if bytes([0x48, 0xC7, 0xC0, 0x3C, 0, 0, 0, 0x48, 0xC7, 0xC7, 0x2A, 0, 0, 0, 0x0F, 0x05]) not in data:
-    raise SystemExit("x86_64 executable missing syscall exit stub")
+# The executable now calls the lowered entry rather than embedding its result.
+entry = int.from_bytes(data[24:32], "little")
+text_offset = int.from_bytes(data[72:80], "little")
+text_address = int.from_bytes(data[80:88], "little")
+start = text_offset + entry - text_address
+if data[start] != 0xe8 or data[start+5:start+15] != bytes([0x48,0x89,0xc7,0xb8,60,0,0,0,0x0f,0x05]):
+    raise SystemExit("x86_64 executable missing entry call and result-preserving syscall exit")
+if int.from_bytes(data[68:72], "little") != 5 or int.from_bytes(data[124:128], "little") != 6:
+    raise SystemExit("x86_64 executable must separate RX code and RW data")
+import platform, subprocess
+if platform.system() == "Linux" and platform.machine() == "x86_64":
+    if subprocess.run([sys.argv[1]]).returncode != 42:
+        raise SystemExit("x86_64 executable did not execute its entry and exit 42")
 if report.get("reason_code") != "native-x86_64-linux-exit-subset":
     raise SystemExit("x86_64 executable report has wrong reason_code")
 PY

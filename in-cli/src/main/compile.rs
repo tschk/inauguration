@@ -350,7 +350,7 @@ fn cmd_emit_boot(
         inauguration::target::integer_semantics(target_triple),
     );
 
-    let (_mir, code, kernel_exports, data) =
+    let (_mir, mut code, kernel_exports, mut data) =
         inauguration::compiler::mir_lower::lower_boot_image(&module, entry_name, target_triple)
             .map_err(|e| InError::Message(format!("lower: {e}")))?;
 
@@ -406,7 +406,6 @@ fn cmd_emit_boot(
     // Boot-only 256-byte wrapper extension (not the SCI v2 manifest):
     // [64..72] writable data VA, [72..80] initialized data byte length.
     // Consumers can reserve the complete loaded image before heap allocation.
-    write_boot_data_metadata(&mut sci_header, data.len());
 
     // Kernel export table: lets a dynamic loader register the kernel's
     // functions as symbol providers for dynamically linked components.
@@ -433,8 +432,38 @@ fn cmd_emit_boot(
     table_bytes.extend_from_slice(&name_blob);
     sci_header[40..48].copy_from_slice(&export_table_addr.to_le_bytes());
 
-    let image = pack_boot_sections(&trampoline_bytes, &sci_header, &code, &table_bytes, &data)
+    let data_base = boot_data_base(tramp_size, SCI_HEADER_SIZE, code.len(), table_bytes.len())
         .map_err(InError::Message)?;
+    if !data.is_empty() && data_base != 0x200000 {
+        let (_, relocated_code, relocated_exports, relocated_data) =
+            inauguration::compiler::mir_lower::lower_boot_image_with_data_base(
+                &module,
+                entry_name,
+                target_triple,
+                data_base,
+            )
+            .map_err(|error| InError::Message(format!("boot data relocation: {error}")))?;
+        if relocated_code.len() != code.len()
+            || relocated_exports != kernel_exports
+            || relocated_data.len() != data.len()
+        {
+            return Err(InError::Message(
+                "boot data relocation changed section layout".into(),
+            ));
+        }
+        code = relocated_code;
+        data = relocated_data;
+    }
+    write_boot_data_metadata(&mut sci_header, data_base, data.len());
+    let image = pack_boot_sections(
+        &trampoline_bytes,
+        &sci_header,
+        &code,
+        &table_bytes,
+        &data,
+        data_base,
+    )
+    .map_err(InError::Message)?;
 
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)
@@ -516,6 +545,19 @@ fn cmd_emit_boot(
         "deterministic": deterministic,
         "checkpoint": checkpoint,
         "code_size": code.len(),
+        "boot_layout": {
+            "load_base": BOOT_LOAD_BASE,
+            "load_end": BOOT_LOAD_BASE + image.len() as u64,
+            "code_base": code_load,
+            "code_size": code.len(),
+            "exports_base": export_table_addr,
+            "exports_size": table_bytes.len(),
+            "data_base": if data.is_empty() { 0 } else { data_base },
+            "data_size": data.len(),
+            "data_file_offset": if data.is_empty() { 0 } else { data_base - BOOT_LOAD_BASE },
+            "file_size": image.len(),
+            "page_size": 4096,
+        },
         "provenance": {
             "compiler": "inauguration",
             "compiler_version": env!("CARGO_PKG_VERSION"),
@@ -747,28 +789,50 @@ fn print_owned_report(report: &inauguration::owned_compile::OwnedCompileReport) 
     }
 }
 
-fn write_boot_data_metadata(header: &mut [u8; 256], data_len: usize) {
-    let address = if data_len == 0 { 0u64 } else { 0x200000u64 };
+fn write_boot_data_metadata(header: &mut [u8; 256], data_base: u64, data_len: usize) {
+    let address = if data_len == 0 { 0u64 } else { data_base };
     header[64..72].copy_from_slice(&address.to_le_bytes());
     header[72..80].copy_from_slice(&(data_len as u64).to_le_bytes());
 }
 
-// Multiboot loads the whole file contiguously at 0x100000. x86 lowering
-// fixes writable globals to 0x200000, so retain that exact file offset.
+// Multiboot loads the whole file contiguously at 0x100000. Keep the legacy
+// 2 MiB data placement when it fits, otherwise align after code and exports.
+fn boot_data_base(
+    trampoline: usize,
+    header: usize,
+    code: usize,
+    exports: usize,
+) -> std::result::Result<u64, String> {
+    let prefix = [trampoline, header, code, exports]
+        .into_iter()
+        .try_fold(0u64, |sum, len| sum.checked_add(len as u64))
+        .ok_or("boot image section size overflow")?;
+    let end = 0x100000u64
+        .checked_add(prefix)
+        .and_then(|value| value.checked_add(4095))
+        .ok_or("boot image layout overflow")?
+        & !4095;
+    Ok(end.max(0x200000))
+}
 fn pack_boot_sections(
     trampoline: &[u8],
     header: &[u8],
     code: &[u8],
     exports: &[u8],
     data: &[u8],
+    data_base: u64,
 ) -> std::result::Result<Vec<u8>, String> {
     let prefix = [trampoline.len(), header.len(), code.len(), exports.len()]
         .into_iter()
         .try_fold(0usize, |sum, len| sum.checked_add(len))
         .ok_or_else(|| "boot image section size overflow".to_string())?;
-    let data_offset = 0x100000usize;
+    if data_base < 0x200000 || !data_base.is_multiple_of(4096) {
+        return Err("boot image data base must be page aligned and at least 0x200000".into());
+    }
+    let data_offset = usize::try_from(data_base - 0x100000)
+        .map_err(|_| "boot image data offset exceeds host address space")?;
     if !data.is_empty() && prefix > data_offset {
-        return Err("boot image code/export sections overlap writable data at 0x200000".into());
+        return Err("boot image code/export sections overlap writable data".into());
     }
     let length = if data.is_empty() {
         prefix
@@ -801,22 +865,58 @@ fn pack_boot_sections(
 
 #[cfg(test)]
 mod boot_data_tests {
-    use super::{pack_boot_sections, write_boot_data_metadata};
+    use super::{boot_data_base, pack_boot_sections, write_boot_data_metadata};
+    #[test]
+    fn boot_pack_places_growing_code_and_exports_before_aligned_data() {
+        let trampoline = vec![1; 4096];
+        let header = vec![2; 256];
+        let code = vec![3; 0x100001];
+        let exports = vec![4; 99];
+        let base =
+            boot_data_base(trampoline.len(), header.len(), code.len(), exports.len()).unwrap();
+        let prefix = trampoline.len() + header.len() + code.len() + exports.len();
+        assert_eq!(base % 4096, 0);
+        assert!(base >= 0x100000 + prefix as u64);
+        assert!(base > 0x200000);
+        let image =
+            pack_boot_sections(&trampoline, &header, &code, &exports, &[5, 6], base).unwrap();
+        let offset = (base - 0x100000) as usize;
+        assert_eq!(image.len(), offset + 2);
+        assert_eq!(&image[offset..], &[5, 6]);
+        assert!(image[prefix..offset].iter().all(|byte| *byte == 0));
+        let mut metadata = [0u8; 256];
+        write_boot_data_metadata(&mut metadata, base, 2);
+        assert_eq!(
+            u64::from_le_bytes(metadata[64..72].try_into().unwrap()),
+            base
+        );
+        assert!(
+            pack_boot_sections(&[], &[], &[], &[], &[1], base + 1)
+                .unwrap_err()
+                .contains("aligned")
+        );
+        assert!(
+            pack_boot_sections(&[], &[], &[], &[], &[1], 0x100000000)
+                .unwrap_err()
+                .contains("32-bit physical")
+        );
+    }
+
     #[test]
     fn boot_pack_retains_data_at_fixed_load_address() {
-        let image = pack_boot_sections(&[1], &[2], &[3], &[4], &[5, 6]).unwrap();
+        let image = pack_boot_sections(&[1], &[2], &[3], &[4], &[5, 6], 0x200000).unwrap();
         assert_eq!(&image[..4], &[1, 2, 3, 4]);
         assert_eq!(image.len(), 0x100002);
         assert_eq!(&image[0x100000..], &[5, 6]);
         assert_eq!(
-            pack_boot_sections(&[1], &[], &[], &[], &[]).unwrap(),
+            pack_boot_sections(&[1], &[], &[], &[], &[], 0x200000).unwrap(),
             vec![1]
         );
     }
     #[test]
     fn boot_data_metadata_preserves_existing_header_fields() {
         let mut header = [7u8; 256];
-        write_boot_data_metadata(&mut header, 123);
+        write_boot_data_metadata(&mut header, 0x200000, 123);
         assert_eq!(&header[..64], &[7u8; 64]);
         assert_eq!(
             u64::from_le_bytes(header[64..72].try_into().unwrap()),
@@ -824,7 +924,7 @@ mod boot_data_tests {
         );
         assert_eq!(u64::from_le_bytes(header[72..80].try_into().unwrap()), 123);
         assert_eq!(&header[80..], &[7u8; 176]);
-        write_boot_data_metadata(&mut header, 0);
+        write_boot_data_metadata(&mut header, 0x200000, 0);
         assert_eq!(&header[64..80], &[0u8; 16]);
     }
 
@@ -832,13 +932,13 @@ mod boot_data_tests {
     fn boot_pack_refuses_code_export_overlap() {
         let code = vec![0; 0x100000];
         assert_eq!(
-            pack_boot_sections(&[], &[], &code, &[], &[2])
+            pack_boot_sections(&[], &[], &code, &[], &[2], 0x200000)
                 .unwrap()
                 .len(),
             0x100001
         );
         assert!(
-            pack_boot_sections(&[], &[], &code, &[1], &[2])
+            pack_boot_sections(&[], &[], &code, &[1], &[2], 0x200000)
                 .unwrap_err()
                 .contains("overlap")
         );

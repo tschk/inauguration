@@ -1,3 +1,5 @@
+mod x86_executable;
+pub(crate) use x86_executable::lower_x86_executable;
 mod x86_object;
 pub use x86_object::{X86RelocatableObject, write_x86_data_object};
 

@@ -1,7 +1,7 @@
 use crate::boundary_emit::emit_component_metadata;
 use crate::boundary_ir::{
-    CapabilityDecl, CodeSection, ComponentMetadata, MemoryRequirements, ObjectField, ObjectSchema,
-    Provenance, ServiceExport, ServiceImport,
+    CapabilityDecl, CodeSection, ComponentMetadata, DataSection, MemoryRequirements, ObjectField,
+    ObjectSchema, Provenance, SciLayout, ServiceExport, ServiceImport,
 };
 use crate::core_ir::{Decl, UnifiedModule};
 use std::path::Path;
@@ -12,6 +12,15 @@ pub fn emit_component_metadata_sidecar(
     module: &UnifiedModule,
     entry: &str,
     out_path: &Path,
+) -> Option<String> {
+    emit_component_metadata_with_layout(module, entry, out_path, None)
+}
+
+pub fn emit_component_metadata_with_layout(
+    module: &UnifiedModule,
+    entry: &str,
+    out_path: &Path,
+    layout: Option<&SciLayout>,
 ) -> Option<String> {
     let meta_path = out_path.with_extension("component-metadata.json");
     // Find the first component declaration.
@@ -100,11 +109,22 @@ pub fn emit_component_metadata_sidecar(
         entry: Some(entry.to_string()),
         code_sections: vec![CodeSection {
             name: ".text".to_string(),
-            offset: 0,
-            size: 0, // filled in after lowering
+            offset: layout.map_or(0, |layout| layout.text_offset),
+            size: layout.map_or(0, |layout| layout.text_size),
             flags: "rx".to_string(),
         }],
-        data_sections: Vec::new(),
+        data_sections: layout.filter(|layout| layout.data_size != 0).map_or_else(
+            Vec::new,
+            |layout| {
+                vec![DataSection {
+                    name: ".data".to_string(),
+                    offset: layout.data_offset,
+                    size: layout.data_size,
+                    flags: "rw".to_string(),
+                }]
+            },
+        ),
+        sci_layout: layout.cloned(),
         imports: imports
             .into_iter()
             .map(|i: crate::core_ir::ComponentImport| ServiceImport {
@@ -139,7 +159,7 @@ pub fn emit_component_metadata_sidecar(
         memory: Some(MemoryRequirements {
             stack: 16384,
             heap: 0,
-            static_data: 0,
+            static_data: layout.map_or(0, |layout| layout.data_size),
         }),
         checkpoint: checkpoint.clone(),
         deterministic,
