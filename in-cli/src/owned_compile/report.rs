@@ -133,3 +133,58 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::owned_compile::{CompileTarget, OwnedCompileRequest};
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    #[test]
+    fn test_finalize_report() {
+        let request = OwnedCompileRequest {
+            path: PathBuf::from("dummy.in"),
+            module_id: "dummy".to_string(),
+            parser: crate::owned_compile::ParserCli::Auto,
+            target: CompileTarget::Native,
+            entry: None,
+            out: None,
+            linkage: crate::owned_compile::NativeLinkage::Executable,
+            target_triple: None,
+            jobs: 2,
+            debug: false,
+            profile: crate::owned_compile::EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+        let started = Instant::now();
+
+        let mut report = base_report(&request, 2, started);
+        report.success = true;
+
+        // We don't want to actually write to the filesystem, so we simulate cache hit
+        // or mock the directory. We can set cache_hit to true to avoid cache writing.
+        report.cache_hit = true;
+
+        // Since we didn't start a guard and record anything, active_invocations should be empty
+        let cwd = std::path::Path::new(".");
+        let frontend_hash = "dummy_hash";
+
+        // Wait slightly to ensure timing is non-zero
+        std::thread::sleep(Duration::from_micros(10));
+
+        let finalized = finalize_report(report, started, cwd, frontend_hash);
+
+        assert!(
+            finalized.success,
+            "success should remain true if no forbidden tools"
+        );
+        assert!(finalized.timing_micros > 0);
+        assert!(finalized.timing_waves_us.is_some());
+        let waves = finalized.timing_waves_us.unwrap();
+        assert_eq!(waves.len(), 2);
+        assert!(waves.iter().sum::<u128>() == finalized.timing_micros);
+        assert!(finalized.external_invocations.is_empty());
+    }
+}
