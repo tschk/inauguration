@@ -300,3 +300,28 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_ir::{Expr, MatchArm, Stmt};
+
+    #[test]
+    fn test_unsupported_match_pattern() {
+        let stmt = Stmt::Match {
+            scrutinee: Expr::Ident("foo".to_string()),
+            arms: vec![MatchArm {
+                pattern: "StructPat {}".to_string(), // unsupported pattern
+                guard: None,
+                body: vec![],
+            }],
+        };
+
+        let mut nodes = 0;
+        let res = count_stmt(&stmt, 0, &mut nodes);
+        assert_eq!(
+            res.unwrap_err(),
+            "c-backend: unsupported match pattern `StructPat {}`"
+        );
+    }
+}
