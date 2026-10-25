@@ -3648,3 +3648,74 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn test_parse_in_file_successful() {
+    let path = std::env::temp_dir().join(format!(
+        "success_{}.in",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&path, "fn main() {}").unwrap();
+    let module = parse_in_file(&path).unwrap();
+
+    assert_eq!(module.decls.len(), 1);
+    match &module.decls[0] {
+        crate::core_ir::Decl::Function { name, .. } => assert_eq!(name, "main"),
+        _ => panic!("Expected function declaration"),
+    }
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_parse_in_file_missing_main() {
+    let path = std::env::temp_dir().join(format!(
+        "missing_main_{}.in",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&path, "fn hello() {}").unwrap();
+    let result = parse_in_file(&path);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), ".in: missing required `fn main`");
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_parse_in_file_invalid_syntax() {
+    let path = std::env::temp_dir().join(format!(
+        "invalid_{}.in",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&path, "this is not valid in syntax!").unwrap();
+    let result = parse_in_file(&path);
+    assert!(result.is_err());
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_parse_in_library_file_missing_main_allowed() {
+    let path = std::env::temp_dir().join(format!(
+        "library_{}.in",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&path, "fn hello() {}").unwrap();
+    let module = super::parse_in_library_file(&path).unwrap();
+
+    assert_eq!(module.decls.len(), 1);
+    match &module.decls[0] {
+        crate::core_ir::Decl::Function { name, .. } => assert_eq!(name, "hello"),
+        _ => panic!("Expected function declaration"),
+    }
+    std::fs::remove_file(path).ok();
+}
