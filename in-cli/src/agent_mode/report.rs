@@ -515,3 +515,46 @@ fn lower_textual_sil(module: &UnifiedModule, module_id: &str) -> String {
     );
     sil
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_mode::types::{AgentModeConfig, AgentParserPreference};
+    use std::fs;
+
+    struct TempFile(std::path::PathBuf);
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_json_report() {
+        let dir = std::env::temp_dir();
+        let file_path = dir.join(format!("test_json_report_{}.in", std::process::id()));
+        let temp_file = TempFile(file_path.clone());
+        fs::write(&temp_file.0, "fn main() {}\n").unwrap();
+
+        let config = AgentModeConfig {
+            parser: AgentParserPreference::Auto,
+            module_id: "App".to_string(),
+        };
+
+        let result = json_report(&temp_file.0, &config);
+        assert!(result.is_ok());
+        let report = result.unwrap();
+
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.parser_decision.parser_id.as_deref(), Some("in"));
+
+        let missing_path = dir.join(format!("missing_json_report_{}.in", std::process::id()));
+        let result_missing = json_report(&missing_path, &config);
+        assert!(result_missing.is_err());
+        match result_missing {
+            Err(AgentModeError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
+            _ => panic!("Expected IO error for missing file"),
+        }
+    }
+}
