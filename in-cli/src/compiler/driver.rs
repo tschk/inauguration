@@ -185,3 +185,86 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_compile_in_file_success_with_metadata() {
+        let temp_dir = std::env::temp_dir().join("in_cli_driver_test_success_md");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let source_path = temp_dir.join("test_success.in");
+        fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
+
+        let mut spec = ComponentSpec::host_executable("test_app", Some("main"));
+        spec.target = "x86_64-unknown-linux-gnu".to_string();
+
+        let result = compile_in_file(&source_path, &spec, true);
+
+        assert!(result.is_ok());
+        let (output_path, metadata_path) = result.unwrap();
+
+        assert!(output_path.exists());
+        assert!(metadata_path.is_some());
+        assert!(metadata_path.unwrap().exists());
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_compile_in_file_success_no_metadata() {
+        let temp_dir = std::env::temp_dir().join("in_cli_driver_test_success_no_md");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let source_path = temp_dir.join("test_success_no_md.in");
+        fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
+
+        let mut spec = ComponentSpec::host_executable("test_app", Some("main"));
+        spec.target = "x86_64-unknown-linux-gnu".to_string();
+
+        let result = compile_in_file(&source_path, &spec, false);
+
+        assert!(result.is_ok());
+        let (output_path, metadata_path) = result.unwrap();
+
+        assert!(output_path.exists());
+        assert!(metadata_path.is_none());
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_compile_in_file_read_error() {
+        let source_path = Path::new("non_existent_file_12345.in");
+        let mut spec = ComponentSpec::host_executable("test_app", Some("main"));
+        spec.target = "x86_64-unknown-linux-gnu".to_string();
+
+        let result = compile_in_file(source_path, &spec, true);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.starts_with("read source:"));
+    }
+
+    #[test]
+    fn test_compile_in_file_compilation_error() {
+        let temp_dir = std::env::temp_dir().join("in_cli_driver_test_comp_err");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let source_path = temp_dir.join("test_err.in");
+        fs::write(&source_path, "fn main() -> Int { return \"not an int\"; }").unwrap();
+
+        let mut spec = ComponentSpec::host_executable("test_app", Some("main"));
+        spec.target = "x86_64-unknown-linux-gnu".to_string();
+
+        let result = compile_in_file(&source_path, &spec, true);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.starts_with("compilation:"));
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+}
