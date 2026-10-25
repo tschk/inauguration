@@ -3648,3 +3648,26 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn test_parse_in_library_source() {
+    // Test happy path - parsing a simple library source
+    let source = "fn helper() -> Int { return 42; }";
+    let parsed = super::parse_in_library_source(source);
+    assert!(parsed.is_ok());
+
+    let module = parsed.unwrap();
+    assert_eq!(module.decls.len(), 1);
+
+    // Check that it's a function declaration for "helper"
+    let is_helper_fn = module
+        .decls
+        .iter()
+        .any(|decl| matches!(decl, super::Decl::Function { name, .. } if name == "helper"));
+    assert!(is_helper_fn);
+
+    // Test with syntax error
+    let invalid_source = "fn helper() -> { return 42; }";
+    let invalid_parsed = super::parse_in_library_source(invalid_source);
+    assert!(invalid_parsed.is_err());
+}
