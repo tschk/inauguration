@@ -112,12 +112,16 @@ pub(crate) fn append_string_table(
         // bug. Failing loudly beats leaving the `adr` unpatched: an unpatched
         // `adr rd, 0` yields a self-referential pointer and the program would
         // read garbage instead of the literal.
-        let header_offset = index_offsets.get(&p.string_index).ok_or_else(|| {
-            format!(
-                "native-lower: string table is missing pool index {} (internal invariant)",
-                p.string_index
-            )
-        })?;
+        let header_offset = match index_offsets.get(&p.string_index) {
+            Some(offset) => offset,
+            None => {
+                emitter.patch_u32(p.adr_site, crate::native_emit::aarch64::brk(0));
+                return Err(format!(
+                    "native-lower: string table is missing pool index {} (internal invariant)",
+                    p.string_index
+                ));
+            }
+        };
         let adr_delta = (*header_offset - p.adr_site as i64) as i32;
         emitter.patch_u32(p.adr_site, aarch64::adr(p.rd, adr_delta));
     }
