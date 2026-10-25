@@ -506,3 +506,33 @@ pub(super) fn missing_capability_from_message(message: &str) -> Option<String> {
         .map(|(_, capability)| capability.trim().to_string())
         .filter(|capability| !capability.is_empty())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_mode::types::AgentDiagnosticSeverity;
+
+    #[test]
+    fn test_explain_diagnostic() {
+        let explained = explain_diagnostic(DEGRADATION_SKIPPED_FUNCTION).unwrap();
+        assert_eq!(explained.code, DEGRADATION_SKIPPED_FUNCTION);
+        assert_eq!(explained.severity, AgentDiagnosticSeverity::Warning);
+
+        let explained = explain_diagnostic("AGENT_NO_MAIN").unwrap();
+        assert_eq!(explained.code, "AGENT_NO_MAIN");
+        assert_eq!(explained.severity, AgentDiagnosticSeverity::Warning);
+
+        let explained = explain_diagnostic("INAGENT010").unwrap();
+        assert_eq!(explained.code, "INAGENT010");
+        assert_eq!(explained.severity, AgentDiagnosticSeverity::Warning);
+
+        let explained = explain_diagnostic("AGENT_PARSE_FAILED").unwrap();
+        assert_eq!(explained.severity, AgentDiagnosticSeverity::Error);
+
+        let explained = explain_diagnostic("INPKG001").unwrap();
+        assert_eq!(explained.severity, AgentDiagnosticSeverity::Warning);
+
+        let explained = explain_diagnostic("UNKNOWN_CODE");
+        assert!(explained.is_none());
+    }
+}
