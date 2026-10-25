@@ -133,3 +133,75 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit_profile::EmitProfile;
+    use crate::native_emit::NativeLinkage;
+    use crate::owned_compile::{CompileTarget, OwnedCompileRequest};
+    use crate::parser_registry::ParserCli;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_finalize_report_updates_timing_and_waves() {
+        let request = OwnedCompileRequest {
+            path: PathBuf::from("fake.in"),
+            module_id: "test".to_string(),
+            parser: ParserCli::default(),
+            target: CompileTarget::Jit,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: None,
+            jobs: 2,
+            debug: false,
+            profile: EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+
+        let started = Instant::now();
+        let mut report = base_report(&request, request.jobs, started);
+        report.cache_hit = true;
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let finalized = finalize_report(report, started, std::path::Path::new(""), "dummy_hash");
+
+        assert!(finalized.timing_micros > 0);
+        assert!(finalized.timing_waves_us.is_some());
+        let waves = finalized.timing_waves_us.as_ref().unwrap();
+        assert_eq!(waves.len(), 2);
+        let wave_sum: u128 = waves.iter().sum();
+        assert_eq!(wave_sum, finalized.timing_micros);
+    }
+
+    #[test]
+    fn test_finalize_report_success_unmodified_without_forbidden_invocations() {
+        let request = OwnedCompileRequest {
+            path: PathBuf::from("fake.in"),
+            module_id: "test".to_string(),
+            parser: ParserCli::default(),
+            target: CompileTarget::Jit,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: None,
+            jobs: 1,
+            debug: false,
+            profile: EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+
+        let started = Instant::now();
+        let mut report = base_report(&request, request.jobs, started);
+        report.cache_hit = true;
+        report.success = true;
+
+        let finalized = finalize_report(report, started, std::path::Path::new(""), "dummy_hash");
+        assert!(finalized.success);
+        assert!(finalized.error.is_none());
+        assert!(finalized.reason.is_none());
+        assert!(finalized.reason_code.is_none());
+    }
+}
