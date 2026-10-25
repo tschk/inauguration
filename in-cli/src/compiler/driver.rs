@@ -185,3 +185,65 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn get_temp_dir() -> PathBuf {
+        let count = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let dir =
+            std::env::temp_dir().join(format!("inauguration_test_{}_{}_{}", pid, timestamp, count));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let temp_dir = get_temp_dir();
+        let source_path = temp_dir.join("test_module.in");
+        std::fs::write(&source_path, "module foo; fn main() {}").unwrap();
+
+        let spec = spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            0,
+            true,
+            false,
+        );
+
+        let (output_path, metadata_path) = compile_in_file(&source_path, &spec, true).unwrap();
+        assert!(output_path.exists());
+        assert!(metadata_path.is_some());
+        assert!(metadata_path.unwrap().exists());
+    }
+
+    #[test]
+    fn test_compile_in_file_missing_source() {
+        let temp_dir = get_temp_dir();
+        let source_path = temp_dir.join("missing.in");
+
+        let spec = spec_from_cli(
+            "missing",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            0,
+            true,
+            false,
+        );
+
+        let res = compile_in_file(&source_path, &spec, true);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("read source"));
+    }
+}
