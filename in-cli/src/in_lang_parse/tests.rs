@@ -7,6 +7,28 @@ use super::{
 };
 
 #[test]
+fn test_parse_in_source_valid() {
+    let source = "fn main() -> Int { return 42; }\n";
+    let module = parse_in_source(source).expect("Valid source should parse successfully");
+    assert_eq!(module.decls.len(), 1);
+}
+
+#[test]
+fn test_parse_in_source_invalid_syntax() {
+    let source = "this is not valid syntax";
+    let result = parse_in_source(source);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_parse_in_source_missing_main() {
+    let source = "fn helper() -> Int { return 42; }\n";
+    let result = parse_in_source(source);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("missing required `fn main`"));
+}
+
+#[test]
 fn test_split_top_level_decl_blocks_empty() {
     let src = "";
     let blocks = split_top_level_decl_blocks(src);
