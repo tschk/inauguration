@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import time
+import threading
 
 repository = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -79,26 +79,33 @@ for case in cases:
             "executed_elf_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
         }, indent=2) + "\n")
         serial = directory / "serial.log"
-        with serial.open("w") as log:
-            process = subprocess.Popen(
-                ["qemu-system-arm", "-machine", "mps2-an521", "-cpu", "cortex-m33",
-                 "-nographic", "-kernel", str(executable)],
-                stdout=log, stderr=subprocess.STDOUT,
-            )
+        process = subprocess.Popen(
+            ["qemu-system-arm", "-machine", "mps2-an521", "-cpu", "cortex-m33",
+             "-nographic", "-kernel", str(executable)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        out_bytes = bytearray()
+        def reader():
+            while True:
+                chunk = process.stdout.read1(4096)
+                if not chunk:
+                    break
+                out_bytes.extend(chunk)
+                if b"empty definitions" in out_bytes:
+                    break
+        t = threading.Thread(target=reader)
+        t.start()
+        try:
+            t.join(timeout=10)
+        finally:
+            process.terminate()
             try:
-                deadline = time.monotonic() + 10
-                while time.monotonic() < deadline:
-                    text = serial.read_text(errors="replace")
-                    if "empty definitions" in text or process.poll() is not None:
-                        break
-                    time.sleep(0.05)
-            finally:
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            t.join()
+        serial.write_bytes(out_bytes)
         text = serial.read_text(errors="replace")
         passed = "PASS empty definitions" in text and "FAIL empty definitions" not in text
         results.append({"case": case["name"], "profile": profile, "passed": passed})
