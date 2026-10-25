@@ -572,6 +572,17 @@ mod tests {
     }
 
     #[test]
+    fn test_doc_href() {
+        assert_eq!(doc_href("index", "about"), "about.html");
+        assert_eq!(doc_href("index", "index"), "index.html");
+        assert_eq!(doc_href("index", "dir/page"), "dir/page.html");
+        assert_eq!(doc_href("dir/index", "about"), "../about.html");
+        assert_eq!(doc_href("dir/index", "dir/page"), "page.html");
+        assert_eq!(doc_href("dir/index", "dir/index"), "index.html");
+        assert_eq!(doc_href("dir1/index", "dir2/page"), "../dir2/page.html");
+    }
+
+    #[test]
     fn test_render_nav_nested_class() {
         let pages = vec![
             ("benchmarks/README".to_string(), "Overview".to_string()),
