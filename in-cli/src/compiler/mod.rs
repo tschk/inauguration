@@ -26,3 +26,6 @@ pub mod passes;
 pub mod pipeline;
 pub mod rust_front;
 pub mod tree_front;
+
+#[cfg(test)]
+mod driver_tests;
