@@ -27,6 +27,13 @@ fn temp_source(name: &str, suffix: &str, source: &str) -> TempFile {
 }
 
 #[test]
+fn test_json_report_missing_file() {
+    let path = std::path::Path::new("does_not_exist.in");
+    let result = json_report(path, &AgentModeConfig::default());
+    assert!(result.is_err());
+}
+
+#[test]
 fn json_report_includes_core_graph_and_parser_decision() {
     let temp = temp_source(
         "main",
