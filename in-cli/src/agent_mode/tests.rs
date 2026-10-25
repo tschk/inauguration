@@ -83,6 +83,14 @@ fn fix_plan_reports_parse_failure_repair() {
 }
 
 #[test]
+fn fix_plan_reports_success_without_diagnostics() {
+    let temp = temp_source("fix_plan_success", "in", "fn main() -> void { return; }\n");
+    let plan = fix_plan_report(&temp.path, &AgentModeConfig::default()).expect("fix plan");
+
+    assert!(plan.diagnostics.is_empty());
+}
+
+#[test]
 fn icore_v2_report_uses_body_subset_level() {
     let temp = temp_source(
         "body",
