@@ -14,6 +14,28 @@ fn test_split_top_level_decl_blocks_empty() {
 }
 
 #[test]
+fn test_parse_in_library_source_happy_path() {
+    let result = super::parse_in_library_source("var x = 1\nfn helper() -> Int { return x; }");
+    assert!(result.is_ok());
+    let module = result.unwrap();
+    assert_eq!(module.decls.len(), 2);
+    assert!(matches!(&module.decls[0], Decl::Global { name, .. } if name == "x"));
+    assert!(matches!(&module.decls[1], Decl::Function { name, .. } if name == "helper"));
+}
+
+#[test]
+fn test_parse_in_library_source_missing_main() {
+    let result = super::parse_in_library_source("fn do_nothing() {}");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_parse_in_library_source_validation_error() {
+    let result = super::parse_in_library_source("var x = y");
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_split_top_level_decl_blocks_single() {
     let src = "fn test() {}\n";
     let blocks = split_top_level_decl_blocks(src);
