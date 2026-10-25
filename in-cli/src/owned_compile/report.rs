@@ -133,3 +133,55 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::owned_compile::OwnedCompileReport;
+
+    #[test]
+    fn test_report_to_json() {
+        let report = OwnedCompileReport {
+            schema_version: 1,
+            owned: true,
+            path: "test/path".to_string(),
+            module_id: "test_module".to_string(),
+            package_name: None,
+            module_identity: None,
+            target: "test_target".to_string(),
+            target_triple: None,
+            entry: None,
+            linkage: "test_linkage".to_string(),
+            frontend_level: "level1".to_string(),
+            semantic_level: "level2".to_string(),
+            backend_level: "level3".to_string(),
+            runtime_level: "level4".to_string(),
+            external_invocations: vec![],
+            reason_code: None,
+            reason: None,
+            success: true,
+            artifact_path: None,
+            executable_path: None,
+            abi_path: None,
+            degradations: vec![],
+            parsed_function_count: 10,
+            typed_function_count: 5,
+            call_edge_count: 2,
+            jobs: 4,
+            timing_micros: 1000,
+            timing_waves_us: None,
+            cache_hit: false,
+            frontend_hash: None,
+            eval_exit_code: None,
+            eval_result: None,
+            execution_started: false,
+            error: None,
+        };
+
+        let json = report_to_json(&report).unwrap();
+        assert!(json.contains("\"schema_version\": 1"));
+        assert!(json.contains("\"owned\": true"));
+        assert!(json.contains("\"path\": \"test/path\""));
+        assert!(json.contains("\"success\": true"));
+    }
+}
