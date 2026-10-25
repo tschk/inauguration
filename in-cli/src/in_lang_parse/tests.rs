@@ -144,6 +144,16 @@ fn test_parse_in_surface_info_duplicate_module() {
 }
 
 #[test]
+fn test_parse_in_source() {
+    let valid_src = "fn main() -> Int { return 42; }";
+    let module = parse_in_source(valid_src).expect("should parse valid source");
+    assert_eq!(module.decls.len(), 1);
+
+    let err = parse_in_source("unknown_syntax foo").expect_err("should fail on unknown syntax");
+    assert!(err.contains("unknown"));
+}
+
+#[test]
 fn test_parse_in_surface_info_unknown_syntax() {
     let src = "unknown_keyword foo";
     let err = parse_in_surface_info(src).expect_err("should fail");
