@@ -1,0 +1,5 @@
+🧪 Test error paths in c_backend_scan
+
+🎯 **What:** The missing test for the error path in c_backend_scan.rs is added.
+📊 **Coverage:** The DoS guard limits (MAX_EMIT_NODES and MAX_EMIT_DEPTH) are now tested.
+✨ **Result:** Increased test coverage for error paths.

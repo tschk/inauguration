@@ -300,3 +300,66 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_ir::{CoreModuleIdentity, Decl, Expr, Typ, UnifiedModule};
+
+    #[test]
+    fn test_max_emit_nodes_dos_guard() {
+        let mut decls = Vec::new();
+        // MAX_EMIT_NODES is 100_000, so 100_001 will trigger the error
+        for i in 0..100_001 {
+            decls.push(Decl::Global {
+                name: format!("g{}", i),
+                typ: Typ::Int,
+                init: None,
+                mutable: false,
+                constant_value: false,
+            });
+        }
+        let module = UnifiedModule {
+            identity: CoreModuleIdentity::default(),
+            decls,
+        };
+
+        let result = check_module_limits(&module);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "emit aborted: Core IR exceeds 100000 nodes (DoS guard)"
+        );
+    }
+
+    #[test]
+    fn test_max_emit_depth_dos_guard() {
+        // MAX_EMIT_DEPTH is 256.
+        // We create an expression nested 257 times.
+        let mut expr = Expr::IntLit(0);
+        for _ in 0..257 {
+            expr = Expr::Unary {
+                op: "not".to_string(),
+                expr: Box::new(expr),
+            };
+        }
+
+        let module = UnifiedModule {
+            identity: CoreModuleIdentity::default(),
+            decls: vec![Decl::Global {
+                name: "deep".to_string(),
+                typ: Typ::Int,
+                init: Some(Box::new(expr)),
+                mutable: false,
+                constant_value: false,
+            }],
+        };
+
+        let result = check_module_limits(&module);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "emit aborted: Core IR nesting exceeds 256 (DoS guard)"
+        );
+    }
+}
