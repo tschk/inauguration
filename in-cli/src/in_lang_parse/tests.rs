@@ -151,6 +151,21 @@ fn test_parse_in_surface_info_unknown_syntax() {
 }
 
 #[test]
+fn test_parse_in_source() {
+    let src = "fn main() -> void { }";
+    let module = parse_in_source(src).expect("should parse basic source");
+    assert_eq!(module.decls.len(), 1);
+
+    let bad_src = "fn main() -> void {";
+    let err = parse_in_source(bad_src).expect_err("should fail to parse bad source");
+    assert!(err.contains("incomplete declaration at line 1"));
+
+    let validation_err_src = "struct S { UnknownType x }\nfn main() -> void {}";
+    let err = parse_in_source(validation_err_src).expect_err("should fail validation");
+    assert!(err.contains("unknown type in struct S field x"));
+}
+
+#[test]
 fn void_return_case_insensitive() {
     let m = parse_in_source("fn main() -> VOID\n").expect("ok");
     match &m.decls[0] {
