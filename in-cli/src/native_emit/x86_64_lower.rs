@@ -3427,17 +3427,22 @@ fn lower_builtin_call(
             }
             Ok(true)
         }
-        "read-cr3" => {
-            emitter.emit_width(&[0x0F, 0x20, 0xD8], &[0x48, 0x0F, 0x20, 0xD8]); // mov eax/rax, cr3
+        "read-cr3" | "cr3-read" => {
+            emitter.emit_width(&[0x0F, 0x20, 0xD8], &[0x0F, 0x20, 0xD8]); // mov eax/rax, cr3
             if target_reg != RAX {
                 emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
             }
             Ok(true)
         }
-        "write-cr3" => {
+        "write-cr3" | "cr3-write" => {
             if args.len() >= 1 {
-                lower_expr_into(emitter, ctx, &args[0], RDI, pending_calls)?;
-                emitter.emit_bytes(&[0x0F, 0x22, 0xC7]); // mov cr3, edi/rdi
+                lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+                emitter.emit_bytes(&[0x0F, 0x22, 0xD8]); // mov cr3, eax/rax
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `{target_name}` requires 1 argument in `{}`",
+                    ctx.fn_name
+                ));
             }
             Ok(true)
         }
@@ -3460,6 +3465,124 @@ fn lower_builtin_call(
             } else {
                 return Err(format!(
                     "x86_64-lower: `lidt` requires 1 argument in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "lgdt" => {
+            if args.len() >= 1 {
+                lower_expr_into(emitter, ctx, &args[0], RDI, pending_calls)?;
+                emitter.emit_bytes(&[0x0F, 0x01, 0x17]); // lgdt [rdi]
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `lgdt` requires 1 argument in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "ltr" => {
+            if args.len() >= 1 {
+                lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+                emitter.emit_bytes(&[0x0F, 0x00, 0xD8]); // ltr ax
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `ltr` requires 1 argument in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "rdmsr" => {
+            if args.len() >= 1 {
+                lower_expr_into(emitter, ctx, &args[0], RCX, pending_calls)?;
+                emitter.emit_bytes(&[0x0F, 0x32]); // rdmsr -> edx:eax
+                if !x86_64::is_32bit() {
+                    emitter.emit_bytes(&[0x48, 0xC1, 0xE2, 0x20]); // shl rdx, 32
+                    emitter.emit_bytes(&[0x48, 0x09, 0xD0]); // or rax, rdx
+                }
+                if target_reg != RAX {
+                    emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+                }
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `rdmsr` requires 1 argument in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "wrmsr64" => {
+            if args.len() >= 2 {
+                lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[1], RAX, pending_calls)?;
+                if x86_64::is_32bit() {
+                    emitter.emit_insns(&x86_64::xor_rr(RDX, RDX));
+                } else {
+                    emitter.emit_bytes(&[0x48, 0x89, 0xC2]); // mov rdx, rax
+                    emitter.emit_bytes(&[0x48, 0xC1, 0xEA, 0x20]); // shr rdx, 32
+                }
+                emitter.emit_insns(&x86_64::pop_r(RCX));
+                emitter.emit_bytes(&[0x0F, 0x30]); // wrmsr
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `wrmsr64` requires 2 arguments in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "wrmsr" => {
+            if args.len() >= 3 {
+                lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[1], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[2], RDX, pending_calls)?;
+                emitter.emit_insns(&x86_64::pop_r(RAX));
+                emitter.emit_insns(&x86_64::pop_r(RCX));
+                emitter.emit_bytes(&[0x0F, 0x30]); // wrmsr
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `wrmsr` requires 3 arguments in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "mem-fill64" => {
+            if args.len() >= 3 {
+                lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[1], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[2], RCX, pending_calls)?;
+                emitter.emit_insns(&x86_64::pop_r(RAX));
+                emitter.emit_insns(&x86_64::pop_r(RDI));
+                emitter.emit_width(&[0xFC, 0xF3, 0xAB], &[0xFC, 0xF3, 0x48, 0xAB]); // cld; rep stosd/stosq
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `mem-fill64` requires 3 arguments in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "mem-copy64" => {
+            if args.len() >= 3 {
+                lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[1], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[2], RCX, pending_calls)?;
+                emitter.emit_insns(&x86_64::pop_r(RSI));
+                emitter.emit_insns(&x86_64::pop_r(RDI));
+                emitter.emit_width(&[0xFC, 0xF3, 0xA5], &[0xFC, 0xF3, 0x48, 0xA5]); // cld; rep movsd/movsq
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `mem-copy64` requires 3 arguments in `{}`",
                     ctx.fn_name
                 ));
             }
@@ -3834,10 +3957,10 @@ fn lower_call_expr(
     if matches!(
         target_name.as_str(),
         "vector-push" | "vector-extend" | "vector-clear"
-    ) && ctx
+    ) && !ctx
         .functions
         .get(&target_name)
-        .is_none_or(|function| function.body.is_empty())
+        .is_some_and(|function| !function.body.is_empty())
     {
         let expected_args = if target_name == "vector-clear" { 1 } else { 2 };
         if args.len() != expected_args {
@@ -7551,6 +7674,83 @@ mod ieee_bit_cast_tests {
             assert_eq!(
                 &bytes[numeric..numeric + numeric_start.len()],
                 numeric_start.as_slice()
+            );
+        }
+    }
+
+    #[test]
+    fn bare_metal_cpu_control_and_msr_intrinsics_encode_expected_x86_64_opcodes() {
+        let _restore = Restore(x86_64::is_32bit());
+        x86_64::set_32bit(false);
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "cpu_probe".into(),
+            params: vec![("addr".into(), Typ::Int)],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("lgdt".into())),
+                    args: vec![Expr::Ident("addr".into())],
+                }),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("ltr".into())),
+                    args: vec![Expr::IntLit(0x28)],
+                }),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("cr3-write".into())),
+                    args: vec![Expr::Ident("addr".into())],
+                }),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("wrmsr".into())),
+                    args: vec![
+                        Expr::IntLit(0xC0000081),
+                        Expr::IntLit(0),
+                        Expr::IntLit(0x00130008),
+                    ],
+                }),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("wrmsr64".into())),
+                    args: vec![Expr::IntLit(0xC0000082), Expr::Ident("addr".into())],
+                }),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("mem-fill64".into())),
+                    args: vec![Expr::Ident("addr".into()), Expr::IntLit(0), Expr::IntLit(8)],
+                }),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("mem-copy64".into())),
+                    args: vec![
+                        Expr::Ident("addr".into()),
+                        Expr::Ident("addr".into()),
+                        Expr::IntLit(8),
+                    ],
+                }),
+                Stmt::Return(Some(Expr::Binary {
+                    op: "+".into(),
+                    lhs: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Ident("cr3-read".into())),
+                        args: vec![],
+                    }),
+                    rhs: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Ident("rdmsr".into())),
+                        args: vec![Expr::IntLit(0xC0000080)],
+                    }),
+                })),
+            ],
+        }]);
+        let lowered = lower_native_module(&module, "cpu_probe").expect("cpu_probe lowers");
+        for expected in [
+            &[0x0F, 0x01, 0x17][..],       // lgdt [rdi]
+            &[0x0F, 0x00, 0xD8][..],       // ltr ax
+            &[0x0F, 0x22, 0xD8][..],       // mov cr3, rax
+            &[0x0F, 0x30][..],             // wrmsr
+            &[0xFC, 0xF3, 0x48, 0xAB][..], // cld; rep stosq
+            &[0xFC, 0xF3, 0x48, 0xA5][..], // cld; rep movsq
+            &[0x0F, 0x20, 0xD8][..],       // mov rax, cr3
+            &[0x0F, 0x32][..],             // rdmsr
+        ] {
+            assert!(
+                lowered.code.windows(expected.len()).any(|w| w == expected),
+                "missing expected opcode sequence {expected:02X?}"
             );
         }
     }
