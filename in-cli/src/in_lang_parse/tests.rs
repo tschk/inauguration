@@ -7,6 +7,20 @@ use super::{
 };
 
 #[test]
+fn test_parse_in_source() {
+    let src_ok = "fn main() -> Int { return 42; }";
+    let parsed_ok = parse_in_source(src_ok);
+    assert!(parsed_ok.is_ok());
+    assert_eq!(parsed_ok.unwrap().decls.len(), 1);
+    let src_err_syntax = "fn main() -> { return 42; }";
+    let parsed_err_syntax = parse_in_source(src_err_syntax);
+    assert!(parsed_err_syntax.is_err());
+    let src_human = "fn main() -> Int:\n  return 42";
+    let parsed_human = parse_in_source(src_human);
+    assert!(parsed_human.is_ok());
+}
+
+#[test]
 fn test_split_top_level_decl_blocks_empty() {
     let src = "";
     let blocks = split_top_level_decl_blocks(src);
