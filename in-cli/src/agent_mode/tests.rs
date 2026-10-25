@@ -616,3 +616,24 @@ fn explains_lowerer_degradation_codes() {
     }
     assert!(explain_diagnostic("IN3999").is_none());
 }
+
+#[test]
+fn json_report_returns_io_error_for_missing_file() {
+    let result = json_report("nonexistent_file_xyz.in", &AgentModeConfig::default());
+    assert!(matches!(result, Err(AgentModeError::Io(_))));
+}
+
+#[test]
+fn json_report_serialization_format_matches_expected() {
+    let temp = temp_source(
+        "json_report_format",
+        "in",
+        "fn main() -> void { return; }\n",
+    );
+    let report = json_report(&temp.path, &AgentModeConfig::default()).expect("report");
+    let json_string = serde_json::to_string(&report).expect("serialize report");
+
+    assert!(json_string.contains(r#""schema_version":1"#));
+    assert!(json_string.contains(r#""route":"core_ir""#));
+    assert!(json_string.contains(r#""parser_id":"in""#));
+}
