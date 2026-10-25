@@ -718,10 +718,11 @@ pub fn lower_module_with_jobs(
     let resolved_entry = if functions.contains_key(entry) {
         entry.to_string()
     } else {
+        let entry_suffix = format!(".{entry}");
         // Try any function ending with .<entry> (namespaced)
         functions
             .keys()
-            .find(|k| k.ends_with(&format!(".{entry}")))
+            .find(|k| k.ends_with(&entry_suffix))
             .cloned()
             .or_else(|| functions.keys().find(|k| k.as_str() == entry).cloned())
             .unwrap_or_else(|| {
