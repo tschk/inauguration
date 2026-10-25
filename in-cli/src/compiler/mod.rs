@@ -15,6 +15,8 @@ pub mod backend;
 pub mod boundary_common;
 pub mod core;
 pub mod driver;
+#[cfg(test)]
+mod driver_tests;
 pub mod icore;
 pub mod metadata;
 pub mod mir;
