@@ -185,3 +185,92 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::metadata::{ArtifactKind, OptimizationLevel};
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.in");
+
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "fn main() {{ }}").unwrap();
+
+        // We do not hardcode a specific target; use current host target
+        let target = if cfg!(target_arch = "aarch64") {
+            if cfg!(target_os = "macos") {
+                "aarch64-apple-darwin".to_string()
+            } else {
+                "aarch64-unknown-linux-gnu".to_string()
+            }
+        } else {
+            "x86_64-unknown-linux-gnu".to_string()
+        };
+
+        let spec = ComponentSpec {
+            name: "test".to_string(),
+            target,
+            artifact_kind: ArtifactKind::Executable,
+            deterministic: true,
+            checkpoint: String::new(),
+            optimization_level: OptimizationLevel::None,
+            debug_info: false,
+            entry_point: Some("main".to_string()),
+            imports: vec![],
+            exports: vec![],
+            capabilities: vec![],
+            capabilities_exported: vec![],
+        };
+
+        let result = compile_in_file(&file_path, &spec, true);
+
+        assert!(result.is_ok(), "compilation failed: {:?}", result.err());
+        let (output_path, metadata_path) = result.unwrap();
+
+        assert!(output_path.exists());
+        assert!(metadata_path.is_some());
+        assert!(metadata_path.unwrap().exists());
+    }
+
+    #[test]
+    fn test_compile_in_file_missing_source() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("missing.in");
+
+        let target = if cfg!(target_arch = "aarch64") {
+            if cfg!(target_os = "macos") {
+                "aarch64-apple-darwin".to_string()
+            } else {
+                "aarch64-unknown-linux-gnu".to_string()
+            }
+        } else {
+            "x86_64-unknown-linux-gnu".to_string()
+        };
+
+        let spec = ComponentSpec {
+            name: "test".to_string(),
+            target,
+            artifact_kind: ArtifactKind::Executable,
+            deterministic: true,
+            checkpoint: String::new(),
+            optimization_level: OptimizationLevel::None,
+            debug_info: false,
+            entry_point: Some("main".to_string()),
+            imports: vec![],
+            exports: vec![],
+            capabilities: vec![],
+            capabilities_exported: vec![],
+        };
+
+        let result = compile_in_file(&file_path, &spec, true);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("read source"));
+    }
+}
