@@ -506,3 +506,39 @@ pub(super) fn missing_capability_from_message(message: &str) -> Option<String> {
         .map(|(_, capability)| capability.trim().to_string())
         .filter(|capability| !capability.is_empty())
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_mode::types::AgentDiagnosticSeverity;
+    use crate::native_emit::lower::{DEGRADATION_SKIPPED_FUNCTION, DEGRADATION_UNRESOLVED_CALL};
+
+    #[test]
+    fn test_explain_diagnostic() {
+        // Test lowerer codes
+        let explanation = explain_diagnostic(DEGRADATION_SKIPPED_FUNCTION).unwrap();
+        assert_eq!(explanation.code, DEGRADATION_SKIPPED_FUNCTION);
+        assert_eq!(explanation.severity, AgentDiagnosticSeverity::Warning);
+
+        let explanation = explain_diagnostic(DEGRADATION_UNRESOLVED_CALL).unwrap();
+        assert_eq!(explanation.code, DEGRADATION_UNRESOLVED_CALL);
+        assert_eq!(explanation.severity, AgentDiagnosticSeverity::Warning);
+
+        // Test known core diagnostic codes
+        let explanation = explain_diagnostic("AGENT_NO_MAIN").unwrap();
+        assert_eq!(explanation.code, "AGENT_NO_MAIN");
+        assert_eq!(explanation.severity, AgentDiagnosticSeverity::Warning);
+
+        let explanation = explain_diagnostic("INAGENT010").unwrap();
+        assert_eq!(explanation.code, "INAGENT010");
+        assert_eq!(explanation.severity, AgentDiagnosticSeverity::Warning);
+
+        let explanation = explain_diagnostic("AGENT_PARSE_FAILED").unwrap();
+        assert_eq!(explanation.severity, AgentDiagnosticSeverity::Error);
+
+        let explanation = explain_diagnostic("AGENT_SWIFT_SIL_ROUTE").unwrap();
+        assert_eq!(explanation.severity, AgentDiagnosticSeverity::Info);
+
+        // Test unknown code
+        assert!(explain_diagnostic("UNKNOWN_CODE_999").is_none());
+    }
+}
