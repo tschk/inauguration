@@ -3648,3 +3648,27 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn parse_in_library_source_skips_main_requirement_but_validates_syntax() {
+    let valid_source = "fn helper() -> Int { return 42; }";
+    let module = super::parse_in_library_source(valid_source);
+    assert!(
+        module.is_ok(),
+        "Library source without main should parse successfully"
+    );
+
+    let source_with_main = "fn main() -> Int { return 0; }";
+    let module_with_main = super::parse_in_library_source(source_with_main);
+    assert!(
+        module_with_main.is_ok(),
+        "Library source with main should also parse successfully"
+    );
+
+    let invalid_source = "fn helper() -> Int { return 42; ";
+    let invalid_module = super::parse_in_library_source(invalid_source);
+    assert!(
+        invalid_module.is_err(),
+        "Invalid syntax should fail to parse"
+    );
+}
