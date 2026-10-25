@@ -300,3 +300,70 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_ir::{CoreModuleIdentity, Expr, Typ};
+
+    #[test]
+    fn test_dos_guard_nodes() {
+        let mut decls = Vec::new();
+        // MAX_EMIT_NODES + 10 nodes to guarantee failure (since other parts may count)
+        for i in 0..(MAX_EMIT_NODES + 10) {
+            decls.push(Decl::Global {
+                name: format!("g{}", i),
+                typ: Typ::Int,
+                init: None,
+                mutable: false,
+                constant_value: false,
+            });
+        }
+        let module = UnifiedModule {
+            identity: CoreModuleIdentity::default(),
+            decls,
+        };
+
+        let res = check_module_limits(&module);
+        assert!(res.is_err());
+        assert_eq!(
+            res.unwrap_err(),
+            format!(
+                "emit aborted: Core IR exceeds {} nodes (DoS guard)",
+                MAX_EMIT_NODES
+            )
+        );
+    }
+
+    #[test]
+    fn test_dos_guard_depth() {
+        // Create deeply nested blocks/exprs to hit MAX_EMIT_DEPTH
+        let mut expr = Expr::UnitLit;
+        for _ in 0..(MAX_EMIT_DEPTH + 10) {
+            expr = Expr::Unary {
+                op: "not".to_string(),
+                expr: Box::new(expr),
+            };
+        }
+        let module = UnifiedModule {
+            identity: CoreModuleIdentity::default(),
+            decls: vec![Decl::Global {
+                name: "deep".to_string(),
+                typ: Typ::Int,
+                init: Some(Box::new(expr)),
+                mutable: false,
+                constant_value: false,
+            }],
+        };
+
+        let res = check_module_limits(&module);
+        assert!(res.is_err());
+        assert_eq!(
+            res.unwrap_err(),
+            format!(
+                "emit aborted: Core IR nesting exceeds {} (DoS guard)",
+                MAX_EMIT_DEPTH
+            )
+        );
+    }
+}
