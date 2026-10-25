@@ -185,3 +185,52 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn default_spec() -> ComponentSpec {
+        ComponentSpec {
+            name: "test".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            artifact_kind: ArtifactKind::Executable,
+            deterministic: false,
+            checkpoint: String::new(),
+            optimization_level: OptimizationLevel::None,
+            debug_info: false,
+            entry_point: None,
+            imports: vec![],
+            exports: vec![],
+            capabilities: vec![],
+            capabilities_exported: vec![],
+        }
+    }
+
+    #[test]
+    fn test_compile_in_file_not_found() {
+        let spec = default_spec();
+        let result = compile_in_file(Path::new("does_not_exist.in"), &spec, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("read source"));
+    }
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let spec = default_spec();
+        let tmp_dir = TempDir::new().unwrap();
+        let source_path = tmp_dir.path().join("test_success.in");
+        std::fs::write(&source_path, "fn main() { }").unwrap();
+
+        let result = compile_in_file(&source_path, &spec, true);
+
+        assert!(result.is_ok(), "compile failed: {:?}", result);
+        let (out_path, meta_path) = result.unwrap();
+
+        assert!(out_path.exists());
+        assert!(meta_path.is_some());
+        assert!(meta_path.unwrap().exists());
+    }
+}
