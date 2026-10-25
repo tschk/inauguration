@@ -3648,3 +3648,19 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn test_parse_in_file_requires_main() {
+    let dir = std::env::temp_dir().join("in_test_parse_in_file_requires_main");
+    fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("no_main.in");
+    fs::write(&file_path, "fn helper() -> void { return; }\n").unwrap();
+
+    let err = parse_in_file(&file_path).expect_err("should require main");
+    assert!(err.contains("missing required `fn main`"), "{err}");
+
+    let ok = super::parse_in_library_file(&file_path).expect("should not require main");
+    assert_eq!(ok.decls.len(), 1);
+
+    fs::remove_dir_all(dir).unwrap();
+}
