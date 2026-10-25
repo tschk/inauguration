@@ -91,7 +91,10 @@ for case in cases:
                     text = serial.read_text(errors="replace")
                     if "empty definitions" in text or process.poll() is not None:
                         break
-                    time.sleep(0.05)
+                    try:
+                        process.wait(timeout=0.005)
+                    except subprocess.TimeoutExpired:
+                        pass
             finally:
                 process.terminate()
                 try:

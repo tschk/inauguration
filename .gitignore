@@ -31,3 +31,4 @@ docs-site/node_modules/
 
 # Amp orb portals (local)
 .amp/portals/
+scripts/__pycache__/

@@ -95,7 +95,10 @@ with (root / "serial.log").open("w") as log:
             text = (root / "serial.log").read_text(errors="replace")
             if "stack arguments" in text or proc.poll() is not None:
                 break
-            time.sleep(0.05)
+            try:
+                proc.wait(timeout=0.005)
+            except subprocess.TimeoutExpired:
+                pass
     finally:
         proc.terminate()
         try:

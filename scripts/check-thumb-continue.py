@@ -109,7 +109,10 @@ for profile in ("default", "lean", "harden"):
                     text = serial.read_text(errors="replace")
                     if "loop continue" in text or process.poll() is not None:
                         break
-                    time.sleep(0.05)
+                    try:
+                        process.wait(timeout=0.005)
+                    except subprocess.TimeoutExpired:
+                        pass
             finally:
                 process.terminate()
                 try:
