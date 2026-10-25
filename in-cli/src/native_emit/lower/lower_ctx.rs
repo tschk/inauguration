@@ -108,16 +108,16 @@ pub(crate) fn append_string_table(
 
     for p in pending {
         // Every `PendingString` comes from `LowerCtx::string_id`, which only
-        // hands out indices present in the pool, so a miss here is a compiler
-        // bug. Failing loudly beats leaving the `adr` unpatched: an unpatched
-        // `adr rd, 0` yields a self-referential pointer and the program would
-        // read garbage instead of the literal.
-        let header_offset = index_offsets.get(&p.string_index).ok_or_else(|| {
-            format!(
+        // hands out indices present in the pool, so a miss here is an internal
+        // invariant violation. Failing loudly beats leaving the `adr` unpatched:
+        // an unpatched `adr rd, 0` yields a self-referential pointer and the
+        // program would read garbage instead of the literal.
+        let header_offset = index_offsets.get(&p.string_index).unwrap_or_else(|| {
+            panic!(
                 "native-lower: string table is missing pool index {} (internal invariant)",
                 p.string_index
             )
-        })?;
+        });
         let adr_delta = (*header_offset - p.adr_site as i64) as i32;
         emitter.patch_u32(p.adr_site, aarch64::adr(p.rd, adr_delta));
     }
