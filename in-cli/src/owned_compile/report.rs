@@ -133,3 +133,78 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit_profile::EmitProfile;
+    use crate::native_emit::NativeLinkage;
+    use crate::owned_compile::{CompileTarget, OwnedCompileRequest};
+    use crate::parser_registry::ParserCli;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_base_report_native() {
+        let request = OwnedCompileRequest {
+            path: PathBuf::from("test/path/main.in"),
+            module_id: "test_module".to_string(),
+            parser: ParserCli::In,
+            target: CompileTarget::Native,
+            entry: Some("main".to_string()),
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+            jobs: 4,
+            debug: true,
+            profile: EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+        let started = Instant::now() - Duration::from_micros(100);
+        let report = base_report(&request, 2, started);
+
+        assert_eq!(report.schema_version, 1);
+        assert!(report.owned);
+        assert_eq!(report.path, "test/path/main.in");
+        assert_eq!(report.module_id, "test_module");
+        assert_eq!(report.target, "native");
+        assert_eq!(
+            report.target_triple.as_deref(),
+            Some("x86_64-unknown-linux-gnu")
+        );
+        assert_eq!(report.entry.as_deref(), Some("main"));
+        assert_eq!(report.linkage, "executable");
+        assert_eq!(report.backend_level, "contract-only");
+        assert_eq!(report.runtime_level, "none");
+        assert_eq!(report.jobs, 2);
+        assert!(report.timing_micros >= 100);
+        assert!(!report.success);
+    }
+
+    #[test]
+    fn test_base_report_jit() {
+        let request = OwnedCompileRequest {
+            path: PathBuf::from("jit_test.in"),
+            module_id: "jit_module".to_string(),
+            parser: ParserCli::Auto,
+            target: CompileTarget::Jit,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::Dylib,
+            target_triple: None,
+            jobs: 1,
+            debug: false,
+            profile: EmitProfile::Lean,
+            emit: None,
+            base: None,
+        };
+        let started = Instant::now();
+        let report = base_report(&request, 1, started);
+
+        assert_eq!(report.target, "jit");
+        assert_eq!(report.linkage, "dylib");
+        assert_eq!(report.backend_level, "owned-native-subset");
+        assert_eq!(report.runtime_level, "inrt-jit");
+    }
+}
