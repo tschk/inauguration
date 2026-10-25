@@ -601,6 +601,71 @@ fn explain_summarizes_successful_report() {
     );
 }
 
+#[test]
+fn explain_formats_summary_strings_correctly() {
+    let mut config = AgentModeConfig::default();
+    config.parser = AgentParserPreference::In;
+
+    // Test successfully parsed summary with core IR and SIL info
+    let temp = temp_source(
+        "explain_summary",
+        "in",
+        r#"
+fn main() -> void { return; }
+struct User { Int id }
+"#,
+    );
+    let explanation = explain(&temp.path, &config).expect("explain");
+
+    assert!(
+        explanation
+            .summary
+            .contains(&"parser in via core_ir".to_string())
+    );
+    assert!(
+        explanation
+            .summary
+            .contains(&"2 decls, 1 functions, 1 structs".to_string())
+    );
+    assert!(
+        explanation
+            .summary
+            .contains(&"1 SIL functions, 2 blocks, 2 instructions, 0 call edges".to_string())
+    );
+    assert!(explanation.summary.contains(&"no diagnostics".to_string()));
+}
+
+#[test]
+fn explain_formats_diagnostics_summary_correctly() {
+    let mut config = AgentModeConfig::default();
+    config.parser = AgentParserPreference::In;
+
+    // Code with a syntax error that will generate diagnostics and not emit SIL/core
+    let temp = temp_source(
+        "explain_summary_err",
+        "in",
+        r#"
+fn main( -> void { return; }
+"#,
+    );
+    let explanation = explain(&temp.path, &config).expect("explain");
+
+    assert!(
+        explanation
+            .summary
+            .contains(&"parser in via swift".to_string())
+            || explanation
+                .summary
+                .contains(&"parser in via core_ir".to_string())
+    );
+    assert!(
+        explanation
+            .summary
+            .iter()
+            .any(|s| s.contains("diagnostics") && !s.contains("no diagnostics"))
+    );
+}
+
 /// Lowerer codes must be explainable through the same registry as the rest, and
 /// the explanation must be keyed on the constant the lowerer emits.
 #[test]
