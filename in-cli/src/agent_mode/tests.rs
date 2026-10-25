@@ -27,6 +27,23 @@ fn temp_source(name: &str, suffix: &str, source: &str) -> TempFile {
 }
 
 #[test]
+fn json_report_formatting() {
+    let temp = temp_source("main", "in", "fn main() -> void { return; }\n");
+    let mut report = json_report(&temp.path, &AgentModeConfig::default()).expect("report");
+    report.size_timing.parse_micros = 0;
+    report.size_timing.lower_micros = 0;
+    report.size_timing.graph_micros = 0;
+    report.size_timing.total_micros = 0;
+
+    let json = serde_json::to_string_pretty(&report).expect("json serialize");
+    assert!(json.contains("\"schema_version\": 1"));
+    assert!(json.contains("\"parser_id\": \"in\""));
+    assert!(json.contains("\"function_count\": 1"));
+    assert!(json.contains("\"route\": \"core_ir\""));
+    assert!(json.contains("\"diagnostics\": []"));
+}
+
+#[test]
 fn json_report_includes_core_graph_and_parser_decision() {
     let temp = temp_source(
         "main",
