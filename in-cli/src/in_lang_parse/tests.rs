@@ -3648,3 +3648,41 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+#[test]
+fn test_parse_in_file_and_library() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_parse_in_file_{}",
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let valid_path = temp_dir.join("valid.in");
+    fs::write(&valid_path, "fn main() -> Int { return 42; }").unwrap();
+
+    let invalid_path = temp_dir.join("invalid.in");
+    fs::write(&invalid_path, "fn main() -> Int { return ").unwrap();
+
+    // Test parse_in_file success
+    let result = parse_in_file(&valid_path);
+    assert!(result.is_ok());
+    let module = result.unwrap();
+    assert!(!module.decls.is_empty());
+
+    // Test parse_in_file failure
+    let result = parse_in_file(&invalid_path);
+    assert!(result.is_err());
+
+    // Test parse_in_library_file success
+    let result = super::parse_in_library_file(&valid_path);
+    assert!(result.is_ok());
+    let module = result.unwrap();
+    assert!(!module.decls.is_empty());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
