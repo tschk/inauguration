@@ -300,3 +300,52 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_ir::{CoreModuleIdentity, Typ};
+
+    #[test]
+    fn test_dos_guards() {
+        let mut nodes = MAX_EMIT_NODES;
+        assert!(bump(&mut nodes).is_err());
+        assert!(bump(&mut nodes).unwrap_err().contains("exceeds"));
+
+        assert!(depth_ok(MAX_EMIT_DEPTH + 1).is_err());
+        assert!(
+            depth_ok(MAX_EMIT_DEPTH + 1)
+                .unwrap_err()
+                .contains("nesting exceeds")
+        );
+    }
+
+    #[test]
+    fn test_count_limits() {
+        let mut module = UnifiedModule {
+            identity: CoreModuleIdentity::default(),
+            decls: vec![],
+        };
+
+        // Deep nesting to trigger depth check
+        let mut stmt = Stmt::Return(None);
+        for _ in 0..=MAX_EMIT_DEPTH {
+            stmt = Stmt::If {
+                cond: Expr::BoolLit(true),
+                then_body: vec![stmt],
+                else_body: vec![],
+            };
+        }
+        module.decls.push(Decl::Function {
+            name: "deep".into(),
+            params: vec![],
+            ret: Typ::Void,
+            body: vec![stmt],
+            type_params: vec![],
+        });
+
+        let res = check_module_limits(&module);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("nesting exceeds"));
+    }
+}
