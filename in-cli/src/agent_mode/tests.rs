@@ -616,3 +616,30 @@ fn explains_lowerer_degradation_codes() {
     }
     assert!(explain_diagnostic("IN3999").is_none());
 }
+
+#[test]
+fn fix_plan_report_summarizes_fix_plans() {
+    // Let's use a known missing capability error to generate repair plans.
+    let temp = temp_source(
+        "fix_plan",
+        "in",
+        "extern \"C\" fn foo() -> void requires Foo;\nfn main() -> void { foo(); }\n",
+    );
+    let plan = fix_plan_report(&temp.path, &AgentModeConfig::default()).expect("fix_plan_report");
+    assert_eq!(plan.schema_version, 1);
+    assert!(
+        !plan.diagnostics.is_empty(),
+        "expected diagnostics for missing capability"
+    );
+    assert!(
+        !plan.repair_plans.is_empty(),
+        "expected repair plans for missing capability"
+    );
+    assert!(
+        plan.repair_plans
+            .iter()
+            .any(|r| r.title.contains("capability") || r.rationale.contains("capability")),
+        "{:?}",
+        plan.repair_plans
+    );
+}
