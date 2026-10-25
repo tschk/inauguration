@@ -133,3 +133,80 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit_profile::EmitProfile;
+    use crate::native_emit::NativeLinkage;
+    use std::path::PathBuf;
+
+    #[test]
+    fn finalize_report_sets_timing_and_success_flags() {
+        let request = OwnedCompileRequest {
+            path: PathBuf::from("test.in"),
+            module_id: "test".to_string(),
+            parser: crate::parser_registry::ParserCli::Auto,
+            target: CompileTarget::Native,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: None,
+            jobs: 4,
+            debug: false,
+            profile: EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+
+        let started = Instant::now();
+        let mut report = base_report(&request, 4, started);
+        report.success = true;
+        report.cache_hit = true;
+
+        let finalized = finalize_report(report, started, std::path::Path::new("."), "hash");
+
+        assert!(finalized.success);
+        assert!(finalized.timing_waves_us.is_some());
+        assert!(finalized.error.is_none());
+        assert!(finalized.reason_code.is_none());
+        assert!(finalized.timing_waves_us.unwrap().len() == 4);
+    }
+
+    #[test]
+    fn finalize_report_flags_forbidden_tools() {
+        let request = OwnedCompileRequest {
+            path: PathBuf::from("test.in"),
+            module_id: "test".to_string(),
+            parser: crate::parser_registry::ParserCli::Auto,
+            target: CompileTarget::Native,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: None,
+            jobs: 1,
+            debug: false,
+            profile: EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+
+        let started = Instant::now();
+        let mut report = base_report(&request, 1, started);
+        report.success = true;
+        report.cache_hit = true;
+
+        let _token = external_guard::ExternalInvocationGuard::enter();
+        external_guard::ExternalInvocationGuard::record("swiftc");
+
+        let finalized = finalize_report(report, started, std::path::Path::new("."), "hash");
+
+        assert!(!finalized.success);
+        assert_eq!(
+            finalized.reason_code.as_deref(),
+            Some("external-tool-invoked")
+        );
+        assert!(finalized.error.is_some());
+        assert!(finalized.error.unwrap().contains("swiftc"));
+    }
+}
