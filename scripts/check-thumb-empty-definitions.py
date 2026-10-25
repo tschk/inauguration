@@ -5,6 +5,8 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import os
+import select
 import shutil
 import subprocess
 import tempfile
@@ -83,15 +85,24 @@ for case in cases:
             process = subprocess.Popen(
                 ["qemu-system-arm", "-machine", "mps2-an521", "-cpu", "cortex-m33",
                  "-nographic", "-kernel", str(executable)],
-                stdout=log, stderr=subprocess.STDOUT,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             )
             try:
                 deadline = time.monotonic() + 10
+                out_bytes = bytearray()
                 while time.monotonic() < deadline:
-                    text = serial.read_text(errors="replace")
-                    if "empty definitions" in text or process.poll() is not None:
+                    r, _, _ = select.select([process.stdout], [], [], 0.05)
+                    if r:
+                        chunk = os.read(process.stdout.fileno(), 4096)
+                        if not chunk:
+                            break
+                        out_bytes.extend(chunk)
+                        log.write(chunk.decode(errors="replace"))
+                        log.flush()
+                        if b"empty definitions" in out_bytes:
+                            break
+                    elif process.poll() is not None:
                         break
-                    time.sleep(0.05)
             finally:
                 process.terminate()
                 try:
