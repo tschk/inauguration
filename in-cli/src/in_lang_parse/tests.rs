@@ -151,6 +151,94 @@ fn test_parse_in_surface_info_unknown_syntax() {
 }
 
 #[test]
+fn test_parse_in_surface_info_comprehensive() {
+    let src = r#"
+        package test-pkg
+        module test-mod
+        import "path/to/import.in";
+        use another-mod
+        bind some-module as sm
+        capability fs;
+        enable gpu;
+        @pure
+        fn compute() {}
+        distributed fn query() {}
+        parallel {
+            process()
+        }
+        extern "C" fn native_call() -> Void;
+
+        system sys {}
+        struct ignore_this {}
+    "#;
+    let info = parse_in_surface_info(src).unwrap();
+    assert_eq!(info.package, Some("test-pkg".to_string()));
+    assert_eq!(info.module, Some("test-mod".to_string()));
+    assert_eq!(info.imports, vec!["\"path/to/import.in\"".to_string()]);
+    assert_eq!(info.semantic_imports, vec!["another-mod".to_string()]);
+    assert_eq!(
+        info.semantic_bindings,
+        vec![InSemanticBinding {
+            import: "some-module".to_string(),
+            alias: "sm".to_string()
+        }]
+    );
+    assert_eq!(info.capabilities, vec!["fs".to_string()]);
+    assert_eq!(
+        info.orchestration.enabled_extensions,
+        vec!["gpu".to_string()]
+    );
+    assert_eq!(info.orchestration.annotations.len(), 1);
+    assert_eq!(info.orchestration.annotations[0].name, "pure");
+    assert_eq!(
+        info.orchestration.annotations[0].target,
+        Some("compute".to_string())
+    );
+    assert_eq!(
+        info.orchestration.distributed_functions,
+        vec!["query".to_string()]
+    );
+    assert_eq!(info.orchestration.parallel_regions, 1);
+    assert_eq!(info.orchestration.parallel_tasks.len(), 1);
+    assert_eq!(info.orchestration.parallel_tasks[0].name, "process");
+    assert_eq!(info.externs.len(), 1);
+}
+
+#[test]
+fn test_parse_in_surface_info_errors() {
+    // missing import path
+    assert!(
+        parse_in_surface_info("import ;")
+            .unwrap_err()
+            .contains("import path missing")
+    );
+    assert!(parse_in_surface_info("import").is_err());
+
+    // missing capability name
+    assert!(
+        parse_in_surface_info("capability ;")
+            .unwrap_err()
+            .contains("capability name missing")
+    );
+    assert!(parse_in_surface_info("capability").is_err());
+
+    // missing enable extension
+    assert!(
+        parse_in_surface_info("enable ;")
+            .unwrap_err()
+            .contains("enable extension missing")
+    );
+    assert!(parse_in_surface_info("enable").is_err());
+
+    // malformed parallel region
+    assert!(
+        parse_in_surface_info("parallel foo")
+            .unwrap_err()
+            .contains("must be a top-level `parallel { ... }` region")
+    );
+}
+
+#[test]
 fn void_return_case_insensitive() {
     let m = parse_in_source("fn main() -> VOID\n").expect("ok");
     match &m.decls[0] {
