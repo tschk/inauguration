@@ -3648,3 +3648,25 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn test_parse_in_source_basic() {
+    let src = "fn main() -> void { return; }\n";
+    let module = parse_in_source(src).expect("should parse successfully");
+    assert_eq!(module.decls.len(), 1);
+    match &module.decls[0] {
+        Decl::Function { name, ret, .. } => {
+            assert_eq!(name, "main");
+            assert!(matches!(ret, Typ::Void));
+        }
+        _ => panic!("Expected function declaration"),
+    }
+}
+
+#[test]
+fn test_parse_in_source_with_validation_error() {
+    // Should fail validation during finalize_in_module
+    let src = "fn main() -> unknown_type { return; }\n";
+    let err = parse_in_source(src).expect_err("should fail validation");
+    assert!(err.contains("unknown_type") || err.contains("unknown"));
+}
