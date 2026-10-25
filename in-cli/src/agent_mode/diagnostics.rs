@@ -506,3 +506,63 @@ pub(super) fn missing_capability_from_message(message: &str) -> Option<String> {
         .map(|(_, capability)| capability.trim().to_string())
         .filter(|capability| !capability.is_empty())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_explain_diagnostic() {
+        let explanation = explain_diagnostic(DEGRADATION_SKIPPED_FUNCTION).unwrap();
+        assert_eq!(explanation.code, DEGRADATION_SKIPPED_FUNCTION);
+        assert!(matches!(
+            explanation.severity,
+            AgentDiagnosticSeverity::Warning
+        ));
+
+        let explanation = explain_diagnostic(DEGRADATION_UNRESOLVED_CALL).unwrap();
+        assert_eq!(explanation.code, DEGRADATION_UNRESOLVED_CALL);
+        assert!(matches!(
+            explanation.severity,
+            AgentDiagnosticSeverity::Warning
+        ));
+
+        let explanation = explain_diagnostic("AGENT_NO_MAIN").unwrap();
+        assert_eq!(explanation.code, "AGENT_NO_MAIN");
+        assert_eq!(
+            explanation.expected_shape,
+            "function named main for entrypoint-shaped reports"
+        );
+        assert_eq!(
+            explanation.repair_hint,
+            "Add a top-level main function or confirm this module is intended as a library"
+        );
+
+        let explanation = explain_diagnostic("INAGENT010").unwrap();
+        assert_eq!(explanation.code, "INAGENT010");
+        assert!(matches!(
+            explanation.severity,
+            AgentDiagnosticSeverity::Warning
+        ));
+
+        let explanation = explain_diagnostic("AGENT_PARSE_FAILED").unwrap();
+        assert_eq!(explanation.code, "AGENT_PARSE_FAILED");
+        assert!(matches!(
+            explanation.severity,
+            AgentDiagnosticSeverity::Error
+        ));
+
+        let explanation = explain_diagnostic("AGENT_SWIFT_SIL_ROUTE").unwrap();
+        assert_eq!(explanation.code, "AGENT_SWIFT_SIL_ROUTE");
+        assert!(matches!(
+            explanation.severity,
+            AgentDiagnosticSeverity::Info
+        ));
+
+        let explanation = explain_diagnostic("INPKG001").unwrap();
+        assert_eq!(explanation.code, "INPKG001");
+
+        let unknown = explain_diagnostic("UNKNOWN_CODE");
+        assert!(unknown.is_none());
+    }
+}
