@@ -42,3 +42,16 @@ pub fn artifact_stem(path: &Path, fallback: &str) -> String {
         .unwrap_or(fallback)
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native_emit::NativeLinkage;
+
+    #[test]
+    fn test_linkage_label() {
+        assert_eq!(linkage_label(NativeLinkage::Executable), "executable");
+        assert_eq!(linkage_label(NativeLinkage::Dylib), "dylib");
+        assert_eq!(linkage_label(NativeLinkage::StaticLib), "staticlib");
+    }
+}
