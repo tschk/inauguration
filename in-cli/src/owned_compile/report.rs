@@ -133,3 +133,67 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit_profile::EmitProfile;
+    use crate::native_emit::NativeLinkage;
+    use crate::owned_compile::{CompileTarget, OwnedCompileRequest};
+    use crate::parser_registry::ParserCli;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    fn default_request() -> OwnedCompileRequest {
+        OwnedCompileRequest {
+            path: PathBuf::from("dummy.in"),
+            module_id: "App".to_string(),
+            parser: ParserCli::Auto,
+            target: CompileTarget::Native,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::StaticLib,
+            target_triple: None,
+            jobs: 1,
+            debug: false,
+            profile: EmitProfile::Default,
+            emit: None,
+            base: None,
+        }
+    }
+
+    #[test]
+    fn test_finalize_report() {
+        let req = default_request();
+        let started = Instant::now();
+
+        // 1. Success case: no forbidden external invocations
+        let mut report = base_report(&req, 2, started);
+        report.success = true;
+        let _guard = crate::external_guard::ExternalInvocationGuard::enter();
+        let finalized = finalize_report(report, started, std::path::Path::new("."), "dummy_hash");
+        assert_eq!(finalized.timing_waves_us.unwrap().len(), 2);
+        assert!(finalized.success);
+        assert_eq!(finalized.reason_code, None);
+        assert_eq!(finalized.reason, None);
+        assert_eq!(finalized.error, None);
+        assert!(finalized.external_invocations.is_empty());
+
+        // 2. Failure case: forbidden external invocation (e.g., 'gcc')
+        let mut report2 = base_report(&req, 2, started);
+        report2.success = true;
+        let _guard2 = crate::external_guard::ExternalInvocationGuard::enter();
+        crate::external_guard::ExternalInvocationGuard::record("gcc");
+
+        let finalized2 =
+            finalize_report(report2, started, std::path::Path::new("."), "dummy_hash2");
+        assert!(!finalized2.success);
+        assert_eq!(
+            finalized2.reason_code,
+            Some("external-tool-invoked".to_string())
+        );
+        assert!(finalized2.reason.is_some());
+        assert!(finalized2.error.is_some());
+        assert_eq!(finalized2.external_invocations, vec!["gcc".to_string()]);
+    }
+}
