@@ -95,7 +95,7 @@ with (root / "serial.log").open("w") as log:
             text = (root / "serial.log").read_text(errors="replace")
             if "stack arguments" in text or proc.poll() is not None:
                 break
-            time.sleep(0.05)
+            time.sleep(0.001)
     finally:
         proc.terminate()
         try:

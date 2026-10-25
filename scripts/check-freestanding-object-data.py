@@ -157,7 +157,7 @@ for arch in ("i386", "x86_64"):
                                 while time.monotonic() < end:
                                     if "object data" in logpath.read_text(errors="replace") or qemu.poll() is not None:
                                         break
-                                    time.sleep(0.05)
+                                    time.sleep(0.001)
                             finally:
                                 qemu.terminate()
                                 try:
