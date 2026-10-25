@@ -97,19 +97,32 @@ for profile in ("default", "lean", "harden"):
             "executed_elf_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
         }, indent=2) + "\n")
         serial = directory / "serial.log"
-        with serial.open("w") as log:
+        with serial.open("wb") as log:
             process = subprocess.Popen(
                 ["qemu-system-arm", "-machine", "mps2-an521", "-cpu", "cortex-m33",
                  "-nographic", "-kernel", str(executable)],
-                stdout=log, stderr=subprocess.STDOUT,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             )
             try:
+                import select, os
                 deadline = time.monotonic() + 10
+                text = b""
                 while time.monotonic() < deadline:
-                    text = serial.read_text(errors="replace")
-                    if "loop continue" in text or process.poll() is not None:
+                    timeout = deadline - time.monotonic()
+                    if timeout < 0:
                         break
-                    time.sleep(0.05)
+                    r, _, _ = select.select([process.stdout], [], [], timeout)
+                    if r:
+                        chunk = os.read(process.stdout.fileno(), 4096)
+                        if not chunk:
+                            break
+                        log.write(chunk)
+                        log.flush()
+                        text += chunk
+                        if b"loop continue" in text:
+                            break
+                    elif process.poll() is not None:
+                        break
             finally:
                 process.terminate()
                 try:
