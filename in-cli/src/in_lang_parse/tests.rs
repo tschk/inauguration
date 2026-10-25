@@ -151,6 +151,67 @@ fn test_parse_in_surface_info_unknown_syntax() {
 }
 
 #[test]
+fn test_parse_in_surface_info_comprehensive() {
+    let src = "
+        package pkg
+        module mdl
+        import std.io;
+        use some.lib
+        bind other.lib as ol
+        capability network;
+        enable some_ext;
+        @pure
+        fn target_fn() {}
+        distributed fn d_fn() {}
+        parallel {
+            t1()
+            t2()
+        }
+        extern c fn ext_fn() -> Int;
+        system test {}
+        fn main() {}
+    ";
+    let info = parse_in_surface_info(src).expect("should parse");
+    assert_eq!(info.package, Some("pkg".to_string()));
+    assert_eq!(info.module, Some("mdl".to_string()));
+    assert_eq!(info.imports, vec!["std.io".to_string()]);
+    assert_eq!(info.semantic_imports, vec!["some.lib".to_string()]);
+    assert_eq!(info.semantic_bindings.len(), 1);
+    assert_eq!(info.semantic_bindings[0].alias, "ol");
+    assert_eq!(info.capabilities, vec!["network".to_string()]);
+    assert_eq!(
+        info.orchestration.enabled_extensions,
+        vec!["some_ext".to_string()]
+    );
+    assert_eq!(info.orchestration.annotations.len(), 1);
+    assert_eq!(info.orchestration.distributed_functions.len(), 1);
+    assert_eq!(info.orchestration.parallel_regions, 1);
+    assert_eq!(info.orchestration.parallel_tasks.len(), 2);
+    assert_eq!(info.externs.len(), 1);
+}
+
+#[test]
+fn test_parse_in_surface_info_errors() {
+    assert!(parse_in_surface_info("fn main() \n unknown_syntax").is_err());
+    assert!(parse_in_surface_info("module invalid_mod_name_!").is_err());
+    assert!(parse_in_surface_info("package invalid_pkg_name_!").is_err());
+    assert!(parse_in_surface_info("import ;").is_err());
+    assert!(parse_in_surface_info("bind some_lib as ").is_err());
+    assert!(parse_in_surface_info("capability ;").is_err());
+    assert!(parse_in_surface_info("enable ;").is_err());
+    assert!(parse_in_surface_info("parallel foo").is_err());
+}
+
+#[test]
+fn test_parse_in_surface_info_empty() {
+    let info = parse_in_surface_info("").expect("should parse successfully");
+    assert_eq!(
+        info,
+        crate::in_lang_parse::surface::InSurfaceInfo::default()
+    );
+}
+
+#[test]
 fn void_return_case_insensitive() {
     let m = parse_in_source("fn main() -> VOID\n").expect("ok");
     match &m.decls[0] {
