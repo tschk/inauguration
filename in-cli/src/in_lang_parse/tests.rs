@@ -3648,3 +3648,31 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn test_parse_in_library_source() {
+    use crate::in_lang_parse::module::parse_in_library_source;
+
+    let source = "fn add(a: Int, b: Int) -> Int { return a + b; }";
+    let result = parse_in_library_source(source);
+    assert!(
+        result.is_ok(),
+        "Expected parse to succeed: {:?}",
+        result.err()
+    );
+
+    let module = result.unwrap();
+    assert_eq!(module.decls.len(), 1);
+
+    let src_result = parse_in_source(source);
+    assert!(src_result.is_err());
+    assert_eq!(src_result.unwrap_err(), ".in: missing required `fn main`");
+
+    let source_with_main = "fn main() -> Int { return 0; }";
+    let result_with_main = parse_in_library_source(source_with_main);
+    assert!(result_with_main.is_ok());
+
+    let invalid_source = "fn add(a: Int, b: Int -> Int { return a + b; }";
+    let result_invalid = parse_in_library_source(invalid_source);
+    assert!(result_invalid.is_err());
+}
