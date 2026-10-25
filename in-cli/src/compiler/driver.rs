@@ -185,3 +185,73 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_compile_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let source_path = temp_dir.as_path().join("test_success.in");
+        let source_code = "fn main() { }\n";
+        fs::write(&source_path, source_code).unwrap();
+
+        let spec = ComponentSpec::host_executable("test_success", None);
+        let result = compile_in_file(&source_path, &spec, true);
+
+        assert!(
+            result.is_ok(),
+            "compilation should succeed: {:?}",
+            result.unwrap_err()
+        );
+        let (output_path, metadata_path) = result.unwrap();
+
+        assert!(output_path.exists(), "artifact file should exist");
+        assert!(metadata_path.is_some(), "metadata path should be returned");
+        let meta_path = metadata_path.unwrap();
+        assert!(meta_path.exists(), "metadata file should exist");
+
+        let meta_contents = fs::read_to_string(&meta_path).unwrap();
+        assert!(
+            meta_contents.contains("test_success"),
+            "metadata should contain component name"
+        );
+    }
+
+    #[test]
+    fn test_compile_in_file_failure() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_compile_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let source_path = temp_dir.as_path().join("test_fail.in");
+        let source_code = "export fn main() -> i32 { this_is_a_syntax_error }\n";
+        fs::write(&source_path, source_code).unwrap();
+
+        let spec = ComponentSpec::host_executable("test_fail", None);
+        let result = compile_in_file(&source_path, &spec, false);
+
+        assert!(
+            result.is_err(),
+            "compilation should fail due to syntax error"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("compilation:"),
+            "error should describe compilation failure"
+        );
+    }
+}
