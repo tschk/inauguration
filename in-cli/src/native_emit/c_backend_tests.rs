@@ -410,6 +410,23 @@ fn skips_invec_typedef_when_unused() {
 }
 
 #[test]
+fn rejects_extreme_node_count() {
+    let mut stmts = vec![];
+    for _ in 0..100_001 {
+        stmts.push(Stmt::Return(None));
+    }
+    let module = UnifiedModule::new(vec![Decl::Function {
+        name: "huge".into(),
+        params: vec![],
+        ret: Typ::Void,
+        body: stmts,
+        type_params: vec![],
+    }]);
+    let err = emit_c_module(&module).expect_err("node guard");
+    assert!(err.contains("nodes"), "err={err}");
+}
+
+#[test]
 fn rejects_extreme_nesting() {
     let mut body = Stmt::Return(Some(Expr::IntLit(1)));
     for _ in 0..300 {
