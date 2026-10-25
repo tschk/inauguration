@@ -610,11 +610,11 @@ fn file_import_merges_local_in_declarations() {
         "inauguration-in-import-{}-{unique}",
         std::process::id()
     ));
-    fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::create_dir_all(&dir).expect("temp dir");
     let lib = dir.join("lib.in");
     let main = dir.join("main.in");
-    fs::write(&lib, "fn helper() -> Int { return 1; }\n").expect("write lib");
-    fs::write(
+    std::fs::write(&lib, "fn helper() -> Int { return 1; }\n").expect("write lib");
+    std::fs::write(
         &main,
         "import \"./lib.in\";\nfn main() -> void { helper(); return; }\n",
     )
@@ -639,7 +639,7 @@ fn file_import_reports_missing_local_in_file() {
         "inauguration-missing-import-{}-{unique}.in",
         std::process::id()
     ));
-    fs::write(
+    std::fs::write(
         &path,
         "import \"./missing.in\";\nfn main() -> void { return; }\n",
     )
@@ -2645,9 +2645,9 @@ fn imported_explicit_global_receiver_methods_are_resolved_after_merge() {
         "inauguration-global-method-{}-{unique}",
         std::process::id()
     ));
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("values.in"), "var number:Int=42;\n").unwrap();
-    fs::write(
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("values.in"), "var number:Int=42;\n").unwrap();
+    std::fs::write(
         dir.join("main.in"),
         "import \"./values.in\";\nfn main()->String{return number.toStr();}\n",
     )
@@ -2793,12 +2793,12 @@ fn unannotated_imported_globals_keep_private_inference_metadata_through_parallel
             .unwrap()
             .as_nanos()
     ));
-    fs::create_dir_all(&root).unwrap();
-    fs::write(root.join("left.in"), "var left=right\n").unwrap();
-    fs::write(root.join("right.in"), "var right=\"雪\"\n").unwrap();
-    fs::write(root.join("main.in"),"import \"./left.in\";\nimport \"./right.in\";\nvar selected=left\nfn main()->Int{return 42;}\n").unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("left.in"), "var left=right\n").unwrap();
+    std::fs::write(root.join("right.in"), "var right=\"雪\"\n").unwrap();
+    std::fs::write(root.join("main.in"),"import \"./left.in\";\nimport \"./right.in\";\nvar selected=left\nfn main()->Int{return 42;}\n").unwrap();
     let result = parse_in_file(&root.join("main.in"));
-    fs::write(root.join("library.in"), "var selected=\"library\"\n").unwrap();
+    std::fs::write(root.join("library.in"), "var selected=\"library\"\n").unwrap();
     let library_file = super::parse_in_library_file(&root.join("library.in"));
     fs::remove_dir_all(&root).unwrap();
     assert!(library_file.unwrap().decls.iter().any(|decl| matches!(
@@ -2945,23 +2945,23 @@ fn diamond_imports_merge_each_file_once_in_deterministic_dependency_order() {
         "inauguration-diamond-{}-{unique}",
         std::process::id()
     ));
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
         dir.join("shared.in"),
         "module shared;\nconst banner=\"shared\";\nfn shared()->Int{return 20;}\n",
     )
     .unwrap();
-    fs::write(
+    std::fs::write(
         dir.join("left.in"),
         "import \"./shared.in\";\nfn left()->Int{return shared();}\n",
     )
     .unwrap();
-    fs::write(
+    std::fs::write(
         dir.join("right.in"),
         "import \"./shared.in\";\nfn right()->Int{return shared()+2;}\n",
     )
     .unwrap();
-    fs::write(dir.join("main.in"), "module root;\nimport \"./left.in\";\nimport \"./right.in\";\nvar selected=banner;\nfn main()->Int{return left()+right();}\n").unwrap();
+    std::fs::write(dir.join("main.in"), "module root;\nimport \"./left.in\";\nimport \"./right.in\";\nvar selected=banner;\nfn main()->Int{return left()+right();}\n").unwrap();
     let first = parse_in_file(&dir.join("main.in")).unwrap();
     for _ in 0..4 {
         assert_eq!(parse_in_file(&dir.join("main.in")).unwrap(), first);
@@ -2987,14 +2987,14 @@ fn diamond_imports_merge_each_file_once_in_deterministic_dependency_order() {
             .is_ok()
     );
     // Both direct and worker-crossing cycles retain each declaration once.
-    fs::write(
+    std::fs::write(
         dir.join("left.in"),
         "import \"./main.in\";\nimport \"./shared.in\";\nfn left()->Int{return shared();}\n",
     )
     .unwrap();
     let cycle = parse_in_file(&dir.join("main.in")).unwrap();
     assert_eq!(cycle, first);
-    fs::write(
+    std::fs::write(
         dir.join("library.in"),
         "import \"./shared.in\";\nimport \"./shared.in\";\nimport \"./library.in\";\n",
     )
@@ -3021,23 +3021,23 @@ fn import_deduplication_preserves_duplicate_declarations_from_distinct_files() {
         "inauguration-import-collision-{}-{unique}",
         std::process::id()
     ));
-    fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
     for name in ["left.in", "right.in"] {
-        fs::write(dir.join(name), "fn same()->Int{return 42;}\n").unwrap();
+        std::fs::write(dir.join(name), "fn same()->Int{return 42;}\n").unwrap();
     }
-    fs::write(
+    std::fs::write(
         dir.join("main.in"),
         "import \"./left.in\";\nimport \"./right.in\";\nfn main()->Int{return 42;}\n",
     )
     .unwrap();
     let error = parse_in_file(&dir.join("main.in")).unwrap_err();
     assert!(error.contains("duplicate top-level name: same"), "{error}");
-    fs::write(
+    std::fs::write(
         dir.join("left.in"),
         "fn same()->Int{return 42;}\nfn same()->Int{return 42;}\n",
     )
     .unwrap();
-    fs::write(
+    std::fs::write(
         dir.join("main.in"),
         "import \"./left.in\";\nimport \"./left.in\";\nfn main()->Int{return 42;}\n",
     )
@@ -3058,10 +3058,10 @@ fn import_deduplication_uses_canonical_file_identity_for_path_aliases() {
         "inauguration-import-alias-{}-{unique}",
         std::process::id()
     ));
-    fs::create_dir_all(dir.join("sub")).unwrap();
-    fs::write(dir.join("shared.in"), "fn shared()->Int{return 42;}\n").unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("shared.in"), "fn shared()->Int{return 42;}\n").unwrap();
     std::os::unix::fs::symlink("shared.in", dir.join("alias.in")).unwrap();
-    fs::write(dir.join("main.in"), "import \"./shared.in\";\nimport \"./sub/../shared.in\";\nimport \"./alias.in\";\nfn main()->Int{return shared();}\n").unwrap();
+    std::fs::write(dir.join("main.in"), "import \"./shared.in\";\nimport \"./sub/../shared.in\";\nimport \"./alias.in\";\nfn main()->Int{return shared();}\n").unwrap();
     let module = parse_in_file(&dir.join("main.in")).unwrap();
     assert_eq!(
         module
@@ -3469,11 +3469,11 @@ fn same_line_imports_discover_both_real_local_modules() {
             .unwrap()
             .as_nanos()
     ));
-    fs::create_dir_all(&directory).unwrap();
-    fs::write(directory.join("left.in"), "fn left()->Int{return 20;}").unwrap();
-    fs::write(directory.join("right.in"), "fn right()->Int{return 22;}").unwrap();
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("left.in"), "fn left()->Int{return 20;}").unwrap();
+    std::fs::write(directory.join("right.in"), "fn right()->Int{return 22;}").unwrap();
     let path = directory.join("main.in");
-    fs::write(
+    std::fs::write(
         &path,
         "import \"./left.in\";import \"./right.in\";fn main()->Int{return left()+right();}",
     )
@@ -3647,4 +3647,47 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
             "{source}: {report:?}"
         );
     }
+}
+
+#[test]
+fn test_parse_in_file_success() {
+    let dir = std::env::temp_dir().join(format!("in-parse-file-success-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("test.in");
+    std::fs::write(&file_path, "fn main() { return 0; }").unwrap();
+
+    let res = parse_in_file(&file_path);
+    assert!(res.is_ok(), "Expected success, got {:?}", res.err());
+    let module = res.unwrap();
+    assert_eq!(module.decls.len(), 1);
+}
+
+#[test]
+fn test_parse_in_file_syntax_error() {
+    let dir = std::env::temp_dir().join(format!("in-parse-file-error-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("error.in");
+    std::fs::write(&file_path, "fn main() { return 0").unwrap();
+
+    let res = parse_in_file(&file_path);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_parse_in_file_with_imports() {
+    let dir = std::env::temp_dir().join(format!("in-parse-file-imports-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let main_path = dir.join("main.in");
+    let lib_path = dir.join("lib.in");
+    std::fs::write(
+        &main_path,
+        "import \"lib.in\"\nfn main() { return my_fn(); }",
+    )
+    .unwrap();
+    std::fs::write(&lib_path, "fn my_fn() { return 42; }").unwrap();
+
+    let res = parse_in_file(&main_path);
+    assert!(res.is_ok(), "Expected success, got {:?}", res.err());
+    let module = res.unwrap();
+    assert_eq!(module.decls.len(), 2);
 }
