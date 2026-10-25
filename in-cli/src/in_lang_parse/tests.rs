@@ -151,6 +151,53 @@ fn test_parse_in_surface_info_unknown_syntax() {
 }
 
 #[test]
+fn test_parse_in_surface_info_empty_source() {
+    let info = parse_in_surface_info("").expect("should parse empty source");
+    assert_eq!(info.package, None);
+    assert!(info.imports.is_empty());
+}
+
+#[test]
+fn test_parse_in_surface_info_parallel_invalid() {
+    let src = "parallel";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("`parallel` must be a top-level `parallel { ... }` region"));
+}
+
+#[test]
+fn test_parse_in_surface_info_annotation() {
+    let src = "@pure\nfn foo() {}";
+    let info = parse_in_surface_info(src).expect("should parse annotation");
+    assert_eq!(info.orchestration.annotations.len(), 1);
+    assert_eq!(info.orchestration.annotations[0].name, "pure");
+    assert_eq!(
+        info.orchestration.annotations[0].target,
+        Some("foo".to_string())
+    );
+}
+
+#[test]
+fn test_parse_in_surface_info_import_missing_path() {
+    let src = "import ;";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("import path missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_capability_missing_name() {
+    let src = "capability ;";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("capability name missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_enable_missing_extension() {
+    let src = "enable ;";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("enable extension missing"));
+}
+
+#[test]
 fn void_return_case_insensitive() {
     let m = parse_in_source("fn main() -> VOID\n").expect("ok");
     match &m.decls[0] {
