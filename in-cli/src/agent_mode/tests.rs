@@ -27,6 +27,14 @@ fn temp_source(name: &str, suffix: &str, source: &str) -> TempFile {
 }
 
 #[test]
+fn in_report_returns_json_report() {
+    let temp = temp_source("json_report", "in", "fn main() -> void { return; }\n");
+    let report = json_report(&temp.path, &AgentModeConfig::default()).expect("report");
+    assert_eq!(report.schema_version, 1);
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+}
+
+#[test]
 fn json_report_includes_core_graph_and_parser_decision() {
     let temp = temp_source(
         "main",
