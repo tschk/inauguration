@@ -101,7 +101,7 @@ for case in cases:
                         text = serial.read_text(errors="replace")
                         if "call priority" in text or process.poll() is not None:
                             break
-                        time.sleep(0.05)
+                        time.sleep(0.005)
                 finally:
                     process.terminate()
                     try:
