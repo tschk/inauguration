@@ -133,3 +133,65 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::owned_compile::EvalValue;
+    use crate::owned_compile::OwnedCompileReport;
+
+    fn create_dummy_report() -> OwnedCompileReport {
+        OwnedCompileReport {
+            schema_version: 1,
+            owned: true,
+            path: "test/path.in".to_string(),
+            module_id: "test_module".to_string(),
+            package_name: Some("test_package".to_string()),
+            module_identity: None,
+            target: "contract-only".to_string(),
+            target_triple: None,
+            entry: Some("main".to_string()),
+            linkage: "static".to_string(),
+            frontend_level: "success".to_string(),
+            semantic_level: "success".to_string(),
+            backend_level: "contract-only".to_string(),
+            runtime_level: "none".to_string(),
+            external_invocations: vec!["tool1".to_string()],
+            reason_code: None,
+            reason: None,
+            success: true,
+            artifact_path: None,
+            executable_path: None,
+            abi_path: None,
+            degradations: vec![],
+            parsed_function_count: 5,
+            typed_function_count: 5,
+            call_edge_count: 10,
+            jobs: 2,
+            timing_micros: 100,
+            timing_waves_us: Some(vec![50, 50]),
+            cache_hit: false,
+            frontend_hash: Some("hash123".to_string()),
+            eval_exit_code: None,
+            eval_result: Some(EvalValue::Int(42)),
+            execution_started: false,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn test_report_to_json_success() {
+        let report = create_dummy_report();
+        let json_result = report_to_json(&report);
+        assert!(json_result.is_ok());
+        let json = json_result.unwrap();
+
+        // Basic fields
+        assert!(json.contains(r#""schema_version": 1"#));
+        assert!(json.contains(r#""module_id": "test_module""#));
+        assert!(json.contains(r#""path": "test/path.in""#));
+        assert!(json.contains(r#""owned": true"#));
+        assert!(json.contains(r#""eval_result": {"#));
+        assert!(json.contains(r#""Int": 42"#));
+    }
+}
