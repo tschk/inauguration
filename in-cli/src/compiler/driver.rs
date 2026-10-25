@@ -185,3 +185,86 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::fs::File;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn get_temp_file(name: &str) -> std::path::PathBuf {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        env::temp_dir().join(format!("{}_{}.in", name, id))
+    }
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let source_path = get_temp_file("test_module");
+        let mut file = File::create(&source_path).unwrap();
+        file.write_all(b"fn main() -> Int { return 42; }").unwrap();
+
+        let spec = super::spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            crate::compiler::metadata::ArtifactKind::Executable,
+            "main",
+            2,
+            false,
+            false,
+        );
+
+        let result = super::compile_in_file(&source_path, &spec, true);
+        assert!(result.is_ok(), "compilation failed: {:?}", result.err());
+        let (out_path, meta_path) = result.unwrap();
+
+        assert!(out_path.exists());
+        assert!(out_path.extension().is_some());
+        assert!(meta_path.is_some());
+        assert!(meta_path.unwrap().exists());
+    }
+
+    #[test]
+    fn test_compile_in_file_read_error() {
+        let source_path = get_temp_file("nonexistent");
+
+        let spec = super::spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            crate::compiler::metadata::ArtifactKind::Executable,
+            "main",
+            2,
+            false,
+            false,
+        );
+
+        let result = super::compile_in_file(&source_path, &spec, true);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("read source"));
+    }
+
+    #[test]
+    fn test_compile_in_file_compile_error() {
+        let source_path = get_temp_file("error_module");
+        let mut file = File::create(&source_path).unwrap();
+        file.write_all(b"invalid syntax here!").unwrap();
+
+        let spec = super::spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            crate::compiler::metadata::ArtifactKind::Executable,
+            "main",
+            2,
+            false,
+            false,
+        );
+
+        let result = super::compile_in_file(&source_path, &spec, true);
+        assert!(result.is_err());
+        // The parser returns "parse:" or "compilation:" or "parse error:" etc. Let's inspect the error msg.
+        let err = result.unwrap_err();
+        assert!(err.contains("compilation:"), "Error was: {}", err);
+    }
+}
