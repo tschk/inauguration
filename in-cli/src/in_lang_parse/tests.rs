@@ -3648,3 +3648,19 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn parse_library_source_accepts_valid_source_without_main() {
+    let source = "var x = 10;\nfn helper() -> Int { return x; }";
+    let result = super::parse_in_library_source(source);
+    assert!(result.is_ok(), "{:?}", result.err());
+    let module = result.unwrap();
+    assert_eq!(module.decls.len(), 2);
+}
+
+#[test]
+fn parse_library_source_rejects_invalid_syntax() {
+    let source = "var x = 10; fn helper( -> Int { return x; }";
+    let result = super::parse_in_library_source(source);
+    assert!(result.is_err());
+}
