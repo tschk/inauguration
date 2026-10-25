@@ -7,6 +7,19 @@ use super::{
 };
 
 #[test]
+fn test_parse_in_source() {
+    let m = parse_in_source("fn main() -> Int { return 42; }\n").expect("ok");
+    assert_eq!(m.decls.len(), 1);
+    let err = parse_in_source("fn main() -> Int { return 42; \n").expect_err("unclosed brace");
+    assert!(
+        err.contains("brace")
+            || err.contains("syntax")
+            || err.contains("parse")
+            || err.contains("incomplete")
+    );
+}
+
+#[test]
 fn test_split_top_level_decl_blocks_empty() {
     let src = "";
     let blocks = split_top_level_decl_blocks(src);
