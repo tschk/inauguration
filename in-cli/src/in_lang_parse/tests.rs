@@ -151,6 +151,51 @@ fn test_parse_in_surface_info_unknown_syntax() {
 }
 
 #[test]
+fn test_parse_in_surface_info_missing_errors() {
+    let err = parse_in_surface_info("import ;").expect_err("should fail");
+    assert!(err.contains("import path missing"));
+
+    let err = parse_in_surface_info("capability ;").expect_err("should fail");
+    assert!(err.contains("capability name missing"));
+
+    let err = parse_in_surface_info("enable ;").expect_err("should fail");
+    assert!(err.contains("enable extension missing"));
+
+    let err = parse_in_surface_info("parallel()").expect_err("should fail");
+    assert!(err.contains("`parallel` must be a top-level"));
+}
+
+#[test]
+fn test_parse_in_surface_info_orchestration_and_externs() {
+    let src = "
+        enable distributed-workers;
+        @pure
+        fn my_pure_fn() {}
+        distributed fn my_distributed() {}
+        extern c fn my_extern() -> Int;
+        system my_sys {}
+        struct MyStruct {}
+    ";
+    let info = parse_in_surface_info(src).expect("should parse");
+    assert_eq!(
+        info.orchestration.enabled_extensions,
+        vec!["distributed-workers".to_string()]
+    );
+    assert_eq!(info.orchestration.annotations.len(), 1);
+    assert_eq!(info.orchestration.annotations[0].name, "pure");
+    assert_eq!(
+        info.orchestration.annotations[0].target,
+        Some("my_pure_fn".to_string())
+    );
+    assert_eq!(
+        info.orchestration.distributed_functions,
+        vec!["my_distributed".to_string()]
+    );
+    assert_eq!(info.externs.len(), 1);
+    assert_eq!(info.externs[0].name, "my_extern");
+}
+
+#[test]
 fn void_return_case_insensitive() {
     let m = parse_in_source("fn main() -> VOID\n").expect("ok");
     match &m.decls[0] {
