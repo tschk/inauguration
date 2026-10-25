@@ -2,8 +2,8 @@ use std::fs;
 
 use super::{
     Decl, Expr, InExternBinding, InParallelTaskFact, InSemanticBinding, LoopKind, Stmt, Typ,
-    in_standard_import_bindings, parse_expr, parse_in_file, parse_in_source, parse_in_surface_info,
-    split_top_level_decl_blocks,
+    in_standard_import_bindings, parse_expr, parse_in_file, parse_in_library_file, parse_in_source,
+    parse_in_surface_info, split_top_level_decl_blocks,
 };
 
 #[test]
@@ -2151,6 +2151,52 @@ fn scientific_literals_keep_exponent_signs_out_of_binary_operators() {
             "{source}"
         );
     }
+}
+
+#[test]
+fn parse_in_file_tests() {
+    let directory = std::env::temp_dir().join(format!(
+        "in-parse-in-file-tests-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+
+    let main_path = directory.join("main.in");
+    fs::write(&main_path, "fn main()->Int{return 42;}").unwrap();
+    let module = parse_in_file(&main_path).expect("failed to parse main.in");
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "main"))
+    );
+
+    let no_main_path = directory.join("no_main.in");
+    fs::write(&no_main_path, "fn helper()->Int{return 42;}").unwrap();
+    let err = parse_in_file(&no_main_path).expect_err("should fail without main");
+    assert!(
+        err.contains("missing required `fn main`"),
+        "Unexpected error: {}",
+        err
+    );
+
+    let lib_module =
+        parse_in_library_file(&no_main_path).expect("library should parse without main");
+    assert!(
+        lib_module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "helper"))
+    );
+
+    let missing_path = directory.join("missing.in");
+    assert!(parse_in_file(&missing_path).is_err());
+
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
