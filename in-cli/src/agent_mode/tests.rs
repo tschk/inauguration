@@ -616,3 +616,29 @@ fn explains_lowerer_degradation_codes() {
     }
     assert!(explain_diagnostic("IN3999").is_none());
 }
+
+#[test]
+fn explain_diagnostic_returns_expected_fields() {
+    // Known code from match arms
+    let no_main = crate::agent_mode::explain_diagnostic("AGENT_NO_MAIN").unwrap();
+    assert_eq!(no_main.code, "AGENT_NO_MAIN");
+    assert_eq!(no_main.severity, AgentDiagnosticSeverity::Warning);
+    assert_eq!(
+        no_main.expected_shape,
+        "function named main for entrypoint-shaped reports"
+    );
+
+    // Known code from direct if checks
+    let skipped = crate::agent_mode::explain_diagnostic(
+        crate::native_emit::lower::DEGRADATION_SKIPPED_FUNCTION,
+    )
+    .unwrap();
+    assert_eq!(
+        skipped.code,
+        crate::native_emit::lower::DEGRADATION_SKIPPED_FUNCTION
+    );
+    assert_eq!(skipped.severity, AgentDiagnosticSeverity::Warning);
+
+    // Unknown code
+    assert!(crate::agent_mode::explain_diagnostic("UNKNOWN_CODE").is_none());
+}
