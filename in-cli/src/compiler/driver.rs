@@ -185,3 +185,113 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::fs;
+
+    fn temp_dir() -> PathBuf {
+        let mut path = env::temp_dir();
+        path.push(format!(
+            "in-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_compile_in_file_happy_path() {
+        let dir = temp_dir();
+        let source_path = dir.join("test_module.in");
+        fs::write(&source_path, "fn main() {}").unwrap();
+
+        let spec = ComponentSpec {
+            name: "test_module".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            artifact_kind: ArtifactKind::Executable,
+            deterministic: false,
+            checkpoint: "".to_string(),
+            optimization_level: OptimizationLevel::None,
+            debug_info: false,
+            entry_point: Some("main".to_string()),
+            imports: vec![],
+            exports: vec![],
+            capabilities: vec![],
+            capabilities_exported: vec![],
+        };
+
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(result.is_ok());
+
+        let (output_path, metadata_path) = result.unwrap();
+        assert!(output_path.exists());
+        assert!(metadata_path.is_some());
+        assert!(metadata_path.unwrap().exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_compile_in_file_no_metadata() {
+        let dir = temp_dir();
+        let source_path = dir.join("test_module.in");
+        fs::write(&source_path, "fn main() {}").unwrap();
+
+        let spec = ComponentSpec {
+            name: "test_module".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            artifact_kind: ArtifactKind::Executable,
+            deterministic: false,
+            checkpoint: "".to_string(),
+            optimization_level: OptimizationLevel::None,
+            debug_info: false,
+            entry_point: Some("main".to_string()),
+            imports: vec![],
+            exports: vec![],
+            capabilities: vec![],
+            capabilities_exported: vec![],
+        };
+
+        let result = compile_in_file(&source_path, &spec, false);
+        assert!(result.is_ok());
+
+        let (output_path, metadata_path) = result.unwrap();
+        assert!(output_path.exists());
+        assert!(metadata_path.is_none());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_compile_in_file_missing_source() {
+        let dir = temp_dir();
+        let source_path = dir.join("missing.in");
+
+        let spec = ComponentSpec {
+            name: "test_module".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            artifact_kind: ArtifactKind::Executable,
+            deterministic: false,
+            checkpoint: "".to_string(),
+            optimization_level: OptimizationLevel::None,
+            debug_info: false,
+            entry_point: Some("main".to_string()),
+            imports: vec![],
+            exports: vec![],
+            capabilities: vec![],
+            capabilities_exported: vec![],
+        };
+
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().starts_with("read source:"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
