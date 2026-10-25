@@ -185,3 +185,102 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn get_temp_dir() -> std::path::PathBuf {
+        let cnt = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        std::env::temp_dir().join(format!("in-driver-test-{pid}-{cnt}"))
+    }
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let dir = get_temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let _guard = TempDirGuard(dir.clone());
+        let source_path = dir.join("test_module.in");
+        fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
+
+        let spec = spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            0,
+            false,
+            false,
+        );
+
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(
+            result.is_ok(),
+            "Expected compilation to succeed, got: {:?}",
+            result.err()
+        );
+
+        let (out_path, meta_path) = result.unwrap();
+        assert!(out_path.exists());
+        assert!(meta_path.is_some());
+        assert!(meta_path.unwrap().exists());
+    }
+
+    #[test]
+    fn test_compile_in_file_read_error() {
+        let dir = get_temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let _guard = TempDirGuard(dir.clone());
+        let source_path = dir.join("missing.in");
+
+        let spec = spec_from_cli(
+            "missing",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            0,
+            false,
+            false,
+        );
+
+        let result = compile_in_file(&source_path, &spec, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("read source"));
+    }
+
+    #[test]
+    fn test_compile_in_file_compile_error() {
+        let dir = get_temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let _guard = TempDirGuard(dir.clone());
+        let source_path = dir.join("bad.in");
+        // syntax error
+        fs::write(&source_path, "fn main() -> Int { return ").unwrap();
+
+        let spec = spec_from_cli(
+            "bad",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            0,
+            false,
+            false,
+        );
+
+        let result = compile_in_file(&source_path, &spec, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("compilation"));
+    }
+}
