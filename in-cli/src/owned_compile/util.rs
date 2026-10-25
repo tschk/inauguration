@@ -42,3 +42,13 @@ pub fn artifact_stem(path: &Path, fallback: &str) -> String {
         .unwrap_or(fallback)
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_linkage_label() {
+        assert_eq!(default_linkage_label(), "executable");
+    }
+}
