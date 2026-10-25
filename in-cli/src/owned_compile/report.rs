@@ -134,6 +134,8 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
 
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
