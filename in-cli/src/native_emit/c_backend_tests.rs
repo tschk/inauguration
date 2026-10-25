@@ -3665,3 +3665,31 @@ fn c_global_function_addresses_are_declared_before_initializers() {
     assert!(declaration < initializer, "{c}");
     assert_inferred_c_executes(&module, "return (int)answer();");
 }
+
+#[test]
+fn errors_on_unsupported_match_pattern() {
+    let module = UnifiedModule::with_identity(
+        vec![Decl::Function {
+            name: "foo".into(),
+            params: vec![("x".into(), Typ::Int)],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![Stmt::Match {
+                scrutinee: Expr::Ident("x".into()),
+                arms: vec![MatchArm {
+                    pattern: "(a, b)".to_string(),
+                    guard: None,
+                    body: vec![],
+                }],
+            }],
+        }],
+        CoreModuleIdentity::default(),
+    );
+
+    let res = emit_c_module(&module);
+    assert!(res.is_err());
+    assert_eq!(
+        res.unwrap_err(),
+        "c-backend: unsupported match pattern `(a, b)`"
+    );
+}
