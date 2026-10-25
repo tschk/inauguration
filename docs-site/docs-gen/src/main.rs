@@ -529,6 +529,23 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_collect_markdown_error_path() -> io::Result<()> {
+        let (src_dir, _src_guard) = make_temp_dir("src_error");
+
+        let broken_symlink = src_dir.join("broken.md");
+        std::os::unix::fs::symlink("does_not_exist.md", &broken_symlink)?;
+
+        let mut out = Vec::new();
+        let result = collect_markdown(&src_dir, &src_dir, &mut out);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_render_nav_basic_sections() {
         let pages = vec![
             ("in-language".to_string(), "inlang (.in)".to_string()),
@@ -569,6 +586,17 @@ mod tests {
             nav,
             "<nav aria-label=\"Documentation\" class=\"doc-nav\"></nav>"
         );
+    }
+
+    #[test]
+    fn test_doc_href() {
+        assert_eq!(doc_href("index", "about"), "about.html");
+        assert_eq!(doc_href("index", "index"), "index.html");
+        assert_eq!(doc_href("index", "dir/page"), "dir/page.html");
+        assert_eq!(doc_href("dir/index", "about"), "../about.html");
+        assert_eq!(doc_href("dir/index", "dir/page"), "page.html");
+        assert_eq!(doc_href("dir/index", "dir/index"), "index.html");
+        assert_eq!(doc_href("dir1/index", "dir2/page"), "../dir2/page.html");
     }
 
     #[test]
