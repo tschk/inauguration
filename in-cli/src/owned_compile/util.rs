@@ -42,3 +42,14 @@ pub fn artifact_stem(path: &Path, fallback: &str) -> String {
         .unwrap_or(fallback)
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_label_returns_correct_string() {
+        assert_eq!(target_label(CompileTarget::Native), "native");
+        assert_eq!(target_label(CompileTarget::Jit), "jit");
+    }
+}
