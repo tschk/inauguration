@@ -185,3 +185,92 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    struct TempFile(std::path::PathBuf);
+    impl TempFile {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "{}_{}",
+                std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos(),
+                name
+            ));
+            Self(path)
+        }
+    }
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn get_test_spec() -> ComponentSpec {
+        let mut spec = ComponentSpec::host_executable("test_mod", Some("main"));
+        spec.target = "x86_64-unknown-linux-gnu".to_string();
+        spec
+    }
+
+    #[test]
+    fn test_compile_in_file_success_no_metadata() {
+        let source_file = TempFile::new("test1_compile_in_file.in");
+        let source_path = source_file.0.clone();
+        fs::write(&source_path, "fn main() { }").unwrap();
+
+        let spec = get_test_spec();
+        let (out_path, meta_path) = compile_in_file(&source_path, &spec, false).unwrap();
+
+        assert!(out_path.exists());
+        assert!(meta_path.is_none());
+
+        let out_data = fs::read(&out_path).unwrap();
+        assert!(!out_data.is_empty());
+
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn test_compile_in_file_success_with_metadata() {
+        let source_file = TempFile::new("test2_compile_in_file.in");
+        let source_path = source_file.0.clone();
+        fs::write(&source_path, "fn main() { }").unwrap();
+
+        let spec = get_test_spec();
+        let (out_path, meta_path) = compile_in_file(&source_path, &spec, true).unwrap();
+
+        assert!(out_path.exists());
+        assert!(meta_path.is_some());
+        let meta_path = meta_path.unwrap();
+        assert!(meta_path.exists());
+
+        let meta_json = fs::read_to_string(&meta_path).unwrap();
+        assert!(meta_json.contains("test_mod"));
+
+        let _ = std::fs::remove_file(&out_path);
+        let _ = std::fs::remove_file(&meta_path);
+    }
+
+    #[test]
+    fn test_compile_in_file_read_error() {
+        let source_file = TempFile::new("does_not_exist.in");
+        let source_path = source_file.0.clone();
+
+        let spec = get_test_spec();
+        let err = compile_in_file(&source_path, &spec, false).unwrap_err();
+        assert!(err.starts_with("read source:"));
+    }
+
+    #[test]
+    fn test_compile_in_file_compile_error() {
+        let source_file = TempFile::new("test_err_compile_in_file.in");
+        let source_path = source_file.0.clone();
+        fs::write(&source_path, "fn main() -> Int { this is invalid syntax }").unwrap();
+
+        let spec = get_test_spec();
+        let err = compile_in_file(&source_path, &spec, false).unwrap_err();
+        assert!(err.starts_with("compilation:"));
+    }
+}
