@@ -151,6 +151,60 @@ fn test_parse_in_surface_info_unknown_syntax() {
 }
 
 #[test]
+fn test_parse_in_surface_info_import_path_missing() {
+    let src = "import ;";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("import path missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_capability_missing() {
+    let src = "capability ;";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("capability name missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_enable_extension_missing() {
+    let src = "enable ;";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("enable extension missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_parallel_malformed() {
+    let src = "parallel fn foo() {}";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("`parallel` must be a top-level `parallel { ... }` region"));
+}
+
+#[test]
+fn test_parse_in_surface_info_valid_enable() {
+    let src = "enable some_extension;";
+    let info = parse_in_surface_info(src).expect("should parse");
+    assert_eq!(
+        info.orchestration.enabled_extensions,
+        vec!["some_extension".to_string()]
+    );
+}
+
+#[test]
+fn test_parse_in_surface_info_ignores_decls() {
+    let src = "
+        fn foo() {}
+        interrupt fn bar() {}
+        struct Baz {}
+        class Qux {}
+        interface Quux {}
+        component Corge {}
+        var x = 1;
+        const y = 2;
+    ";
+    let info = parse_in_surface_info(src).expect("should parse");
+    assert!(info.package.is_none());
+}
+
+#[test]
 fn void_return_case_insensitive() {
     let m = parse_in_source("fn main() -> VOID\n").expect("ok");
     match &m.decls[0] {
