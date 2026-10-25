@@ -3648,3 +3648,67 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn parse_in_file_requires_main() {
+    let dir = std::env::temp_dir().join(format!(
+        "in-parse-file-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+
+    // File with main
+    let main_path = dir.join("main.in");
+    fs::write(&main_path, "fn main()->Int{return 42;}\n").unwrap();
+    let module = parse_in_file(&main_path).unwrap();
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "main"))
+    );
+
+    // File without main
+    let lib_path = dir.join("lib.in");
+    fs::write(&lib_path, "fn helper()->Int{return 42;}\n").unwrap();
+    let error = parse_in_file(&lib_path).unwrap_err();
+    assert!(error.contains("missing required `fn main`"), "{error}");
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn parse_in_library_file_allows_missing_main() {
+    let dir = std::env::temp_dir().join(format!(
+        "in-parse-library-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+
+    // File without main
+    let lib_path = dir.join("lib.in");
+    fs::write(&lib_path, "fn helper()->Int{return 42;}\n").unwrap();
+    let module = super::parse_in_library_file(&lib_path).unwrap();
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "helper"))
+    );
+    assert!(
+        !module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "main"))
+    );
+
+    fs::remove_dir_all(dir).unwrap();
+}
