@@ -151,6 +151,32 @@ fn test_parse_in_surface_info_unknown_syntax() {
 }
 
 #[test]
+fn test_parse_in_surface_info_errors() {
+    let src_empty_import = "import ;";
+    let err = parse_in_surface_info(src_empty_import).unwrap_err();
+    assert_eq!(err, ".in: import path missing");
+
+    let src_empty_cap = "capability ;";
+    let err = parse_in_surface_info(src_empty_cap).unwrap_err();
+    assert_eq!(err, ".in: capability name missing");
+
+    let src_empty_enable = "enable ;";
+    let err = parse_in_surface_info(src_empty_enable).unwrap_err();
+    assert_eq!(err, ".in: enable extension missing");
+
+    let src_invalid_parallel_2 = "parallel bad";
+    let err = parse_in_surface_info(src_invalid_parallel_2).unwrap_err();
+    assert_eq!(
+        err,
+        ".in: `parallel` must be a top-level `parallel { ... }` region"
+    );
+
+    let src_lexer_fail = "\"unclosed string";
+    let err = parse_in_surface_info(src_lexer_fail).unwrap_err();
+    assert_eq!(err, ".in: incomplete declaration at line 1");
+}
+
+#[test]
 fn void_return_case_insensitive() {
     let m = parse_in_source("fn main() -> VOID\n").expect("ok");
     match &m.decls[0] {
