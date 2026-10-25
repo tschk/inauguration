@@ -27,6 +27,52 @@ fn temp_source(name: &str, suffix: &str, source: &str) -> TempFile {
 }
 
 #[test]
+fn json_report_formats_correctly_as_json_value() {
+    let temp = temp_source("json_format", "in", "fn main() -> void { return; }\n");
+    let config = AgentModeConfig {
+        module_id: "TestModule".to_string(),
+        ..Default::default()
+    };
+    let mut report = json_report(&temp.path, &config).expect("report");
+
+    // Normalize unstable fields
+    report.size_timing.parse_micros = 0;
+    report.size_timing.lower_micros = 0;
+    report.size_timing.graph_micros = 0;
+    report.size_timing.total_micros = 0;
+    report.parser_decision.source_path = "/mock/path/main.in".to_string();
+
+    let value = serde_json::to_value(&report).expect("serialize report to value");
+
+    // Verify core structure of the JSON value
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["parser_decision"]["route"], "core_ir");
+    assert_eq!(
+        value["parser_decision"]["source_path"],
+        "/mock/path/main.in"
+    );
+
+    // Verify arrays are present
+    assert!(value["diagnostics"].is_array());
+    assert!(value["effects"].is_array());
+    assert!(value["capabilities"].is_array());
+    assert!(value["package_symbol_index"].is_array());
+    assert!(value["package_diagnostics"].is_array());
+    assert!(value["repair_plans"].is_array());
+
+    // Verify nested objects are present
+    assert!(value["language_level"].is_object());
+    assert!(value["orchestration"].is_object());
+    assert!(value["size_timing"].is_object());
+
+    // Verify specific timing values were zeroed out
+    assert_eq!(value["size_timing"]["parse_micros"], 0);
+    assert_eq!(value["size_timing"]["lower_micros"], 0);
+    assert_eq!(value["size_timing"]["graph_micros"], 0);
+    assert_eq!(value["size_timing"]["total_micros"], 0);
+}
+
+#[test]
 fn json_report_includes_core_graph_and_parser_decision() {
     let temp = temp_source(
         "main",
