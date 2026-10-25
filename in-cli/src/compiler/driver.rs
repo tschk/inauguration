@@ -185,3 +185,98 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let dir = std::env::temp_dir().join(format!("test_compile_success_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("test_compile.in");
+        let source_code = "fn main() -> Int { return 42; }";
+        fs::write(&source_path, source_code).unwrap();
+
+        let spec = ComponentSpec::host_executable("test_compile", Some("main"));
+
+        let (out_path, meta_path) = compile_in_file(&source_path, &spec, true).unwrap();
+
+        assert!(out_path.exists());
+        assert!(meta_path.is_some());
+        assert!(meta_path.unwrap().exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_compile_in_file_no_metadata() {
+        let dir = std::env::temp_dir().join(format!("test_compile_no_meta_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("test_compile_no_meta.in");
+        let source_code = "fn main() -> Int { return 42; }";
+        fs::write(&source_path, source_code).unwrap();
+
+        let spec = ComponentSpec::host_executable("test_compile_no_meta", Some("main"));
+
+        let (out_path, meta_path) = compile_in_file(&source_path, &spec, false).unwrap();
+
+        assert!(out_path.exists());
+        assert!(meta_path.is_none());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_compile_in_file_read_error() {
+        let dir =
+            std::env::temp_dir().join(format!("test_compile_read_error_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("non_existent.in");
+        let spec = ComponentSpec::host_executable("non_existent", Some("main"));
+
+        let result = compile_in_file(&source_path, &spec, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().starts_with("read source:"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_compile_in_file_parse_error() {
+        let dir =
+            std::env::temp_dir().join(format!("test_compile_parse_error_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("test_compile_parse_error.in");
+        let source_code = "fn main() -> Int { return 42"; // Missing closing brace
+        fs::write(&source_path, source_code).unwrap();
+
+        let spec = ComponentSpec::host_executable("test_compile_parse_error", Some("main"));
+
+        let result = compile_in_file(&source_path, &spec, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().starts_with("compilation:"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_emit_component_metadata_success() {
+        let dir =
+            std::env::temp_dir().join(format!("test_emit_meta_success_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("test_emit_meta.in");
+        let source_code = "fn main() -> Int { return 42; }";
+        fs::write(&source_path, source_code).unwrap();
+
+        let spec = ComponentSpec::host_executable("test_emit_meta", Some("main"));
+
+        let meta_path = emit_component_metadata(&source_path, &spec).unwrap();
+
+        assert!(meta_path.exists());
+        let meta_content = fs::read_to_string(&meta_path).unwrap();
+        assert!(meta_content.contains("test_emit_meta"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
