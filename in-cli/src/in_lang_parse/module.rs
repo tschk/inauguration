@@ -600,3 +600,27 @@ pub fn parse_in_file(path: &Path) -> Result<UnifiedModule, String> {
 pub fn parse_in_library_file(path: &Path) -> Result<UnifiedModule, String> {
     finalize_in_module(parse_in_file_with_imports(path)?, false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_library_source_accepts_no_main() {
+        let source = "fn foo() -> Int { return 42; }";
+        let module = parse_in_library_source(source).unwrap();
+        assert_eq!(module.decls.len(), 1);
+        if let Decl::Function { name, .. } = &module.decls[0] {
+            assert_eq!(name, "foo");
+        } else {
+            panic!("Expected function decl");
+        }
+    }
+
+    #[test]
+    fn parse_library_source_validates_types() {
+        let source = "fn foo(x: UnknownType) -> Int { return 42; }";
+        let err = parse_in_library_source(source).unwrap_err();
+        assert!(err.contains("unknown type"));
+    }
+}
