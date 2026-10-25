@@ -601,6 +601,55 @@ fn extern_body_rejected() {
 }
 
 #[test]
+fn test_parse_in_file() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("in-parse-in-file-{unique}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("main.in");
+    std::fs::write(&dir.join("lib.in"), "fn lib_fn() -> Int { return 42; }\n").unwrap();
+    std::fs::write(
+        &path,
+        "import \"./lib.in\";\nfn main() -> void { lib_fn(); }\n",
+    )
+    .unwrap();
+    let module = parse_in_file(&path).unwrap();
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "main"))
+    );
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "lib_fn"))
+    );
+    std::fs::write(&path, "fn not_main() -> void {}\n").unwrap();
+    let err = parse_in_file(&path).unwrap_err();
+    assert!(
+        err.contains("missing required `fn main`") || err.contains("missing main"),
+        "error was: {err}"
+    );
+    let missing_path = dir.join("does_not_exist.in");
+    let err = parse_in_file(&missing_path).unwrap_err();
+    assert!(
+        err.contains("No such file")
+            || err.contains("missing file")
+            || err.contains("os error")
+            || err.contains("could not read"),
+        "error was: {err}"
+    );
+    std::fs::write(&path, "invalid syntax\n").unwrap();
+    let err = parse_in_file(&path).unwrap_err();
+    assert!(err.contains("unknown top-level syntax"), "error was: {err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn file_import_merges_local_in_declarations() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

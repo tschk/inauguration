@@ -1,0 +1,13 @@
+🧪 Add tests for parse_in_file
+
+🎯 **What:** The testing gap addressed
+The `parse_in_file` function in `in-cli/src/in_lang_parse/module.rs` lacked test coverage. This function is critical as it handles core parsing and validation logic for `.in` files, including resolving imports and verifying the presence of a `main` function.
+
+📊 **Coverage:** What scenarios are now tested
+- **Happy Path:** Successfully parses a valid `main.in` file that imports another `lib.in` file, verifying that both `main` and the imported `lib_fn` functions are present in the resulting `UnifiedModule`.
+- **Missing Main Function:** Verifies that attempting to parse a file without a `main` function returns an error (since `parse_in_file` requires it).
+- **Missing File:** Checks the error handling when the provided file path does not exist.
+- **Invalid Syntax:** Ensures that passing a file with invalid `.in` syntax results in a parsing error.
+
+✨ **Result:** The improvement in test coverage
+The critical `parse_in_file` function is now well-tested, providing a safety net against regressions in file parsing, import resolution, and validation logic.
