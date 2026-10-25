@@ -922,6 +922,26 @@ direct_dep = { path = "direct_dep" }
     }
 
     #[test]
+    fn test_get_manifest_success() {
+        let temp = TempDirGuard::new();
+        let manifest = temp.path.join("Cargo.toml");
+        fs::write(
+            &manifest,
+            "[package]\nname = \"test-package\"\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .unwrap();
+        let result = get_manifest(&temp.path).unwrap();
+        assert_eq!(result.package_name.as_deref(), Some("test-package"));
+        assert_eq!(result.lib_path.as_deref(), Some("src/lib.rs"));
+    }
+
+    #[test]
+    fn test_get_manifest_no_file() {
+        let temp = TempDirGuard::new();
+        assert!(get_manifest(&temp.path).is_none());
+    }
+
+    #[test]
     fn test_find_crate_root_no_cargo_toml() {
         let temp = TempDirGuard::new();
         assert_eq!(
@@ -1132,6 +1152,43 @@ mod retained_artifact_tests {
                 .unary_methods
                 .contains_key(&("dep::Row".into(), "-".into()))
         );
+    }
+
+    #[test]
+    fn test_merge_dependency_modules_merges_decls_and_generates_aliases() {
+        let mut main = UnifiedModule::new(vec![callable("main_func", 1)]);
+        let dep1 = UnifiedModule::new(vec![callable("dep1_func", 2)]);
+        let dep2 = UnifiedModule::new(vec![callable("dep2_func", 3)]);
+
+        let deps = vec![("in-dep".into(), dep1), ("dep2".into(), dep2)];
+
+        merge_dependency_modules(&mut main, deps);
+
+        assert_eq!(main.decls.len(), 4);
+
+        let has_main_func = main
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "main_func"));
+        assert!(has_main_func);
+
+        let has_dep1_func = main
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "dep1_func"));
+        assert!(has_dep1_func);
+
+        let has_dep2_func = main
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "dep2_func"));
+        assert!(has_dep2_func);
+
+        let has_dep2_alias = main
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "dep2::dep2_func"));
+        assert!(has_dep2_alias);
     }
 
     #[test]
