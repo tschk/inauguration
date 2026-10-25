@@ -300,3 +300,28 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::core_ir::{Expr, MatchArm, Stmt};
+
+    #[test]
+    fn test_c_backend_scan_unsupported_match_pattern() {
+        let stmt = Stmt::Match {
+            scrutinee: Expr::Ident("x".to_string()),
+            arms: vec![MatchArm {
+                pattern: "Some(x)".to_string(),
+                guard: None,
+                body: vec![],
+            }],
+        };
+        let mut nodes = 0;
+        let result = count_stmt(&stmt, 0, &mut nodes);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "c-backend: unsupported match pattern `Some(x)`"
+        );
+    }
+}
