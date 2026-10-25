@@ -3648,3 +3648,45 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn test_parse_in_source() {
+    // Test 1: Valid basic function
+    let valid_source = "fn main() -> void {\n    return;\n}\n";
+    let module = parse_in_source(valid_source).expect("Failed to parse valid source");
+    assert_eq!(module.decls.len(), 1);
+    match &module.decls[0] {
+        Decl::Function {
+            name, ret, body, ..
+        } => {
+            assert_eq!(name, "main");
+            assert!(matches!(ret, Typ::Void));
+            assert_eq!(body.len(), 1);
+        }
+        _ => panic!("Expected a function declaration"),
+    }
+
+    // Test 2: Valid struct (needs a main function to be a valid module)
+    let struct_source =
+        "struct Point {\n    Int x;\n    Int y;\n}\nfn main() -> void { return; }\n";
+    let struct_module = parse_in_source(struct_source).expect("Failed to parse struct source");
+    assert_eq!(struct_module.decls.len(), 2);
+    match &struct_module.decls[0] {
+        Decl::Struct { name, fields, .. } => {
+            assert_eq!(name, "Point");
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].0, "x");
+            assert!(matches!(fields[0].1, Typ::Int));
+        }
+        _ => panic!("Expected a struct declaration"),
+    }
+
+    // Test 3: Invalid source - duplicated function names
+    let dup_source = "fn main() -> void { return; }\nfn main() -> void { return; }\n";
+    let _err = parse_in_source(dup_source).expect_err("Should fail on duplicated names");
+
+    // Test 4: Invalid source - syntax error (unknown type)
+    let invalid_type_source = "fn main() -> UnknownType { return; }\n";
+    let _err2 =
+        parse_in_source(invalid_type_source).expect_err("Should fail on unknown return type");
+}
