@@ -3491,6 +3491,32 @@ fn same_line_imports_discover_both_real_local_modules() {
 }
 
 #[test]
+fn test_parse_in_file_and_library() {
+    let dir = std::env::temp_dir().join(format!(
+        "test_parse_in_file_and_library_{}",
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("test.in");
+    std::fs::write(&file, "fn helper() -> Int { return 42; }\n").unwrap();
+
+    // Test parse_in_file without main should fail
+    let err = parse_in_file(&file).unwrap_err();
+    assert!(err.contains("main"), "err was {err:?}");
+
+    // Test parse_in_library_file without main should succeed
+    let library = super::parse_in_library_file(&file).unwrap();
+    assert!(
+        library
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "helper"))
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn rejects_incomplete_and_mismatched_top_level_items() {
     for source in [
         "fn main( {",
