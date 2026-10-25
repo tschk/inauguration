@@ -83,6 +83,21 @@ fn fix_plan_reports_parse_failure_repair() {
 }
 
 #[test]
+fn fix_plan_report_returns_expected_format() {
+    let temp = temp_source(
+        "main",
+        "in",
+        "fn helper() -> void { return; }\nfn main() -> void { helper(); return; }\n",
+    );
+    let plan = fix_plan_report(&temp.path, &AgentModeConfig::default()).expect("fix plan");
+    assert_eq!(plan.schema_version, 1);
+    assert_eq!(plan.parser_decision.route, "core_ir");
+    assert_eq!(plan.parser_decision.parser_id.as_deref(), Some("in"));
+    assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+    assert!(plan.repair_plans.is_empty(), "{:?}", plan.repair_plans);
+}
+
+#[test]
 fn icore_v2_report_uses_body_subset_level() {
     let temp = temp_source(
         "body",
