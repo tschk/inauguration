@@ -151,6 +151,58 @@ fn test_parse_in_surface_info_unknown_syntax() {
 }
 
 #[test]
+fn test_parse_in_surface_info_import_missing() {
+    let src = "import ;";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("import path missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_capability_missing() {
+    let src = "capability ;";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("capability name missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_enable_missing() {
+    let src = "enable ;";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("enable extension missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_invalid_parallel() {
+    let src = "parallel foo";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("`parallel` must be a top-level `parallel { ... }` region"));
+}
+
+#[test]
+fn test_parse_in_surface_info_advanced_features() {
+    let src = "enable my-ext\n@pure\nfn annotated() {}\ndistributed fn dist_fn() {}\nextern c fn ext_fn();";
+    let info = parse_in_surface_info(src).expect("should parse successfully");
+    assert_eq!(
+        info.orchestration.enabled_extensions,
+        vec!["my-ext".to_string()]
+    );
+    assert_eq!(info.orchestration.annotations.len(), 1);
+    assert_eq!(
+        info.orchestration.annotations[0].name,
+        "pure".to_string()
+    );
+    assert_eq!(
+        info.orchestration.annotations[0].target,
+        Some("annotated".to_string())
+    );
+    assert_eq!(
+        info.orchestration.distributed_functions,
+        vec!["dist_fn".to_string()]
+    );
+    assert_eq!(info.externs.len(), 1);
+}
+
+#[test]
 fn void_return_case_insensitive() {
     let m = parse_in_source("fn main() -> VOID\n").expect("ok");
     match &m.decls[0] {
