@@ -300,3 +300,38 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_ir::{Expr, MatchArm, Stmt};
+
+    #[test]
+    fn c_backend_scan_unsupported_match_pattern() {
+        let mut nodes = 0;
+
+        let valid_stmt = Stmt::Match {
+            scrutinee: Expr::IntLit(1),
+            arms: vec![MatchArm {
+                pattern: "1".to_string(),
+                guard: None,
+                body: vec![],
+            }],
+        };
+        assert!(count_stmt(&valid_stmt, 0, &mut nodes).is_ok());
+
+        let invalid_stmt = Stmt::Match {
+            scrutinee: Expr::IntLit(1),
+            arms: vec![MatchArm {
+                pattern: "Point{x: 1, y: 2}".to_string(),
+                guard: None,
+                body: vec![],
+            }],
+        };
+
+        let err = count_stmt(&invalid_stmt, 0, &mut nodes).unwrap_err();
+        assert_eq!(
+            err,
+            "c-backend: unsupported match pattern `Point{x: 1, y: 2}`"
+        );
+    }
+}
