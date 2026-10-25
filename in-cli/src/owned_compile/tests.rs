@@ -2163,28 +2163,6 @@ fn float_entry_reports_its_value_without_an_exit_status() {
 }
 
 #[test]
-fn report_to_json_roundtrip_fields() {
-    if !native_backend::native_subset_host_available() {
-        return;
-    }
-    let source_path = temp_path("json.in");
-    fs::write(&source_path, "fn main() -> void { return; }\n").unwrap();
-
-    let report = compile_owned(&default_request(
-        source_path.clone(),
-        CompileTarget::Jit,
-        None,
-        None,
-    ));
-    let json = report_to_json(&report).unwrap();
-    assert!(json.contains("\"schema_version\": 1"));
-    assert!(json.contains("\"owned\": true"));
-    assert!(json.contains("\"external_invocations\": []"));
-
-    fs::remove_file(source_path).unwrap();
-}
-
-#[test]
 fn report_to_json_serialization_format() {
     let started = std::time::Instant::now();
     let request = OwnedCompileRequest {
@@ -2221,6 +2199,28 @@ fn report_to_json_serialization_format() {
     assert!(json.contains("\"runtime_level\": \"none\""));
     assert!(json.contains("\"success\": false"));
     assert!(json.contains("\"timing_micros\": 12345"));
+}
+
+#[test]
+fn report_to_json_roundtrip_fields() {
+    if !native_backend::native_subset_host_available() {
+        return;
+    }
+    let source_path = temp_path("json.in");
+    fs::write(&source_path, "fn main() -> void { return; }\n").unwrap();
+
+    let report = compile_owned(&default_request(
+        source_path.clone(),
+        CompileTarget::Jit,
+        None,
+        None,
+    ));
+    let json = report_to_json(&report).unwrap();
+    assert!(json.contains("\"schema_version\": 1"));
+    assert!(json.contains("\"owned\": true"));
+    assert!(json.contains("\"external_invocations\": []"));
+
+    fs::remove_file(source_path).unwrap();
 }
 
 #[test]
