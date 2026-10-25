@@ -80,10 +80,7 @@ fn fix_plan_report_success() {
     assert_eq!(plan.schema_version, 1);
     assert_eq!(plan.diagnostics.len(), 0);
     assert_eq!(plan.repair_plans.len(), 0);
-    assert_eq!(
-        plan.parser_decision.parser_id.as_deref(),
-        Some("in")
-    );
+    assert_eq!(plan.parser_decision.parser_id.as_deref(), Some("in"));
 }
 
 #[test]
