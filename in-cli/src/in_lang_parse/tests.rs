@@ -160,6 +160,46 @@ fn void_return_case_insensitive() {
 }
 
 #[test]
+fn test_parse_in_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-in-parse-in-file-{unique}",
+        unique = std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("temp dir");
+    let main = dir.join("main.in");
+    fs::write(&main, "fn main() -> void { return; }\n").expect("write main");
+    let module = parse_in_file(&main).expect("parse file");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "main")),
+        "main function missing"
+    );
+}
+
+#[test]
+fn test_parse_in_library_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-in-parse-in-library-{unique}",
+        unique = std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("temp dir");
+    let lib = dir.join("lib.in");
+    fs::write(&lib, "fn helper() -> void { return; }\n").expect("write lib");
+    let module = super::parse_in_library_file(&lib).expect("parse library file");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "helper")),
+        "helper function missing"
+    );
+}
+
+#[test]
 fn rejects_malformed_param_without_type() {
     let err = parse_in_source("fn main(bad) -> void\n").expect_err("param");
     assert!(err.contains("name: Type") || err.contains("parameter"));
