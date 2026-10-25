@@ -3648,3 +3648,67 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn test_parse_in_file_happy_path() {
+    let dir = std::env::temp_dir().join(format!(
+        "parse_in_file_happy_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("main.in");
+    fs::write(&file_path, "fn main() -> Int { return 0; }").unwrap();
+
+    let result = parse_in_file(&file_path);
+    assert!(result.is_ok());
+    let module = result.unwrap();
+
+    // Check if the declaration was parsed correctly
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "main"))
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_parse_in_file_not_found() {
+    let dir = std::env::temp_dir().join(format!(
+        "parse_in_file_not_found_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("does_not_exist.in");
+
+    let result = parse_in_file(&file_path);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err();
+    assert!(err_msg.contains("does_not_exist.in") || err_msg.contains("No such file"));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_parse_in_file_syntax_error() {
+    let dir = std::env::temp_dir().join(format!(
+        "parse_in_file_syntax_error_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("syntax_error.in");
+    fs::write(&file_path, "invalid syntax!!!").unwrap();
+
+    let result = parse_in_file(&file_path);
+    assert!(result.is_err());
+    fs::remove_dir_all(&dir).unwrap();
+}
