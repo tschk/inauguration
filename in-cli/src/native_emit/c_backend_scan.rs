@@ -300,3 +300,93 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_ir::Typ;
+
+    #[test]
+    fn test_depth_ok_error() {
+        let result = depth_ok(MAX_EMIT_DEPTH + 1);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            format!(
+                "emit aborted: Core IR nesting exceeds {} (DoS guard)",
+                MAX_EMIT_DEPTH
+            )
+        );
+    }
+
+    #[test]
+    fn test_bump_nodes_error() {
+        let mut nodes = MAX_EMIT_NODES;
+        let result = bump(&mut nodes);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            format!(
+                "emit aborted: Core IR exceeds {} nodes (DoS guard)",
+                MAX_EMIT_NODES
+            )
+        );
+    }
+
+    #[test]
+    fn test_check_module_limits_depth_error() {
+        // Deeply nested expressions to hit depth error
+        let mut body = Expr::BoolLit(true);
+        for _ in 0..MAX_EMIT_DEPTH + 1 {
+            body = Expr::Unary {
+                op: "not".to_string(),
+                expr: Box::new(body),
+            };
+        }
+
+        let d = Decl::Function {
+            name: "deep".to_string(),
+            params: vec![],
+            ret: Typ::Void,
+            body: vec![Stmt::Expr(body)],
+            type_params: vec![],
+        };
+        let m = UnifiedModule::new(vec![d]);
+        let result = check_module_limits(&m);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            format!(
+                "emit aborted: Core IR nesting exceeds {} (DoS guard)",
+                MAX_EMIT_DEPTH
+            )
+        );
+    }
+
+    #[test]
+    fn test_check_module_limits_nodes_error() {
+        // Broadly nested expressions to hit nodes error but keep depth small
+        let mut stmts = Vec::new();
+        for _ in 0..MAX_EMIT_NODES + 1 {
+            stmts.push(Stmt::Expr(Expr::BoolLit(true)));
+        }
+
+        let d = Decl::Function {
+            name: "broad".to_string(),
+            params: vec![],
+            ret: Typ::Void,
+            body: stmts,
+            type_params: vec![],
+        };
+        let m = UnifiedModule::new(vec![d]);
+        let result = check_module_limits(&m);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            format!(
+                "emit aborted: Core IR exceeds {} nodes (DoS guard)",
+                MAX_EMIT_NODES
+            )
+        );
+    }
+}
