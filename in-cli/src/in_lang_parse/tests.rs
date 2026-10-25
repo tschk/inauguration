@@ -2154,6 +2154,29 @@ fn scientific_literals_keep_exponent_signs_out_of_binary_operators() {
 }
 
 #[test]
+fn test_parse_in_library_source() {
+    let source = "var test_var = 42\n";
+    let module = super::parse_in_library_source(source).unwrap();
+    assert_eq!(module.decls.len(), 1);
+    assert!(matches!(
+        &module.decls[0],
+        Decl::Global {
+            typ: Typ::Int,
+            name,
+            ..
+        } if name == "test_var"
+    ));
+
+    // Testing missing main should work
+    let source_fn = "fn foo() -> Int { return 1; }\n";
+    let module_fn = super::parse_in_library_source(source_fn).unwrap();
+    assert_eq!(module_fn.decls.len(), 1);
+
+    // Invalid source should fail
+    assert!(super::parse_in_library_source("invalid syntax").is_err());
+}
+
+#[test]
 fn method_receiver_inference_preserves_arithmetic_value_kinds() {
     use super::validate::infer_in_expr_type;
     use std::collections::HashMap;
