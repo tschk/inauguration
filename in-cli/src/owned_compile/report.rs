@@ -133,3 +133,49 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit_profile::EmitProfile;
+    use crate::native_emit::NativeLinkage;
+    use crate::owned_compile::{CompileTarget, OwnedCompileRequest};
+    use crate::parser_registry::ParserCli;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    #[test]
+    fn test_base_report() {
+        let request = OwnedCompileRequest {
+            path: PathBuf::from("test/path.in"),
+            module_id: "test_module".to_string(),
+            parser: ParserCli::Auto,
+            target: CompileTarget::Native,
+            entry: Some("main".to_string()),
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: None,
+            jobs: 4,
+            debug: false,
+            profile: EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+        let started = Instant::now();
+        let report = base_report(&request, 2, started);
+
+        assert_eq!(report.schema_version, 1);
+        assert!(report.owned);
+        assert_eq!(report.path, "test/path.in");
+        assert_eq!(report.module_id, "test_module");
+        assert_eq!(report.target, "native");
+        assert_eq!(report.entry.as_deref(), Some("main"));
+        assert_eq!(report.linkage, "executable");
+        assert_eq!(report.jobs, 2);
+        assert_eq!(report.backend_level, "contract-only");
+        assert_eq!(report.runtime_level, "none");
+        assert_eq!(report.frontend_level, "unsupported");
+        assert_eq!(report.semantic_level, "failed");
+        assert!(!report.success);
+    }
+}
