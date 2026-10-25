@@ -154,10 +154,12 @@ for arch in ("i386", "x86_64"):
                             )
                             try:
                                 end = time.monotonic() + 3
+                                delay = 0.005
                                 while time.monotonic() < end:
                                     if "object data" in logpath.read_text(errors="replace") or qemu.poll() is not None:
                                         break
-                                    time.sleep(0.05)
+                                    time.sleep(delay)
+                                    delay = min(delay * 2, 0.05)
                             finally:
                                 qemu.terminate()
                                 try:

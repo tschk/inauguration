@@ -91,11 +91,13 @@ with (root / "serial.log").open("w") as log:
     )
     try:
         deadline = time.monotonic() + 10
+        delay = 0.005
         while time.monotonic() < deadline:
             text = (root / "serial.log").read_text(errors="replace")
             if "stack arguments" in text or proc.poll() is not None:
                 break
-            time.sleep(0.05)
+            time.sleep(delay)
+            delay = min(delay * 2, 0.05)
     finally:
         proc.terminate()
         try:
