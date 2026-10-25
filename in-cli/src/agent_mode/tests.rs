@@ -77,22 +77,6 @@ fn in_report_uses_level_three_after_diagnostic_contract() {
 }
 
 #[test]
-fn fix_plan_report_generates_expected_plan_for_valid_source() {
-    let temp = temp_source("valid-fix-plan", "in", "fn main() -> void { return; }\n");
-    let plan = fix_plan_report(&temp.path, &AgentModeConfig::default()).expect("fix plan");
-    assert_eq!(plan.schema_version, 1);
-    assert!(plan.diagnostics.is_empty());
-    assert!(plan.repair_plans.is_empty());
-    assert_eq!(plan.parser_decision.parser_id.as_deref(), Some("in"));
-}
-
-#[test]
-fn fix_plan_report_returns_error_for_missing_file() {
-    let result = fix_plan_report("does_not_exist.in", &AgentModeConfig::default());
-    assert!(result.is_err());
-}
-
-#[test]
 fn fix_plan_reports_parse_failure_repair() {
     let temp = temp_source(
         "library",
@@ -118,6 +102,12 @@ fn fix_plan_report_returns_expected_format() {
     assert_eq!(plan.parser_decision.parser_id.as_deref(), Some("in"));
     assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
     assert!(plan.repair_plans.is_empty(), "{:?}", plan.repair_plans);
+}
+
+#[test]
+fn fix_plan_report_returns_error_for_missing_file() {
+    let result = fix_plan_report("does_not_exist.in", &AgentModeConfig::default());
+    assert!(result.is_err());
 }
 
 #[test]
