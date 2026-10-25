@@ -1,0 +1,6 @@
+Title: 🧪 Add test for default_linkage_label in in-cli
+Description: 🎯 **What:** Added a unit test for default_linkage_label in in-cli/src/owned_compile/util.rs.
+
+📊 **Coverage:** Covered the expected output for the default linkage label.
+
+✨ **Result:** Increased test coverage for the util module.
