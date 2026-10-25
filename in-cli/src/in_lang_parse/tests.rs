@@ -3648,3 +3648,74 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn test_parse_in_file_success() {
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-parse-in-file-success-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let main_path = dir.join("main.in");
+    std::fs::write(&main_path, "fn main() -> Int { return 42; }").unwrap();
+
+    let result = parse_in_file(&main_path);
+    assert!(result.is_ok());
+    let module = result.unwrap();
+    assert_eq!(module.decls.len(), 1);
+    match &module.decls[0] {
+        Decl::Function { name, .. } => assert_eq!(name, "main"),
+        _ => panic!("Expected function declaration"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_parse_in_file_error_invalid_syntax() {
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-parse-in-file-error-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let main_path = dir.join("main.in");
+    // Write invalid syntax
+    std::fs::write(&main_path, "fn main() -> Int { return 42;").unwrap();
+
+    let result = parse_in_file(&main_path);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("syntax error")
+            || err.contains("missing")
+            || err.contains("expected")
+            || err.contains("incomplete"),
+        "Unexpected error: {}",
+        err
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_parse_in_file_missing_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-parse-in-file-missing-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let main_path = dir.join("missing.in");
+    let result = parse_in_file(&main_path);
+    assert!(result.is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
