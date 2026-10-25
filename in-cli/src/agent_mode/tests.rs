@@ -70,6 +70,23 @@ fn in_report_uses_level_three_after_diagnostic_contract() {
 }
 
 #[test]
+fn fix_plan_report_success() {
+    let temp = temp_source(
+        "fix_plan_report_test",
+        "in",
+        "fn main() -> void { return; }\n",
+    );
+    let plan = fix_plan_report(&temp.path, &AgentModeConfig::default()).expect("fix plan");
+    assert_eq!(plan.schema_version, 1);
+    assert_eq!(plan.diagnostics.len(), 0);
+    assert_eq!(plan.repair_plans.len(), 0);
+    assert_eq!(
+        plan.parser_decision.parser_id.as_deref(),
+        Some("in")
+    );
+}
+
+#[test]
 fn fix_plan_reports_parse_failure_repair() {
     let temp = temp_source(
         "library",
