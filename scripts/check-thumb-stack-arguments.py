@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Cortex-M33 regression for AAPCS stack argument values, effects, and alignment."""
+
 import argparse
 import json
 import os
@@ -93,9 +94,13 @@ with (root / "serial.log").open("w") as log:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             text = (root / "serial.log").read_text(errors="replace")
-            if "stack arguments" in text or proc.poll() is not None:
+            if "stack arguments" in text:
                 break
-            time.sleep(0.05)
+            try:
+                proc.wait(timeout=0.05)
+                break
+            except subprocess.TimeoutExpired:
+                pass
     finally:
         proc.terminate()
         try:

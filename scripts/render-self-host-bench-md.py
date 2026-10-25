@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Inject self-host-vs-native.json into docs/benchmarks/self-host-vs-native.md."""
+
 import json
 import sys
 from pathlib import Path
@@ -40,7 +41,9 @@ def main() -> int:
     rustc_w = float(cmp.get("rustc_release_wall_ms_avg") or 0)
     if ratio is not None and rustc_w > 0:
         faster = "in front" if ratio < 1 else "Cargo release"
-        speed_note = f"{ratio:.3f}× wall (in ÷ rustc); **{faster}** on this incremental compile"
+        speed_note = (
+            f"{ratio:.3f}× wall (in ÷ rustc); **{faster}** on this incremental compile"
+        )
     else:
         speed_note = "n/a"
     br = cmp.get("binary_size_ratio")

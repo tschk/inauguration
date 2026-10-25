@@ -16,14 +16,31 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument("--compiler", required=True)
 p.add_argument("--output-dir", type=Path)
 p.add_argument(
-    "--expect-failure", action="store_true", help="retain a known-bad baseline; require at least one failed case"
+    "--expect-failure",
+    action="store_true",
+    help="retain a known-bad baseline; require at least one failed case",
 )
-p.add_argument("--cases", nargs="*", choices=("control", "scalar", "strings", "addresses", "exports"))
+p.add_argument(
+    "--cases",
+    nargs="*",
+    choices=("control", "scalar", "strings", "addresses", "exports"),
+)
 a = p.parse_args()
-for tool in ("nasm", "ld.lld", "llvm-objcopy", "llvm-readelf", "qemu-system-i386", "qemu-system-x86_64"):
+for tool in (
+    "nasm",
+    "ld.lld",
+    "llvm-objcopy",
+    "llvm-readelf",
+    "qemu-system-i386",
+    "qemu-system-x86_64",
+):
     if not shutil.which(tool):
         p.error(f"required installed tool not found: {tool}")
-out = a.output_dir.resolve() if a.output_dir else Path(tempfile.mkdtemp(prefix="in-object-data-"))
+out = (
+    a.output_dir.resolve()
+    if a.output_dir
+    else Path(tempfile.mkdtemp(prefix="in-object-data-"))
+)
 if a.output_dir:
     out.mkdir(parents=True, exist_ok=False)
 compiler = out / "compiler-snapshot"
@@ -33,7 +50,9 @@ shutil.copy2(a.compiler, compiler)
         {
             "source": str(Path(a.compiler).resolve()),
             "sha256": hashlib.sha256(compiler.read_bytes()).hexdigest(),
-            "version": subprocess.check_output([compiler, "--version"], text=True).strip(),
+            "version": subprocess.check_output(
+                [compiler, "--version"], text=True
+            ).strip(),
         },
         indent=2,
     )
@@ -45,7 +64,10 @@ for arch in ("i386", "x86_64"):
             continue
         for profile in ("default", "lean", "harden"):
             for explicit_base in (False, True):
-                directory = out / f"{arch}-{case}-{profile}-{'base' if explicit_base else 'no-base'}"
+                directory = (
+                    out
+                    / f"{arch}-{case}-{profile}-{'base' if explicit_base else 'no-base'}"
+                )
                 directory.mkdir()
                 shutil.copyfile(fixture / f"{case}.in", directory / "source.in")
                 shutil.copyfile(fixture / "memory.ld", directory / "memory.ld")
@@ -72,15 +94,23 @@ for arch in ("i386", "x86_64"):
                 ]
                 if explicit_base:
                     command += ["--base", "0x20000000"]
-                run = subprocess.run(command, capture_output=True, text=True, timeout=120)
+                run = subprocess.run(
+                    command, capture_output=True, text=True, timeout=120
+                )
                 (directory / "compile.json").write_text(run.stdout)
                 (directory / "compile.stderr").write_text(run.stderr)
                 report = json.loads(run.stdout)
-                compiled = run.returncode == 0 and report.get("success") and not report.get("degradations")
+                compiled = (
+                    run.returncode == 0
+                    and report.get("success")
+                    and not report.get("degradations")
+                )
                 linked = executed = False
                 if compiled:
                     obj = (directory / "values.o").read_bytes()
-                    assert obj[:4] == b"\x7fELF" and obj[4] == (1 if arch == "i386" else 2)
+                    assert obj[:4] == b"\x7fELF" and obj[4] == (
+                        1 if arch == "i386" else 2
+                    )
                     sections = subprocess.run(
                         ["llvm-readelf", "-S", "-r", "-s", str(directory / "values.o")],
                         capture_output=True,
@@ -95,12 +125,21 @@ for arch in ("i386", "x86_64"):
                                 f"\nextern other_export\nsection .rodata\nexport_link_probe: {width} other_export\n"
                             )
                     assembly = subprocess.run(
-                        ["nasm", "-f", "elf32" if arch == "i386" else "elf64", "startup.asm", "-o", "startup.o"],
+                        [
+                            "nasm",
+                            "-f",
+                            "elf32" if arch == "i386" else "elf64",
+                            "startup.asm",
+                            "-o",
+                            "startup.o",
+                        ],
                         cwd=directory,
                         capture_output=True,
                         text=True,
                     )
-                    (directory / "assembly.log").write_text(assembly.stdout + assembly.stderr)
+                    (directory / "assembly.log").write_text(
+                        assembly.stdout + assembly.stderr
+                    )
                     link = subprocess.run(
                         [
                             "ld.lld",
@@ -127,14 +166,22 @@ for arch in ("i386", "x86_64"):
                             # mode before calling the compiler's actual ELF64 code.
                             executable = directory / "multiboot.elf"
                             subprocess.run(
-                                ["llvm-objcopy", "-O", "elf32-i386", str(directory / "linked.elf"), str(executable)],
+                                [
+                                    "llvm-objcopy",
+                                    "-O",
+                                    "elf32-i386",
+                                    str(directory / "linked.elf"),
+                                    str(executable),
+                                ],
                                 check=True,
                             )
                         logpath = directory / "serial.log"
                         with logpath.open("w") as log:
                             qemu = subprocess.Popen(
                                 [
-                                    "qemu-system-i386" if arch == "i386" else "qemu-system-x86_64",
+                                    "qemu-system-i386"
+                                    if arch == "i386"
+                                    else "qemu-system-x86_64",
                                     "-kernel",
                                     str(executable),
                                     "-m",
@@ -155,9 +202,15 @@ for arch in ("i386", "x86_64"):
                             try:
                                 end = time.monotonic() + 3
                                 while time.monotonic() < end:
-                                    if "object data" in logpath.read_text(errors="replace") or qemu.poll() is not None:
+                                    if "object data" in logpath.read_text(
+                                        errors="replace"
+                                    ):
                                         break
-                                    time.sleep(0.05)
+                                    try:
+                                        qemu.wait(timeout=0.05)
+                                        break
+                                    except subprocess.TimeoutExpired:
+                                        pass
                             finally:
                                 qemu.terminate()
                                 try:
@@ -166,7 +219,10 @@ for arch in ("i386", "x86_64"):
                                     qemu.kill()
                                     qemu.wait()
                         serial = logpath.read_text(errors="replace")
-                        executed = "PASS object data" in serial and "FAIL object data" not in serial
+                        executed = (
+                            "PASS object data" in serial
+                            and "FAIL object data" not in serial
+                        )
                 row = {
                     "arch": arch,
                     "case": case,
@@ -182,10 +238,12 @@ for arch in ("i386", "x86_64"):
 (out / "summary.json").write_text(json.dumps(results, indent=2))
 all_pass = all(row["runtime_pass"] for row in results)
 if a.expect_failure:
-    assert any(
-        row["compiled"] and not row["runtime_pass"] for row in results
-    ), "baseline must compile before demonstrating link/runtime failure"
-assert (not all_pass) if a.expect_failure else all_pass, f"unexpected regression outcome; evidence: {out}"
+    assert any(row["compiled"] and not row["runtime_pass"] for row in results), (
+        "baseline must compile before demonstrating link/runtime failure"
+    )
+assert (not all_pass) if a.expect_failure else all_pass, (
+    f"unexpected regression outcome; evidence: {out}"
+)
 print(
     f"{'EXPECTED BASELINE FAILURE' if a.expect_failure else 'PASS'}: {len(results)} object/link/runtime cases ({out})"
 )

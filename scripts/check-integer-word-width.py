@@ -19,7 +19,11 @@ args = parser.parse_args()
 for tool in ("nasm", "ld.lld", "zig", "qemu-system-arm", "qemu-system-i386"):
     if not shutil.which(tool):
         parser.error(f"required installed tool not found: {tool}")
-root = args.output_dir.resolve() if args.output_dir else Path(tempfile.mkdtemp(prefix="in-word-width-"))
+root = (
+    args.output_dir.resolve()
+    if args.output_dir
+    else Path(tempfile.mkdtemp(prefix="in-word-width-"))
+)
 if args.output_dir:
     root.mkdir(parents=True, exist_ok=False)
 compiler = root / "compiler-snapshot"
@@ -29,7 +33,9 @@ shutil.copy2(args.compiler, compiler)
         {
             "source": str(Path(args.compiler).resolve()),
             "sha256": hashlib.sha256(compiler.read_bytes()).hexdigest(),
-            "version": subprocess.check_output([compiler, "--version"], text=True).strip(),
+            "version": subprocess.check_output(
+                [compiler, "--version"], text=True
+            ).strip(),
         },
         indent=2,
     )
@@ -45,7 +51,9 @@ for target, triple in (
         directory = root / f"{target}-{profile}"
         directory.mkdir()
         path = directory / "values.in"
-        path.write_text(source.replace("0x300000", "0x38000000") if target == "thumb" else source)
+        path.write_text(
+            source.replace("0x300000", "0x38000000") if target == "thumb" else source
+        )
         command = [
             str(compiler),
             "compile",
@@ -76,7 +84,11 @@ for target, triple in (
         (directory / "compile.json").write_text(compile_run.stdout)
         (directory / "compile.stderr").write_text(compile_run.stderr)
         report = json.loads(compile_run.stdout)
-        assert compile_run.returncode == 0 and report.get("success") and not report.get("degradations"), report
+        assert (
+            compile_run.returncode == 0
+            and report.get("success")
+            and not report.get("degradations")
+        ), report
         elf = (directory / "values.o").read_bytes()
         assert elf[:5] == b"\x7fELF\x01" and int.from_bytes(elf[18:20], "little") == (
             40 if target == "thumb" else 3
@@ -88,7 +100,9 @@ for target, triple in (
                     directory / name,
                 )
             startup = directory / "startup.S"
-            startup.write_text(startup.read_text().replace("stack arguments", "integer word width"))
+            startup.write_text(
+                startup.read_text().replace("stack arguments", "integer word width")
+            )
             build = subprocess.run(
                 ["zig", "build"],
                 cwd=directory,
@@ -111,7 +125,9 @@ for target, triple in (
             shutil.copyfile(fixture / "i386-startup.asm", directory / "startup.asm")
             shutil.copyfile(fixture / "i386-memory.ld", directory / "memory.ld")
             startup = directory / "startup.asm"
-            startup.write_text(startup.read_text().replace("integer width i386", "integer word width"))
+            startup.write_text(
+                startup.read_text().replace("integer width i386", "integer word width")
+            )
             assembly = subprocess.run(
                 ["nasm", "-f", "elf32", "startup.asm", "-o", "startup.o"],
                 cwd=directory,
@@ -163,9 +179,13 @@ for target, triple in (
             try:
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
-                    if "integer word width" in logpath.read_text(errors="replace") or qemu.poll() is not None:
+                    if "integer word width" in logpath.read_text(errors="replace"):
                         break
-                    time.sleep(0.05)
+                    try:
+                        qemu.wait(timeout=0.05)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
             finally:
                 qemu.terminate()
                 try:
@@ -174,8 +194,13 @@ for target, triple in (
                     qemu.kill()
                     qemu.wait()
         serial = logpath.read_text(errors="replace")
-        assert "PASS integer word width" in serial and "FAIL integer word width" not in serial, serial
-        results.append({"target": target, "profile": profile, "compile": True, "runtime": True})
+        assert (
+            "PASS integer word width" in serial
+            and "FAIL integer word width" not in serial
+        ), serial
+        results.append(
+            {"target": target, "profile": profile, "compile": True, "runtime": True}
+        )
         print(
             f"PASS {target}/{profile}: compiled ELF32 and actual QEMU execution",
             flush=True,
@@ -203,7 +228,10 @@ conditions = [
 host_path = root / "host64.in"
 host_path.write_text(
     "fn identity(value:Int)->Int{return value;}\nfn main()->Int{"
-    + "".join(f"if {condition}{{return {index+1};}}" for index, condition in enumerate(conditions))
+    + "".join(
+        f"if {condition}{{return {index + 1};}}"
+        for index, condition in enumerate(conditions)
+    )
     + "return 0;}\n"
 )
 for profile in ("default", "lean", "harden"):
@@ -229,6 +257,10 @@ for profile in ("default", "lean", "harden"):
     )
     (root / f"host-{profile}.json").write_text(host.stdout)
     report = json.loads(host.stdout)
-    assert host.returncode == 0 and report.get("success") and report.get("eval_result") == {"Int": 0}, report
+    assert (
+        host.returncode == 0
+        and report.get("success")
+        and report.get("eval_result") == {"Int": 0}
+    ), report
     print(f"PASS host64/{profile}: pure controls", flush=True)
 (root / "summary.json").write_text(json.dumps(results, indent=2))
