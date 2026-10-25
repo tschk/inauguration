@@ -616,3 +616,10 @@ fn explains_lowerer_degradation_codes() {
     }
     assert!(explain_diagnostic("IN3999").is_none());
 }
+
+#[test]
+fn json_report_returns_io_error_for_missing_file() {
+    let missing_path = std::path::Path::new("does_not_exist_abc123.in");
+    let result = json_report(&missing_path, &AgentModeConfig::default());
+    assert!(matches!(result, Err(AgentModeError::Io(_))));
+}
