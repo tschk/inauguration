@@ -300,3 +300,60 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_ir::{CoreModuleIdentity, Decl, Expr, Stmt, Typ, UnifiedModule};
+
+    #[test]
+    fn test_max_depth_exceeded() {
+        let mut e = Expr::IntLit(0);
+        for _ in 0..MAX_EMIT_DEPTH + 1 {
+            e = Expr::Field {
+                base: Box::new(e),
+                name: "f".to_string(),
+            };
+        }
+        let module = UnifiedModule {
+            identity: CoreModuleIdentity {
+                package: None,
+                module: None,
+            },
+            decls: vec![Decl::Global {
+                name: "g".to_string(),
+                typ: Typ::Int,
+                init: Some(Box::new(e)),
+                mutable: false,
+                constant_value: false,
+            }],
+        };
+        let result = check_module_limits(&module);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Core IR nesting exceeds"));
+    }
+
+    #[test]
+    fn test_max_nodes_exceeded() {
+        let mut stmts = Vec::new();
+        for _ in 0..50001 {
+            stmts.push(Stmt::Expr(Expr::IntLit(0)));
+        }
+        let module = UnifiedModule {
+            identity: CoreModuleIdentity {
+                package: None,
+                module: None,
+            },
+            decls: vec![Decl::Function {
+                name: "f".to_string(),
+                params: vec![],
+                ret: Typ::Void,
+                body: stmts,
+                type_params: vec![],
+            }],
+        };
+        let result = check_module_limits(&module);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Core IR exceeds"));
+    }
+}
