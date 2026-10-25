@@ -300,3 +300,62 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_ir::{CoreModuleIdentity, Decl, Expr, Stmt, Typ, UnifiedModule};
+
+    #[test]
+    fn test_dos_guard_depth() {
+        let mut stmt = Stmt::Return(Some(Expr::IntLit(1)));
+        for _ in 0..MAX_EMIT_DEPTH + 1 {
+            stmt = Stmt::If {
+                cond: Expr::BoolLit(true),
+                then_body: vec![stmt],
+                else_body: vec![],
+            };
+        }
+        let module = UnifiedModule {
+            identity: CoreModuleIdentity::default(),
+            decls: vec![Decl::Function {
+                name: "test".to_string(),
+                params: vec![],
+                ret: Typ::Int,
+                body: vec![stmt],
+                type_params: vec![],
+            }],
+        };
+        let res = check_module_limits(&module);
+        assert_eq!(
+            res,
+            Err(format!(
+                "emit aborted: Core IR nesting exceeds {} (DoS guard)",
+                MAX_EMIT_DEPTH
+            ))
+        );
+    }
+
+    #[test]
+    fn test_dos_guard_nodes() {
+        let stmts = vec![Stmt::Return(Some(Expr::IntLit(1))); MAX_EMIT_NODES + 1];
+        let module = UnifiedModule {
+            identity: CoreModuleIdentity::default(),
+            decls: vec![Decl::Function {
+                name: "large".to_string(),
+                params: vec![],
+                ret: Typ::Int,
+                body: stmts,
+                type_params: vec![],
+            }],
+        };
+        let res = check_module_limits(&module);
+        assert_eq!(
+            res,
+            Err(format!(
+                "emit aborted: Core IR exceeds {} nodes (DoS guard)",
+                MAX_EMIT_NODES
+            ))
+        );
+    }
+}
