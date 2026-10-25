@@ -185,3 +185,90 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::metadata::{ArtifactKind, ComponentSpec, OptimizationLevel};
+    use std::io::Write;
+    use std::path::PathBuf;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_compile_in_file_missing_source() {
+        let spec = ComponentSpec {
+            name: "test_missing".into(),
+            target: "x86_64-unknown-linux-gnu".into(),
+            artifact_kind: ArtifactKind::Executable,
+            deterministic: false,
+            checkpoint: String::new(),
+            optimization_level: OptimizationLevel::None,
+            debug_info: false,
+            entry_point: None,
+            imports: vec![],
+            exports: vec![],
+            capabilities: vec![],
+            capabilities_exported: vec![],
+        };
+
+        let result = compile_in_file(&PathBuf::from("does_not_exist.in"), &spec, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("read source:"));
+    }
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(b"fn main() {}").unwrap();
+        let source_path = temp_file.path().to_path_buf();
+
+        let spec = ComponentSpec {
+            name: "test_success".into(),
+            target: "x86_64-unknown-linux-gnu".into(),
+            artifact_kind: ArtifactKind::Executable,
+            deterministic: false,
+            checkpoint: String::new(),
+            optimization_level: OptimizationLevel::None,
+            debug_info: false,
+            entry_point: None,
+            imports: vec![],
+            exports: vec![],
+            capabilities: vec![],
+            capabilities_exported: vec![],
+        };
+
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(result.is_ok(), "Compilation failed: {:?}", result);
+        let (output_path, metadata_path) = result.unwrap();
+
+        assert!(output_path.exists());
+        assert!(metadata_path.is_some());
+        assert!(metadata_path.unwrap().exists());
+    }
+
+    #[test]
+    fn test_compile_in_file_compilation_error() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(b"fn main() { syntax error }").unwrap();
+        let source_path = temp_file.path().to_path_buf();
+
+        let spec = ComponentSpec {
+            name: "test_error".into(),
+            target: "x86_64-unknown-linux-gnu".into(),
+            artifact_kind: ArtifactKind::Executable,
+            deterministic: false,
+            checkpoint: String::new(),
+            optimization_level: OptimizationLevel::None,
+            debug_info: false,
+            entry_point: None,
+            imports: vec![],
+            exports: vec![],
+            capabilities: vec![],
+            capabilities_exported: vec![],
+        };
+
+        let result = compile_in_file(&source_path, &spec, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("compilation:"));
+    }
+}
