@@ -300,3 +300,84 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_ir::{Decl, Expr, Stmt, Typ, UnifiedModule};
+
+    #[test]
+    fn test_node_limit() {
+        let mut nodes = MAX_EMIT_NODES;
+        let res = bump(&mut nodes);
+        assert!(res.is_err());
+        assert_eq!(
+            res.unwrap_err(),
+            format!(
+                "emit aborted: Core IR exceeds {} nodes (DoS guard)",
+                MAX_EMIT_NODES
+            )
+        );
+    }
+
+    #[test]
+    fn test_depth_limit() {
+        let res = depth_ok(MAX_EMIT_DEPTH + 1);
+        assert!(res.is_err());
+        assert_eq!(
+            res.unwrap_err(),
+            format!(
+                "emit aborted: Core IR nesting exceeds {} (DoS guard)",
+                MAX_EMIT_DEPTH
+            )
+        );
+    }
+
+    #[test]
+    fn test_module_limits_ok() {
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "foo".to_string(),
+            params: vec![],
+            ret: Typ::Void,
+            body: vec![Stmt::Return(None)],
+            type_params: vec![],
+        }]);
+        assert!(check_module_limits(&module).is_ok());
+    }
+
+    #[test]
+    fn test_module_limits_exceeded() {
+        // We can manually craft a tree that hits MAX_EMIT_DEPTH
+        let mut deep_body = vec![Stmt::Return(None)];
+        for _ in 0..(MAX_EMIT_DEPTH + 2) {
+            deep_body = vec![Stmt::If {
+                cond: Expr::BoolLit(true),
+                then_body: deep_body,
+                else_body: vec![],
+            }];
+        }
+        let deep_module = UnifiedModule::new(vec![Decl::Function {
+            name: "foo".to_string(),
+            params: vec![],
+            ret: Typ::Void,
+            body: deep_body,
+            type_params: vec![],
+        }]);
+        assert!(check_module_limits(&deep_module).is_err());
+
+        // We can manually craft a tree that hits MAX_EMIT_NODES
+        // Need over 100_000 nodes.
+        let mut wide_body = vec![];
+        for _ in 0..(MAX_EMIT_NODES + 2) {
+            wide_body.push(Stmt::Return(None));
+        }
+        let wide_module = UnifiedModule::new(vec![Decl::Function {
+            name: "bar".to_string(),
+            params: vec![],
+            ret: Typ::Void,
+            body: wide_body,
+            type_params: vec![],
+        }]);
+        assert!(check_module_limits(&wide_module).is_err());
+    }
+}
