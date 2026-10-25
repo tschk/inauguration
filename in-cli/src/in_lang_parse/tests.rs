@@ -151,6 +151,52 @@ fn test_parse_in_surface_info_unknown_syntax() {
 }
 
 #[test]
+fn test_parse_in_file_happy_path() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("inauguration-in-parse-test-{unique}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let main_in = dir.join("main.in");
+    std::fs::write(&main_in, "fn main() {}\n").unwrap();
+
+    let module = parse_in_file(&main_in).unwrap();
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "main"))
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_parse_in_file_missing_main() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("inauguration-in-parse-test-missing-main-{unique}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lib_in = dir.join("main.in");
+    std::fs::write(&lib_in, "fn foo() {}\n").unwrap();
+
+    let err = parse_in_file(&lib_in).unwrap_err();
+    assert!(err.contains("missing required `fn main`"));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_parse_in_file_file_not_found() {
+    let err = parse_in_file(std::path::Path::new("/does/not/exist/nonexistent.in")).unwrap_err();
+    assert!(!err.is_empty());
+}
+
+#[test]
 fn void_return_case_insensitive() {
     let m = parse_in_source("fn main() -> VOID\n").expect("ok");
     match &m.decls[0] {
