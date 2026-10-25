@@ -133,3 +133,70 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn dummy_report() -> OwnedCompileReport {
+        serde_json::from_str(
+            r#"{
+            "schema_version": 1,
+            "owned": true,
+            "path": "dummy",
+            "module_id": "dummy",
+            "target": "native",
+            "linkage": "executable",
+            "frontend_level": "unsupported",
+            "semantic_level": "failed",
+            "backend_level": "contract-only",
+            "runtime_level": "none",
+            "external_invocations": [],
+            "success": true,
+            "parsed_function_count": 0,
+            "typed_function_count": 0,
+            "call_edge_count": 0,
+            "jobs": 2,
+            "timing_micros": 0,
+            "cache_hit": true,
+            "execution_started": false
+        }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_finalize_report_no_forbidden_tools() {
+        let report = dummy_report();
+        let started = Instant::now();
+        let _guard = crate::external_guard::ExternalInvocationGuard::enter();
+        crate::external_guard::ExternalInvocationGuard::record("allowed_tool");
+
+        let finalized = finalize_report(report, started, std::path::Path::new(""), "hash");
+
+        assert_eq!(finalized.success, true);
+        assert_eq!(finalized.external_invocations, vec!["allowed_tool"]);
+        assert!(finalized.reason_code.is_none());
+        assert!(finalized.timing_waves_us.is_some());
+    }
+
+    #[test]
+    fn test_finalize_report_with_forbidden_tools() {
+        let report = dummy_report();
+        let started = Instant::now();
+        let _guard = crate::external_guard::ExternalInvocationGuard::enter();
+        crate::external_guard::ExternalInvocationGuard::record("swiftc");
+
+        let finalized = finalize_report(report, started, std::path::Path::new(""), "hash");
+
+        assert_eq!(finalized.success, false);
+        assert_eq!(finalized.external_invocations, vec!["swiftc"]);
+        assert_eq!(
+            finalized.reason_code.as_deref(),
+            Some("external-tool-invoked")
+        );
+        assert!(finalized.reason.as_ref().unwrap().contains("swiftc"));
+        assert!(finalized.error.as_ref().unwrap().contains("swiftc"));
+    }
+}
