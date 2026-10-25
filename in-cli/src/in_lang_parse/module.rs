@@ -600,3 +600,98 @@ pub fn parse_in_file(path: &Path) -> Result<UnifiedModule, String> {
 pub fn parse_in_library_file(path: &Path) -> Result<UnifiedModule, String> {
     finalize_in_module(parse_in_file_with_imports(path)?, false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::SystemTime;
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn get_temp_dir() -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir_name = format!("in_lang_parse_module_test_{}_{}", timestamp, counter);
+        let mut path = std::env::temp_dir();
+        path.push(dir_name);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_parse_in_file_success() {
+        let dir = get_temp_dir();
+        let file_path = dir.join("main.in");
+        fs::write(
+            &file_path,
+            "fn main() {}
+",
+        )
+        .unwrap();
+
+        let result = parse_in_file(&file_path);
+        assert!(result.is_ok());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_parse_in_file_missing_main() {
+        let dir = get_temp_dir();
+        let file_path = dir.join("lib.in");
+        fs::write(
+            &file_path,
+            "fn foo() {}
+",
+        )
+        .unwrap();
+
+        let result = parse_in_file(&file_path);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ".in: missing required `fn main`");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_parse_in_library_file_missing_main() {
+        let dir = get_temp_dir();
+        let file_path = dir.join("lib.in");
+        fs::write(
+            &file_path,
+            "fn foo() {}
+",
+        )
+        .unwrap();
+
+        let result = parse_in_library_file(&file_path);
+        assert!(result.is_ok());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_parse_in_file_invalid_syntax() {
+        let dir = get_temp_dir();
+        let file_path = dir.join("main.in");
+        fs::write(&file_path, "invalid syntax here").unwrap();
+
+        let result = parse_in_file(&file_path);
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_parse_in_file_not_found() {
+        let file_path = PathBuf::from("does_not_exist.in");
+        let result = parse_in_file(&file_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("No such file or directory")
+                || err.contains("The system cannot find the file specified")
+        );
+    }
+}
