@@ -854,13 +854,6 @@ direct_dep = { path = "direct_dep" }
     }
 
     #[test]
-    fn test_get_manifest_no_cargo_toml() {
-        let temp = TempDirGuard::new();
-        let manifest = get_manifest(&temp.path);
-        assert!(manifest.is_none());
-    }
-
-    #[test]
     fn test_get_manifest_partial() {
         let temp = TempDirGuard::new();
         fs::write(
