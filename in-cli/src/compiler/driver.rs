@@ -185,3 +185,58 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("test.in");
+        fs::write(&source_path, "fn main() {}").unwrap();
+
+        let spec = ComponentSpec::host_executable("test", Some("main"));
+        let result = compile_in_file(&source_path, &spec, true);
+
+        assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
+        let (out_path, meta_path) = result.unwrap();
+        assert!(out_path.exists(), "Output artifact was not created");
+        assert!(meta_path.is_some(), "Metadata sidecar was not created");
+        assert!(
+            meta_path.unwrap().exists(),
+            "Metadata sidecar file does not exist"
+        );
+    }
+
+    #[test]
+    fn test_compile_in_file_no_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("test_no_meta.in");
+        fs::write(&source_path, "fn main() {}").unwrap();
+
+        let spec = ComponentSpec::host_executable("test", Some("main"));
+        let result = compile_in_file(&source_path, &spec, false);
+
+        assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
+        let (out_path, meta_path) = result.unwrap();
+        assert!(out_path.exists(), "Output artifact was not created");
+        assert!(
+            meta_path.is_none(),
+            "Metadata sidecar should not be created"
+        );
+    }
+
+    #[test]
+    fn test_compile_in_file_missing_source() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("missing.in");
+        let spec = ComponentSpec::host_executable("test", Some("main"));
+        let result = compile_in_file(&source_path, &spec, true);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("read source"));
+    }
+}
