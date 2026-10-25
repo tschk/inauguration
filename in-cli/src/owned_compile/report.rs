@@ -133,3 +133,72 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit_profile::EmitProfile;
+    use crate::external_guard::ExternalInvocationGuard;
+    use crate::native_emit::NativeLinkage;
+    use crate::parser_registry::ParserCli;
+    use std::path::PathBuf;
+
+    fn dummy_request() -> OwnedCompileRequest {
+        OwnedCompileRequest {
+            path: PathBuf::from("dummy.in"),
+            module_id: "Dummy".to_string(),
+            parser: ParserCli::Auto,
+            target: CompileTarget::Native,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: None,
+            jobs: 1,
+            debug: false,
+            profile: EmitProfile::default(),
+            emit: None,
+            base: None,
+        }
+    }
+
+    #[test]
+    fn finalize_report_sets_timing_and_keeps_success_on_clean_invocations() {
+        let request = dummy_request();
+        let started = Instant::now();
+        let mut report = base_report(&request, 1, started);
+        report.success = true;
+        report.cache_hit = true; // avoid file writes
+
+        let _token = ExternalInvocationGuard::enter();
+
+        let finalized = finalize_report(report, started, &PathBuf::from("."), "hash");
+
+        assert!(finalized.success);
+        assert!(finalized.timing_waves_us.is_some());
+        assert!(finalized.reason_code.is_none());
+        assert!(finalized.error.is_none());
+    }
+
+    #[test]
+    fn finalize_report_marks_failure_on_forbidden_invocations() {
+        let request = dummy_request();
+        let started = Instant::now();
+        let mut report = base_report(&request, 1, started);
+        report.success = true;
+        report.cache_hit = true;
+
+        let _token = ExternalInvocationGuard::enter();
+        ExternalInvocationGuard::record("swiftc");
+
+        let finalized = finalize_report(report, started, &PathBuf::from("."), "hash");
+
+        assert!(!finalized.success);
+        assert_eq!(
+            finalized.reason_code.as_deref(),
+            Some("external-tool-invoked")
+        );
+        assert!(finalized.reason.is_some());
+        assert!(finalized.error.is_some());
+        assert_eq!(finalized.external_invocations, vec!["swiftc"]);
+    }
+}
