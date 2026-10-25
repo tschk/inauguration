@@ -151,6 +151,91 @@ fn test_parse_in_surface_info_unknown_syntax() {
 }
 
 #[test]
+fn test_parse_in_surface_info_empty_paths() {
+    assert!(
+        parse_in_surface_info("import ;")
+            .expect_err("should fail")
+            .contains("import path missing")
+    );
+    assert!(
+        parse_in_surface_info("capability ;")
+            .expect_err("should fail")
+            .contains("capability name missing")
+    );
+    assert!(
+        parse_in_surface_info("enable ;")
+            .expect_err("should fail")
+            .contains("enable extension missing")
+    );
+}
+
+#[test]
+fn test_parse_in_surface_info_annotations_and_enable() {
+    let src = "
+        enable my_ext;
+        @gpu
+        fn my_func() {}
+    ";
+    let info = parse_in_surface_info(src).expect("should parse");
+    assert_eq!(
+        info.orchestration.enabled_extensions,
+        vec!["my_ext".to_string()]
+    );
+    assert_eq!(info.orchestration.annotations.len(), 1);
+    assert_eq!(info.orchestration.annotations[0].name, "gpu");
+    assert_eq!(
+        info.orchestration.annotations[0].target,
+        Some("my_func".to_string())
+    );
+}
+
+#[test]
+fn test_parse_in_surface_info_distributed() {
+    let src = "distributed fn my_distributed() {}";
+    let info = parse_in_surface_info(src).expect("should parse");
+    assert_eq!(
+        info.orchestration.distributed_functions,
+        vec!["my_distributed".to_string()]
+    );
+}
+
+#[test]
+fn test_parse_in_surface_info_extern() {
+    let src = "extern c fn my_ext() -> Int;";
+    let info = parse_in_surface_info(src).expect("should parse");
+    assert_eq!(info.externs.len(), 1);
+}
+
+#[test]
+fn test_parse_in_surface_info_invalid_parallel() {
+    let err = parse_in_surface_info("parallel foo").expect_err("should fail");
+    assert!(err.contains("`parallel` must be a top-level `parallel { ... }` region"));
+}
+
+#[test]
+fn test_parse_in_surface_info_valid_skip_blocks() {
+    let src = "
+        fn foo() {}
+        interrupt fn bar() {}
+        struct MyStruct {}
+        class MyClass {}
+        interface MyInterface {}
+        component MyComponent {}
+        var x = 1;
+        const Y = 2;
+        system MySystem {}
+        domain MyDomain {}
+        instance MyInstance {}
+        task MyTask {}
+        grant MyGrant {}
+        port MyPort {}
+        startup MyStartup {}
+    ";
+    let info = parse_in_surface_info(src).expect("should skip all and return default");
+    assert!(info.package.is_none());
+}
+
+#[test]
 fn void_return_case_insensitive() {
     let m = parse_in_source("fn main() -> VOID\n").expect("ok");
     match &m.decls[0] {
