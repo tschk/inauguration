@@ -616,3 +616,22 @@ fn explains_lowerer_degradation_codes() {
     }
     assert!(explain_diagnostic("IN3999").is_none());
 }
+
+#[test]
+fn explain_formats_summary_correctly() {
+    let temp = temp_source(
+        "explain",
+        "in",
+        "fn helper() -> void { return; }\nfn main() -> void { helper(); return; }\n",
+    );
+    let explanation = explain(&temp.path, &AgentModeConfig::default()).expect("explain");
+    assert_eq!(
+        explanation.summary,
+        vec![
+            "parser in via core_ir",
+            "2 decls, 2 functions, 0 structs",
+            "2 SIL functions, 4 blocks, 6 instructions, 1 call edges",
+            "no diagnostics"
+        ]
+    );
+}
