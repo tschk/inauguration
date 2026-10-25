@@ -3648,3 +3648,32 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn test_parse_in_file() {
+    let directory = std::env::temp_dir().join(format!(
+        "in_test_parse_in_file_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+
+    let path = directory.join("main.in");
+    fs::write(&path, "fn main()->Int{return 42;}").unwrap();
+    let module = parse_in_file(&path).unwrap();
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, crate::core_ir::Decl::Function{name, ..} if name == "main"))
+    );
+
+    let missing_path = directory.join("missing.in");
+    let err = parse_in_file(&missing_path).unwrap_err();
+    assert!(err.contains("No such file") || err.contains("not found"));
+
+    fs::remove_dir_all(directory).unwrap();
+}
