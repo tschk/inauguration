@@ -144,6 +144,51 @@ fn test_parse_in_surface_info_duplicate_module() {
 }
 
 #[test]
+fn test_parse_in_surface_info_edge_cases() {
+    let src = "
+        enable my-extension;
+        @pure
+        fn annotated_target() {}
+        distributed fn dist_func() {}
+        extern rust fn ext_func() -> Int;
+    ";
+    let info = parse_in_surface_info(src).expect("should parse successfully");
+
+    assert_eq!(
+        info.orchestration.enabled_extensions,
+        vec!["my-extension".to_string()]
+    );
+    assert_eq!(
+        info.orchestration.annotations,
+        vec![crate::in_lang_parse::surface::InAnnotationFact {
+            name: "pure".to_string(),
+            target: Some("annotated_target".to_string())
+        }]
+    );
+    assert_eq!(
+        info.orchestration.distributed_functions,
+        vec!["dist_func".to_string()]
+    );
+    assert_eq!(info.externs.len(), 1);
+    assert_eq!(info.externs[0].name, "ext_func");
+}
+
+#[test]
+fn test_parse_in_surface_info_errors() {
+    let err = parse_in_surface_info("import ;").expect_err("should fail");
+    assert!(err.contains("import path missing"));
+
+    let err = parse_in_surface_info("capability ;").expect_err("should fail");
+    assert!(err.contains("capability name missing"));
+
+    let err = parse_in_surface_info("enable ;").expect_err("should fail");
+    assert!(err.contains("enable extension missing"));
+
+    let err = parse_in_surface_info("parallel foo").expect_err("should fail");
+    assert!(err.contains("must be a top-level"));
+}
+
+#[test]
 fn test_parse_in_surface_info_unknown_syntax() {
     let src = "unknown_keyword foo";
     let err = parse_in_surface_info(src).expect_err("should fail");
