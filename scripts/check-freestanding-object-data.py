@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+import queue
+import threading
 
 repo = Path(__file__).resolve().parents[1]
 fixture = repo / "fixtures/freestanding-object-data"
@@ -149,15 +151,37 @@ for arch in ("i386", "x86_64"):
                                     "-device",
                                     "isa-debug-exit,iobase=0xf4,iosize=0x04",
                                 ],
-                                stdout=log,
+                                stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT,
                             )
                             try:
+                                q = queue.Queue()
+                                def _reader():
+                                    while True:
+                                        line = qemu.stdout.readline()
+                                        if not line:
+                                            break
+                                        q.put(line)
+                                t = threading.Thread(target=_reader)
+                                t.daemon = True
+                                t.start()
+                                text_accum = ""
                                 end = time.monotonic() + 3
                                 while time.monotonic() < end:
-                                    if "object data" in logpath.read_text(errors="replace") or qemu.poll() is not None:
+                                    remaining = end - time.monotonic()
+                                    if remaining <= 0:
                                         break
-                                    time.sleep(0.05)
+                                    try:
+                                        line = q.get(timeout=remaining)
+                                        decoded = line.decode(errors="replace")
+                                        log.write(decoded)
+                                        log.flush()
+                                        text_accum += decoded
+                                        if "object data" in text_accum:
+                                            break
+                                    except queue.Empty:
+                                        if qemu.poll() is not None:
+                                            break
                             finally:
                                 qemu.terminate()
                                 try:

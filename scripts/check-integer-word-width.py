@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+import queue
+import threading
 
 repository = Path(__file__).resolve().parents[1]
 fixture = repository / "fixtures/integer-word-width"
@@ -159,13 +161,36 @@ for target, triple in (
         assert build.returncode == 0, build.stderr
         logpath = directory / "serial.log"
         with logpath.open("w") as log:
-            qemu = subprocess.Popen(qemu_command, stdout=log, stderr=subprocess.STDOUT)
+            qemu = subprocess.Popen(qemu_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                )
             try:
+                q = queue.Queue()
+                def _reader():
+                    while True:
+                        line = qemu.stdout.readline()
+                        if not line:
+                            break
+                        q.put(line)
+                t = threading.Thread(target=_reader)
+                t.daemon = True
+                t.start()
+                text_accum = ""
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
-                    if "integer word width" in logpath.read_text(errors="replace") or qemu.poll() is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         break
-                    time.sleep(0.05)
+                    try:
+                        line = q.get(timeout=remaining)
+                        decoded = line.decode(errors="replace")
+                        log.write(decoded)
+                        log.flush()
+                        text_accum += decoded
+                        if "integer word width" in text_accum:
+                            break
+                    except queue.Empty:
+                        if qemu.poll() is not None:
+                            break
             finally:
                 qemu.terminate()
                 try:

@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+import queue
+import threading
 
 repository = pathlib.Path(__file__).resolve().parent.parent
 fixture = repository / "fixtures/thumb-stack-arguments"
@@ -86,16 +88,37 @@ with (root / "serial.log").open("w") as log:
             "-kernel",
             str(root / "zig-out/bin/stack-args"),
         ],
-        stdout=log,
+        stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
     try:
+        q = queue.Queue()
+        def _reader():
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                q.put(line)
+        t = threading.Thread(target=_reader)
+        t.daemon = True
+        t.start()
+        text_accum = ""
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            text = (root / "serial.log").read_text(errors="replace")
-            if "stack arguments" in text or proc.poll() is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 break
-            time.sleep(0.05)
+            try:
+                line = q.get(timeout=remaining)
+                decoded = line.decode(errors="replace")
+                log.write(decoded)
+                log.flush()
+                text_accum += decoded
+                if "stack arguments" in text_accum:
+                    break
+            except queue.Empty:
+                if proc.poll() is not None:
+                    break
     finally:
         proc.terminate()
         try:

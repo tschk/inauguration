@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+import queue
+import threading
 
 repository = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -93,15 +95,36 @@ for case in cases:
                 process = subprocess.Popen(
                     ["qemu-system-arm", "-machine", "mps2-an521", "-cpu", "cortex-m33",
                      "-nographic", "-kernel", str(executable)],
-                    stdout=log, stderr=subprocess.STDOUT,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 )
                 try:
+                    q = queue.Queue()
+                    def _reader():
+                        while True:
+                            line = process.stdout.readline()
+                            if not line:
+                                break
+                            q.put(line)
+                    t = threading.Thread(target=_reader)
+                    t.daemon = True
+                    t.start()
+                    text_accum = ""
                     deadline = time.monotonic() + 10
                     while time.monotonic() < deadline:
-                        text = serial.read_text(errors="replace")
-                        if "index" in text or process.poll() is not None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
                             break
-                        time.sleep(0.05)
+                        try:
+                            line = q.get(timeout=remaining)
+                            decoded = line.decode(errors="replace")
+                            log.write(decoded)
+                            log.flush()
+                            text_accum += decoded
+                            if "index" in text_accum:
+                                break
+                        except queue.Empty:
+                            if process.poll() is not None:
+                                break
                 finally:
                     process.terminate()
                     try:
