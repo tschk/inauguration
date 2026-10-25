@@ -185,3 +185,77 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("test_module.in");
+        // A minimal valid .in source code
+        let source_code = "fn main() { }";
+        fs::write(&source_path, source_code).unwrap();
+
+        let spec = ComponentSpec::host_executable("test_app", Some("main"));
+
+        let result = compile_in_file(&source_path, &spec, true);
+
+        assert!(result.is_ok());
+        let (output_path, metadata_path) = result.unwrap();
+
+        assert!(output_path.exists());
+        assert!(metadata_path.is_some());
+        assert!(metadata_path.unwrap().exists());
+    }
+
+    #[test]
+    fn test_compile_in_file_without_metadata() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("test_module_no_meta.in");
+        let source_code = "fn main() { }";
+        fs::write(&source_path, source_code).unwrap();
+
+        let spec = ComponentSpec::host_executable("test_app", Some("main"));
+
+        let result = compile_in_file(&source_path, &spec, false);
+
+        assert!(result.is_ok());
+        let (output_path, metadata_path) = result.unwrap();
+
+        assert!(output_path.exists());
+        assert!(metadata_path.is_none());
+    }
+
+    #[test]
+    fn test_compile_in_file_read_error() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("non_existent.in");
+
+        let spec = ComponentSpec::host_executable("test_app", Some("main"));
+
+        let result = compile_in_file(&source_path, &spec, true);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("read source"));
+    }
+
+    #[test]
+    fn test_compile_in_file_parse_error() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("invalid.in");
+        // Invalid syntax that will fail parsing/compilation
+        let source_code = "fn main() { invalid syntax!!! }";
+        fs::write(&source_path, source_code).unwrap();
+
+        let spec = ComponentSpec::host_executable("test_app", Some("main"));
+
+        let result = compile_in_file(&source_path, &spec, true);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("compilation"));
+    }
+}
