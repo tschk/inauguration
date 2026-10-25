@@ -185,3 +185,61 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let dir = std::env::temp_dir().join(format!(
+            "inauguration_test_driver_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("test_module.in");
+        fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
+
+        let spec = spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            0,
+            false,
+            false,
+        );
+
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(result.is_ok(), "compilation failed: {:?}", result.err());
+
+        let (out_path, meta_path) = result.unwrap();
+        assert!(out_path.exists());
+        assert!(meta_path.is_some());
+        assert!(meta_path.unwrap().exists());
+
+        // cleanup
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_compile_in_file_missing_source() {
+        let source_path = PathBuf::from("non_existent_file_abc.in");
+        let spec = spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::SharedLibrary,
+            "main",
+            0,
+            false,
+            false,
+        );
+        let result = compile_in_file(&source_path, &spec, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("read source"));
+    }
+}
