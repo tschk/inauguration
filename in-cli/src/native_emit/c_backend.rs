@@ -1436,10 +1436,53 @@ impl Ctx {
                 "__extension__({{ __asm__ volatile(\"lidt (%0)\" : : \"r\"({}) : \"memory\"); }})",
                 a(0)
             ),
-            "read_cr2" => {
+            "lgdt" => format!(
+                "__extension__({{ __asm__ volatile(\"lgdt (%0)\" : : \"r\"({}) : \"memory\"); }})",
+                a(0)
+            ),
+            "ltr" => format!(
+                "__extension__({{ uint16_t _s = (uint16_t)({}); __asm__ volatile(\"ltr %0\" : : \"r\"(_s) : \"memory\"); }})",
+                a(0)
+            ),
+            "read_cr2" | "read-cr2" => {
                 "__extension__({ uint64_t _v; __asm__ volatile(\"mov %%cr2, %0\" : \"=r\"(_v)); _v; })"
                     .into()
             }
+            "read_cr3" | "read-cr3" | "cr3_read" | "cr3-read" => {
+                "__extension__({ uint64_t _v; __asm__ volatile(\"mov %%cr3, %0\" : \"=r\"(_v)); _v; })"
+                    .into()
+            }
+            "write_cr3" | "write-cr3" | "cr3_write" | "cr3-write" => format!(
+                "__extension__({{ uint64_t _v = (uint64_t)({}); __asm__ volatile(\"mov %0, %%cr3\" : : \"r\"(_v) : \"memory\"); }})",
+                a(0)
+            ),
+            "rdmsr" => format!(
+                "__extension__({{ uint32_t _lo, _hi; __asm__ volatile(\"rdmsr\" : \"=a\"(_lo), \"=d\"(_hi) : \"c\"((uint32_t)({}))); ((uint64_t)_hi << 32) | _lo; }})",
+                a(0)
+            ),
+            "wrmsr64" => format!(
+                "__extension__({{ uint64_t _v = (uint64_t)({}); __asm__ volatile(\"wrmsr\" : : \"c\"((uint32_t)({})), \"a\"((uint32_t)_v), \"d\"((uint32_t)(_v >> 32)) : \"memory\"); }})",
+                a(1),
+                a(0)
+            ),
+            "wrmsr" => format!(
+                "__extension__({{ __asm__ volatile(\"wrmsr\" : : \"c\"((uint32_t)({})), \"a\"((uint32_t)({})), \"d\"((uint32_t)({})) : \"memory\"); }})",
+                a(0),
+                a(1),
+                a(2)
+            ),
+            "mem_fill64" | "mem-fill64" => format!(
+                "__extension__({{ volatile uint64_t *_d = (volatile uint64_t*)({}); uint64_t _v = (uint64_t)({}); int64_t _n = (int64_t)({}); for (int64_t _i = 0; _i < _n; _i++) _d[_i] = _v; }})",
+                a(0),
+                a(1),
+                a(2)
+            ),
+            "mem_copy64" | "mem-copy64" => format!(
+                "__extension__({{ volatile uint64_t *_d = (volatile uint64_t*)({}); const volatile uint64_t *_s = (const volatile uint64_t*)({}); int64_t _n = (int64_t)({}); for (int64_t _i = 0; _i < _n; _i++) _d[_i] = _s[_i]; }})",
+                a(0),
+                a(1),
+                a(2)
+            ),
             "load8" => format!("(*(volatile uint8_t*)({}))", a(0)),
             "load16" => format!("(*(volatile uint16_t*)({}))", a(0)),
             "load32" => format!("(*(volatile uint32_t*)({}))", a(0)),
