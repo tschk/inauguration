@@ -3608,6 +3608,7 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
             "{operand}"
         );
     }
+
     for operand in ["!42", "!2.5", "!\"hello\"", "!(-0.0)", "!true"] {
         let conditional = format!("(if({operand}){{42}}else{{0}})");
         for body in [
@@ -3647,4 +3648,42 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
             "{source}: {report:?}"
         );
     }
+}
+
+#[test]
+fn test_parse_in_file_and_library() {
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-test-parse-in-file-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+
+    let main_path = dir.join("main.in");
+    fs::write(&main_path, "fn main()->Int{return 42;}").unwrap();
+    let parsed_main = parse_in_file(&main_path).unwrap();
+    assert!(
+        parsed_main
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "main"))
+    );
+
+    let missing_main_path = dir.join("missing.in");
+    fs::write(&missing_main_path, "fn not_main()->Int{return 42;}").unwrap();
+    let err = parse_in_file(&missing_main_path).unwrap_err();
+    assert_eq!(err, ".in: missing required `fn main`");
+
+    let parsed_lib = super::parse_in_library_file(&missing_main_path).unwrap();
+    assert!(
+        parsed_lib
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "not_main"))
+    );
+
+    fs::remove_dir_all(dir).unwrap();
 }
