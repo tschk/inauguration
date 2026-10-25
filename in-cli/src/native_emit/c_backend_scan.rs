@@ -300,3 +300,37 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_c_backend_scan_limits() {
+        // Test depth limit
+        assert!(depth_ok(0).is_ok());
+        assert!(depth_ok(MAX_EMIT_DEPTH).is_ok());
+        assert_eq!(
+            depth_ok(MAX_EMIT_DEPTH + 1),
+            Err(format!(
+                "emit aborted: Core IR nesting exceeds {} (DoS guard)",
+                MAX_EMIT_DEPTH
+            ))
+        );
+
+        // Test nodes limit
+        let mut nodes = 0;
+        assert!(bump(&mut nodes).is_ok());
+        assert_eq!(nodes, 1);
+
+        nodes = MAX_EMIT_NODES;
+        assert_eq!(
+            bump(&mut nodes),
+            Err(format!(
+                "emit aborted: Core IR exceeds {} nodes (DoS guard)",
+                MAX_EMIT_NODES
+            ))
+        );
+        assert_eq!(nodes, MAX_EMIT_NODES + 1);
+    }
+}

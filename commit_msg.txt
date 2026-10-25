@@ -1,0 +1,5 @@
+🧪 Add tests for DoS guards in c_backend_scan.rs
+
+🎯 What: Added unit tests for the error paths of `depth_ok` and `bump` functions in `c_backend_scan.rs` to ensure the DoS guards gracefully fail and return expected errors.
+📊 Coverage: Added tests for the happy paths (within limits) and error paths (exceeding `MAX_EMIT_DEPTH` and `MAX_EMIT_NODES`) limits.
+✨ Result: Increased test coverage for error conditions, ensuring the compiler safely aborts when encountering excessively deep or large core IR structures.
