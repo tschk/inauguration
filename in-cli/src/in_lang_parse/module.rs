@@ -600,3 +600,32 @@ pub fn parse_in_file(path: &Path) -> Result<UnifiedModule, String> {
 pub fn parse_in_library_file(path: &Path) -> Result<UnifiedModule, String> {
     finalize_in_module(parse_in_file_with_imports(path)?, false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_in_library_source() {
+        let valid_source = r#"
+            fn add(a: Int, b: Int) -> Int {
+                a + b
+            }
+        "#;
+        let parsed = parse_in_library_source(valid_source);
+        assert!(
+            parsed.is_ok(),
+            "Should parse valid library source without main"
+        );
+
+        let invalid_source = r#"
+            fn add(a: Int, b: Int) -> Int {
+                a + b
+        "#;
+        let parsed_err = parse_in_library_source(invalid_source);
+        assert!(
+            parsed_err.is_err(),
+            "Should return error for invalid syntax"
+        );
+    }
+}
