@@ -185,3 +185,60 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn test_spec() -> ComponentSpec {
+        let mut spec = ComponentSpec::host_executable("test_app", Some("main"));
+        spec.target = "x86_64-unknown-linux-gnu".to_string();
+        spec
+    }
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("test.in");
+        fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
+
+        let spec = test_spec();
+        let result = compile_in_file(&source_path, &spec, true);
+
+        assert!(result.is_ok());
+        let (output_path, metadata_path) = result.unwrap();
+
+        assert!(output_path.exists());
+
+        assert!(metadata_path.is_some());
+        let md_path = metadata_path.unwrap();
+        assert!(md_path.exists());
+        assert_eq!(md_path.extension().unwrap(), "json");
+    }
+
+    #[test]
+    fn test_compile_in_file_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("nonexistent.in");
+
+        let spec = test_spec();
+        let result = compile_in_file(&source_path, &spec, true);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("read source"));
+    }
+
+    #[test]
+    fn test_compile_in_file_compile_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("error.in");
+        fs::write(&source_path, "fn main() -> Int { return \"not an int\"; }").unwrap();
+
+        let spec = test_spec();
+        let result = compile_in_file(&source_path, &spec, true);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("compilation"));
+    }
+}
