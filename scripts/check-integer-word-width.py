@@ -165,7 +165,7 @@ for target, triple in (
                 while time.monotonic() < deadline:
                     if "integer word width" in logpath.read_text(errors="replace") or qemu.poll() is not None:
                         break
-                    time.sleep(0.05)
+                    time.sleep(0.01)
             finally:
                 qemu.terminate()
                 try:
