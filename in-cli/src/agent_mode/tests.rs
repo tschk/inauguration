@@ -601,6 +601,24 @@ fn explain_summarizes_successful_report() {
     );
 }
 
+#[test]
+fn explain_summarizes_diagnostics() {
+    let temp = temp_source(
+        "explain-diagnostics",
+        "in",
+        "fn main() -> void { return; } fn main() -> void { return; }\n",
+    );
+    let explanation = explain(&temp.path, &AgentModeConfig::default()).expect("explain");
+    assert!(
+        explanation
+            .summary
+            .iter()
+            .any(|line| line.contains("1 diagnostics")),
+        "{:?}",
+        explanation.summary
+    );
+}
+
 /// Lowerer codes must be explainable through the same registry as the rest, and
 /// the explanation must be keyed on the constant the lowerer emits.
 #[test]
