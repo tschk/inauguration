@@ -600,3 +600,41 @@ pub fn parse_in_file(path: &Path) -> Result<UnifiedModule, String> {
 pub fn parse_in_library_file(path: &Path) -> Result<UnifiedModule, String> {
     finalize_in_module(parse_in_file_with_imports(path)?, false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_in_library_source() {
+        let valid_source = "fn add(a: Int, b: Int) -> Int { return a + b; }";
+        let parsed = parse_in_library_source(valid_source);
+        assert!(
+            parsed.is_ok(),
+            "Expected valid library source to parse successfully"
+        );
+
+        let module = parsed.unwrap();
+        assert_eq!(
+            module.decls.len(),
+            1,
+            "Expected one declaration in the parsed module"
+        );
+
+        // Let's add a syntax error
+        let invalid_source = "fn add(a: Int b: Int) -> Int { return a + b; }";
+        let parsed_invalid = parse_in_library_source(invalid_source);
+        assert!(
+            parsed_invalid.is_err(),
+            "Expected invalid library source to fail parsing"
+        );
+
+        // Test main not required (but still passes if present)
+        let with_main = "fn main() -> Int { return 0; }";
+        let parsed_main = parse_in_library_source(with_main);
+        assert!(
+            parsed_main.is_ok(),
+            "Expected source with main to also parse successfully"
+        );
+    }
+}
