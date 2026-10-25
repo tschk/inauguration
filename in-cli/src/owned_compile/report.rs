@@ -137,71 +137,101 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::emit_profile::EmitProfile;
-    use crate::native_emit::NativeLinkage;
-    use crate::owned_compile::{CompileTarget, OwnedCompileRequest};
-    use crate::parser_registry::ParserCli;
-    use std::path::PathBuf;
+    use crate::external_guard::ExternalInvocationGuard;
+    use std::path::Path;
 
-    #[test]
-    fn test_finalize_report_updates_timing_and_waves() {
-        let request = OwnedCompileRequest {
-            path: PathBuf::from("fake.in"),
+    fn dummy_report() -> OwnedCompileReport {
+        OwnedCompileReport {
+            schema_version: 1,
+            owned: true,
+            path: "test".to_string(),
             module_id: "test".to_string(),
-            parser: ParserCli::default(),
-            target: CompileTarget::Jit,
-            entry: None,
-            out: None,
-            linkage: NativeLinkage::Executable,
+            package_name: None,
+            module_identity: None,
+            target: "native".to_string(),
             target_triple: None,
+            entry: None,
+            linkage: "executable".to_string(),
+            frontend_level: "unsupported".to_string(),
+            semantic_level: "failed".to_string(),
+            backend_level: "contract-only".to_string(),
+            runtime_level: "none".to_string(),
+            external_invocations: vec![],
+            reason_code: None,
+            reason: None,
+            success: true,
+            artifact_path: None,
+            executable_path: None,
+            abi_path: None,
+            degradations: vec![],
+            parsed_function_count: 0,
+            typed_function_count: 0,
+            call_edge_count: 0,
             jobs: 2,
-            debug: false,
-            profile: EmitProfile::Default,
-            emit: None,
-            base: None,
-        };
-
-        let started = Instant::now();
-        let mut report = base_report(&request, request.jobs, started);
-        report.cache_hit = true;
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        let finalized = finalize_report(report, started, std::path::Path::new(""), "dummy_hash");
-
-        assert!(finalized.timing_micros > 0);
-        assert!(finalized.timing_waves_us.is_some());
-        let waves = finalized.timing_waves_us.as_ref().unwrap();
-        assert_eq!(waves.len(), 2);
-        let wave_sum: u128 = waves.iter().sum();
-        assert_eq!(wave_sum, finalized.timing_micros);
+            timing_micros: 0,
+            timing_waves_us: None,
+            cache_hit: true, // prevent cache write attempts during tests
+            frontend_hash: None,
+            eval_exit_code: None,
+            eval_result: None,
+            execution_started: false,
+            error: None,
+        }
     }
 
     #[test]
-    fn test_finalize_report_success_unmodified_without_forbidden_invocations() {
-        let request = OwnedCompileRequest {
-            path: PathBuf::from("fake.in"),
-            module_id: "test".to_string(),
-            parser: ParserCli::default(),
-            target: CompileTarget::Jit,
-            entry: None,
-            out: None,
-            linkage: NativeLinkage::Executable,
-            target_triple: None,
-            jobs: 1,
-            debug: false,
-            profile: EmitProfile::Default,
-            emit: None,
-            base: None,
-        };
+    fn finalize_report_success_no_forbidden_tools() {
+        let _guard = ExternalInvocationGuard::enter();
+        ExternalInvocationGuard::record("echo");
 
+        let report = dummy_report();
         let started = Instant::now();
-        let mut report = base_report(&request, request.jobs, started);
-        report.cache_hit = true;
-        report.success = true;
+        let cwd = Path::new(".");
 
-        let finalized = finalize_report(report, started, std::path::Path::new(""), "dummy_hash");
+        let finalized = finalize_report(report, started, cwd, "dummy_hash");
+
         assert!(finalized.success);
-        assert!(finalized.error.is_none());
-        assert!(finalized.reason.is_none());
+        assert_eq!(finalized.external_invocations, vec!["echo"]);
         assert!(finalized.reason_code.is_none());
+        assert!(finalized.error.is_none());
+        assert!(finalized.timing_waves_us.is_some());
+        assert_eq!(finalized.timing_waves_us.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn finalize_report_fails_on_forbidden_tool() {
+        let _guard = ExternalInvocationGuard::enter();
+        ExternalInvocationGuard::record("swiftc"); // forbidden by FORBIDDEN_OWNED_TOOLS
+
+        let report = dummy_report();
+        let started = Instant::now();
+        let cwd = Path::new(".");
+
+        let finalized = finalize_report(report, started, cwd, "dummy_hash");
+
+        assert!(!finalized.success);
+        assert_eq!(finalized.external_invocations, vec!["swiftc"]);
+        assert_eq!(
+            finalized.reason_code.as_deref(),
+            Some("external-tool-invoked")
+        );
+        assert!(finalized.error.is_some());
+        assert!(finalized.error.as_ref().unwrap().contains("swiftc"));
+    }
+
+    #[test]
+    fn test_finalize_report_updates_timing_and_waves() {
+        let _guard = ExternalInvocationGuard::enter();
+
+        let report = dummy_report();
+        let started = Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+
+        let finalized = finalize_report(report, started, Path::new("."), "dummy_hash");
+
+        assert!(finalized.timing_micros >= 1_000);
+        let waves = finalized.timing_waves_us.as_ref().unwrap();
+        assert_eq!(waves.len(), 2);
+        assert_eq!(waves.iter().sum::<u128>(), finalized.timing_micros);
     }
 }
