@@ -133,3 +133,75 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit_profile::EmitProfile;
+    use crate::external_guard::ExternalInvocationGuard;
+    use crate::native_emit::NativeLinkage;
+    use crate::owned_compile::{CompileTarget, OwnedCompileReport, OwnedCompileRequest};
+    use crate::parser_registry::ParserCli;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    fn create_dummy_report(started: Instant) -> OwnedCompileReport {
+        let request = OwnedCompileRequest {
+            path: PathBuf::from("test.in"),
+            module_id: "test".to_string(),
+            parser: ParserCli::In,
+            target: CompileTarget::Native,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: None,
+            jobs: 2,
+            debug: false,
+            profile: EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+        base_report(&request, 2, started)
+    }
+
+    #[test]
+    fn test_finalize_report_success() {
+        let started = Instant::now();
+        let report = create_dummy_report(started);
+        let cwd = std::path::Path::new(".");
+
+        let final_report = finalize_report(report, started, cwd, "dummy_hash");
+
+        assert!(final_report.external_invocations.is_empty());
+        assert!(!final_report.success);
+        assert!(final_report.reason_code.is_none());
+        assert!(final_report.error.is_none());
+        assert!(final_report.timing_waves_us.is_some());
+        assert_eq!(final_report.timing_waves_us.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_finalize_report_external_tool_failure() {
+        let started = Instant::now();
+        let mut report = create_dummy_report(started);
+        report.success = true;
+        let cwd = std::path::Path::new(".");
+
+        let _token = ExternalInvocationGuard::enter();
+        ExternalInvocationGuard::record("swiftc");
+
+        let final_report = finalize_report(report, started, cwd, "dummy_hash");
+
+        assert!(!final_report.success);
+        assert_eq!(
+            final_report.reason_code,
+            Some("external-tool-invoked".to_string())
+        );
+        assert!(final_report.reason.as_ref().unwrap().contains("swiftc"));
+        assert!(final_report.error.as_ref().unwrap().contains("swiftc"));
+        assert_eq!(
+            final_report.external_invocations,
+            vec!["swiftc".to_string()]
+        );
+    }
+}
