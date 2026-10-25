@@ -185,3 +185,73 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn get_temp_dir(name: &str) -> PathBuf {
+        let count = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("in-cli-test-{name}-{pid}-{count}"));
+        let _ = fs::create_dir_all(&path);
+        path
+    }
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let temp_dir = get_temp_dir("compile-success");
+        let source_path = temp_dir.join("test.in");
+        fs::write(&source_path, "fn main() { }").unwrap();
+
+        let spec = spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            2,
+            false,
+            false,
+        );
+
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(result.is_ok(), "compile_in_file failed: {:?}", result.err());
+
+        let (output_path, metadata_path) = result.unwrap();
+        assert!(output_path.exists(), "Output artifact should exist");
+        assert!(metadata_path.is_some(), "Metadata path should be returned");
+        assert!(
+            metadata_path.unwrap().exists(),
+            "Metadata file should exist"
+        );
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_compile_in_file_read_error() {
+        let temp_dir = get_temp_dir("compile-error");
+        let source_path = temp_dir.join("non_existent.in");
+
+        let spec = spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            0,
+            false,
+            false,
+        );
+
+        let result = compile_in_file(&source_path, &spec, false);
+        assert!(result.is_err(), "Expected error for non-existent file");
+        assert!(result.unwrap_err().contains("read source"));
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+}
