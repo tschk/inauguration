@@ -3648,3 +3648,31 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn test_parse_in_library_source() {
+    let source = "var value = 42\nfn double_value() -> Int { return value * 2; }\n";
+    let module =
+        super::parse_in_library_source(source).expect("Failed to parse valid library source");
+    assert_eq!(module.decls.len(), 2);
+
+    // Check that parse_in_source requires main while parse_in_library_source does not
+    assert!(
+        super::parse_in_source(source).is_err(),
+        "parse_in_source should require main entry"
+    );
+    assert!(
+        super::parse_in_source(source)
+            .unwrap_err()
+            .contains("missing required `fn main`"),
+        "Error should mention main"
+    );
+
+    // Check handling of errors like invalid syntax
+    let error_source =
+        "var value = 42\nfn double_value() -> Int { return value * 2; }\nInvalidSyntax";
+    assert!(
+        super::parse_in_library_source(error_source).is_err(),
+        "Invalid syntax should fail"
+    );
+}
