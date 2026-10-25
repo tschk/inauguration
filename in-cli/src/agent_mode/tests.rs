@@ -601,6 +601,16 @@ fn explain_summarizes_successful_report() {
     );
 }
 
+#[test]
+fn fix_plan_report_summarizes_successful_report() {
+    let temp = temp_source("fix_plan", "in", "fn main() -> void { return; }\n");
+    let plan = fix_plan_report(&temp.path, &AgentModeConfig::default()).expect("fix_plan");
+    assert_eq!(plan.schema_version, 1);
+    assert_eq!(plan.parser_decision.route, "core_ir");
+    assert!(plan.diagnostics.is_empty());
+    assert!(plan.repair_plans.is_empty());
+}
+
 /// Lowerer codes must be explainable through the same registry as the rest, and
 /// the explanation must be keyed on the constant the lowerer emits.
 #[test]
