@@ -14,6 +14,25 @@ fn test_split_top_level_decl_blocks_empty() {
 }
 
 #[test]
+fn test_parse_in_library_source() {
+    let source = "var message: String = \"library mode\"; fn helper() -> Int { return 42; }";
+    let module = super::parse_in_library_source(source).unwrap();
+    assert_eq!(module.decls.len(), 2);
+
+    let source_with_main = "fn main() -> Int { return 0; }";
+    assert!(super::parse_in_library_source(source_with_main).is_ok());
+
+    let invalid_syntax = "var missing_type = 42; syntax error";
+    assert!(super::parse_in_library_source(invalid_syntax).is_err());
+
+    let empty_source = "// just a comment";
+    assert!(super::parse_in_library_source(empty_source).is_err());
+
+    let duplicate_names = "fn helper() -> Int { return 1; } fn helper() -> Int { return 2; }";
+    assert!(super::parse_in_library_source(duplicate_names).is_err());
+}
+
+#[test]
 fn test_split_top_level_decl_blocks_single() {
     let src = "fn test() {}\n";
     let blocks = split_top_level_decl_blocks(src);
