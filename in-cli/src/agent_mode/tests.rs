@@ -616,3 +616,106 @@ fn explains_lowerer_degradation_codes() {
     }
     assert!(explain_diagnostic("IN3999").is_none());
 }
+
+#[test]
+fn json_report_formatting() {
+    let temp = temp_source(
+        "json-formatting",
+        "in",
+        "fn helper() -> void { return; }\nfn main() -> void { helper(); return; }\n",
+    );
+    let mut report = json_report(&temp.path, &AgentModeConfig::default()).expect("report");
+
+    report.parser_decision.source_path = "/app/test_json2.in".to_string();
+    report.size_timing.parse_micros = 0;
+    report.size_timing.lower_micros = 0;
+    report.size_timing.graph_micros = 0;
+    report.size_timing.total_micros = 0;
+
+    let json = serde_json::to_string_pretty(&report).unwrap();
+    let expected = r#"{
+  "schema_version": 1,
+  "diagnostics": [],
+  "parser_decision": {
+    "requested": "auto",
+    "route": "core_ir",
+    "parser_id": "in",
+    "parser_family": "inauguration .in",
+    "source_path": "/app/test_json2.in",
+    "reason": "parser_registry resolved source to a Core IR frontend"
+  },
+  "language_level": {
+    "level": 3,
+    "label": ".in bounded subset with source diagnostics"
+  },
+  "core_ir_summary": {
+    "identity": {
+      "package": null,
+      "module": null
+    },
+    "decl_count": 2,
+    "struct_count": 0,
+    "function_count": 2,
+    "field_count": 0,
+    "param_count": 0,
+    "statement_count": 3,
+    "structs": [],
+    "functions": [
+      {
+        "name": "helper",
+        "param_count": 0,
+        "return_type": "Void",
+        "statement_count": 1,
+        "params": []
+      },
+      {
+        "name": "main",
+        "param_count": 0,
+        "return_type": "Void",
+        "statement_count": 2,
+        "params": []
+      }
+    ]
+  },
+  "graph_facts": {
+    "function_count": 2,
+    "block_count": 4,
+    "instruction_count": 6,
+    "call_edges": [
+      {
+        "caller": "main",
+        "callee": "helper"
+      }
+    ],
+    "has_main": true,
+    "entry_function": "main"
+  },
+  "orchestration": {
+    "enabled_extensions": [],
+    "annotations": [],
+    "distributed_functions": [],
+    "parallel_regions": 0,
+    "local_plan": [],
+    "distributed_jobs": [],
+    "runtime_status": []
+  },
+  "effects": [],
+  "capabilities": [],
+  "package_symbol_index": [],
+  "package_diagnostics": [],
+  "size_timing": {
+    "source_bytes": 72,
+    "source_lines": 2,
+    "core_decl_count": 2,
+    "textual_sil_bytes": 312,
+    "textual_sil_lines": 13,
+    "parse_micros": 0,
+    "lower_micros": 0,
+    "graph_micros": 0,
+    "total_micros": 0
+  },
+  "repair_plans": []
+}"#;
+
+    assert_eq!(json, expected);
+}
