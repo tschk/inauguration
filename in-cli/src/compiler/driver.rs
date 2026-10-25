@@ -185,3 +185,115 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    struct TempDirWrapper(pub std::path::PathBuf);
+    impl Drop for TempDirWrapper {
+        fn drop(&mut self) {
+            if self.0.exists() {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let pid = std::process::id();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let temp_dir_path =
+            std::env::temp_dir().join(format!("in_cli_test_compile_success_{}_{}", pid, timestamp));
+        fs::create_dir_all(&temp_dir_path).unwrap();
+        let _cleanup = TempDirWrapper(temp_dir_path.clone());
+
+        let source_path = temp_dir_path.join("test_module.in");
+        let source_code = "fn main() { }";
+        fs::write(&source_path, source_code).unwrap();
+
+        let spec = spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            0,
+            false,
+            false,
+        );
+
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(result.is_ok(), "compilation failed: {:?}", result.err());
+
+        let (out_path, meta_path) = result.unwrap();
+        assert!(out_path.exists());
+        assert!(meta_path.is_some());
+        assert!(meta_path.unwrap().exists());
+    }
+
+    #[test]
+    fn test_compile_in_file_read_error() {
+        let pid = std::process::id();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let temp_dir_path =
+            std::env::temp_dir().join(format!("in_cli_test_read_err_{}_{}", pid, timestamp));
+        fs::create_dir_all(&temp_dir_path).unwrap();
+        let _cleanup = TempDirWrapper(temp_dir_path.clone());
+
+        let source_path = temp_dir_path.join("does_not_exist.in");
+
+        let spec = spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            0,
+            false,
+            false,
+        );
+
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("read source"));
+    }
+
+    #[test]
+    fn test_compile_in_file_compile_error() {
+        let pid = std::process::id();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let temp_dir_path =
+            std::env::temp_dir().join(format!("in_cli_test_compile_err_{}_{}", pid, timestamp));
+        fs::create_dir_all(&temp_dir_path).unwrap();
+        let _cleanup = TempDirWrapper(temp_dir_path.clone());
+
+        let source_path = temp_dir_path.join("test_module_err.in");
+        let source_code = "fn main() -> i32 { return \"not an int\"; }";
+        fs::write(&source_path, source_code).unwrap();
+
+        let spec = spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            0,
+            false,
+            false,
+        );
+
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("compilation"));
+    }
+}
