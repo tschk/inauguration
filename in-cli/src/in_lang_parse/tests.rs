@@ -3648,3 +3648,28 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn parse_in_surface_info_handles_valid_and_invalid_inputs() {
+    let valid_empty = parse_in_surface_info("fn main() -> Int { return 0; }");
+    assert!(valid_empty.is_ok());
+
+    let valid_full = parse_in_surface_info(
+        "package my-pkg;\nmodule my-pkg.main;\nimport \"std\";\ncapability fs.read;\nextern rust fn native_func();\nfn main() -> Int { return 0; }",
+    );
+    assert!(valid_full.is_ok());
+    let info = valid_full.unwrap();
+    assert_eq!(info.package.as_deref(), Some("my-pkg"));
+    assert_eq!(info.module.as_deref(), Some("my-pkg.main"));
+    assert_eq!(info.imports.len(), 1);
+    assert_eq!(info.imports[0], "\"std\"");
+    assert_eq!(info.capabilities.len(), 1);
+    assert_eq!(info.capabilities[0], "fs.read");
+    assert_eq!(info.externs.len(), 1);
+    assert_eq!(info.externs[0].name, "native_func");
+
+    assert!(parse_in_surface_info("package a;\npackage b;").is_err());
+    assert!(parse_in_surface_info("module a;\nmodule b;").is_err());
+    assert!(parse_in_surface_info("import ;").is_err());
+    assert!(parse_in_surface_info("invalid_keyword x;").is_err());
+}
