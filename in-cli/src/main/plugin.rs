@@ -15,6 +15,9 @@ fn plugin_name(name: &str) -> Result<&str> {
         || name.contains(['/', '\\'])
         || !matches!(components.next(), Some(Component::Normal(_)))
         || components.next().is_some()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return Err(InError::Message("invalid plugin name".to_string()));
     }
@@ -25,6 +28,14 @@ fn plugin_name(name: &str) -> Result<&str> {
 /// Canonicalization makes symlink escapes observable before the target reaches
 /// an installed plugin.
 fn workspace_target(root: &Path, target: &str) -> Result<PathBuf> {
+    if !target
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/')
+    {
+        return Err(InError::Message(
+            "invalid characters in plugin target".to_string(),
+        ));
+    }
     let target_path = Path::new(target);
     if target.contains('\\')
         || target_path.components().any(|component| {
@@ -142,7 +153,7 @@ mod tests {
     fn plugin_name_is_one_non_empty_path_component() {
         assert!(plugin_name("aurorality").is_ok());
         assert!(plugin_name("my-plugin_2").is_ok());
-        assert!(plugin_name("semi;colon").is_ok());
+        assert!(plugin_name("semi;colon").is_err());
         assert!(plugin_name("").is_err());
         assert!(plugin_name(".").is_err());
         assert!(plugin_name("..").is_err());
