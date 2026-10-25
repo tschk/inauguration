@@ -3665,3 +3665,27 @@ fn c_global_function_addresses_are_declared_before_initializers() {
     assert!(declaration < initializer, "{c}");
     assert_inferred_c_executes(&module, "return (int)answer();");
 }
+
+#[test]
+fn unsupported_match_pattern_returns_err() {
+    let module = UnifiedModule::new(vec![Decl::Function {
+        name: "test".into(),
+        params: vec![],
+        ret: Typ::Int,
+        type_params: vec![],
+        body: vec![Stmt::Match {
+            scrutinee: Expr::IntLit(0),
+            arms: vec![MatchArm {
+                pattern: "Invalid(Pattern)".into(),
+                guard: None,
+                body: vec![],
+            }],
+        }],
+    }]);
+
+    let error = emit_c_module(&module).unwrap_err();
+    assert!(
+        error.contains("c-backend: unsupported match pattern `Invalid(Pattern)`"),
+        "{error}"
+    );
+}
