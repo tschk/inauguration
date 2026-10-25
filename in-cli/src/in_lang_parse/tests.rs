@@ -3648,3 +3648,33 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn test_parse_in_file_direct() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX_EPOCH")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-parse-in-file-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+
+    let path = dir.join("main.in");
+    fs::write(&path, "fn main()->Int{return 42;}\n").unwrap();
+
+    let module = parse_in_file(&path).expect("parse_in_file success");
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "main")),
+        "missing main function"
+    );
+
+    let err = parse_in_file(&dir.join("missing.in")).expect_err("missing file");
+    assert!(err.contains("missing.in"));
+
+    fs::remove_dir_all(&dir).unwrap();
+}
