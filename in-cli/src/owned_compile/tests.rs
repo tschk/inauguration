@@ -11611,3 +11611,35 @@ fn rust_nested_function_qualification_preserves_privacy_and_conditional_refusal(
         fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+fn base_report_populates_fields_correctly() {
+    let request = default_request(
+        PathBuf::from("test.in"),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    );
+    let started = std::time::Instant::now();
+    let jobs = 4;
+    let report = base_report(&request, jobs, started);
+    assert_eq!(report.schema_version, 1);
+    assert!(report.owned);
+    assert_eq!(report.path, "test.in");
+    assert_eq!(report.module_id, "App");
+    assert_eq!(report.target, "jit");
+    assert_eq!(report.entry.as_deref(), Some("main"));
+    assert_eq!(report.linkage, "executable");
+    assert_eq!(report.frontend_level, "unsupported");
+    assert_eq!(report.semantic_level, "failed");
+    assert_eq!(report.backend_level, "owned-native-subset");
+    assert_eq!(report.runtime_level, "inrt-jit");
+    assert_eq!(report.jobs, 4);
+    assert!(!report.success);
+
+    let request_native =
+        default_request(PathBuf::from("test2.in"), CompileTarget::Native, None, None);
+    let report_native = base_report(&request_native, 1, started);
+    assert_eq!(report_native.backend_level, "contract-only");
+    assert_eq!(report_native.runtime_level, "none");
+}
