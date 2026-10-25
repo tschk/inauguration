@@ -887,6 +887,26 @@ direct_dep = { path = "direct_dep" }
     }
 
     #[test]
+    fn test_get_manifest_success() {
+        let temp = TempDirGuard::new();
+        let manifest = temp.path.join("Cargo.toml");
+        fs::write(
+            &manifest,
+            "[package]\nname = \"test-package\"\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .unwrap();
+        let result = get_manifest(&temp.path).unwrap();
+        assert_eq!(result.package_name.as_deref(), Some("test-package"));
+        assert_eq!(result.lib_path.as_deref(), Some("src/lib.rs"));
+    }
+
+    #[test]
+    fn test_get_manifest_no_file() {
+        let temp = TempDirGuard::new();
+        assert!(get_manifest(&temp.path).is_none());
+    }
+
+    #[test]
     fn test_find_crate_root_no_cargo_toml() {
         let temp = TempDirGuard::new();
         assert_eq!(
