@@ -15,6 +15,9 @@ fn plugin_name(name: &str) -> Result<&str> {
         || name.contains(['/', '\\'])
         || !matches!(components.next(), Some(Component::Normal(_)))
         || components.next().is_some()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return Err(InError::Message("invalid plugin name".to_string()));
     }
@@ -33,6 +36,9 @@ fn workspace_target(root: &Path, target: &str) -> Result<PathBuf> {
                 Component::ParentDir | Component::RootDir | Component::Prefix(_)
             )
         })
+        || !target
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/' || c == '.')
     {
         return Err(InError::Message(
             "plugin target must stay within the workspace".to_string(),
@@ -142,7 +148,7 @@ mod tests {
     fn plugin_name_is_one_non_empty_path_component() {
         assert!(plugin_name("aurorality").is_ok());
         assert!(plugin_name("my-plugin_2").is_ok());
-        assert!(plugin_name("semi;colon").is_ok());
+        assert!(plugin_name("semi;colon").is_err());
         assert!(plugin_name("").is_err());
         assert!(plugin_name(".").is_err());
         assert!(plugin_name("..").is_err());
