@@ -2154,6 +2154,22 @@ fn scientific_literals_keep_exponent_signs_out_of_binary_operators() {
 }
 
 #[test]
+fn parse_in_library_source_does_not_require_main() {
+    let source_without_main = "fn helper() -> Int { return 42; }";
+    let module = super::parse_in_library_source(source_without_main);
+    assert!(
+        module.is_ok(),
+        "Library source parsing should not require a main function"
+    );
+
+    let module_requires_main = super::parse_in_source(source_without_main);
+    assert!(
+        module_requires_main.is_err(),
+        "Standard source parsing should require a main function"
+    );
+}
+
+#[test]
 fn method_receiver_inference_preserves_arithmetic_value_kinds() {
     use super::validate::infer_in_expr_type;
     use std::collections::HashMap;
