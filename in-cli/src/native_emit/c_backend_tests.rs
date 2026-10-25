@@ -3665,3 +3665,63 @@ fn c_global_function_addresses_are_declared_before_initializers() {
     assert!(declaration < initializer, "{c}");
     assert_inferred_c_executes(&module, "return (int)answer();");
 }
+
+#[test]
+fn dos_guard_nodes_exceeded() {
+    let mut stmts = Vec::new();
+    for _ in 0..100_005 {
+        stmts.push(Stmt::Expr(Expr::IntLit(1)));
+    }
+
+    let module = UnifiedModule::with_identity(
+        vec![Decl::Function {
+            name: "huge_func".into(),
+            type_params: vec![],
+            params: vec![],
+            ret: Typ::Int,
+            body: stmts,
+        }],
+        crate::core_ir::CoreModuleIdentity {
+            package: Some("test".into()),
+            module: Some("test.nodes".into()),
+        },
+    );
+
+    let res = crate::native_emit::c_backend::emit_c_module(&module);
+    assert!(res.is_err());
+    assert!(res.unwrap_err().contains("emit aborted: Core IR exceeds"));
+}
+
+#[test]
+fn dos_guard_depth_exceeded() {
+    let mut body = vec![Stmt::Return(Some(Expr::IntLit(1)))];
+
+    for _ in 0..260 {
+        body = vec![Stmt::If {
+            cond: Expr::BoolLit(true),
+            then_body: body,
+            else_body: vec![],
+        }];
+    }
+
+    let module = UnifiedModule::with_identity(
+        vec![Decl::Function {
+            name: "deep_func".into(),
+            type_params: vec![],
+            params: vec![],
+            ret: Typ::Int,
+            body,
+        }],
+        crate::core_ir::CoreModuleIdentity {
+            package: Some("test".into()),
+            module: Some("test.depth".into()),
+        },
+    );
+
+    let res = crate::native_emit::c_backend::emit_c_module(&module);
+    assert!(res.is_err());
+    assert!(
+        res.unwrap_err()
+            .contains("emit aborted: Core IR nesting exceeds")
+    );
+}
