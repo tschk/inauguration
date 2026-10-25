@@ -83,6 +83,17 @@ fn fix_plan_reports_parse_failure_repair() {
 }
 
 #[test]
+fn fix_plan_report_formats_success_correctly() {
+    let temp = temp_source("fix_plan_success", "in", "fn main() -> void { return; }\n");
+    let plan = fix_plan_report(&temp.path, &AgentModeConfig::default()).expect("fix plan");
+    assert_eq!(plan.schema_version, 1);
+    assert!(plan.diagnostics.is_empty());
+    assert!(plan.repair_plans.is_empty());
+    let json = serde_json::to_string(&plan).expect("serialize");
+    assert!(json.contains("\"schema_version\":1"));
+}
+
+#[test]
 fn icore_v2_report_uses_body_subset_level() {
     let temp = temp_source(
         "body",
