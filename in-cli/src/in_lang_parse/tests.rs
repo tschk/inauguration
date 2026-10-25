@@ -650,6 +650,56 @@ fn file_import_reports_missing_local_in_file() {
 }
 
 #[test]
+fn test_parse_in_file_success() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX_EPOCH")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-parse-in-file-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("test_file.in");
+
+    fs::write(&path, "fn test() -> void { return; }\nfn main() -> void { return; }\n").unwrap();
+
+    let result = parse_in_file(&path);
+    assert!(result.is_ok(), "{:?}", result.unwrap_err());
+
+    let module = result.unwrap();
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "test"))
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_parse_in_file_error() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX_EPOCH")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-parse-in-file-err-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("test_err.in");
+
+    fs::write(&path, "fn test() -> void { return; \n").unwrap();
+
+    let result = parse_in_file(&path);
+    assert!(result.is_err());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn std_import_adds_core_function_declarations() {
     let src = "import std.io;\ncapability process.stdout;\nfn main() -> void { print(\"ok\"); return; }\n";
     let module = parse_in_source(src).expect("std import");
