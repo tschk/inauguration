@@ -133,3 +133,68 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit_profile::EmitProfile;
+    use crate::native_emit::lower::NativeLinkage;
+    use crate::owned_compile::CompileTarget;
+    use crate::owned_compile::OwnedCompileRequest;
+    use crate::parser_registry::ParserCli;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    fn dummy_report() -> OwnedCompileReport {
+        let request = OwnedCompileRequest {
+            path: PathBuf::from("/path"),
+            module_id: "mod".to_string(),
+            parser: ParserCli::In,
+            target: CompileTarget::Native,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::StaticLib,
+            target_triple: None,
+            jobs: 2,
+            debug: false,
+            profile: EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+        let mut report = base_report(&request, 2, Instant::now());
+        report.success = true;
+        report
+    }
+
+    #[test]
+    fn test_finalize_report_success() {
+        let report = dummy_report();
+        let started = Instant::now()
+            .checked_sub(Duration::from_micros(100))
+            .unwrap_or_else(Instant::now);
+        let cwd = std::path::Path::new("/dummy");
+        let hash = "hash";
+        let final_report = finalize_report(report, started, cwd, hash);
+        assert!(final_report.success);
+        assert!(final_report.timing_micros > 0);
+        assert!(final_report.timing_waves_us.is_some());
+        assert_eq!(final_report.timing_waves_us.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_finalize_report_forbidden_tool() {
+        let report = dummy_report();
+        let _guard = crate::external_guard::ExternalInvocationGuard::enter();
+        crate::external_guard::ExternalInvocationGuard::record("/usr/bin/rustc");
+        let started = Instant::now();
+        let cwd = std::path::Path::new("/dummy");
+        let hash = "hash";
+        let final_report = finalize_report(report, started, cwd, hash);
+        assert!(!final_report.success);
+        assert_eq!(
+            final_report.reason_code.as_deref(),
+            Some("external-tool-invoked")
+        );
+        assert!(final_report.reason.as_ref().unwrap().contains("rustc"));
+    }
+}
