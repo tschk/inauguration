@@ -133,3 +133,48 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit_profile::EmitProfile;
+    use crate::native_emit::NativeLinkage;
+    use crate::owned_compile::{CompileTarget, OwnedCompileRequest};
+    use crate::parser_registry::ParserCli;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_finalize_report() {
+        let req = OwnedCompileRequest {
+            path: PathBuf::from("test.in"),
+            module_id: "App".to_string(),
+            parser: ParserCli::Auto,
+            target: CompileTarget::Native,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: None,
+            jobs: 2,
+            debug: false,
+            profile: EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+        let started = Instant::now() - Duration::from_micros(100);
+        let mut report = base_report(&req, 2, started);
+        report.success = true;
+
+        let cwd = std::path::Path::new(".");
+        let hash = "fakehash";
+        let final_report = finalize_report(report, started, cwd, hash);
+
+        assert!(final_report.timing_micros >= 100);
+        assert_eq!(final_report.jobs, 2);
+        assert!(final_report.timing_waves_us.is_some());
+        let waves = final_report.timing_waves_us.unwrap();
+        assert_eq!(waves.len(), 2);
+        assert!(final_report.success);
+        assert!(final_report.error.is_none());
+    }
+}
