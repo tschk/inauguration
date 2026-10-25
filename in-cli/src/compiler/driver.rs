@@ -185,3 +185,76 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn get_temp_dir() -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "inauguration_driver_tests_{}",
+            TEMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let temp_dir = get_temp_dir();
+        let source_path = temp_dir.join("test_module.in");
+        fs::write(&source_path, "fn main() {}").unwrap();
+
+        let spec = spec_from_cli(
+            "test_module",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            0,
+            false,
+            false,
+        );
+
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
+
+        let (output_path, metadata_path) = result.unwrap();
+        assert!(output_path.exists(), "Output artifact was not created");
+        assert!(metadata_path.is_some(), "Metadata path should be Some");
+        assert!(
+            metadata_path.unwrap().exists(),
+            "Metadata sidecar was not created"
+        );
+    }
+
+    #[test]
+    fn test_emit_component_metadata_success() {
+        let temp_dir = get_temp_dir();
+        let source_path = temp_dir.join("test_module_metadata.in");
+        fs::write(&source_path, "fn main() {}").unwrap();
+
+        let spec = spec_from_cli(
+            "test_module_metadata",
+            "x86_64-unknown-linux-gnu",
+            ArtifactKind::Executable,
+            "main",
+            0,
+            false,
+            false,
+        );
+
+        let result = emit_component_metadata(&source_path, &spec);
+        assert!(
+            result.is_ok(),
+            "Metadata emission failed: {:?}",
+            result.err()
+        );
+        assert!(result.unwrap().exists(), "Metadata file was not created");
+    }
+}
