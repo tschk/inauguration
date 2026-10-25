@@ -133,3 +133,70 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit_profile::EmitProfile;
+    use crate::native_emit::NativeLinkage;
+    use crate::parser_registry::ParserCli;
+    use std::path::PathBuf;
+
+    fn mock_request(target: CompileTarget) -> OwnedCompileRequest {
+        OwnedCompileRequest {
+            path: PathBuf::from("foo.in"),
+            module_id: "foo".to_string(),
+            parser: ParserCli::In,
+            target,
+            entry: Some("main".to_string()),
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+            jobs: 4,
+            debug: false,
+            profile: EmitProfile::Default,
+            emit: None,
+            base: None,
+        }
+    }
+
+    #[test]
+    fn test_base_report_native() {
+        let req = mock_request(CompileTarget::Native);
+        let started = Instant::now();
+        let report = base_report(&req, 4, started);
+
+        assert_eq!(report.path, "foo.in");
+        assert_eq!(report.module_id, "foo");
+        assert_eq!(report.target, "native");
+        assert_eq!(
+            report.target_triple.as_deref(),
+            Some("x86_64-unknown-linux-gnu")
+        );
+        assert_eq!(report.entry.as_deref(), Some("main"));
+        assert_eq!(report.linkage, "executable");
+        assert_eq!(report.backend_level, "contract-only");
+        assert_eq!(report.runtime_level, "none");
+        assert_eq!(report.jobs, 4);
+    }
+
+    #[test]
+    fn test_base_report_jit() {
+        let req = mock_request(CompileTarget::Jit);
+        let started = Instant::now();
+        let report = base_report(&req, 2, started);
+
+        assert_eq!(report.path, "foo.in");
+        assert_eq!(report.module_id, "foo");
+        assert_eq!(report.target, "jit");
+        assert_eq!(
+            report.target_triple.as_deref(),
+            Some("x86_64-unknown-linux-gnu")
+        );
+        assert_eq!(report.entry.as_deref(), Some("main"));
+        assert_eq!(report.linkage, "executable");
+        assert_eq!(report.backend_level, "owned-native-subset");
+        assert_eq!(report.runtime_level, "inrt-jit");
+        assert_eq!(report.jobs, 2);
+    }
+}
