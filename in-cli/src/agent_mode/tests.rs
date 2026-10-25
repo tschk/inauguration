@@ -70,6 +70,28 @@ fn in_report_uses_level_three_after_diagnostic_contract() {
 }
 
 #[test]
+fn fix_plan_report_filters_diagnostics_and_repairs_only() {
+    let temp = temp_source(
+        "library",
+        "icore",
+        r#"{"icoreVersion":1,"decls":[{"kind":"struct","name":"Library","fields":[]}]}"#,
+    );
+    let plan = fix_plan_report(&temp.path, &AgentModeConfig::default()).expect("fix plan");
+    assert_eq!(plan.schema_version, 1);
+    assert_eq!(plan.parser_decision.route, "core_ir");
+    assert_eq!(plan.diagnostics.len(), 1);
+    assert_eq!(plan.repair_plans.len(), 1);
+    let value = serde_json::to_value(&plan).expect("serialize plan");
+    assert!(value.get("diagnostics").is_some());
+    assert!(value.get("repair_plans").is_some());
+    assert!(value.get("size_timing").is_some());
+    assert!(value.get("parser_decision").is_some());
+    assert!(value.get("schema_version").is_some());
+    assert!(value.get("core_ir_summary").is_none());
+    assert!(value.get("graph_facts").is_none());
+}
+
+#[test]
 fn fix_plan_reports_parse_failure_repair() {
     let temp = temp_source(
         "library",
