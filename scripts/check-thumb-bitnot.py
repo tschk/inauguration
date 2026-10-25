@@ -82,7 +82,7 @@ for profile in ("default", "lean", "harden"):
                     text = serial.read_text(errors="replace")
                     if "dynamic bitnot" in text or process.poll() is not None:
                         break
-                    time.sleep(0.05)
+                    time.sleep(0.005)
             finally:
                 process.terminate()
                 try:
