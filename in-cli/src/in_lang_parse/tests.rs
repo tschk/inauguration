@@ -14,6 +14,30 @@ fn test_split_top_level_decl_blocks_empty() {
 }
 
 #[test]
+fn test_parse_in_surface_info_import_missing() {
+    let err = parse_in_surface_info("import ;").expect_err("should fail");
+    assert!(err.contains("import path missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_capability_missing() {
+    let err = parse_in_surface_info("capability ;").expect_err("should fail");
+    assert!(err.contains("capability name missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_enable_missing() {
+    let err = parse_in_surface_info("enable ;").expect_err("should fail");
+    assert!(err.contains("enable extension missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_parallel_invalid() {
+    let err = parse_in_surface_info("parallel task1()").expect_err("should fail");
+    assert!(err.contains("`parallel` must be a top-level `parallel { ... }` region"));
+}
+
+#[test]
 fn test_split_top_level_decl_blocks_single() {
     let src = "fn test() {}\n";
     let blocks = split_top_level_decl_blocks(src);
