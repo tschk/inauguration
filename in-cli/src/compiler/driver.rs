@@ -185,3 +185,45 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn test_compile_in_file() {
+        let count = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let tmp_dir = std::env::temp_dir().join(format!("in_compile_test_{}", count));
+        fs::create_dir_all(&tmp_dir).unwrap();
+
+        let source_path = tmp_dir.join("test.in");
+        fs::write(&source_path, "fn main() {}").unwrap();
+
+        let spec = ComponentSpec {
+            name: "test_spec".into(),
+            target: "x86_64-unknown-linux-gnu".into(),
+            artifact_kind: ArtifactKind::Executable,
+            deterministic: true,
+            checkpoint: "".into(),
+            optimization_level: OptimizationLevel::None,
+            debug_info: false,
+            entry_point: Some("main".into()),
+            imports: vec![],
+            exports: vec![],
+            capabilities: vec![],
+            capabilities_exported: vec![],
+        };
+
+        let (out_path, meta_path) = compile_in_file(&source_path, &spec, true).unwrap();
+
+        assert!(out_path.exists());
+        assert!(meta_path.is_some());
+        assert!(meta_path.unwrap().exists());
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+}
