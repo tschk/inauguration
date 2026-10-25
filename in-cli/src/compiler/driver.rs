@@ -185,3 +185,78 @@ pub fn print_backends() {
         println!("  {triple:40} {status:15} format={}", caps.object_format);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let source = "fn main() -> Int { return 0; }";
+
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("test_compile_in_file_success_{}", timestamp));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("test.in");
+        fs::write(&file_path, source).unwrap();
+
+        let spec = ComponentSpec {
+            name: "test".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            artifact_kind: ArtifactKind::Executable,
+            deterministic: false,
+            checkpoint: String::new(),
+            optimization_level: OptimizationLevel::None,
+            debug_info: false,
+            entry_point: Some("main".to_string()),
+            imports: vec![],
+            exports: vec![],
+            capabilities: vec![],
+            capabilities_exported: vec![],
+        };
+
+        let (out_path, meta_path) = compile_in_file(&file_path, &spec, true).unwrap();
+        assert!(out_path.exists());
+        assert!(meta_path.is_some());
+        assert!(meta_path.unwrap().exists());
+
+        let (out_path_no_meta, meta_path_no_meta) =
+            compile_in_file(&file_path, &spec, false).unwrap();
+        assert!(out_path_no_meta.exists());
+        assert!(meta_path_no_meta.is_none());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_compile_in_file_read_error() {
+        let file_path = PathBuf::from("/does/not/exist/surely/not/there.in");
+
+        let spec = ComponentSpec {
+            name: "test".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            artifact_kind: ArtifactKind::Executable,
+            deterministic: false,
+            checkpoint: String::new(),
+            optimization_level: OptimizationLevel::None,
+            debug_info: false,
+            entry_point: Some("main".to_string()),
+            imports: vec![],
+            exports: vec![],
+            capabilities: vec![],
+            capabilities_exported: vec![],
+        };
+
+        let result = compile_in_file(&file_path, &spec, true);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.starts_with("read source:"));
+    }
+}
