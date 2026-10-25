@@ -588,6 +588,47 @@ fn malformed_surface_declaration_rejected() {
 }
 
 #[test]
+fn test_parse_in_file() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX_EPOCH")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "inauguration-parse-in-file-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("temp dir");
+    let main = dir.join("main.in");
+    fs::write(&main, "fn main() -> void { return; }\n").expect("write main");
+
+    // Test successful parsing
+    let module = parse_in_file(&main).expect("parse in file");
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "main"))
+    );
+
+    // Test missing file
+    let missing_path = dir.join("missing.in");
+    let err = parse_in_file(&missing_path).expect_err("should fail on missing file");
+    assert!(err.contains("missing.in"));
+
+    // Test invalid syntax
+    let invalid = dir.join("invalid.in");
+    fs::write(
+        &invalid,
+        "fn main() -> void { return; }\nthis is not valid code\n",
+    )
+    .expect("write invalid");
+    let err = parse_in_file(&invalid).expect_err("should fail on invalid syntax");
+    assert!(err.contains("unknown top-level syntax"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn malformed_capability_rejected() {
     let err = parse_in_source("capability ;\nfn main() -> void\n").expect_err("capability");
     assert!(err.contains("capability name missing"), "{err}");
