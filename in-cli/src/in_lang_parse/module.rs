@@ -600,3 +600,26 @@ pub fn parse_in_file(path: &Path) -> Result<UnifiedModule, String> {
 pub fn parse_in_library_file(path: &Path) -> Result<UnifiedModule, String> {
     finalize_in_module(parse_in_file_with_imports(path)?, false)
 }
+
+#[cfg(test)]
+mod parse_library_tests {
+    use super::*;
+
+    #[test]
+    fn parse_library_succeeds_without_main() {
+        let source = "fn foo() { }";
+        assert!(parse_in_library_source(source).is_ok());
+    }
+
+    #[test]
+    fn parse_library_succeeds_with_main() {
+        let source = "fn main() { }";
+        assert!(parse_in_library_source(source).is_ok());
+    }
+
+    #[test]
+    fn parse_source_fails_without_main() {
+        let source = "fn foo() { }";
+        assert!(parse_in_source(source).is_err());
+    }
+}
