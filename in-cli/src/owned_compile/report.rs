@@ -133,3 +133,80 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::external_guard::ExternalInvocationGuard;
+    use crate::native_emit::NativeLinkage;
+    use crate::owned_compile::{CompileTarget, OwnedCompileRequest};
+    use crate::parser_registry::ParserCli;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    #[test]
+    fn test_finalize_report_success() {
+        let req = OwnedCompileRequest {
+            path: PathBuf::from("test.in"),
+            module_id: "test".to_string(),
+            parser: ParserCli::In,
+            target: CompileTarget::Native,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: None,
+            jobs: 1,
+            debug: false,
+            profile: crate::emit_profile::EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+        let started = Instant::now();
+        let mut report = base_report(&req, 1, started);
+        report.cache_hit = true;
+
+        let report = finalize_report(report, started, std::path::Path::new(""), "hash");
+        assert!(report.timing_waves_us.is_some());
+        assert_eq!(report.timing_waves_us.unwrap().len(), 1);
+        assert!(!report.success); // Note: base_report sets success to false initially.
+        assert!(report.reason_code.is_none());
+        assert!(report.external_invocations.is_empty());
+    }
+
+    #[test]
+    fn test_finalize_report_forbidden_tools() {
+        let req = OwnedCompileRequest {
+            path: PathBuf::from("test.in"),
+            module_id: "test".to_string(),
+            parser: ParserCli::In,
+            target: CompileTarget::Native,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: None,
+            jobs: 1,
+            debug: false,
+            profile: crate::emit_profile::EmitProfile::Default,
+            emit: None,
+            base: None,
+        };
+        let started = Instant::now();
+        let mut report = base_report(&req, 1, started);
+        report.success = true; // Pretend compilation succeeded so we can check if it gets reset.
+        report.cache_hit = true;
+
+        let _guard = ExternalInvocationGuard::enter();
+        ExternalInvocationGuard::record("swiftc");
+
+        let report = finalize_report(report, started, std::path::Path::new(""), "hash");
+
+        assert_eq!(report.external_invocations, vec!["swiftc".to_string()]);
+        assert!(!report.success);
+        assert_eq!(
+            report.reason_code,
+            Some("external-tool-invoked".to_string())
+        );
+        assert!(report.reason.is_some());
+        assert!(report.error.is_some());
+    }
+}
