@@ -3648,3 +3648,23 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+#[test]
+fn test_parse_in_library_source() {
+    let src = "fn some_function() -> Int { return 42; }\nvar some_var = 10\n";
+    let result = super::parse_in_library_source(src);
+    assert!(
+        result.is_ok(),
+        "Failed to parse valid library source: {:?}",
+        result
+    );
+    let module = result.unwrap();
+    assert_eq!(module.decls.len(), 2, "Expected 2 declarations");
+
+    let dup_src = "var x = 1\nvar x = 2\n";
+    let dup_result = super::parse_in_library_source(dup_src);
+    assert!(dup_result.is_err(), "Should fail on duplicate definition");
+
+    let bad_src = "fn broken(";
+    let bad_result = super::parse_in_library_source(bad_src);
+    assert!(bad_result.is_err(), "Should fail on syntax error");
+}
