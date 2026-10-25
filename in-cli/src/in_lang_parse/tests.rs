@@ -3648,3 +3648,25 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+
+#[test]
+fn test_parse_in_library_source_behavior() {
+    // Valid syntax without `main` should parse correctly with `parse_in_library_source`
+    let source_no_main = "fn foo() { }";
+    let module = super::parse_in_library_source(source_no_main).unwrap();
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "foo"))
+    );
+
+    // The same source would fail with `parse_in_source` because it requires `main`
+    let err = super::parse_in_source(source_no_main).unwrap_err();
+    assert!(err.contains("missing required `fn main`"));
+
+    // Syntax errors should propagate back as errors
+    let invalid_source = "something_invalid";
+    let parse_err = super::parse_in_library_source(invalid_source).unwrap_err();
+    assert!(parse_err.contains("unknown top-level syntax"));
+}
