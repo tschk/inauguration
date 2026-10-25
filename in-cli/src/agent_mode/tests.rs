@@ -27,6 +27,20 @@ fn temp_source(name: &str, suffix: &str, source: &str) -> TempFile {
 }
 
 #[test]
+fn fix_plan_report_converts_report_to_fix_plan() {
+    let temp = temp_source(
+        "fix_plan_report_test",
+        "in",
+        "fn main() -> void { return; }\n",
+    );
+    let plan = fix_plan_report(&temp.path, &AgentModeConfig::default()).expect("fix plan");
+    assert_eq!(plan.schema_version, 1);
+    assert_eq!(plan.parser_decision.route, "core_ir");
+    assert!(plan.diagnostics.is_empty());
+    assert!(plan.repair_plans.is_empty());
+}
+
+#[test]
 fn json_report_includes_core_graph_and_parser_decision() {
     let temp = temp_source(
         "main",
