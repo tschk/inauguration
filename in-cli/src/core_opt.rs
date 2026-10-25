@@ -4329,6 +4329,35 @@ mod tests {
     }
 
     #[test]
+    fn optimize_with_profile_applies_specified_profile() {
+        let mut decls = vec![
+            make_fn_with_params(
+                "inline_me",
+                vec![],
+                Typ::Int,
+                vec![
+                    Stmt::Let("a".into(), Some(Typ::Int), Expr::IntLit(10)),
+                    Stmt::Return(Some(ident("a"))),
+                ],
+            ),
+            make_fn_with_params(
+                "custom_entry",
+                vec![],
+                Typ::Int,
+                vec![Stmt::Return(Some(call("inline_me", vec![])))],
+            ),
+            make_fn("unused", vec![Stmt::Return(None)]),
+        ];
+        optimize_with_profile(&mut decls, Some("custom_entry"), EmitProfile::Default);
+        assert_eq!(decls.len(), 1);
+        let Decl::Function { name, body, .. } = &decls[0] else {
+            panic!("expected entry function");
+        };
+        assert_eq!(name, "custom_entry");
+        assert_eq!(body, &vec![Stmt::Return(Some(Expr::IntLit(10)))]);
+    }
+
+    #[test]
     fn optimize_performs_inlining_and_dce() {
         let mut decls = vec![
             make_fn_with_params(
