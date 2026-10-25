@@ -2154,6 +2154,29 @@ fn scientific_literals_keep_exponent_signs_out_of_binary_operators() {
 }
 
 #[test]
+fn test_parse_in_file_and_library_file_require_main_validation() {
+    let directory = std::env::temp_dir().join(format!("in-parse-file-{}", std::process::id()));
+    fs::create_dir_all(&directory).unwrap();
+    let lib_path = directory.join("lib.in");
+    fs::write(&lib_path, "fn work()->Int{return 42;}").unwrap();
+    let main_path = directory.join("main.in");
+    fs::write(
+        &main_path,
+        "fn work()->Int{return 42;} fn main()->Int{return 42;}",
+    )
+    .unwrap();
+
+    assert!(super::parse_in_library_file(&lib_path).is_ok());
+
+    let err = super::parse_in_file(&lib_path).unwrap_err();
+    assert_eq!(err, ".in: missing required `fn main`");
+
+    assert!(super::parse_in_file(&main_path).is_ok());
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn method_receiver_inference_preserves_arithmetic_value_kinds() {
     use super::validate::infer_in_expr_type;
     use std::collections::HashMap;
