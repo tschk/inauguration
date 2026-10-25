@@ -166,7 +166,7 @@ mod tests {
         let report = base_report(&request, 4, started);
 
         assert_eq!(report.schema_version, 1);
-        assert_eq!(report.owned, true);
+        assert!(report.owned);
         assert_eq!(report.path, "mock_path.in");
         assert_eq!(report.module_id, "mock_module");
         assert_eq!(report.target, "native");
