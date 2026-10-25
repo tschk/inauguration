@@ -630,6 +630,53 @@ fn file_import_merges_local_in_declarations() {
 }
 
 #[test]
+fn parse_in_file_enforces_main_function() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX_EPOCH")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "inauguration-missing-main-{}-{unique}.in",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        "fn helper() -> void { return; }
+",
+    )
+    .expect("write no main");
+    let err = parse_in_file(&path).expect_err("should require main");
+    let _ = std::fs::remove_file(&path);
+    assert!(err.contains("missing required `fn main`"), "{err}");
+}
+
+#[test]
+fn parse_in_library_file_allows_missing_main() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX_EPOCH")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "inauguration-lib-missing-main-{}-{unique}.in",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        "fn helper() -> void { return; }
+",
+    )
+    .expect("write no main");
+    let module = super::parse_in_library_file(&path).expect("should allow missing main");
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "helper"))
+    );
+}
+
+#[test]
 fn file_import_reports_missing_local_in_file() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
