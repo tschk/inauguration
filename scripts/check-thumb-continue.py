@@ -105,11 +105,13 @@ for profile in ("default", "lean", "harden"):
             )
             try:
                 deadline = time.monotonic() + 10
+                sleep_time = 0.005
                 while time.monotonic() < deadline:
                     text = serial.read_text(errors="replace")
                     if "loop continue" in text or process.poll() is not None:
                         break
-                    time.sleep(0.05)
+                    time.sleep(sleep_time)
+                    sleep_time = min(sleep_time * 2, 0.05)
             finally:
                 process.terminate()
                 try:
