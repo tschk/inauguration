@@ -133,3 +133,72 @@ pub fn report_to_json(report: &OwnedCompileReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|err| format!("serialize owned compile report: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::owned_compile::{CompileTarget, EmitProfile, NativeLinkage};
+    use crate::parser_registry::ParserCli;
+    use std::path::Path;
+    use std::time::Duration;
+
+    fn create_test_request() -> OwnedCompileRequest {
+        OwnedCompileRequest {
+            path: Path::new("test.in").to_path_buf(),
+            module_id: "Test".to_string(),
+            parser: ParserCli::Auto,
+            target: CompileTarget::Native,
+            entry: None,
+            out: None,
+            linkage: NativeLinkage::Executable,
+            target_triple: None,
+            jobs: 1,
+            debug: false,
+            profile: EmitProfile::Default,
+            emit: None,
+            base: None,
+        }
+    }
+
+    #[test]
+    fn finalize_report_records_timing_and_external_invocations() {
+        let request = create_test_request();
+        let started = Instant::now() - Duration::from_micros(42000);
+        let mut report = base_report(&request, 2, started);
+        report.success = true;
+
+        let _token = external_guard::ExternalInvocationGuard::enter();
+        external_guard::ExternalInvocationGuard::record("swiftc");
+
+        // Use a dummy path for cwd, we mock the behavior of cache write gracefully failing
+        let finalized = finalize_report(report, started, Path::new("/tmp"), "abc123hash");
+
+        drop(_token);
+
+        assert!(finalized.timing_micros >= 42000);
+        assert!(finalized.timing_waves_us.is_some());
+        assert_eq!(finalized.timing_waves_us.as_ref().unwrap().len(), 2);
+
+        assert_eq!(finalized.external_invocations, vec!["swiftc".to_string()]);
+        assert_eq!(finalized.success, false);
+        assert_eq!(
+            finalized.reason_code.as_deref(),
+            Some("external-tool-invoked")
+        );
+        assert!(finalized.reason.as_ref().unwrap().contains("swiftc"));
+    }
+
+    #[test]
+    fn finalize_report_handles_cache_hit_without_writing() {
+        let request = create_test_request();
+        let started = Instant::now();
+        let mut report = base_report(&request, 1, started);
+        report.cache_hit = true;
+
+        let _token = external_guard::ExternalInvocationGuard::enter();
+        let finalized = finalize_report(report, started, Path::new("/tmp"), "def456hash");
+        drop(_token);
+
+        assert!(finalized.cache_hit);
+    }
+}
