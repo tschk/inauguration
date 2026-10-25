@@ -3648,3 +3648,38 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
         );
     }
 }
+#[test]
+fn test_parse_in_file_success() {
+    let dir = std::env::temp_dir().join(format!(
+        "test_parse_in_file_success-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("main.in");
+    std::fs::write(&path, "fn main() -> Int { return 42; }").unwrap();
+    let result = parse_in_file(&path);
+    assert!(result.is_ok());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_parse_in_file_missing_main() {
+    let dir = std::env::temp_dir().join(format!(
+        "test_parse_in_file_missing_main-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("main.in");
+    std::fs::write(&path, "fn other() -> Int { return 42; }").unwrap();
+    let result = parse_in_file(&path);
+    assert!(result.is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
