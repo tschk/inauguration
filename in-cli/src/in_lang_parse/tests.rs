@@ -2,8 +2,8 @@ use std::fs;
 
 use super::{
     Decl, Expr, InExternBinding, InParallelTaskFact, InSemanticBinding, LoopKind, Stmt, Typ,
-    in_standard_import_bindings, parse_expr, parse_in_file, parse_in_source, parse_in_surface_info,
-    split_top_level_decl_blocks,
+    in_standard_import_bindings, parse_expr, parse_in_file, parse_in_library_file, parse_in_source,
+    parse_in_surface_info, split_top_level_decl_blocks,
 };
 
 #[test]
@@ -3647,4 +3647,51 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
             "{source}: {report:?}"
         );
     }
+}
+
+#[test]
+fn test_parse_in_file() {
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("inauguration-test-parse-in-file-{unique}"));
+    fs::create_dir_all(&dir).expect("temp dir");
+
+    let valid_file = dir.join("valid.in");
+    fs::write(&valid_file, "fn main() -> void { return; }\n").expect("write valid file");
+    let module = parse_in_file(&valid_file).expect("parse valid file");
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "main"))
+    );
+
+    let invalid_file = dir.join("invalid.in");
+    fs::write(&invalid_file, "syntax error\n").expect("write invalid file");
+    parse_in_file(&invalid_file).expect_err("parse invalid file should fail");
+
+    let missing_file = dir.join("missing.in");
+    parse_in_file(&missing_file).expect_err("missing file should fail");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_parse_in_library_file() {
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("inauguration-test-parse-in-lib-file-{unique}"));
+    fs::create_dir_all(&dir).expect("temp dir");
+
+    let valid_file = dir.join("lib.in");
+    fs::write(&valid_file, "fn helper() -> Int { return 1; }\n").expect("write valid file");
+    let module = parse_in_library_file(&valid_file).expect("parse valid library file");
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "helper"))
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }
