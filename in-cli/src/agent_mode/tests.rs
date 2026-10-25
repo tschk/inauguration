@@ -27,6 +27,45 @@ fn temp_source(name: &str, suffix: &str, source: &str) -> TempFile {
 }
 
 #[test]
+fn test_json_report_missing_file() {
+    let path = std::path::Path::new("does_not_exist.in");
+    let result = json_report(path, &AgentModeConfig::default());
+    assert!(result.is_err());
+}
+
+#[test]
+fn json_report_includes_core_graph_and_parser_decision() {
+    let temp = temp_source(
+        "main",
+        "in",
+        "fn helper() -> void { return; }\nfn main() -> void { helper(); return; }\n",
+    );
+    let report = json_report(&temp.path, &AgentModeConfig::default()).expect("report");
+    assert_eq!(report.parser_decision.route, "core_ir");
+    assert_eq!(report.parser_decision.parser_id.as_deref(), Some("in"));
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    let core = report.core_ir_summary.as_ref().expect("core summary");
+    assert_eq!(core.function_count, 2);
+    let graph = report.graph_facts.as_ref().expect("graph facts");
+    assert!(graph.has_main);
+    assert!(
+        graph.call_edges.contains(&CallEdge {
+            caller: "main".to_string(),
+            callee: "helper".to_string(),
+        }),
+        "{:?}",
+        graph.call_edges
+    );
+    let value = serde_json::to_value(&report).expect("serialize report");
+    assert!(value.get("diagnostics").is_some());
+    assert!(value.get("parser_decision").is_some());
+    assert!(value.get("core_ir_summary").is_some());
+    assert!(value.get("graph_facts").is_some());
+    assert!(value.get("size_timing").is_some());
+    assert!(value.get("repair_plans").is_some());
+}
+
+#[test]
 fn json_report_formats_correctly_as_json_value() {
     let temp = temp_source("json_format", "in", "fn main() -> void { return; }\n");
     let config = AgentModeConfig {
@@ -73,38 +112,6 @@ fn json_report_formats_correctly_as_json_value() {
 }
 
 #[test]
-fn json_report_includes_core_graph_and_parser_decision() {
-    let temp = temp_source(
-        "main",
-        "in",
-        "fn helper() -> void { return; }\nfn main() -> void { helper(); return; }\n",
-    );
-    let report = json_report(&temp.path, &AgentModeConfig::default()).expect("report");
-    assert_eq!(report.parser_decision.route, "core_ir");
-    assert_eq!(report.parser_decision.parser_id.as_deref(), Some("in"));
-    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
-    let core = report.core_ir_summary.as_ref().expect("core summary");
-    assert_eq!(core.function_count, 2);
-    let graph = report.graph_facts.as_ref().expect("graph facts");
-    assert!(graph.has_main);
-    assert!(
-        graph.call_edges.contains(&CallEdge {
-            caller: "main".to_string(),
-            callee: "helper".to_string(),
-        }),
-        "{:?}",
-        graph.call_edges
-    );
-    let value = serde_json::to_value(&report).expect("serialize report");
-    assert!(value.get("diagnostics").is_some());
-    assert!(value.get("parser_decision").is_some());
-    assert!(value.get("core_ir_summary").is_some());
-    assert!(value.get("graph_facts").is_some());
-    assert!(value.get("size_timing").is_some());
-    assert!(value.get("repair_plans").is_some());
-}
-
-#[test]
 fn in_report_uses_level_three_after_diagnostic_contract() {
     let temp = temp_source("level-three", "in", "fn main() -> void { return; }\n");
     let report = json_report(&temp.path, &AgentModeConfig::default()).expect("report");
@@ -126,6 +133,21 @@ fn fix_plan_reports_parse_failure_repair() {
     assert_eq!(plan.diagnostics[0].code, "AGENT_PARSE_FAILED");
     assert_eq!(plan.repair_plans[0].id, "inspect-parser-input");
     assert_eq!(plan.repair_plans[0].actions[0].kind, "manual_review");
+}
+
+#[test]
+fn fix_plan_report_returns_expected_format() {
+    let temp = temp_source(
+        "main",
+        "in",
+        "fn helper() -> void { return; }\nfn main() -> void { helper(); return; }\n",
+    );
+    let plan = fix_plan_report(&temp.path, &AgentModeConfig::default()).expect("fix plan");
+    assert_eq!(plan.schema_version, 1);
+    assert_eq!(plan.parser_decision.route, "core_ir");
+    assert_eq!(plan.parser_decision.parser_id.as_deref(), Some("in"));
+    assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+    assert!(plan.repair_plans.is_empty(), "{:?}", plan.repair_plans);
 }
 
 #[test]
@@ -661,4 +683,23 @@ fn explains_lowerer_degradation_codes() {
         assert!(!rule.fix.is_empty());
     }
     assert!(explain_diagnostic("IN3999").is_none());
+}
+
+#[test]
+fn explain_formats_summary_correctly() {
+    let temp = temp_source(
+        "explain",
+        "in",
+        "fn helper() -> void { return; }\nfn main() -> void { helper(); return; }\n",
+    );
+    let explanation = explain(&temp.path, &AgentModeConfig::default()).expect("explain");
+    assert_eq!(
+        explanation.summary,
+        vec![
+            "parser in via core_ir",
+            "2 decls, 2 functions, 0 structs",
+            "2 SIL functions, 4 blocks, 6 instructions, 1 call edges",
+            "no diagnostics"
+        ]
+    );
 }
