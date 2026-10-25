@@ -2,8 +2,8 @@ use std::fs;
 
 use super::{
     Decl, Expr, InExternBinding, InParallelTaskFact, InSemanticBinding, LoopKind, Stmt, Typ,
-    in_standard_import_bindings, parse_expr, parse_in_file, parse_in_source, parse_in_surface_info,
-    split_top_level_decl_blocks,
+    in_standard_import_bindings, parse_expr, parse_in_file, parse_in_library_file, parse_in_source,
+    parse_in_surface_info, split_top_level_decl_blocks,
 };
 
 #[test]
@@ -627,6 +627,43 @@ fn file_import_merges_local_in_declarations() {
             .iter()
             .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "helper"))
     );
+}
+
+#[test]
+fn test_parse_in_file() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX_EPOCH")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("inauguration-test-parse-in-file-{unique}"));
+    fs::create_dir_all(&dir).expect("temp dir");
+
+    let path = dir.join("main.in");
+    fs::write(&path, "fn main() -> void { return; }\n").expect("write main");
+
+    let module = parse_in_file(&path).expect("parse file with main");
+    assert!(
+        module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "main"))
+    );
+
+    let path_no_main = dir.join("nomain.in");
+    fs::write(&path_no_main, "fn helper() -> void { return; }\n").expect("write nomain");
+
+    let err = parse_in_file(&path_no_main).expect_err("parse file without main");
+    assert!(err.contains("missing required `fn main`"), "{err}");
+
+    let lib_module = parse_in_library_file(&path_no_main).expect("parse library without main");
+    assert!(
+        lib_module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "helper"))
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
