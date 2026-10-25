@@ -601,6 +601,44 @@ fn explain_summarizes_successful_report() {
     );
 }
 
+#[test]
+fn explain_formats_complex_report() {
+    let temp = temp_source(
+        "explain-complex",
+        "in",
+        r#"
+import std.process;
+fn main() -> String { return process-run("pwd"); }
+"#,
+    );
+    let explanation = explain(&temp.path, &AgentModeConfig::default()).expect("explain");
+
+    assert!(
+        explanation
+            .summary
+            .iter()
+            .any(|line| line.contains("2 decls, 2 functions, 0 structs")),
+        "{:?}",
+        explanation.summary
+    );
+    assert!(
+        explanation
+            .summary
+            .iter()
+            .any(|line| line.contains("2 SIL functions, 4 blocks, 6 instructions, 1 call edges")),
+        "{:?}",
+        explanation.summary
+    );
+    assert!(
+        explanation
+            .summary
+            .iter()
+            .any(|line| line.contains("1 diagnostics")),
+        "{:?}",
+        explanation.summary
+    );
+}
+
 /// Lowerer codes must be explainable through the same registry as the rest, and
 /// the explanation must be keyed on the constant the lowerer emits.
 #[test]
