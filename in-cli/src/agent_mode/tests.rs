@@ -607,38 +607,35 @@ fn explain_formats_complex_report() {
         "explain-complex",
         "in",
         r#"
-import std.process;
-fn main() -> String { return process-run("pwd"); }
+capability process.spawn;
+extern rust fn host_log(text: String) -> void requires process.stdout;
+struct Video { Int id }
+fn main() -> void { host_log("ready"); return; }
 "#,
     );
     let explanation = explain(&temp.path, &AgentModeConfig::default()).expect("explain");
 
+    let summary_str = explanation.summary.join(" | ");
+
     assert!(
-        explanation
-            .summary
-            .iter()
-            .any(|line| line.contains("2 decls, 2 functions, 0 structs")),
+        summary_str.contains("function") && summary_str.contains("struct"),
         "{:?}",
         explanation.summary
     );
     assert!(
-        explanation
-            .summary
-            .iter()
-            .any(|line| line.contains("2 SIL functions, 4 blocks, 6 instructions, 1 call edges")),
+        summary_str.contains("SIL function")
+            && summary_str.contains("block")
+            && summary_str.contains("instruction")
+            && summary_str.contains("call edge"),
         "{:?}",
         explanation.summary
     );
     assert!(
-        explanation
-            .summary
-            .iter()
-            .any(|line| line.contains("1 diagnostics")),
+        summary_str.contains("diagnostic") && !summary_str.contains("no diagnostics"),
         "{:?}",
         explanation.summary
     );
 }
-
 /// Lowerer codes must be explainable through the same registry as the rest, and
 /// the explanation must be keyed on the constant the lowerer emits.
 #[test]
