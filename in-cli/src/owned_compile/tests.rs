@@ -2217,6 +2217,45 @@ fn report_to_json_roundtrip_fields() {
 }
 
 #[test]
+fn report_to_json_serialization_format() {
+    let started = std::time::Instant::now();
+    let request = OwnedCompileRequest {
+        path: std::path::PathBuf::from("/fake/path"),
+        module_id: "test_module".to_string(),
+        parser: crate::parser_registry::ParserCli::In,
+        target: CompileTarget::Native,
+        entry: None,
+        out: None,
+        linkage: crate::native_emit::NativeLinkage::Executable,
+        target_triple: None,
+        jobs: 1,
+        debug: false,
+        profile: crate::emit_profile::EmitProfile::Default,
+        emit: None,
+        base: None,
+    };
+
+    let mut report = crate::owned_compile::report::base_report(&request, 1, started);
+    report.timing_micros = 12345;
+    report.timing_waves_us = Some(vec![12345]);
+
+    let json = crate::owned_compile::report_to_json(&report).expect("Failed to serialize report");
+
+    assert!(json.contains("\"schema_version\": 1"));
+    assert!(json.contains("\"owned\": true"));
+    assert!(json.contains("\"path\": \"/fake/path\""));
+    assert!(json.contains("\"module_id\": \"test_module\""));
+    assert!(json.contains("\"target\": \"native\""));
+    assert!(json.contains("\"linkage\": \"executable\""));
+    assert!(json.contains("\"frontend_level\": \"unsupported\""));
+    assert!(json.contains("\"semantic_level\": \"failed\""));
+    assert!(json.contains("\"backend_level\": \"contract-only\""));
+    assert!(json.contains("\"runtime_level\": \"none\""));
+    assert!(json.contains("\"success\": false"));
+    assert!(json.contains("\"timing_micros\": 12345"));
+}
+
+#[test]
 fn report_carries_core_identity_metadata() {
     if !native_backend::native_subset_host_available() {
         return;
