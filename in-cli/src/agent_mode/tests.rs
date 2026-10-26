@@ -151,6 +151,12 @@ fn fix_plan_report_returns_expected_format() {
 }
 
 #[test]
+fn fix_plan_report_returns_error_for_missing_file() {
+    let result = fix_plan_report("does_not_exist.in", &AgentModeConfig::default());
+    assert!(result.is_err());
+}
+
+#[test]
 fn icore_v2_report_uses_body_subset_level() {
     let temp = temp_source(
         "body",
