@@ -606,7 +606,7 @@ fn explain_summarizes_diagnostics() {
     let temp = temp_source(
         "explain-diagnostics",
         "in",
-        "fn main() -> void { return; } fn main() -> void { return; }\n",
+        "undeclared_function();\nfn main() -> void { return; }\n",
     );
     let explanation = explain(&temp.path, &AgentModeConfig::default()).expect("explain");
     assert!(
