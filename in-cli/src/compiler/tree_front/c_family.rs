@@ -907,8 +907,9 @@ fn c_cast_expr(src: &[u8], expr: Node<'_>) -> Option<Expr> {
     }
     let specifier = descriptor.child_by_field_name("type")?;
     // The C grammar exposes the reserved _Bool keyword as a type_identifier.
-    if !(matches!(specifier.kind(), "primitive_type" | "sized_type_specifier")
-        || (specifier.kind() == "type_identifier" && node_txt(src, specifier) == "_Bool"))
+    #[allow(clippy::nonminimal_bool)]
+    if !matches!(specifier.kind(), "primitive_type" | "sized_type_specifier")
+        && !(specifier.kind() == "type_identifier" && node_txt(src, specifier) == "_Bool")
     {
         return None;
     }
