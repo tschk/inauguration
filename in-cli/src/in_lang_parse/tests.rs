@@ -145,7 +145,7 @@ fn test_parse_in_surface_info_duplicate_module() {
 
 #[test]
 fn test_parse_in_source() {
-    let valid_src = "fn main() -> Int { return 42; }";
+    let valid_src = "fn main() -> void\n";
     let module = parse_in_source(valid_src).expect("should parse valid source");
     assert_eq!(module.decls.len(), 1);
 
