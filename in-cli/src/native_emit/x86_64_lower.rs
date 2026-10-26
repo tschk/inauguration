@@ -3954,6 +3954,7 @@ fn lower_call_expr(
         super::validate_word32_scalar_signature(&function.params, &function.ret)?;
     }
 
+    #[allow(clippy::nonminimal_bool)]
     if matches!(
         target_name.as_str(),
         "vector-push" | "vector-extend" | "vector-clear"
