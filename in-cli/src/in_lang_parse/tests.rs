@@ -151,6 +151,73 @@ fn test_parse_in_surface_info_unknown_syntax() {
 }
 
 #[test]
+fn test_parse_in_surface_info_missing_import_path() {
+    let src = "import ;";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("import path missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_missing_capability() {
+    let src = "capability ;";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("capability name missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_missing_enable() {
+    let src = "enable ;";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("enable extension missing"));
+}
+
+#[test]
+fn test_parse_in_surface_info_invalid_parallel() {
+    let src = "parallel foo { }";
+    let err = parse_in_surface_info(src).expect_err("should fail");
+    assert!(err.contains("`parallel` must be a top-level `parallel { ... }` region"));
+}
+
+#[test]
+fn test_parse_in_surface_info_annotations_and_distributed() {
+    let src = "
+        @pure
+        fn pure_func() {}
+
+        distributed fn dist_func() {}
+
+        enable some_ext;
+    ";
+    let info = parse_in_surface_info(src).expect("should parse successfully");
+    assert_eq!(
+        info.orchestration.enabled_extensions,
+        vec!["some_ext".to_string()]
+    );
+    assert_eq!(
+        info.orchestration.distributed_functions,
+        vec!["dist_func".to_string()]
+    );
+    assert_eq!(info.orchestration.annotations.len(), 1);
+    assert_eq!(info.orchestration.annotations[0].name, "pure");
+    assert_eq!(
+        info.orchestration.annotations[0].target,
+        Some("pure_func".to_string())
+    );
+}
+
+#[test]
+fn test_parse_in_surface_info_topology_and_skips() {
+    let src = "
+        system MySystem {}
+        domain MyDomain {}
+        struct MyStruct {}
+        component MyComp {}
+    ";
+    let info = parse_in_surface_info(src).expect("should parse successfully");
+    assert!(info.package.is_none());
+}
+
+#[test]
 fn void_return_case_insensitive() {
     let m = parse_in_source("fn main() -> VOID\n").expect("ok");
     match &m.decls[0] {
