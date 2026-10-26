@@ -192,19 +192,36 @@ mod tests {
     use crate::compiler::metadata::ArtifactKind;
     use std::fs;
 
-    #[test]
-    fn test_compile_in_file_success() {
+    struct TempDirGuard {
+        path: std::path::PathBuf,
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn temp_dir() -> TempDirGuard {
         let dir = std::env::temp_dir().join(format!(
-            "in_cli_test_{}",
+            "in_cli_test_{}_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            std::process::id()
         ));
         fs::create_dir_all(&dir).unwrap();
-        let source_path = dir.join("test_module.in");
-        fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
-        let spec = spec_from_cli(
+        TempDirGuard { path: dir }
+    }
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let guard = temp_dir();
+        let source_path = guard.path.join("test_module.in");
+        fs::write(&source_path, "fn main() { }").unwrap();
+
+        let mut spec = spec_from_cli(
             "test_module",
             "x86_64-unknown-linux-gnu",
             ArtifactKind::Executable,
@@ -213,28 +230,24 @@ mod tests {
             false,
             false,
         );
+        // Ensure tests do not output to the workspace directory to avoid concurrent CI issues
+        spec.checkpoint = guard.path.to_string_lossy().into_owned();
+
         let result = compile_in_file(&source_path, &spec, true);
         assert!(result.is_ok(), "result was not ok: {:?}", result.err());
         let (out_path, meta_path) = result.unwrap();
         assert!(out_path.exists());
         assert!(meta_path.is_some());
         assert!(meta_path.unwrap().exists());
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn test_compile_in_file_no_metadata() {
-        let dir = std::env::temp_dir().join(format!(
-            "in_cli_test_no_meta_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let source_path = dir.join("test_module.in");
-        fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
-        let spec = spec_from_cli(
+        let guard = temp_dir();
+        let source_path = guard.path.join("test_module.in");
+        fs::write(&source_path, "fn main() { }").unwrap();
+
+        let mut spec = spec_from_cli(
             "test_module",
             "x86_64-unknown-linux-gnu",
             ArtifactKind::Executable,
@@ -243,25 +256,19 @@ mod tests {
             false,
             false,
         );
+        spec.checkpoint = guard.path.to_string_lossy().into_owned();
+
         let result = compile_in_file(&source_path, &spec, false);
         assert!(result.is_ok(), "result was not ok: {:?}", result.err());
         let (out_path, meta_path) = result.unwrap();
         assert!(out_path.exists());
         assert!(meta_path.is_none());
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn test_compile_in_file_source_not_found() {
-        let dir = std::env::temp_dir().join(format!(
-            "in_cli_test_missing_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let source_path = dir.join("nonexistent.in");
+        let guard = temp_dir();
+        let source_path = guard.path.join("nonexistent.in");
         let spec = spec_from_cli(
             "test_module",
             "x86_64-unknown-linux-gnu",
@@ -275,22 +282,15 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("read source:"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn test_compile_in_file_syntax_error() {
-        let dir = std::env::temp_dir().join(format!(
-            "in_cli_test_syntax_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let source_path = dir.join("error.in");
-        fs::write(&source_path, "fn main() -> Int { return 42").unwrap();
-        let spec = spec_from_cli(
+        let guard = temp_dir();
+        let source_path = guard.path.join("error.in");
+        fs::write(&source_path, "fn main() {").unwrap();
+
+        let mut spec = spec_from_cli(
             "test_module",
             "x86_64-unknown-linux-gnu",
             ArtifactKind::Executable,
@@ -299,10 +299,11 @@ mod tests {
             false,
             false,
         );
+        spec.checkpoint = guard.path.to_string_lossy().into_owned();
+
         let result = compile_in_file(&source_path, &spec, true);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("compilation: frontend error"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 }
