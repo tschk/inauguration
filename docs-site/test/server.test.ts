@@ -1,11 +1,9 @@
-import { expect, test, mock } from "bun:test";
+import { expect, test, spyOn } from "bun:test";
 import { serveIndex, renderer } from "../src/server";
 
 test("serveIndex constructs RenderContext correctly and calls renderer", async () => {
-  const originalRender = renderer.render;
-
   let capturedCtx: any;
-  renderer.render = mock(async (ctx: any) => {
+  const renderSpy = spyOn(renderer, "render").mockImplementation(async (ctx: any) => {
     capturedCtx = ctx;
     return new Response("mocked");
   });
@@ -19,8 +17,8 @@ test("serveIndex constructs RenderContext correctly and calls renderer", async (
     expect(capturedCtx.request).toBe(request);
     expect(capturedCtx.route.id).toBe("index");
     expect(capturedCtx.params).toEqual({});
-    expect(capturedCtx.signal).toBe(controller.signal);
+    expect(capturedCtx.signal).toBe(request.signal);
   } finally {
-    renderer.render = originalRender;
+    renderSpy.mockRestore();
   }
 });

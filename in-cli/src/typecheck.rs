@@ -4461,8 +4461,7 @@ fn is_builtin_fn(name: &str) -> bool {
             | "load8" | "load16" | "load32" | "load64"
             | "store8" | "store16" | "store32" | "store64"
             | "hlt" | "cli" | "sti" | "pause"
-            | "lidt" | "lgdt" | "ltr" | "invlpg" | "read-cr2" | "read-cr3" | "cr3-read"
-            | "write-cr3" | "cr3-write" | "rdmsr" | "wrmsr" | "wrmsr64" | "mem-fill64" | "mem-copy64"
+            | "lidt" | "invlpg" | "read-cr2" | "read-cr3"
             | "invoke" | "invoke1" | "invoke2" | "invoke-native" | "invoke-native1" | "invoke-native2" | "invoke_native" | "invoke_native1" | "invoke_native2"
     )
 }
@@ -4474,10 +4473,9 @@ fn builtin_return_type(name: &str) -> Typ {
     match name {
         "len" | "str-len" | "array-len" | "array_len" | "vector-capacity" | "bool-to-int"
         | "to-int" | "str-to-int" | "str-index-of" | "str-table-get-int" | "inb" | "inw"
-        | "inl" | "load8" | "load16" | "load32" | "load64" | "read-cr2" | "read-cr3"
-        | "cr3-read" | "rdmsr" | "invoke" | "invoke1" | "invoke2" | "invoke-native"
-        | "invoke-native1" | "invoke-native2" | "invoke_native" | "invoke_native1"
-        | "invoke_native2" => Typ::Int,
+        | "inl" | "load8" | "load16" | "load32" | "load64" | "read-cr2" | "read-cr3" | "invoke"
+        | "invoke1" | "invoke2" | "invoke-native" | "invoke-native1" | "invoke-native2"
+        | "invoke_native" | "invoke_native1" | "invoke_native2" => Typ::Int,
         "str-eq" | "str-contains" | "str-starts-with" | "str-is-int" | "str-table-has"
         | "int-to-bool" => Typ::Bool,
         "str-concat" | "str-trim" | "str-slice" | "to-string" => Typ::String,
