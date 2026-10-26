@@ -185,37 +185,6 @@ fn struct_parses_inline_fields() {
 }
 
 #[test]
-fn test_parse_in_source_coverage() {
-    // Test brace form
-    let source_brace = "fn main() -> Int { return 42; }";
-    let module = parse_in_source(source_brace).expect("Failed to parse basic source");
-    assert_eq!(module.decls.len(), 1);
-    assert!(matches!(
-        &module.decls[0],
-        Decl::Function { name, ret: Typ::Int, .. }
-        if name == "main"
-    ));
-
-    // Test human-friendly form
-    let source_human = "fn main() -> Int:\n  return 42\n";
-    let module_human =
-        parse_in_source(source_human).expect("Failed to parse human-friendly source");
-    assert_eq!(module_human.decls.len(), 1);
-    assert_eq!(module.decls, module_human.decls);
-
-    // Test syntax error
-    let invalid_syntax = "fn main( {";
-    let err = parse_in_source(invalid_syntax).expect_err("Expected parse error");
-    assert!(err.contains("incomplete"));
-
-    // Test validation error (unknown type handled in finalization/validation)
-    // For parse_in_source, if it successfully parses but fails validation, it returns Err(String)
-    let invalid_type = "struct Bad { Unknown z }\nfn main() -> void\n";
-    let err_type = parse_in_source(invalid_type).expect_err("Expected validation error");
-    assert!(err_type.contains("unknown type"));
-}
-
-#[test]
 fn struct_parses_multiline_fields() {
     let src = r#"
 struct Card {
@@ -3678,4 +3647,35 @@ fn logical_not_result_facts_preserve_conditional_receiver_resolution() {
             "{source}: {report:?}"
         );
     }
+}
+
+#[test]
+fn test_parse_in_source_coverage() {
+    // Test brace form
+    let source_brace = "fn main() -> Int { return 42; }";
+    let module = parse_in_source(source_brace).expect("Failed to parse basic source");
+    assert_eq!(module.decls.len(), 1);
+    assert!(matches!(
+        &module.decls[0],
+        Decl::Function { name, ret: Typ::Int, .. }
+        if name == "main"
+    ));
+
+    // Test human-friendly form
+    let source_human = "fn main() -> Int:\n  return 42\n";
+    let module_human =
+        parse_in_source(source_human).expect("Failed to parse human-friendly source");
+    assert_eq!(module_human.decls.len(), 1);
+    assert_eq!(module.decls, module_human.decls);
+
+    // Test syntax error
+    let invalid_syntax = "fn main( {";
+    let err = parse_in_source(invalid_syntax).expect_err("Expected parse error");
+    assert!(err.contains("incomplete"));
+
+    // Test validation error (unknown type handled in finalization/validation)
+    // For parse_in_source, if it successfully parses but fails validation, it returns Err(String)
+    let invalid_type = "struct Bad { Unknown z }\nfn main() -> void\n";
+    let err_type = parse_in_source(invalid_type).expect_err("Expected validation error");
+    assert!(err_type.contains("unknown type"));
 }
