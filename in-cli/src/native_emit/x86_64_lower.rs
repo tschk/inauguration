@@ -3960,7 +3960,7 @@ fn lower_call_expr(
     ) && ctx
         .functions
         .get(&target_name)
-        .map_or(true, |function| function.body.is_empty())
+        .is_none_or(|function| function.body.is_empty())
     {
         let expected_args = if target_name == "vector-clear" { 1 } else { 2 };
         if args.len() != expected_args {
