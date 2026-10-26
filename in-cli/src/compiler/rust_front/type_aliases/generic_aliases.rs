@@ -1173,6 +1173,7 @@ pub(super) fn callable<'a>(
             }
         }
     };
+    #[allow(clippy::redundant_closure)]
     let parameters = parameters.map(|source| child(source)).collect();
     let result = match output {
         syn::ReturnType::Default => Typ::Void,
