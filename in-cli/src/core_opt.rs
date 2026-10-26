@@ -4358,6 +4358,24 @@ mod tests {
     }
 
     #[test]
+    fn optimize_with_profile_runs_different_profiles_and_keeps_entry() {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut decls = vec![
+                make_fn("custom_main", vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+                make_fn("dead_code", vec![Stmt::Return(Some(Expr::IntLit(0)))]),
+            ];
+            optimize_with_profile(&mut decls, Some("custom_main"), profile);
+            assert_eq!(decls.len(), 1, "Failed for profile {profile:?}");
+            if let Decl::Function { name, body, .. } = &decls[0] {
+                assert_eq!(name, "custom_main");
+                assert!(!body.is_empty());
+            } else {
+                panic!("Expected Function declaration");
+            }
+        }
+    }
+
+    #[test]
     fn optimize_performs_inlining_and_dce() {
         let mut decls = vec![
             make_fn_with_params(
