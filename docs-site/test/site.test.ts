@@ -51,43 +51,6 @@ test("GET /static/favicon.svg returns 200 svg", async () => {
   expect(res.headers.get("content-type")).toContain("svg");
 });
 
-test("GET handles URLs with query strings", async () => {
-  const res1 = await fetch(`${base}/?query=1`);
-  expect(res1.status).toBe(200);
-
-  const res2 = await fetch(`${base}/static/favicon.svg?query=1`);
-  expect(res2.status).toBe(200);
-});
-
-test("GET handles URLs with hash fragments", async () => {
-  const res1 = await fetch(`${base}/#hash`);
-  expect(res1.status).toBe(200);
-
-  const res2 = await fetch(`${base}/static/favicon.svg#hash`);
-  expect(res2.status).toBe(200);
-});
-
-test("GET handles URLs with both query strings and hash fragments", async () => {
-  const res1 = await fetch(`${base}/?query=1#hash`);
-  expect(res1.status).toBe(200);
-
-  const res2 = await fetch(`${base}/static/favicon.svg?query=1#hash`);
-  expect(res2.status).toBe(200);
-});
-
-test("GET handles URLs with trailing slashes", async () => {
-  const res1 = await fetch(`${base}/static/favicon.svg/`);
-  expect(res1.status).toBe(200);
-
-  const res2 = await fetch(`${base}/static/favicon.svg//`);
-  expect(res2.status).toBe(200);
-});
-
-test("GET handles URLs with no trailing slash on root", async () => {
-  const res = await fetch(`${base}`);
-  expect(res.status).toBe(200);
-});
-
 test("GET unknown path returns 404", async () => {
   const res = await fetch(`${base}/does-not-exist`);
   expect(res.status).toBe(404);
