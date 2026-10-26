@@ -684,6 +684,16 @@ fn main() -> void { return; }
 }
 
 #[test]
+fn json_report_formatting() {
+    let temp = temp_source("json-report-fmt", "in", "fn main() -> void { return; }\n");
+    let report = json_report(&temp.path, &AgentModeConfig::default()).expect("report");
+    let json = serde_json::to_string(&report).expect("serialize");
+    assert!(json.contains("\"schema_version\":1"));
+    assert!(json.contains("\"diagnostics\":[]"));
+    assert!(json.contains("\"parser_id\":\"in\""));
+}
+
+#[test]
 fn explain_summarizes_successful_report() {
     let temp = temp_source("explain", "in", "fn main() -> void { return; }\n");
     let explanation = explain(&temp.path, &AgentModeConfig::default()).expect("explain");
