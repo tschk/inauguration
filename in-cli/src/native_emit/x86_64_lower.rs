@@ -2969,7 +2969,7 @@ fn lower_builtin_call(
     if ctx
         .functions
         .get(target_name)
-        .is_some_and(|function| !function.body.is_empty())
+        .map_or(false, |function| !function.body.is_empty())
     {
         return Ok(false);
     }
@@ -3960,7 +3960,7 @@ fn lower_call_expr(
     ) && !ctx
         .functions
         .get(&target_name)
-        .is_some_and(|function| !function.body.is_empty())
+        .map_or(true, |function| function.body.is_empty())
     {
         let expected_args = if target_name == "vector-clear" { 1 } else { 2 };
         if args.len() != expected_args {

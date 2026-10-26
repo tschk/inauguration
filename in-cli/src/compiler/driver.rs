@@ -193,17 +193,37 @@ mod tests {
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    fn get_temp_dir() -> PathBuf {
-        let counter = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let temp_dir = std::env::temp_dir().join(format!("in_test_compile_{}", counter));
-        fs::create_dir_all(&temp_dir).unwrap();
-        temp_dir
+    struct TempDirGuard {
+        path: PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new() -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before UNIX_EPOCH")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "inauguration-driver-{}-{}-{}",
+                std::process::id(),
+                unique,
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 
     #[test]
     fn test_compile_in_file_success() {
-        let temp_dir = get_temp_dir();
-        let source_path = temp_dir.join("test_module.in");
+        let temp = TempDirGuard::new();
+        let source_path = temp.path.join("test_module.in");
         fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
 
         let spec = ComponentSpec::host_executable("test_module", Some("main"));
@@ -217,14 +237,12 @@ mod tests {
 
         let output_data = fs::read(&output_path).unwrap();
         assert!(!output_data.is_empty(), "Output artifact is empty");
-
-        fs::remove_dir_all(&temp_dir).unwrap();
     }
 
     #[test]
     fn test_compile_in_file_with_metadata() {
-        let temp_dir = get_temp_dir();
-        let source_path = temp_dir.join("test_module_meta.in");
+        let temp = TempDirGuard::new();
+        let source_path = temp.path.join("test_module_meta.in");
         fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
 
         let spec = ComponentSpec::host_executable("test_module_meta", Some("main"));
@@ -243,28 +261,24 @@ mod tests {
             md_data.contains("test_module_meta"),
             "Metadata should contain the module name"
         );
-
-        fs::remove_dir_all(&temp_dir).unwrap();
     }
 
     #[test]
     fn test_compile_in_file_read_error() {
-        let temp_dir = get_temp_dir();
-        let source_path = temp_dir.join("nonexistent.in");
+        let temp = TempDirGuard::new();
+        let source_path = temp.path.join("nonexistent.in");
 
         let spec = ComponentSpec::host_executable("nonexistent", Some("main"));
         let result = compile_in_file(&source_path, &spec, false);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("read source"));
-
-        fs::remove_dir_all(&temp_dir).unwrap();
     }
 
     #[test]
     fn test_compile_in_file_compile_error() {
-        let temp_dir = get_temp_dir();
-        let source_path = temp_dir.join("invalid.in");
+        let temp = TempDirGuard::new();
+        let source_path = temp.path.join("invalid.in");
         fs::write(&source_path, "this is not valid syntax").unwrap();
 
         let spec = ComponentSpec::host_executable("invalid", Some("main"));
@@ -273,7 +287,215 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("compilation"));
+    }
+}
 
-        fs::remove_dir_all(&temp_dir).unwrap();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDirGuard {
+        path: PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new() -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before UNIX_EPOCH")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "inauguration-driver-{}-{}-{}",
+                std::process::id(),
+                unique,
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let temp = TempDirGuard::new();
+        let source_path = temp.path.join("test_module.in");
+        fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
+
+        let spec = ComponentSpec::host_executable("test_module", Some("main"));
+
+        let result = compile_in_file(&source_path, &spec, false);
+        assert!(result.is_ok(), "compile_in_file failed: {:?}", result.err());
+
+        let (output_path, metadata_path) = result.unwrap();
+        assert!(output_path.exists(), "Output artifact was not created");
+        assert!(metadata_path.is_none(), "Metadata should not be emitted");
+
+        let output_data = fs::read(&output_path).unwrap();
+        assert!(!output_data.is_empty(), "Output artifact is empty");
+    }
+
+    #[test]
+    fn test_compile_in_file_with_metadata() {
+        let temp = TempDirGuard::new();
+        let source_path = temp.path.join("test_module_meta.in");
+        fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
+
+        let spec = ComponentSpec::host_executable("test_module_meta", Some("main"));
+
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(result.is_ok(), "compile_in_file failed: {:?}", result.err());
+
+        let (output_path, metadata_path) = result.unwrap();
+        assert!(output_path.exists(), "Output artifact was not created");
+
+        let md_path = metadata_path.expect("Metadata should be emitted");
+        assert!(md_path.exists(), "Metadata file was not created");
+
+        let md_data = fs::read_to_string(&md_path).unwrap();
+        assert!(
+            md_data.contains("test_module_meta"),
+            "Metadata should contain the module name"
+        );
+    }
+
+    #[test]
+    fn test_compile_in_file_read_error() {
+        let temp = TempDirGuard::new();
+        let source_path = temp.path.join("nonexistent.in");
+
+        let spec = ComponentSpec::host_executable("nonexistent", Some("main"));
+        let result = compile_in_file(&source_path, &spec, false);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("read source"));
+    }
+
+    #[test]
+    fn test_compile_in_file_compile_error() {
+        let temp = TempDirGuard::new();
+        let source_path = temp.path.join("invalid.in");
+        fs::write(&source_path, "this is not valid syntax").unwrap();
+
+        let spec = ComponentSpec::host_executable("invalid", Some("main"));
+
+        let result = compile_in_file(&source_path, &spec, false);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("compilation"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDirGuard {
+        path: PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new() -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before UNIX_EPOCH")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "inauguration-driver-{}-{}-{}",
+                std::process::id(),
+                unique,
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn test_compile_in_file_success() {
+        let temp = TempDirGuard::new();
+        let source_path = temp.path.join("test_module.in");
+        fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
+
+        let spec = ComponentSpec::host_executable("test_module", Some("main"));
+
+        let result = compile_in_file(&source_path, &spec, false);
+        assert!(result.is_ok(), "compile_in_file failed: {:?}", result.err());
+
+        let (output_path, metadata_path) = result.unwrap();
+        assert!(output_path.exists(), "Output artifact was not created");
+        assert!(metadata_path.is_none(), "Metadata should not be emitted");
+
+        let output_data = fs::read(&output_path).unwrap();
+        assert!(!output_data.is_empty(), "Output artifact is empty");
+    }
+
+    #[test]
+    fn test_compile_in_file_with_metadata() {
+        let temp = TempDirGuard::new();
+        let source_path = temp.path.join("test_module_meta.in");
+        fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
+
+        let spec = ComponentSpec::host_executable("test_module_meta", Some("main"));
+
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(result.is_ok(), "compile_in_file failed: {:?}", result.err());
+
+        let (output_path, metadata_path) = result.unwrap();
+        assert!(output_path.exists(), "Output artifact was not created");
+
+        let md_path = metadata_path.expect("Metadata should be emitted");
+        assert!(md_path.exists(), "Metadata file was not created");
+
+        let md_data = fs::read_to_string(&md_path).unwrap();
+        assert!(
+            md_data.contains("test_module_meta"),
+            "Metadata should contain the module name"
+        );
+    }
+
+    #[test]
+    fn test_compile_in_file_read_error() {
+        let temp = TempDirGuard::new();
+        let source_path = temp.path.join("nonexistent.in");
+
+        let spec = ComponentSpec::host_executable("nonexistent", Some("main"));
+        let result = compile_in_file(&source_path, &spec, false);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("read source"));
+    }
+
+    #[test]
+    fn test_compile_in_file_compile_error() {
+        let temp = TempDirGuard::new();
+        let source_path = temp.path.join("invalid.in");
+        fs::write(&source_path, "this is not valid syntax").unwrap();
+
+        let spec = ComponentSpec::host_executable("invalid", Some("main"));
+
+        let result = compile_in_file(&source_path, &spec, false);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("compilation"));
     }
 }
