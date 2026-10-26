@@ -603,8 +603,10 @@ fn explain_summarizes_successful_report() {
 
 #[test]
 fn explain_formats_summary_strings_correctly() {
-    let mut config = AgentModeConfig::default();
-    config.parser = AgentParserPreference::In;
+    let config = AgentModeConfig {
+        parser: AgentParserPreference::In,
+        ..Default::default()
+    };
 
     // Test successfully parsed summary with core IR and SIL info
     let temp = temp_source(
@@ -637,8 +639,10 @@ struct User { Int id }
 
 #[test]
 fn explain_formats_diagnostics_summary_correctly() {
-    let mut config = AgentModeConfig::default();
-    config.parser = AgentParserPreference::In;
+    let config = AgentModeConfig {
+        parser: AgentParserPreference::In,
+        ..Default::default()
+    };
 
     // Code with a syntax error that will generate diagnostics and not emit SIL/core
     let temp = temp_source(
