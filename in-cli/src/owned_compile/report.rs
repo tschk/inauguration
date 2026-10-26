@@ -218,4 +218,20 @@ mod tests {
         assert!(finalized.error.is_some());
         assert!(finalized.error.as_ref().unwrap().contains("swiftc"));
     }
+
+    #[test]
+    fn test_finalize_report_updates_timing_and_waves() {
+        let _guard = ExternalInvocationGuard::enter();
+
+        let report = dummy_report();
+        let started = Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+
+        let finalized = finalize_report(report, started, Path::new("."), "dummy_hash");
+
+        assert!(finalized.timing_micros >= 1_000);
+        let waves = finalized.timing_waves_us.as_ref().unwrap();
+        assert_eq!(waves.len(), 2);
+        assert_eq!(waves.iter().sum::<u128>(), finalized.timing_micros);
+    }
 }
