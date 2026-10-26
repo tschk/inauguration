@@ -623,6 +623,28 @@ fn explain_summarizes_successful_report() {
     );
 }
 
+#[test]
+fn in_explain_formatting_logic() {
+    let temp = temp_source("explain_format", "in", "fn main() -> void { return; }\n");
+    let explanation = explain(&temp.path, &AgentModeConfig::default()).expect("explain");
+    assert_eq!(
+        explanation.summary,
+        vec![
+            "parser in via core_ir",
+            "1 decls, 1 functions, 0 structs",
+            "1 SIL functions, 2 blocks, 2 instructions, 0 call edges",
+            "no diagnostics",
+        ]
+    );
+
+    let temp_err = temp_source("explain_format_err", "in", "fn main() -> ");
+    let explanation_err = explain(&temp_err.path, &AgentModeConfig::default()).expect("explain");
+    assert_eq!(
+        explanation_err.summary,
+        vec!["parser in via core_ir", "1 diagnostics",]
+    );
+}
+
 /// Lowerer codes must be explainable through the same registry as the rest, and
 /// the explanation must be keyed on the constant the lowerer emits.
 #[test]
