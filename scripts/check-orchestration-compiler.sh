@@ -186,8 +186,13 @@ selected = data.get("selected") or {}
 require(data.get("schema_version") == 1, "backend schema version was not 1")
 require(selected.get("name") == "native", "backend selected name was not native")
 if selected.get("implemented"):
-    require(selected.get("reason_code") == "native-aarch64-subset", "backend reason code mismatch")
-    require(selected.get("artifact_kind") == "mach-o-executable", "backend artifact kind mismatch")
+    expected = {
+        "aarch64-apple-darwin": ("native-aarch64-subset", "mach-o-executable"),
+        "x86_64-unknown-linux-gnu": ("native-x86_64-linux-subset", "elf-executable"),
+    }.get(selected.get("host_triple"))
+    require(expected is not None, "backend implemented an unknown host contract")
+    require((selected.get("reason_code"), selected.get("artifact_kind")) == expected,
+            "backend reason/artifact mismatch")
 else:
     require(selected.get("reason_code") == "native-backend-not-implemented", "backend reason code mismatch")
 request = data.get("request") or {}
@@ -221,6 +226,8 @@ native_backend_json="$tmp_dir/native-backend.json"
 "${in_cmd[@]}" backend --path apps/in-sample/agent-native.in --target native --json > "$native_backend_json"
 if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
   NATIVE_BACKEND_MODE="aarch64"
+elif [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
+  NATIVE_BACKEND_MODE="linux-x86_64"
 else
   NATIVE_BACKEND_MODE="contract"
 fi
@@ -241,10 +248,11 @@ require(data.get("schema_version") == 1, "native backend schema version was not 
 require(selected.get("name") == "native", "native backend selected name was not native")
 request = data.get("request") or {}
 require(data.get("artifact") is None, "native backend unexpectedly reported an artifact")
-if mode == "aarch64":
-    require(selected.get("implemented") is True, "native backend should be implemented on macOS aarch64")
+if mode in {"aarch64", "linux-x86_64"}:
+    require(selected.get("implemented") is True, "native executable subset should be implemented")
+    expected = "native-aarch64-subset" if mode == "aarch64" else "native-x86_64-linux-subset"
     require(
-        selected.get("reason_code") == "native-aarch64-subset",
+        selected.get("reason_code") == expected,
         "native backend reason code mismatch",
     )
     require(request.get("supported") is False, "native backend request should not claim artifact without compile path")

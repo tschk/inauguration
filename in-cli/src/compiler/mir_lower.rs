@@ -710,6 +710,17 @@ pub fn lower_boot_image(
     entry: &str,
     target_triple: Option<&str>,
 ) -> Result<(MirModule, Vec<u8>, Vec<(String, u32)>, Vec<u8>), String> {
+    lower_boot_image_with_data_base(module, entry, target_triple, 0x200000)
+}
+
+/// Boot packagers choose a page-aligned writable section after code/exports.
+/// The backend owns both instruction references and nested payload fixups.
+pub fn lower_boot_image_with_data_base(
+    module: &UnifiedModule,
+    entry: &str,
+    target_triple: Option<&str>,
+    data_base: u64,
+) -> Result<(MirModule, Vec<u8>, Vec<(String, u32)>, Vec<u8>), String> {
     let triple = target_triple.unwrap_or("x86_64-unknown-none");
     let (code, exports, data) = if triple.contains("aarch64") || triple.contains("arm64") {
         let result = crate::native_emit::lower::lower_module(
@@ -738,7 +749,7 @@ pub fn lower_boot_image(
             module,
             entry,
             0x101100,
-            0x200000,
+            data_base,
             crate::native_emit::x86_64_lower::X86StringLayout::Cstring,
         )?;
         result.require_resolved_imports()?;
@@ -758,6 +769,43 @@ pub fn lower_boot_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boot_data_relocation_updates_instructions_and_nested_payloads() {
+        let module=crate::in_lang_parse::parse_in_source(
+            "var numbers:[Int]=[20,22];var texts:[String]=[\"left\",\"right\"];var text:String=\"λ\";fn main()->Int{return numbers[0]+numbers[1];}"
+        ).unwrap();
+        let (_, original, exports, data) =
+            lower_boot_image_with_data_base(&module, "main", Some("x86_64-unknown-none"), 0x200000)
+                .unwrap();
+        let (_, relocated, new_exports, new_data) =
+            lower_boot_image_with_data_base(&module, "main", Some("x86_64-unknown-none"), 0x301000)
+                .unwrap();
+        assert_eq!(original.len(), relocated.len());
+        assert_eq!(exports, new_exports);
+        assert_eq!(data.len(), new_data.len());
+        assert_ne!(original, relocated);
+        let mut pointers = 0;
+        for (old, new) in data
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .zip(new_data.as_chunks::<8>().0)
+        {
+            let old = u64::from_le_bytes(*old);
+            let new = u64::from_le_bytes(*new);
+            if (0x200000..0x200000 + data.len() as u64).contains(&old) {
+                assert_eq!(new, old - 0x200000 + 0x301000);
+                pointers += 1;
+            } else {
+                assert_eq!(old, new);
+            }
+        }
+        assert!(
+            pointers >= 3,
+            "array-element and scalar string payload pointers must all relocate"
+        );
+    }
 
     #[test]
     fn scalar_mir_refuses_reserved_atomic_redeclarations() {

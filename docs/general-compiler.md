@@ -224,8 +224,10 @@ GPU, remote workers, and non-owned runtimes stay **status-only** until in-tree r
 
 ## Static coverage and degradation codes
 
-The native lowerer never fabricates a value for code it cannot compile. Anything
-outside the native subset becomes a **trap** body that writes the reason to
+The native lowerer never fabricates a value for code it cannot compile. Linux
+x86_64 executable coverage invokes the actual owned ELF emitter: unsupported
+operations or imports produce `rejected`, a diagnostic and no counts or artifact.
+AArch64 records unsupported functions as **trap** bodies that writes the reason to
 stderr and exits with `inrt::INRT_TRAP_EXIT_CODE` (70), and is recorded on the
 artifact and the compile report:
 
@@ -240,7 +242,11 @@ lowerer limitation (`IN3001`) from an unresolved call (`IN3002`), because only t
 former is a real coverage gap — a build that resolves packages or cargo crates can
 satisfy the latter. Counts are withheld when analysis fails, so a rejected file
 never shows a percentage. Granularity is per function, the unit the lowerer
-degrades.
+degrades. Linux x86_64 differential execution uses a separate checked-in
+`backend-differential.x86_64-unknown-linux-gnu.txt` pin; the macOS reference remains
+`backend-differential.txt`. Agreement and refusal are compared in both directions,
+so a supported Linux case becoming refused fails the gate. Crashes, wrong results
+and JIT failures always fail and cannot be accepted by updating a baseline.
 
 Degradations are marked `reachable` when the entry can follow calls out of
 compiled code into the trap. Unreachable traps are dead code; reachable ones

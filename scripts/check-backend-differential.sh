@@ -18,6 +18,11 @@ cd "$ROOT"
 
 IN_CMD=("${IN_BIN:-in}")
 BASELINE="$ROOT/conformance/backend-differential.txt"
+# The native ABI/runtime is part of this comparison. Preserve the Darwin pin;
+# Linux owns a separate explicit set of agreements and strict refusals.
+if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
+  BASELINE="$ROOT/conformance/backend-differential.x86_64-unknown-linux-gnu.txt"
+fi
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/check-backend-diff.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -108,7 +113,15 @@ for category in agree native-refused native-crash disagree jit-error; do
   echo "  $(printf '%-14s' "$category") $count"
 done
 
-if [[ ! -f "$BASELINE" ]]; then
+# A baseline may pin an intentional unsupported subset, but never normalize
+# wrong execution, a machine crash or a JIT failure into an accepted outcome.
+if grep -Eq '^(disagree|native-crash|jit-error) ' "$actual"; then
+  echo "backend differential contains execution failures (cannot baseline)" >&2
+  grep -E '^(disagree|native-crash|jit-error) ' "$actual" >&2
+  exit 1
+fi
+
+if [[ ! -f "$BASELINE" && "${1:-}" != "--update-baseline" ]]; then
   echo "error: missing baseline $BASELINE" >&2
   exit 1
 fi

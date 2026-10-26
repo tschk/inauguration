@@ -1714,6 +1714,68 @@ fn native_executable_emits_x86_64_linux_elf_file() {
 }
 
 #[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn native_linux_executes_mutable_global_relocations_all_profiles() {
+    let source = temp_path("linux-global-relocations.in");
+    fs::write(
+        &source,
+        r#"
+var word:String="λ雪";
+var words:[String]=["",word];
+var number:Int=19;
+var values:[Int]=[3,5,7];
+var nested:[[Int]]=[[11,13],[17,23]];
+fn change()->Int {
+    values[1]=values[1]+number;
+    number=number+1;
+    nested[1][0]=nested[0][1]+values[1];
+    return nested[1][0];
+}
+fn main()->Int {
+    if word!="λ雪" || words[0]!="" || words[1]!=word { return 4; }
+    word="changed";
+    if words[1]!="λ雪" || word!="changed" { return 5; }
+    if values[0]!=3 || values[2]!=7 || nested[1][1]!=23 { return 1; }
+    if change()!=37 || number!=20 || values[1]!=24 { return 2; }
+    if change()!=57 || number!=21 || values[1]!=44 { return 3; }
+    return 42;
+}
+"#,
+    )
+    .unwrap();
+    for explicit in [false, true] {
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let output = temp_path("linux-global-relocations-exe");
+            let mut request = default_request(
+                source.clone(),
+                CompileTarget::Native,
+                Some("main"),
+                Some(output.clone()),
+            );
+            request.profile = profile;
+            request.linkage = NativeLinkage::Executable;
+            request.target_triple = explicit.then(|| "x86_64-unknown-linux-gnu".into());
+            let report = compile_owned(&request);
+            assert!(report.success, "{explicit} {profile:?}: {report:?}");
+            let bytes = fs::read(&output).unwrap();
+            assert_eq!(&bytes[..4], b"\x7fELF");
+            let flags = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            assert_eq!(flags(64 + 4), 5, "code must be RX");
+            assert_eq!(flags(64 + 56 + 4), 6, "data must be RW, not executable");
+            assert_eq!(flags(64 + 112 + 4), 6, "stack must be non-executable");
+            let status = std::process::Command::new(&output).status().unwrap();
+            assert_eq!(status.code(), Some(42), "{explicit} {profile:?}");
+            fs::remove_file(output).unwrap();
+        }
+    }
+    fs::remove_file(source).unwrap();
+}
+
+#[test]
 fn native_executable_emits_aarch64_linux_elf_file() {
     let source_path = temp_path("aarch64-linux-executable.in");
     let out_path = temp_path("aarch64-linux-executable");
@@ -2027,7 +2089,7 @@ fn native_staticlib_emits_wasm32_module() {
 
 #[test]
 fn native_answer_entry_compiles_on_aarch64_host() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let source_path = temp_path("answer.in");
@@ -2056,7 +2118,7 @@ fn native_answer_entry_compiles_on_aarch64_host() {
 
 #[test]
 fn native_polyglot_answer_entries_compile_on_aarch64_host() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let cases = [
@@ -2116,7 +2178,7 @@ fn native_polyglot_answer_entries_compile_on_aarch64_host() {
 
 #[test]
 fn report_has_empty_external_invocations() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let source_path = temp_path("external.in");
@@ -2137,7 +2199,7 @@ fn report_has_empty_external_invocations() {
 
 #[test]
 fn bare_source_without_entry_keeps_main_through_optimization() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let source_path = temp_path("bare-main.in");
@@ -2171,7 +2233,7 @@ fn bare_source_without_entry_keeps_main_through_optimization() {
 /// and stays 0.
 #[test]
 fn float_entry_reports_its_value_without_an_exit_status() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let source_path = temp_path("float-main.in");
@@ -2196,7 +2258,7 @@ fn float_entry_reports_its_value_without_an_exit_status() {
 
 #[test]
 fn report_to_json_roundtrip_fields() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let source_path = temp_path("json.in");
@@ -2218,7 +2280,7 @@ fn report_to_json_roundtrip_fields() {
 
 #[test]
 fn report_carries_core_identity_metadata() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let source_path = temp_path("identity.in");
@@ -2247,7 +2309,7 @@ fn report_carries_core_identity_metadata() {
 
 #[test]
 fn report_defaults_identity_metadata_without_source_identity() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let source_path = temp_path("default-identity.in");
@@ -2272,7 +2334,7 @@ fn report_defaults_identity_metadata_without_source_identity() {
 
 #[test]
 fn jit_execution_does_not_reuse_report_cache() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let source_path = temp_path("cache.in");
@@ -2447,9 +2509,15 @@ fn cross_target_exit_stubs_reject_observable_entry_bodies() {
         );
         request.target_triple = Some(target.into());
         let result = super::native::compile_native(&module, "App", &request);
+        let marker = if target == "x86_64-unknown-linux-gnu" {
+            "unresolved runtime import"
+        } else {
+            "pure scalar exit entry"
+        };
         assert!(
-            matches!(result, Err(ref error) if error.contains("pure scalar exit entry")),
-            "{target}"
+            matches!(result, Err(ref error) if error.contains(marker)),
+            "{target}: {:?}",
+            result.as_ref().err()
         );
         assert!(!out.exists(), "{target} wrote an incomplete artifact");
     }
@@ -3020,7 +3088,7 @@ fn native_vector_clone_refuses_invalid_descriptors_and_failed_allocations() {
 
 #[test]
 fn owned_jit_uses_runtime_builtin_result_types() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (typ, expression, expected) in [
@@ -3070,7 +3138,7 @@ fn owned_jit_uses_runtime_builtin_result_types() {
 
 #[test]
 fn owned_jit_preserves_caught_scalar_payload_types() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (typ, value, expected) in [
@@ -3132,7 +3200,7 @@ fn owned_jit_rejects_constant_writes_in_exception_bodies() {
 
 #[test]
 fn owned_jit_preserves_error_type_through_calls_and_rethrows() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for profile in [
@@ -3233,7 +3301,7 @@ fn native_backends_reject_dynamic_call_targets() {
             let error = result.expect_err("dynamic call cannot silently return zero");
             assert!(error.contains("dynamic call target unsupported"), "{error}");
         }
-        if native_backend::native_subset_host_available() {
+        if native_backend::native_hosted_runtime_available() {
             let request = default_request(
                 PathBuf::from("dynamic-call.in"),
                 CompileTarget::Jit,
@@ -3287,7 +3355,7 @@ fn owned_jit_reports_uncaught_errors_before_decoding_results() {
 
 #[test]
 fn owned_jit_stops_effects_after_throwing_calls() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for profile in [
@@ -3318,7 +3386,7 @@ fn owned_jit_stops_effects_after_throwing_calls() {
 
 #[test]
 fn owned_jit_preserves_shadowed_bindings() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for profile in [
@@ -3363,7 +3431,7 @@ fn owned_jit_preserves_shadowed_bindings() {
 
 #[test]
 fn inlining_preserves_argument_call_evaluation() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for profile in [
@@ -3447,7 +3515,7 @@ fn inlining_preserves_argument_call_evaluation() {
 
 #[test]
 fn harden_jit_preserves_typed_float_results() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let source = temp_path("harden-float.in");
@@ -3579,7 +3647,29 @@ fn owned_rust_integer_inference_executes_backward_unsigned_constraints() {
 }
 
 #[test]
-fn owned_rust_integer_inference_keeps_valid_selfhost_compile_only() {
+fn owned_runtime_concat_preserves_string_catches_all_profiles() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    for text in [
+        include_str!("../../../conformance/errors/string-catch.in").replace("return 2;", "return 42;"),
+        "var trace:Int=0;fn left()->String{trace=trace*10+1;return \"λ\";}fn right()->String{trace=trace*10+2;return \"雪\";}fn main()->Int{let value=__inrt_str_concat(left(),right());if trace!=12{return 7;}try{throw value;}catch \"λ雪\"{return 42;}return 9;}".into(),
+    ] {
+        let path=temp_path("runtime-string-catch.in");
+        fs::write(&path,text).unwrap();
+        for profile in [EmitProfile::Default,EmitProfile::Lean,EmitProfile::Harden] {
+            let mut request=default_request(path.clone(),CompileTarget::Jit,Some("main"),None);
+            request.profile=profile;
+            let report=compile_owned(&request);
+            assert!(report.success && report.execution_started,"{profile:?}: {report:?}");
+            assert_eq!(report.eval_result,Some(EvalValue::Int(42)),"{report:?}");
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn owned_rust_integer_inference_retains_selfhost_ir_without_claiming_slice_codegen() {
     if !super::jit::host_supports_jit() {
         return;
     }
@@ -3594,8 +3684,18 @@ fn owned_rust_integer_inference_keeps_valid_selfhost_compile_only() {
         request.profile = profile;
         let report = compile_owned(&request);
         assert!(report.success, "{profile:?}: {report:?}");
-        assert_eq!(report.reason_code.as_deref(), Some("jit-compiled-only"));
+        assert_eq!(report.reason_code.as_deref(), Some("jit-ir-only"));
         assert!(!report.execution_started);
+        assert_eq!(report.backend_level, "owned-core-ir-only");
+        assert_eq!(report.runtime_level, "not-executed");
+        assert!(report.artifact_path.is_none());
+        assert!(
+            report
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("borrowed Rust slice ABI is not lowered")),
+            "{report:?}"
+        );
         assert_eq!(report.eval_exit_code, None);
         assert_eq!(report.eval_result, None);
     }
@@ -3604,7 +3704,7 @@ fn owned_rust_integer_inference_keeps_valid_selfhost_compile_only() {
 
 #[test]
 fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = temp_path("rust-static-ir-only.rs");
@@ -3648,7 +3748,7 @@ fn owned_rust_compile_only_reports_unsupported_global_data_without_execution() {
 
 #[test]
 fn owned_rust_compile_only_keeps_unsupported_type_contracts_without_executing() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let unsupported = "struct Row;trait Other{type Output;}impl Other for Row{type Output=i64;}trait Factory{type Output;fn make()->Self::Output;}impl Factory for Row{type Output=<Self as Other>::Output;fn make()->Self::Output{42}}fn main()->i64{<Row as Factory>::make()}";
@@ -3695,7 +3795,7 @@ fn owned_rust_compile_only_keeps_unsupported_type_contracts_without_executing() 
 
 #[test]
 fn owned_rust_compile_only_preserves_unsupported_pattern_shadowing() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -3725,7 +3825,7 @@ fn owned_rust_compile_only_preserves_unsupported_pattern_shadowing() {
 
 #[test]
 fn owned_rust_jit_verifies_before_execution() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = temp_path("rust-unresolved.rs");
@@ -3750,7 +3850,7 @@ fn owned_rust_jit_verifies_before_execution() {
 
 #[test]
 fn owned_rust_jit_inclusive_ranges_include_the_endpoint() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (source, expected) in [
@@ -3800,7 +3900,7 @@ fn owned_rust_jit_inclusive_ranges_include_the_endpoint() {
 
 #[test]
 fn owned_rust_jit_loop_temporaries_preserve_user_names() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (source, expected) in [
@@ -3846,7 +3946,7 @@ fn owned_rust_jit_loop_temporaries_preserve_user_names() {
 
 #[test]
 fn owned_rust_jit_complement_preserves_operand_type() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (source, expected) in [
@@ -3903,7 +4003,7 @@ fn owned_rust_jit_complement_preserves_operand_type() {
 
 #[test]
 fn owned_rust_jit_complement_refuses_nonintegral_operands() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -3933,7 +4033,7 @@ fn owned_rust_jit_complement_refuses_nonintegral_operands() {
 
 #[test]
 fn owned_in_jit_bitwise_complement_handles_negative_operands() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3950,7 +4050,7 @@ fn owned_in_jit_bitwise_complement_handles_negative_operands() {
 
 #[test]
 fn owned_rust_jit_preserves_conditional_returns_and_tail_values() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -3996,7 +4096,7 @@ fn owned_rust_jit_preserves_conditional_returns_and_tail_values() {
 
 #[test]
 fn owned_rust_jit_refuses_missing_values() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -4019,7 +4119,7 @@ fn owned_rust_jit_refuses_missing_values() {
 
 #[test]
 fn owned_rust_jit_unit_tails_execute_in_the_enclosing_function() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -4047,7 +4147,7 @@ fn owned_rust_jit_unit_tails_execute_in_the_enclosing_function() {
 
 #[test]
 fn owned_rust_jit_tail_branches_preserve_primitive_result_types() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (source, expected) in [
@@ -4081,7 +4181,7 @@ fn owned_rust_jit_tail_branches_preserve_primitive_result_types() {
 
 #[test]
 fn owned_rust_jit_match_guards_select_the_first_successful_arm() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -4107,7 +4207,7 @@ fn owned_rust_jit_match_guards_select_the_first_successful_arm() {
 
 #[test]
 fn owned_guarded_matches_share_lowering_across_frontends() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for fixture in ["match-guard-effects.in", "match-guard.icore"] {
@@ -4127,7 +4227,7 @@ fn owned_guarded_matches_share_lowering_across_frontends() {
 
 #[test]
 fn owned_match_guards_require_boolean_conditions() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (suffix, source) in [
@@ -4161,7 +4261,7 @@ fn owned_match_guards_require_boolean_conditions() {
 
 #[test]
 fn raw_native_guard_lowering_preserves_effect_order() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let source = include_str!("../../../conformance/control-flow/match-guard-effects.in");
@@ -4178,7 +4278,7 @@ fn raw_native_guard_lowering_preserves_effect_order() {
 
 #[test]
 fn owned_rust_user_range_is_not_replaced_by_numeric_iteration() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = temp_path("rust-user-range.rs");
@@ -4197,7 +4297,7 @@ fn owned_rust_user_range_is_not_replaced_by_numeric_iteration() {
 
 #[test]
 fn owned_rust_range_syntax_does_not_call_a_user_range_function() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = temp_path("rust-range-syntax.rs");
@@ -4215,7 +4315,7 @@ fn owned_rust_range_syntax_does_not_call_a_user_range_function() {
 
 #[test]
 fn owned_rust_noninlined_range_call_retains_its_array_abi() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = temp_path("rust-range-array-abi.rs");
@@ -4237,7 +4337,7 @@ fn owned_rust_noninlined_range_call_retains_its_array_abi() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn raw_x86_user_range_iterator_executes_the_function_result() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let source = "fn range(start: i64, end: i64) -> [i64; 2] { if start == 1 { return [10, 20]; } else { return [30, 40]; } } fn main() -> i64 { let mut sum = 0; for item in range(1, 2) { sum = sum + item; } return sum; }";
@@ -4254,7 +4354,7 @@ fn raw_x86_user_range_iterator_executes_the_function_result() {
 
 #[test]
 fn owned_rust_open_ranges_iterate_from_their_start() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (source, expected) in [
@@ -4295,7 +4395,7 @@ fn owned_rust_open_ranges_iterate_from_their_start() {
 
 #[test]
 fn owned_in_open_ranges_evaluate_the_start_once() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -4312,7 +4412,7 @@ fn owned_in_open_ranges_evaluate_the_start_once() {
 
 #[test]
 fn owned_range_iterators_do_not_invent_missing_bounds() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (suffix, source) in [
@@ -4353,7 +4453,7 @@ fn owned_range_iterators_do_not_invent_missing_bounds() {
 
 #[test]
 fn owned_rust_array_repeats_preserve_count() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (source, expected) in [
@@ -4411,7 +4511,7 @@ fn owned_rust_array_repeats_preserve_count() {
 
 #[test]
 fn owned_array_repeats_preserve_effect_order() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (source, expected) in [
@@ -4476,7 +4576,7 @@ fn owned_array_repeats_preserve_effect_order() {
 
 #[test]
 fn owned_array_repeat_counts_require_supported_constants() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -4501,7 +4601,7 @@ fn owned_array_repeat_counts_require_supported_constants() {
 
 #[test]
 fn owned_class_array_repeats_use_field_types() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -4518,7 +4618,7 @@ fn owned_class_array_repeats_use_field_types() {
 
 #[test]
 fn owned_scalar_struct_parameters_preserve_layout_and_stack_arguments() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -4542,7 +4642,7 @@ fn owned_scalar_struct_parameters_preserve_layout_and_stack_arguments() {
 
 #[test]
 fn owned_rust_compile_time_constants_copy_values_at_use() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (source, expected) in [
@@ -4575,7 +4675,7 @@ fn owned_rust_compile_time_constants_copy_values_at_use() {
 
 #[test]
 fn owned_large_repeat_respects_native_frame_limits() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = temp_path("large-repeat.rs");
@@ -4605,7 +4705,7 @@ fn owned_large_repeat_respects_native_frame_limits() {
 
 #[test]
 fn owned_rust_indexed_compound_assignments_store_results() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (op, initial, rhs, expected) in [
@@ -4643,7 +4743,7 @@ fn owned_rust_indexed_compound_assignments_store_results() {
 
 #[test]
 fn owned_indexed_compound_stores_preserve_value_first_effects() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (source, expected) in [
@@ -4688,7 +4788,7 @@ fn owned_indexed_compound_stores_preserve_value_first_effects() {
 
 #[test]
 fn owned_rust_float_indexed_compound_assignment() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = temp_path("float-indexed-compound.rs");
@@ -4710,7 +4810,7 @@ fn owned_rust_float_indexed_compound_assignment() {
 
 #[test]
 fn owned_rust_field_compound_assignments_update_original_storage() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (op, initial, rhs, expected) in [
@@ -4748,7 +4848,7 @@ fn owned_rust_field_compound_assignments_update_original_storage() {
 
 #[test]
 fn owned_field_compounds_read_after_rhs_effects() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = temp_path("field-compound-effects.in");
@@ -4766,7 +4866,7 @@ fn owned_field_compounds_read_after_rhs_effects() {
 
 #[test]
 fn owned_rust_float_field_compound_assignment() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = temp_path("float-field-compound.rs");
@@ -4784,7 +4884,7 @@ fn owned_rust_float_field_compound_assignment() {
 
 #[test]
 fn owned_field_compound_throw_preserves_original_field() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let path = temp_path("field-compound-throw.in");
@@ -4802,7 +4902,7 @@ fn owned_field_compound_throw_preserves_original_field() {
 
 #[test]
 fn owned_rust_boolean_bitwise_operations_preserve_boolean_results() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (source, expected) in [
@@ -4846,7 +4946,7 @@ fn owned_rust_boolean_bitwise_operations_preserve_boolean_results() {
 
 #[test]
 fn owned_boolean_bitwise_operators_evaluate_both_operands() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (op, left, right, negate) in [
@@ -4880,7 +4980,7 @@ fn owned_boolean_bitwise_operators_evaluate_both_operands() {
 
 #[test]
 fn owned_bitwise_operands_do_not_mix_boolean_float_and_integer_types() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -4930,7 +5030,7 @@ fn owned_bitwise_operands_do_not_mix_boolean_float_and_integer_types() {
 
 #[test]
 fn owned_c_for_loops_preserve_updates_and_control_flow() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -4993,7 +5093,7 @@ fn owned_c_for_loops_preserve_updates_and_control_flow() {
 
 #[test]
 fn owned_c_unsupported_loop_parts_are_refused_instead_of_dropped() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5018,7 +5118,7 @@ fn owned_c_unsupported_loop_parts_are_refused_instead_of_dropped() {
 
 #[test]
 fn owned_c_global_storage_is_shared_and_zero_initialized() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5053,7 +5153,7 @@ fn owned_c_global_storage_is_shared_and_zero_initialized() {
 
 #[test]
 fn owned_c_global_definitions_preserve_refusal_boundaries() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5080,7 +5180,7 @@ fn owned_c_global_definitions_preserve_refusal_boundaries() {
 
 #[test]
 fn owned_cpp_compound_assignment_reads_target_after_rhs_once() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (op, expected) in [
@@ -5155,7 +5255,7 @@ fn owned_cpp_compound_assignment_reads_target_after_rhs_once() {
 
 #[test]
 fn owned_c_integer_literal_radices_reach_native_unchanged() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5206,7 +5306,7 @@ fn owned_c_integer_literal_radices_reach_native_unchanged() {
 
 #[test]
 fn owned_c_local_declarators_preserve_order_dependencies_and_scope() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5247,7 +5347,7 @@ fn owned_c_local_declarators_preserve_order_dependencies_and_scope() {
 
 #[test]
 fn owned_c_unsupported_later_declarators_are_not_discarded() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5273,7 +5373,7 @@ fn owned_c_unsupported_later_declarators_are_not_discarded() {
 
 #[test]
 fn owned_c_numeric_boolean_conversions_preserve_control_flow_and_effects() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5325,7 +5425,7 @@ fn owned_c_numeric_boolean_conversions_preserve_control_flow_and_effects() {
 
 #[test]
 fn owned_non_c_frontends_keep_strict_boolean_operands() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (extension, source) in [
@@ -5356,7 +5456,7 @@ fn owned_non_c_frontends_keep_strict_boolean_operands() {
 
 #[test]
 fn raw_c_floating_conditions_preserve_zero_and_nan_truth_values() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (value, expected) in [
@@ -5397,7 +5497,7 @@ fn raw_c_floating_conditions_preserve_zero_and_nan_truth_values() {
 
 #[test]
 fn raw_c_boolean_stores_use_field_and_element_types() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -5420,7 +5520,7 @@ fn raw_c_boolean_stores_use_field_and_element_types() {
 
 #[test]
 fn owned_cpp_condition_initializers_keep_effects_bindings_and_scope() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -5448,7 +5548,7 @@ fn owned_cpp_condition_initializers_keep_effects_bindings_and_scope() {
 
 #[test]
 fn owned_cpp_scalar_conversion_does_not_guess_objects_or_references() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -5475,7 +5575,7 @@ fn owned_cpp_scalar_conversion_does_not_guess_objects_or_references() {
 
 #[test]
 fn owned_c_parameter_assignment_reuses_the_parameter_frame_slot() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5506,7 +5606,7 @@ fn owned_c_parameter_assignment_reuses_the_parameter_frame_slot() {
 
 #[test]
 fn owned_stack_arguments_survive_later_argument_calls() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let source = r#"int helper(int a, int b, int c, int d, int e, int f, int g, int h, int i) {
@@ -5542,7 +5642,7 @@ int main() { return combine(0,0,0,0,0,0,0,0,4,helper(0,0,0,0,0,0,0,0,99)); }
 
 #[test]
 fn owned_native_calls_stage_many_scalar_and_aggregate_words() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let params = (0..32)
@@ -5589,7 +5689,7 @@ fn owned_native_calls_stage_many_scalar_and_aggregate_words() {
 
 #[test]
 fn owned_c_decimal_floating_literals_reach_native_values() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5638,7 +5738,7 @@ fn owned_c_decimal_floating_literals_reach_native_values() {
 
 #[test]
 fn owned_cpp_while_declarations_reevaluate_and_keep_scope() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -5671,7 +5771,7 @@ fn owned_cpp_while_declarations_reevaluate_and_keep_scope() {
 
 #[test]
 fn owned_c_do_while_keeps_posttest_effects_continue_and_scope() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5711,7 +5811,7 @@ fn owned_c_do_while_keeps_posttest_effects_continue_and_scope() {
 
 #[test]
 fn owned_c_numeric_conversions_preserve_effects_and_truncate() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5755,7 +5855,7 @@ fn owned_c_numeric_conversions_preserve_effects_and_truncate() {
 
 #[test]
 fn owned_c_numeric_casts_preserve_value_and_effects() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5838,7 +5938,7 @@ fn owned_c_numeric_casts_preserve_value_and_effects() {
 #[test]
 fn raw_unsigned_word_operations_preserve_values_and_checked_failure_effects() {
     use crate::core_ir::Expr;
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (op, expected) in [("udiv", i64::MAX), ("urem", 1), ("lshr", i64::MAX)] {
@@ -5924,7 +6024,7 @@ fn owned_c_unsigned_expressions_refuse_unrepresented_mixed_integer_ranks() {
 
 #[test]
 fn owned_c_unsigned_integer_expressions_preserve_width_order_and_effects() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for extension in ["c", "cpp"] {
@@ -5997,7 +6097,7 @@ fn owned_c_numeric_casts_refuse_pointer_object_and_extended_types() {
 
 #[test]
 fn owned_rust_integer_casts_truncate_and_extend() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -6037,7 +6137,7 @@ fn owned_rust_integer_casts_truncate_and_extend() {
 
 #[test]
 fn owned_rust_floating_width_casts_round_and_keep_values() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -6071,7 +6171,7 @@ fn owned_rust_floating_width_casts_round_and_keep_values() {
 
 #[test]
 fn owned_signed_shift_sources_preserve_sign_and_compound_updates() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (extension, source) in [
@@ -6115,7 +6215,7 @@ fn owned_signed_shift_sources_preserve_sign_and_compound_updates() {
 
 #[test]
 fn owned_in_index_compound_updates_evaluate_place_once_before_rhs() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -6152,7 +6252,7 @@ fn owned_in_index_compound_updates_evaluate_place_once_before_rhs() {
 
 #[test]
 fn owned_global_field_projection_does_not_discard_constructor_effects() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for profile in [
@@ -7684,7 +7784,8 @@ interface Reader {
 interface Writer {
  fn write(value:Int)->void
 }
-fn main()->Int{return 42;}
+var counter:Int=40;
+fn main()->Int{counter+=1;return counter;}
 "#;
     let canonical = crate::in_canonical::canonicalize_in_source(original).unwrap();
     let plain = "fn main()->Int{return 42;}";
@@ -7725,8 +7826,39 @@ fn main()->Int{return 42;}
                 } else {
                     assert_eq!(&bytes[..4], b"\x7fELF");
                 }
-                let value: serde_json::Value =
+                let mut value: serde_json::Value =
                     serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
+                if sci {
+                    let layout: crate::boundary_ir::SciLayout =
+                        serde_json::from_value(value["sci_layout"].clone()).unwrap();
+                    use sha2::Digest;
+                    assert_eq!(
+                        layout.artifact_sha256,
+                        sha2::Sha256::digest(&bytes)
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                    );
+                    assert_eq!(layout.image_size, bytes.len() as u64);
+                    assert_eq!(layout.load_base, 0x100000);
+                    assert_eq!(
+                        value["code_sections"],
+                        serde_json::json!([
+                            {"name":".text","offset":layout.text_offset,"size":layout.text_size,"flags":"rx"}
+                        ])
+                    );
+                    assert_eq!(
+                        value["data_sections"],
+                        serde_json::json!([
+                            {"name":".data","offset":layout.data_offset,"size":layout.data_size,"flags":"rw"}
+                        ])
+                    );
+                    assert_eq!(layout.data_size, 8);
+                    assert_eq!((layout.load_base + layout.data_offset) % 4096, 0);
+                    assert_eq!(value["memory"]["static_data"], 8);
+                } else {
+                    assert!(value.get("sci_layout").is_none());
+                }
                 assert_eq!(value["target"], "x86_64-unknown-none");
                 assert_eq!(value["entry"], "main");
                 assert_eq!(
@@ -7744,6 +7876,11 @@ fn main()->Int{return 42;}
                         {"name":"memory","capability_type":"PhysicalMemory","args":["discover","map","protect"]}
                     ])
                 );
+                // Only the declaration metadata is shared between object and
+                // raw SCI artifacts; their lowered byte layouts differ.
+                for field in ["code_sections", "data_sections", "sci_layout", "memory"] {
+                    value.as_object_mut().unwrap().remove(field);
+                }
                 if let Some(expected) = &baseline {
                     assert_eq!(&value, expected);
                 } else {
@@ -9068,7 +9205,7 @@ fn rust_retained_neg_dispatch_executes_generic_owned_shared_mutable_and_field_pr
 
 #[test]
 fn retained_neg_bounds_do_not_discharge_unrelated_or_wrong_source_obligations() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -9171,7 +9308,7 @@ fn retained_neg_post_inline_failure_aborts_before_execution() {
 
 #[test]
 fn directory_rust_crate_root_is_parsed_once_and_retains_neg_binding() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let root = temp_path("retained-root-project");
@@ -9820,7 +9957,7 @@ fn rust_concrete_aliases_and_scoped_imports_preserve_values() {
 
 #[test]
 fn rust_external_module_calls_preserve_function_namespaces_across_profiles() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (name, files) in [
@@ -10321,7 +10458,7 @@ fn rust_fixed_array_external_count_errors_survive_unused_functions() {
 
 #[test]
 fn rust_constant_negation_preserves_cold_values_and_nominal_dispatch() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (name, source) in [
@@ -10493,7 +10630,7 @@ fn rust_unused_alias_declarations_refuse_before_entry_pruning() {
 
 #[test]
 fn rust_unused_alias_declarations_preserve_valid_and_deferred_scopes() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -10534,7 +10671,7 @@ fn rust_unused_alias_declarations_preserve_valid_and_deferred_scopes() {
 
 #[test]
 fn rust_generic_alias_applications_execute_with_source_type_semantics() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -10680,7 +10817,7 @@ fn rust_unused_generic_alias_parameters_refuse_before_entry_pruning() {
 
 #[test]
 fn rust_f32_values_preserve_source_width_and_rounding() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -10728,7 +10865,7 @@ fn rust_f32_values_preserve_source_width_and_rounding() {
 
 #[test]
 fn rust_f32_aggregate_values_preserve_width() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -10815,7 +10952,7 @@ fn rust_f32_aggregate_values_preserve_width() {
 
 #[test]
 fn rust_f32_generic_call_contexts_preserve_precision() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -10894,7 +11031,7 @@ fn rust_f32_generic_call_contexts_preserve_precision() {
 
 #[test]
 fn mutable_captured_closures_refuse_before_execution() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -10953,7 +11090,7 @@ fn captured_environment_refusal_survives_native_normalization() {
 
 #[test]
 fn rust_captured_match_guards_preserve_scope_and_execute() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -10999,7 +11136,7 @@ fn rust_captured_match_guards_preserve_scope_and_execute() {
 
 #[test]
 fn rust_integer_float_casts_preserve_precision_and_sign() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -11069,7 +11206,7 @@ fn rust_integer_float_casts_preserve_precision_and_sign() {
 
 #[test]
 fn rust_integer_float_casts_preserve_default_integer_range_refusals() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -11113,7 +11250,7 @@ fn rust_integer_float_casts_preserve_default_integer_range_refusals() {
 
 #[test]
 fn rust_integer_literal_casts_infer_source_types_and_preserve_explicit_sources() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -11171,7 +11308,7 @@ fn rust_integer_literal_casts_infer_source_types_and_preserve_explicit_sources()
 
 #[test]
 fn rust_integer_literal_casts_refuse_invalid_sources_before_execution() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -11231,7 +11368,7 @@ fn rust_integer_literal_casts_refuse_invalid_sources_before_execution() {
 
 #[test]
 fn rust_ieee_bit_conversions_preserve_transfers_and_effects() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let patterns32 = [
@@ -11305,7 +11442,7 @@ fn rust_ieee_bit_conversions_preserve_transfers_and_effects() {
 
 #[test]
 fn rust_ieee_bit_conversions_refuse_invalid_primitive_sources() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -11351,7 +11488,7 @@ fn rust_ieee_bit_conversions_refuse_invalid_primitive_sources() {
 
 #[test]
 fn rust_ieee_trait_static_calls_preserve_owned_scope_and_dispatch_priority() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -11402,7 +11539,7 @@ fn rust_ieee_trait_static_calls_preserve_owned_scope_and_dispatch_priority() {
 
 #[test]
 fn rust_ieee_trait_static_calls_refuse_invalid_source_contracts() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for source in [
@@ -11492,7 +11629,7 @@ fn rust_retained_neg_result_casts_preserve_operand_effects_once() {
 
 #[test]
 fn rust_nested_function_aliases_preserve_lexical_callable_identity() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     let cases = [
@@ -11574,7 +11711,7 @@ fn rust_nested_function_aliases_preserve_lexical_callable_identity() {
 
 #[test]
 fn rust_nested_function_qualification_preserves_privacy_and_conditional_refusal() {
-    if !native_backend::native_subset_host_available() {
+    if !native_backend::native_hosted_runtime_available() {
         return;
     }
     for (name, source) in [

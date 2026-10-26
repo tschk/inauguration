@@ -4,7 +4,8 @@
 
 1. **Bytecode VM subset** (all hosts): supported Core IR fronts lower to textual SIL, then to `.bca` bytecode assembly, then execute in the in-tree stack VM.
 2. **Native exit-stub subset** (`aarch64-apple-darwin` only): scalar-return entry functions in the Core IR subset are const-evaluated through the bytecode pipeline and emitted as a tiny owned Mach-O executable that exits with the evaluated code. No `swiftc`, `clang`, or linker invocation occurs on this path.
-3. **Target-triple object/module subsets**: selected non-host triples emit inspectable object, archive, module, or minimal executable artifacts for const-evaluable scalar entry functions without invoking an external linker or language compiler.
+3. **Linux x86_64 executable subset**: real function bodies, writable globals and owned ELF process startup/exit; hosted runtime imports fail closed.
+4. **Target-triple object/module subsets**: selected non-host triples emit inspectable object, archive, module, or minimal executable artifacts for const-evaluable scalar entry functions without invoking an external linker or language compiler.
 
 All languages including Swift go through the unified Core IR pipeline. The old `swiftc`/SwiftPM fallback has been removed — Swift is now a Tree-sitter Core IR front like all other languages.
 
@@ -26,6 +27,7 @@ All languages including Swift go through the unified Core IR pipeline. The old `
 
 | Host | `implemented` | `stage` | `reason_code` | `artifact_kind` |
 |------|---------------|---------|---------------|-----------------|
+| `x86_64-unknown-linux-gnu` host executable | `true` | `owned-native-subset` | `native-x86_64-linux-subset` | `elf-executable` |
 | `aarch64-apple-darwin` host executable | `true` | `owned-native-subset` | `native-aarch64-subset` | `mach-o-executable` |
 | `aarch64-apple-darwin` staticlib | `true` | `owned-native-subset-aarch64-static` | `native-object-subset` | `mach-o-static-archive` |
 | `aarch64-apple-darwin` app bundle | `true` | `owned-native-subset-aarch64-app` | `native-aarch64-darwin-app-subset` | `.app` bundle |
@@ -40,7 +42,7 @@ All languages including Swift go through the unified Core IR pipeline. The old `
 | `wasm32-unknown-unknown` staticlib | `true` | `owned-object-subset` | `native-object-subset` | `wasm-module` |
 | other | `false` | `contract-only` | `native-backend-not-implemented` | `none` |
 
-On Apple Silicon macOS, `in compile --path apps/polyglot-sample/sample.in --target native --entry answer --out target/in/answer-sample` produces an owned executable that exits `42`. On Linux and other hosts, the same command reports `native-backend-not-implemented` and bytecode remains the primary owned executable path.
+On Apple Silicon macOS, `in compile --path apps/polyglot-sample/sample.in --target native --entry answer --out target/in/answer-sample` produces an owned executable that exits `42`. On Linux x86_64, the same command lowers the entry and its reachable functions into an owned ELF executable. Other unsupported hosts report `native-backend-not-implemented`.
 
 `in backend --path <file> --target bytecode --json` reports the owned bytecode backend and artifact facts for supported inputs. `in backend --target native --json` mirrors the host-specific native status above.
 
@@ -50,7 +52,7 @@ The object backends include `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-g
 
 `in compile --target native --target-triple aarch64-apple-darwin --linkage static-lib --entry answer --out target/libanswer.a` emits an `ar` archive containing a Mach-O ARM64 object member with an exported `_answer` symbol. The archive contains real Core IR function bodies, a linker index, and external call relocations. Integer parameters, multiple exports, and libc calls are verified by linking and running C callers. Writable-global references and degraded exports are rejected until the object writer can represent them.
 
-`in compile --target native --target-triple x86_64-unknown-linux-gnu --linkage executable --entry answer --out target/answer` emits a minimal ELF64 Linux executable that exits with the const-evaluated scalar value through the Linux `exit` syscall. This is not general x86_64 native lowering: it has no linker, libc, dynamic loader, relocations, argv/envp contract, heap, imports, or general function ABI support.
+`in compile --target native --target-triple x86_64-unknown-linux-gnu --linkage executable --entry answer --out target/answer` lowers real x86_64 function bodies into a static ELF64 Linux executable. The host-default Linux x86_64 route uses the same writer. A SysV call stub invokes a no-argument Int, Bool or Void entry and exits through the Linux syscall with its result. Code and string literals occupy RX pages; initialized mutable globals and nested array/string pointer payloads occupy separate RW, non-executable pages with validated section-relative relocations. The stack is non-executable. Default, Lean and Harden execute the same source semantics. Owned `malloc` uses anonymous Linux mappings reclaimed on process exit; owned `memcpy` copies bytes and `abort` terminates the process with status 134. This subset has no dynamic loader, general libc imports, argv/envp contract, deallocation or exception runtime: unknown imports and unsupported runtime operations fail compilation.
 
 `aarch64-unknown-linux-gnu` and `armv7-unknown-linux-gnueabihf` also emit minimal Linux executables for the same const-evaluated scalar subset. They use target-native Linux `exit` syscalls and are checked structurally on all hosts, with QEMU runtime checks when `qemu-aarch64` or `qemu-arm` is installed.
 
@@ -59,6 +61,15 @@ The object backends include `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-g
 `in compile --target native --target-triple aarch64-apple-darwin --linkage executable --entry answer --out target/Answer.app` emits a macOS `.app` bundle containing the owned AArch64 Mach-O executable plus `Info.plist` and `PkgInfo`. A normal host executable path without `.app` remains the host native route.
 
 `in compile --target native --target-triple x86_64-unknown-linux-gnu --linkage executable --entry answer --out target/Answer.AppDir` emits a Linux AppDir with an `AppRun` ELF executable and desktop entry. `.AppImage` remains fail-closed with `native-package-not-implemented` until the repository owns an AppImage runtime and SquashFS writer.
+
+Boot images retain the historical writable-data address 0x200000 when the
+trampoline, header, code and export table fit before it. Larger images select the
+next 4 KiB boundary after that loaded prefix and re-lower all global references
+and initialized pointer payloads to the computed address. The boot-header
+extension at [64..80] reports the actual data address and size. The component
+metadata sidecar's `boot_layout` records load/code/export/data ranges and file
+offsets; callers must reserve those ranges before placing payloads or a heap.
+Packing still rejects overlap, misalignment and physical ranges beyond 4 GiB.
 
 Explicit `--target-triple` requests fail closed when the owned backend has no target/linkage implementation. They do not fall through to the host Mach-O path.
 
@@ -98,3 +109,10 @@ The native backend is the stage after source fronts, Core IR, textual SIL, and S
 - `in-cli/src/native_emit/`: emits the aarch64 Mach-O exit stub.
 - `in-cli/src/compile_cache.rs`: owns compile metadata cache under `target/in/cache/`.
 - `in-cli/src/owned_compile.rs`: owned `in compile` pipeline and reports.
+
+Rust borrowed slice types currently retain an explicit unsupported ABI proof.
+A default compile-only Rust request can preserve valid typed Core IR as
+`jit-ir-only` / `owned-core-ir-only` / `not-executed`; it does not claim native
+slice code or an executable artifact. Explicit execution requests refuse that
+proof. Owned String, Array and Vector length operations execute using their
+existing representations; opaque Rust slices do not inherit an array layout.
