@@ -939,7 +939,7 @@ pub(crate) fn lower_array_copy(
         return Err("native-lower: array copy requires an Array".into());
     };
     if !(matches!(elem.canonical(), Typ::Int | Typ::Float | Typ::Bool)
-        || (count == 0 && elem.canonical() == Typ::Void))
+        || count == 0 && elem.canonical() == Typ::Void)
     {
         return Err("native-lower: array copy requires scalar elements".into());
     }
