@@ -90,6 +90,8 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        // To prevent "Text file busy" error, give the OS a moment before executing.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         let status = std::process::Command::new(&path).status().unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(
