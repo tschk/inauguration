@@ -300,3 +300,55 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_ir::{Decl, Typ};
+
+    #[test]
+    fn test_dos_guards() {
+        // Test depth limit
+        assert!(depth_ok(MAX_EMIT_DEPTH).is_ok());
+        let err = depth_ok(MAX_EMIT_DEPTH + 1).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "emit aborted: Core IR nesting exceeds {} (DoS guard)",
+                MAX_EMIT_DEPTH
+            )
+        );
+
+        // Test node limit
+        let mut nodes = MAX_EMIT_NODES;
+        let err = bump(&mut nodes).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "emit aborted: Core IR exceeds {} nodes (DoS guard)",
+                MAX_EMIT_NODES
+            )
+        );
+    }
+
+    #[test]
+    fn test_count_decl_depth_limit() {
+        let mut nodes = 0;
+        let decl = Decl::Global {
+            name: "test".into(),
+            typ: Typ::Void,
+            init: None,
+            mutable: false,
+            constant_value: false,
+        };
+
+        let err = count_decl(&decl, MAX_EMIT_DEPTH + 1, &mut nodes).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "emit aborted: Core IR nesting exceeds {} (DoS guard)",
+                MAX_EMIT_DEPTH
+            )
+        );
+    }
+}
