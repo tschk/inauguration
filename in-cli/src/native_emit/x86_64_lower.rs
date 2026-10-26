@@ -3957,7 +3957,10 @@ fn lower_call_expr(
     if matches!(
         target_name.as_str(),
         "vector-push" | "vector-extend" | "vector-clear"
-    ) && ctx.functions.get(&target_name).map_or(true, |function| function.body.is_empty())
+    ) && !ctx
+        .functions
+        .get(&target_name)
+        .is_some_and(|function| !function.body.is_empty())
     {
         let expected_args = if target_name == "vector-clear" { 1 } else { 2 };
         if args.len() != expected_args {

@@ -938,7 +938,8 @@ pub(crate) fn lower_array_copy(
     let Some(Typ::Array(elem)) = native_expr_type(expr, ctx, functions) else {
         return Err("native-lower: array copy requires an Array".into());
     };
-    if !(matches!(elem.canonical(), Typ::Int | Typ::Float | Typ::Bool) || count == 0 && elem.canonical() == Typ::Void)
+    if !matches!(elem.canonical(), Typ::Int | Typ::Float | Typ::Bool)
+        && !(count == 0 && elem.canonical() == Typ::Void)
     {
         return Err("native-lower: array copy requires scalar elements".into());
     }
