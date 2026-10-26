@@ -11682,3 +11682,37 @@ fn rust_nested_function_qualification_preserves_privacy_and_conditional_refusal(
         fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+fn test_finalize_report() {
+    let mut request = default_request(PathBuf::from("test.rs"), CompileTarget::Native, None, None);
+    request.jobs = 2;
+    let started = Instant::now();
+    let mut base = base_report(&request, request.jobs, started);
+    base.success = true;
+
+    // Test success case
+    let cwd = std::path::Path::new(".");
+    let report_success = finalize_report(base.clone(), started, cwd, "hash1");
+    assert!(report_success.success);
+    assert!(report_success.timing_waves_us.is_some());
+    assert_eq!(report_success.timing_waves_us.as_ref().unwrap().len(), 2);
+
+    // Test forbidden invocation case
+    let _token = crate::external_guard::ExternalInvocationGuard::enter();
+    crate::external_guard::ExternalInvocationGuard::record("rustc");
+    let report_failure = finalize_report(base.clone(), started, cwd, "hash2");
+    assert!(!report_failure.success);
+    assert_eq!(
+        report_failure.reason_code.as_deref(),
+        Some("external-tool-invoked")
+    );
+    assert_eq!(
+        report_failure.reason.as_deref(),
+        Some("forbidden external tool invocation(s): rustc")
+    );
+    assert_eq!(
+        report_failure.error.as_deref(),
+        Some("forbidden external tool invocation(s): rustc")
+    );
+}
