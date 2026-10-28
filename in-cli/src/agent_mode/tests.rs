@@ -14,12 +14,16 @@ impl Drop for TempFile {
 }
 
 fn temp_source(name: &str, suffix: &str, source: &str) -> TempFile {
+    // macOS clocks tick in microseconds, so parallel tests sharing `name` can
+    // read the same timestamp; the counter keeps their paths distinct.
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX_EPOCH")
         .as_nanos();
     let path = std::env::temp_dir().join(format!(
-        "inauguration-agent-mode-{}-{unique}-{name}.{suffix}",
+        "inauguration-agent-mode-{}-{unique}-{seq}-{name}.{suffix}",
         std::process::id()
     ));
     fs::write(&path, source).expect("write temp source");
