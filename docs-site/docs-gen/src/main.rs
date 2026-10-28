@@ -624,6 +624,10 @@ mod tests {
 
         let mut out = Vec::new();
         let result = collect_markdown(&src_dir, &src_dir, &mut out);
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+
+        let mut perms = fs::metadata(&file_path).unwrap().permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(&file_path, perms).unwrap();
     }
 }
