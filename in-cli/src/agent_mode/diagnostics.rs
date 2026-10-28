@@ -506,3 +506,40 @@ pub(super) fn missing_capability_from_message(message: &str) -> Option<String> {
         .map(|(_, capability)| capability.trim().to_string())
         .filter(|capability| !capability.is_empty())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_explain_diagnostic() {
+        let expl = explain_diagnostic(DEGRADATION_SKIPPED_FUNCTION).unwrap();
+        assert_eq!(expl.code, DEGRADATION_SKIPPED_FUNCTION);
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
+        let expl = explain_diagnostic(DEGRADATION_UNRESOLVED_CALL).unwrap();
+        assert_eq!(expl.code, DEGRADATION_UNRESOLVED_CALL);
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
+        let expl = explain_diagnostic("AGENT_NO_MAIN").unwrap();
+        assert_eq!(expl.code, "AGENT_NO_MAIN");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
+        let expl = explain_diagnostic("AGENT_PARSE_FAILED").unwrap();
+        assert_eq!(expl.code, "AGENT_PARSE_FAILED");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Error);
+        let expl = explain_diagnostic("AGENT_SWIFT_SIL_ROUTE").unwrap();
+        assert_eq!(expl.code, "AGENT_SWIFT_SIL_ROUTE");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Info);
+        let expl = explain_diagnostic("AGENT_IO_ERROR").unwrap();
+        assert_eq!(expl.code, "AGENT_IO_ERROR");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Error);
+        let expl = explain_diagnostic("AGENT_MISSING_CAPABILITY").unwrap();
+        assert_eq!(expl.code, "AGENT_MISSING_CAPABILITY");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
+        let expl = explain_diagnostic("INPKG001").unwrap();
+        assert_eq!(expl.code, "INPKG001");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
+        let expl = explain_diagnostic("INPKG002").unwrap();
+        assert_eq!(expl.code, "INPKG002");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
+        assert!(explain_diagnostic("UNKNOWN_CODE").is_none());
+    }
+}

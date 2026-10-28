@@ -41,6 +41,218 @@ fn default_request(
 }
 
 #[test]
+fn rust_borrowed_slices_preserve_lengths_and_element_values() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    for source in [
+        "const NAMES:&[&str]=&[\"four\",\"π\"];fn main()->i64{(NAMES[0].len()*10+NAMES[1].len())as i64}",
+        "fn sum(items:&[i64])->i64{items[0]+items[1]}fn main()->i64{sum(&[20,22])}",
+        "fn put(items:&mut[i64]){items[0]=40;}fn main()->i64{let mut items=[20,2];put(&mut items);items[0]+items[1]}",
+    ] {
+        let path = temp_path("borrowed-slice.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.execution_started,
+                "{source}: {report:?}"
+            );
+            assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{source}");
+            let out = temp_path("borrowed-slice-native");
+            request.target = CompileTarget::Native;
+            request.out = Some(out.clone());
+            let report = compile_owned(&request);
+            assert!(
+                report.success && report.degradations.is_empty(),
+                "{source}: {report:?}"
+            );
+            assert_eq!(
+                std::process::Command::new(&out).status().unwrap().code(),
+                Some(42),
+                "{source}"
+            );
+            fs::remove_file(out).unwrap();
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_result_aliases_preserve_success_payloads_and_source_obligations() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    for (source, expected) in [
+        (
+            "enum Error{Bad}type Result<T>=std::result::Result<T,Error>;fn check(value:&std::result::Result<i64,bool>)->bool{std::result::Result::is_ok(value)}fn value()->Result<i64>{Ok(42)}fn main()->Result<i64>{value()}",
+            Some(EvalValue::Int(42)),
+        ),
+        (
+            "use core::result::Result as Outcome;type Result<T,E>=Outcome<T,E>;fn value()->Result<i64,bool>{Ok(42)}fn main()->Result<i64,bool>{value()}",
+            Some(EvalValue::Int(42)),
+        ),
+        (
+            "mod std{pub mod result{pub type Result=bool;}}type Answer=std::result::Result;fn main()->Answer{true}",
+            Some(EvalValue::Bool(true)),
+        ),
+        (
+            "type Answer=std::result::Result<i64>;fn main()->Answer{42}",
+            None,
+        ),
+        (
+            "type Answer=std::result::Result<i64,Missing>;fn main()->Answer{42}",
+            None,
+        ),
+        (
+            "const Error:i64=7;type Answer=std::result::Result<i64,Error>;fn main()->Answer{42}",
+            None,
+        ),
+    ] {
+        let path = temp_path("result-alias.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert_eq!(report.success, expected.is_some(), "{source}: {report:?}");
+            assert_eq!(report.eval_result, expected, "{source}: {report:?}");
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_unused_constants_do_not_require_runtime_contracts() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    for (source, executes) in [
+        (
+            "#[cfg(unknown)]mod optional{pub const UNUSED:i64=7;}fn main()->i64{42}",
+            true,
+        ),
+        (
+            "#[cfg(unknown)]mod optional{pub const VALUE:i64=7;}fn main()->i64{optional::VALUE+35}",
+            false,
+        ),
+        (
+            "#[cfg(unknown)]mod optional{pub static UNUSED:i64=7;}fn main()->i64{42}",
+            false,
+        ),
+        ("const UNUSED:i64=missing();fn main()->i64{42}", false),
+        ("const BAD:u8=256;fn main()->i64{42}", false),
+        (
+            "const UNUSED:i64=7;fn main()->i64{let UNUSED=42;UNUSED}",
+            true,
+        ),
+    ] {
+        let path = temp_path("unused-constant.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
+            request.profile = profile;
+            let report = compile_owned(&request);
+            assert_eq!(
+                report.success && report.execution_started,
+                executes,
+                "{source} {profile:?}: {report:?}"
+            );
+            if executes {
+                assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{report:?}");
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn linux_native_executables_execute_bodies_and_error_paths() {
+    for (source, status) in [
+        (
+            "var value:Int=19;fn add(x:Int)->Int{return x+23;}fn main()->Int{value=add(value);return value;}",
+            42,
+        ),
+        ("fn main()->void{return;}", 0),
+        ("fn main()->Bool{return true;}", 1),
+        ("fn main()->Int{return 298;}", 42),
+        (
+            "fn fail()->Int{throw 9;}fn main()->Int{try{fail();return 7;}catch 9{return 42;}return 8;}",
+            42,
+        ),
+        ("fn fail()->Int{throw 9;}fn main()->Int{return fail();}", 1),
+        (
+            "fn values()->[Int]{return [20,22];}fn main()->Int{let items=values();return items[0]+items[1];}",
+            42,
+        ),
+    ] {
+        let path = temp_path("linux-native-runtime.in");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for target_triple in [None, Some("x86_64-unknown-linux-gnu")] {
+                let out = temp_path("linux-native-runtime");
+                let mut request = default_request(
+                    path.clone(),
+                    CompileTarget::Native,
+                    Some("main"),
+                    Some(out.clone()),
+                );
+                request.profile = profile;
+                request.target_triple = target_triple.map(str::to_owned);
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{source} {profile:?} {target_triple:?}: {report:?}"
+                );
+                assert_eq!(&fs::read(&out).unwrap()[..4], b"\x7fELF");
+                assert_eq!(
+                    std::process::Command::new(&out).status().unwrap().code(),
+                    Some(status),
+                    "{source} {profile:?} {target_triple:?}"
+                );
+                fs::remove_file(out).unwrap();
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn base_report_populates_fields_correctly() {
+    let request = default_request(
+        PathBuf::from("test.in"),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    );
+    let started = std::time::Instant::now();
+    let jobs = 4;
+    let report = base_report(&request, jobs, started);
+    assert_eq!(report.schema_version, 1);
+    assert!(report.owned);
+    assert_eq!(report.path, "test.in");
+    assert_eq!(report.module_id, "App");
+    assert_eq!(report.target, "jit");
+    assert_eq!(report.entry.as_deref(), Some("main"));
+    assert_eq!(report.linkage, "executable");
+    assert_eq!(report.frontend_level, "unsupported");
+    assert_eq!(report.semantic_level, "failed");
+    assert_eq!(report.backend_level, "owned-native-subset");
+    assert_eq!(report.runtime_level, "inrt-jit");
+    assert_eq!(report.jobs, 4);
+    assert!(!report.success);
+
+    let request_native =
+        default_request(PathBuf::from("test2.in"), CompileTarget::Native, None, None);
+    let report_native = base_report(&request_native, 1, started);
+    assert_eq!(report_native.backend_level, "contract-only");
+    assert_eq!(report_native.runtime_level, "none");
+}
+
+#[test]
 fn unknown_statements_refuse_before_execution_across_profiles() {
     let statement = crate::core_ir::UNSUPPORTED_DEFINED_BODY;
     for (extension, text, marker) in [
@@ -2185,6 +2397,45 @@ fn report_to_json_roundtrip_fields() {
 }
 
 #[test]
+fn report_to_json_serialization_format() {
+    let started = std::time::Instant::now();
+    let request = OwnedCompileRequest {
+        path: std::path::PathBuf::from("/fake/path"),
+        module_id: "test_module".to_string(),
+        parser: crate::parser_registry::ParserCli::In,
+        target: CompileTarget::Native,
+        entry: None,
+        out: None,
+        linkage: crate::native_emit::NativeLinkage::Executable,
+        target_triple: None,
+        jobs: 1,
+        debug: false,
+        profile: crate::emit_profile::EmitProfile::Default,
+        emit: None,
+        base: None,
+    };
+
+    let mut report = crate::owned_compile::report::base_report(&request, 1, started);
+    report.timing_micros = 12345;
+    report.timing_waves_us = Some(vec![12345]);
+
+    let json = crate::owned_compile::report_to_json(&report).expect("Failed to serialize report");
+
+    assert!(json.contains("\"schema_version\": 1"));
+    assert!(json.contains("\"owned\": true"));
+    assert!(json.contains("\"path\": \"/fake/path\""));
+    assert!(json.contains("\"module_id\": \"test_module\""));
+    assert!(json.contains("\"target\": \"native\""));
+    assert!(json.contains("\"linkage\": \"executable\""));
+    assert!(json.contains("\"frontend_level\": \"unsupported\""));
+    assert!(json.contains("\"semantic_level\": \"failed\""));
+    assert!(json.contains("\"backend_level\": \"contract-only\""));
+    assert!(json.contains("\"runtime_level\": \"none\""));
+    assert!(json.contains("\"success\": false"));
+    assert!(json.contains("\"timing_micros\": 12345"));
+}
+
+#[test]
 fn report_carries_core_identity_metadata() {
     if !native_backend::native_subset_host_available() {
         return;
@@ -2415,9 +2666,16 @@ fn cross_target_exit_stubs_reject_observable_entry_bodies() {
         );
         request.target_triple = Some(target.into());
         let result = super::native::compile_native(&module, "App", &request);
+        let expected = if target == "x86_64-unknown-linux-gnu" {
+            // This backend lowers bodies now, but cannot link JIT-only print wrappers.
+            "native ELF unresolved runtime import `print`"
+        } else {
+            "pure scalar exit entry"
+        };
         assert!(
-            matches!(result, Err(ref error) if error.contains("pure scalar exit entry")),
-            "{target}"
+            matches!(result, Err(ref error) if error.contains(expected)),
+            "{target}: {:?}",
+            result.err()
         );
         assert!(!out.exists(), "{target} wrote an incomplete artifact");
     }
@@ -3563,6 +3821,12 @@ fn owned_rust_integer_inference_keeps_valid_selfhost_compile_only() {
         let report = compile_owned(&request);
         assert!(report.success, "{profile:?}: {report:?}");
         assert_eq!(report.reason_code.as_deref(), Some("jit-compiled-only"));
+        assert!(
+            report.degradations.iter().any(|degradation| {
+                degradation.code == "IN3001" && !degradation.reason.is_empty()
+            }),
+            "{profile:?}: {report:?}"
+        );
         assert!(!report.execution_started);
         assert_eq!(report.eval_exit_code, None);
         assert_eq!(report.eval_result, None);
@@ -9742,6 +10006,10 @@ fn rust_concrete_aliases_and_scoped_imports_preserve_values() {
             "type Result=i64;fn Result(value:i64)->i64{if value==0{return 42;}Result(value-1)}fn main()->i64{Result(2)}",
         ),
         (
+            "module-and-imported-value-share-name",
+            "mod answer{pub fn answer()->i64{21}}use answer::answer;fn main()->i64{answer()+answer::answer()}",
+        ),
+        (
             "alias-cfg-control-0",
             "#[cfg(any())]type Byte=u16;#[cfg(not(any()))]type Byte=u8;fn main()->i64{Byte::wrapping_add(255,43) as i64}",
         ),
@@ -11610,4 +11878,38 @@ fn rust_nested_function_qualification_preserves_privacy_and_conditional_refusal(
         }
         fs::remove_file(path).unwrap();
     }
+}
+
+#[test]
+fn test_finalize_report() {
+    let mut request = default_request(PathBuf::from("test.rs"), CompileTarget::Native, None, None);
+    request.jobs = 2;
+    let started = Instant::now();
+    let mut base = base_report(&request, request.jobs, started);
+    base.success = true;
+
+    // Test success case
+    let cwd = std::path::Path::new(".");
+    let report_success = finalize_report(base.clone(), started, cwd, "hash1");
+    assert!(report_success.success);
+    assert!(report_success.timing_waves_us.is_some());
+    assert_eq!(report_success.timing_waves_us.as_ref().unwrap().len(), 2);
+
+    // Test forbidden invocation case
+    let _token = crate::external_guard::ExternalInvocationGuard::enter();
+    crate::external_guard::ExternalInvocationGuard::record("rustc");
+    let report_failure = finalize_report(base.clone(), started, cwd, "hash2");
+    assert!(!report_failure.success);
+    assert_eq!(
+        report_failure.reason_code.as_deref(),
+        Some("external-tool-invoked")
+    );
+    assert_eq!(
+        report_failure.reason.as_deref(),
+        Some("forbidden external tool invocation(s): rustc")
+    );
+    assert_eq!(
+        report_failure.error.as_deref(),
+        Some("forbidden external tool invocation(s): rustc")
+    );
 }
