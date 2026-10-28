@@ -21,6 +21,7 @@ fn bench_desugar_module(c: &mut Criterion) {
 
     let module = UnifiedModule {
         identity: CoreModuleIdentity::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".to_string(),
             type_params: vec![],

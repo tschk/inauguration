@@ -507,9 +507,14 @@ impl TypeChecker {
                                 })
                         {
                             if proof.is_invalid() {
+                                if crate::config::env_config().debug {
+                                    eprintln!("[rust-source] in `{name}`: {}", proof.message());
+                                }
                                 float_invalid = crate::core_ir::type_proofs::prefer_failure(
                                     float_invalid,
-                                    Some(proof.clone()),
+                                    Some(crate::core_ir::type_proofs::ResolutionFailure::Invalid(
+                                        format!("in `{name}`: {}", proof.message()),
+                                    )),
                                 );
                             }
                             body.insert(0, Stmt::Expr(Expr::Ident(proof.symbol())));
@@ -537,6 +542,7 @@ impl TypeChecker {
                         }
                     }
                     Decl::Global {
+                        name,
                         typ,
                         init: Some(expr),
                         ..
@@ -610,7 +616,9 @@ impl TypeChecker {
                             if proof.is_invalid() {
                                 float_invalid = crate::core_ir::type_proofs::prefer_failure(
                                     float_invalid,
-                                    Some(proof.clone()),
+                                    Some(crate::core_ir::type_proofs::ResolutionFailure::Invalid(
+                                        format!("in `{name}`: {}", proof.message()),
+                                    )),
                                 );
                             }
                             **expr = Expr::Ident(proof.symbol());
@@ -1960,6 +1968,7 @@ impl TypeChecker {
             } else {
                 None
             };
+            let receiver = receiver.canonical();
             if let Some(target) = target {
                 **callee = Expr::Ident(target);
             } else if matches!(receiver, Typ::Array(_) | Typ::Vector(_) | Typ::String)
@@ -2706,20 +2715,33 @@ impl TypeChecker {
                         policy,
                     );
                 }
-                Stmt::Loop { cond, body, .. } => {
+                Stmt::Loop { kind, cond, body } => {
                     if let Some(cond) = cond {
                         self.resolve_typed_expr(cond, facts, env, policy, return_type);
-                        if policy == ResolvePolicy::CValues {
+                        if policy == ResolvePolicy::CValues
+                            && !matches!(kind, crate::core_ir::LoopKind::For { .. })
+                        {
                             self.resolve_c_value(cond, &Typ::Bool, facts, env);
                         }
                     }
-                    self.resolve_typed_body(body, facts, &mut env.clone(), return_type, policy);
+                    let mut inner = env.clone();
+                    if let crate::core_ir::LoopKind::For { binding } = kind {
+                        let element = cond
+                            .as_ref()
+                            .and_then(|value| self.expr_type(value, facts, env));
+                        let element = match element {
+                            Some(Typ::Array(element) | Typ::Vector(element)) => *element,
+                            _ => Typ::Generic("_".into()),
+                        };
+                        inner.insert(binding.clone(), element);
+                    }
+                    self.resolve_typed_body(body, facts, &mut inner, return_type, policy);
                 }
                 Stmt::Match { scrutinee, arms } => {
                     self.resolve_typed_expr(scrutinee, facts, env, policy, return_type);
                     let typ = self
                         .expr_type(scrutinee, facts, env)
-                        .unwrap_or(Typ::Named("Any".into()));
+                        .unwrap_or(Typ::Generic("_".into()));
                     for arm in arms {
                         let mut inner = self
                             .pattern_environment(&arm.pattern, &typ, facts, env)
@@ -4094,13 +4116,24 @@ impl TypeChecker {
                     .find_map(|item| self.expr_type(item, facts, env));
                 Some(Typ::Array(Box::new(item_typ.unwrap_or(Typ::Void))))
             }
-            Expr::Index { base, .. } => match self.expr_type(base, facts, env)? {
-                Typ::Array(item) | Typ::Vector(item) => Some(*item),
-                Typ::Named(name) => {
-                    crate::core_ir::rust_arrays::decode(&name).map(|array| array.element)
+            Expr::Index { base, .. } => {
+                let mut base = self.expr_type(base, facts, env)?;
+                // Auto-deref the sequence receiver without erasing source facts
+                // from its elements (for example, the &str in &[&str]).
+                while let Typ::Named(name) = &base {
+                    let Some(reference) = crate::core_ir::rust_references::decode(name) else {
+                        break;
+                    };
+                    base = reference.referent;
                 }
-                _ => None,
-            },
+                match base {
+                    Typ::Array(item) | Typ::Vector(item) => Some(*item),
+                    Typ::Named(name) => {
+                        crate::core_ir::rust_arrays::decode(&name).map(|array| array.element)
+                    }
+                    _ => None,
+                }
+            }
             Expr::Unary { op, expr } if crate::core_ir::rust_arrays::value_length(op).is_some() => {
                 let length = crate::core_ir::rust_arrays::value_length(op)?;
                 let element = match expr.as_ref() {
@@ -4461,7 +4494,8 @@ fn is_builtin_fn(name: &str) -> bool {
             | "load8" | "load16" | "load32" | "load64"
             | "store8" | "store16" | "store32" | "store64"
             | "hlt" | "cli" | "sti" | "pause"
-            | "lidt" | "invlpg" | "read-cr2" | "read-cr3"
+            | "lidt" | "lgdt" | "ltr" | "invlpg" | "read-cr2" | "read-cr3" | "cr3-read"
+            | "write-cr3" | "cr3-write" | "rdmsr" | "wrmsr" | "wrmsr64" | "mem-fill64" | "mem-copy64"
             | "invoke" | "invoke1" | "invoke2" | "invoke-native" | "invoke-native1" | "invoke-native2" | "invoke_native" | "invoke_native1" | "invoke_native2"
     )
 }
@@ -4473,9 +4507,10 @@ fn builtin_return_type(name: &str) -> Typ {
     match name {
         "len" | "str-len" | "array-len" | "array_len" | "vector-capacity" | "bool-to-int"
         | "to-int" | "str-to-int" | "str-index-of" | "str-table-get-int" | "inb" | "inw"
-        | "inl" | "load8" | "load16" | "load32" | "load64" | "read-cr2" | "read-cr3" | "invoke"
-        | "invoke1" | "invoke2" | "invoke-native" | "invoke-native1" | "invoke-native2"
-        | "invoke_native" | "invoke_native1" | "invoke_native2" => Typ::Int,
+        | "inl" | "load8" | "load16" | "load32" | "load64" | "read-cr2" | "read-cr3"
+        | "cr3-read" | "rdmsr" | "invoke" | "invoke1" | "invoke2" | "invoke-native"
+        | "invoke-native1" | "invoke-native2" | "invoke_native" | "invoke_native1"
+        | "invoke_native2" => Typ::Int,
         "str-eq" | "str-contains" | "str-starts-with" | "str-is-int" | "str-table-has"
         | "int-to-bool" => Typ::Bool,
         "str-concat" | "str-trim" | "str-slice" | "to-string" => Typ::String,
@@ -4719,6 +4754,7 @@ pub fn normalize_module_with_semantics(
         .map(|decl| normalize_decl(parser_id, decl))
         .collect();
     let mut normalized = UnifiedModule::with_identity(decls, module.identity.clone());
+    normalized.regions.clone_from(&module.regions);
     if parser_id == ParserId::Lua {
         crate::core_opt::map_decl_exprs_mut(&mut normalized.decls, &mut |expr| {
             match expr {
@@ -6483,6 +6519,34 @@ mod tests {
             err.contains("missing main function"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn recursive_unowned_projection_inference_terminates_without_guessing_widths() {
+        for (source, supported) in [
+            (
+                "fn inspect(choose:bool)->i64{let mut node=external();while choose{if choose{node=node.left;}else{node=node.right;}}node.value+1}",
+                false,
+            ),
+            (
+                "struct Node{value:i64}fn inspect()->i64{let root=Node{value:41};let next=root;next.value+1}",
+                true,
+            ),
+        ] {
+            let source = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let normalized = normalize_module(crate::parser_registry::ParserId::Rust, &source);
+            let report = crate::core_ir_verifier::verify_for_entry(&normalized, "inspect");
+            assert_eq!(report.ok, supported, "{report:?}");
+            if !supported {
+                assert!(
+                    report
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("aggregate source dependency")),
+                    "{report:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -101,17 +101,17 @@ fn generate_docs(
     collect_markdown(src_dir, src_dir, &mut files)?;
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let pages_with_body: Vec<(String, String, String)> = files
+    let pages_with_body: Vec<(&String, String, String)> = files
         .iter()
         .map(|(stem, content)| {
             let (title, body_html) = render_md(content);
-            (stem.clone(), title, body_html)
+            (stem, title, body_html)
         })
         .collect();
 
-    let pages: Vec<(String, String)> = pages_with_body
+    let pages: Vec<(&str, &str)> = pages_with_body
         .iter()
-        .map(|(stem, title, _)| (stem.clone(), title.clone()))
+        .map(|(stem, title, _)| (stem.as_str(), title.as_str()))
         .collect();
 
     fs::create_dir_all(out_dir)?;
@@ -283,8 +283,8 @@ fn nav_link_class(key: &str, current: &str) -> String {
     String::new()
 }
 
-fn render_nav(pages: &[(String, String)], current: &str) -> String {
-    let present: HashSet<&str> = pages.iter().map(|(k, _)| k.as_str()).collect();
+fn render_nav(pages: &[(&str, &str)], current: &str) -> String {
+    let present: HashSet<&str> = pages.iter().map(|(k, _)| *k).collect();
 
     let mut out = String::from("<nav aria-label=\"Documentation\" class=\"doc-nav\">");
     for (section, entries) in NAV_SECTIONS {
@@ -315,7 +315,7 @@ fn render_nav(pages: &[(String, String)], current: &str) -> String {
         .collect();
     let mut extras = String::new();
     for (web_key, page_title) in pages {
-        if listed.contains(web_key.as_str()) {
+        if listed.contains(*web_key) {
             continue;
         }
         let href = doc_href(current, web_key);
@@ -530,25 +530,17 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_collect_markdown_error() -> io::Result<()> {
+    fn test_collect_markdown_error_path() -> io::Result<()> {
         let (src_dir, _src_guard) = make_temp_dir("src_error");
-        fs::write(src_dir.join("test.md"), "hello")?;
 
-        let mut perms = fs::metadata(src_dir.join("test.md"))?.permissions();
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(0o000);
-        fs::set_permissions(src_dir.join("test.md"), perms)?;
+        let broken_symlink = src_dir.join("broken.md");
+        std::os::unix::fs::symlink("does_not_exist.md", &broken_symlink)?;
 
         let mut out = Vec::new();
-        let res = collect_markdown(&src_dir, &src_dir, &mut out);
+        let result = collect_markdown(&src_dir, &src_dir, &mut out);
 
-        assert!(res.is_err());
-        assert_eq!(res.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-
-        // Restore permissions so the directory can be deleted
-        let mut perms = fs::metadata(src_dir.join("test.md"))?.permissions();
-        perms.set_mode(0o644);
-        fs::set_permissions(src_dir.join("test.md"), perms)?;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
 
         Ok(())
     }
@@ -556,11 +548,8 @@ mod tests {
     #[test]
     fn test_render_nav_basic_sections() {
         let pages = vec![
-            ("in-language".to_string(), "inlang (.in)".to_string()),
-            (
-                "multi-frontend-ir".to_string(),
-                "Multi-front Core IR".to_string(),
-            ),
+            ("in-language", "inlang (.in)"),
+            ("multi-frontend-ir", "Multi-front Core IR"),
         ];
         let nav = render_nav(&pages, "in-language");
 
@@ -577,8 +566,8 @@ mod tests {
     #[test]
     fn test_render_nav_more_section() {
         let pages = vec![
-            ("in-language".to_string(), "inlang (.in)".to_string()),
-            ("custom-page".to_string(), "Custom Page Title".to_string()),
+            ("in-language", "inlang (.in)"),
+            ("custom-page", "Custom Page Title"),
         ];
         let nav = render_nav(&pages, "in-language");
 
@@ -588,7 +577,7 @@ mod tests {
 
     #[test]
     fn test_render_nav_empty_pages() {
-        let pages: Vec<(String, String)> = vec![];
+        let pages: Vec<(&str, &str)> = vec![];
         let nav = render_nav(&pages, "in-language");
         assert_eq!(
             nav,
@@ -597,11 +586,19 @@ mod tests {
     }
 
     #[test]
+    fn test_doc_href() {
+        assert_eq!(doc_href("index", "about"), "about.html");
+        assert_eq!(doc_href("index", "index"), "index.html");
+        assert_eq!(doc_href("index", "dir/page"), "dir/page.html");
+        assert_eq!(doc_href("dir/index", "about"), "../about.html");
+        assert_eq!(doc_href("dir/index", "dir/page"), "page.html");
+        assert_eq!(doc_href("dir/index", "dir/index"), "index.html");
+        assert_eq!(doc_href("dir1/index", "dir2/page"), "../dir2/page.html");
+    }
+
+    #[test]
     fn test_render_nav_nested_class() {
-        let pages = vec![
-            ("benchmarks/README".to_string(), "Overview".to_string()),
-            ("benchmarks/jit".to_string(), "JIT".to_string()),
-        ];
+        let pages = vec![("benchmarks/README", "Overview"), ("benchmarks/jit", "JIT")];
 
         let nav = render_nav(&pages, "benchmarks/README");
         assert!(nav.contains("<li><a href=\"README.html\" class=\"active\">Overview</a></li>"));
@@ -610,5 +607,27 @@ mod tests {
         let nav_jit_active = render_nav(&pages, "benchmarks/jit");
         assert!(nav_jit_active
             .contains("<li><a href=\"jit.html\" class=\"active doc-nav-nested\">JIT</a></li>"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_markdown_io_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let (src_dir, _src_guard) = make_temp_dir("src_io_error");
+
+        let file_path = src_dir.join("no_perm.md");
+        fs::write(&file_path, "test").unwrap();
+
+        let mut perms = fs::metadata(&file_path).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&file_path, perms).unwrap();
+
+        let mut out = Vec::new();
+        let result = collect_markdown(&src_dir, &src_dir, &mut out);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+
+        let mut perms = fs::metadata(&file_path).unwrap().permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(&file_path, perms).unwrap();
     }
 }
