@@ -180,6 +180,12 @@ pub(super) fn builtin(
         ["Vec"] | ["std" | "alloc", "vec", "Vec"] => ("std:vec:Vec", 1),
         _ => return Ok(None),
     };
+    // Import declarations name the constructor itself, not an application.
+    // A type spelling without arguments still has Some(PathArguments::None)
+    // and must satisfy its arity below.
+    if arity > 0 && context.arguments.is_none() {
+        return Ok(None);
+    }
     let (args, dependencies) = arguments(context.arguments, active)?;
     if args.len() != arity {
         return Err(Failure::Invalid(
