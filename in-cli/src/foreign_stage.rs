@@ -355,4 +355,26 @@ parser = \"c\"
         assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn empty_project_name_is_err() {
+        let dir = scratch();
+        fs::write(
+            dir.join(FOREIGN_STAGE_FILE),
+            "[project]\nname = \"\"\nentry = \"main\"\n",
+        )
+        .expect("manifest");
+        let err = load_manifest(&dir).unwrap_err();
+        assert!(err.contains("project.name is empty"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn malformed_manifest_is_err() {
+        let dir = scratch();
+        fs::write(dir.join(FOREIGN_STAGE_FILE), "[project]\nname\n").expect("manifest");
+        let err = load_manifest(&dir).unwrap_err();
+        assert!(err.contains("expected key = value"));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
