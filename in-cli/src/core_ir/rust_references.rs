@@ -9,8 +9,12 @@ const ADDRESS_PREFIX: &str = "#rust-reference-address:";
 pub(crate) const NEGATE_VALUE: &str = "#rust-negate";
 pub(crate) const SHARED_VALUE: &str = "#rust-reference-shared";
 pub(crate) const MUTABLE_VALUE: &str = "#rust-reference-mutable";
+pub(crate) const ITER_SHARED: &str = "#rust-iterate-shared";
+pub(crate) const ITER_MUTABLE: &str = "#rust-iterate-mutable";
 const SHARED_ADDRESS: &str = "#rust-address-shared";
 const MUTABLE_ADDRESS: &str = "#rust-address-mutable";
+const ITER_SHARED_ADDRESS: &str = "#rust-iterate-address-shared";
+const ITER_MUTABLE_ADDRESS: &str = "#rust-iterate-address-mutable";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReferenceType {
@@ -88,6 +92,43 @@ pub(crate) fn value_type(op: &str, referent: Typ) -> Option<Typ> {
         referent,
         runtime,
     }))
+}
+
+pub(crate) fn iteration_reference(op: &str) -> Option<&'static str> {
+    match op {
+        ITER_SHARED => Some(SHARED_VALUE),
+        ITER_MUTABLE => Some(MUTABLE_VALUE),
+        ITER_SHARED_ADDRESS => Some(SHARED_ADDRESS),
+        ITER_MUTABLE_ADDRESS => Some(MUTABLE_ADDRESS),
+        _ => None,
+    }
+}
+
+/// Borrowed iteration yields addresses of elements, not copies of their values.
+pub(crate) fn iteration_type(op: &str, source: Typ) -> Option<Typ> {
+    let reference_op = iteration_reference(op)?;
+    let source = if let Typ::Named(name) = &source
+        && let Some(reference) = decode(name)
+    {
+        if value_kind(reference_op)? && !reference.mutable {
+            return None;
+        }
+        reference.referent
+    } else {
+        source
+    };
+    match source {
+        Typ::Array(element) => Some(Typ::Array(Box::new(value_type(reference_op, *element)?))),
+        Typ::Vector(element) => Some(Typ::Vector(Box::new(value_type(reference_op, *element)?))),
+        Typ::Named(name) => {
+            let array = super::rust_arrays::decode(&name)?;
+            Some(Typ::Array(Box::new(value_type(
+                reference_op,
+                array.element,
+            )?)))
+        }
+        _ => None,
+    }
 }
 
 /// Exact proof identity. Generic referents stay deferred instead of guessing a
@@ -205,6 +246,8 @@ pub(crate) fn erase_value(value: &mut Expr) {
             NEGATE_VALUE => *op = "-".into(),
             SHARED_VALUE => *op = SHARED_ADDRESS.into(),
             MUTABLE_VALUE => *op = MUTABLE_ADDRESS.into(),
+            ITER_SHARED => *op = ITER_SHARED_ADDRESS.into(),
+            ITER_MUTABLE => *op = ITER_MUTABLE_ADDRESS.into(),
             _ => {}
         }
     }

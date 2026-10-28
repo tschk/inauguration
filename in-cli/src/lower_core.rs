@@ -364,14 +364,36 @@ pub(crate) fn expand_for_loop(
         callee: Box::new(Expr::Ident("array-len".into())),
         args: vec![Expr::Ident(collection.clone())],
     };
-    let mut body = vec![Stmt::Let(
-        binding,
-        None,
-        Expr::Index {
-            base: Box::new(Expr::Ident(collection.clone())),
-            index: Box::new(Expr::Ident(idx.clone())),
-        },
-    )];
+    let mut element = Expr::Index {
+        base: Box::new(Expr::Ident(collection.clone())),
+        index: Box::new(Expr::Ident(idx.clone())),
+    };
+    let iter = match iter {
+        Expr::Unary { op, mut expr }
+            if crate::core_ir::rust_references::iteration_reference(&op).is_some() =>
+        {
+            element = Expr::Unary {
+                op: crate::core_ir::rust_references::iteration_reference(&op)
+                    .unwrap()
+                    .into(),
+                expr: Box::new(element),
+            };
+            // Container borrows use the same header; only yielded elements
+            // become caller-storage addresses.
+            loop {
+                match *expr {
+                    Expr::Unary { op, expr: inner }
+                        if crate::core_ir::rust_references::value_kind(&op).is_some() =>
+                    {
+                        expr = inner;
+                    }
+                    other => break other,
+                }
+            }
+        }
+        other => other,
+    };
+    let mut body = vec![Stmt::Let(binding, None, element)];
     body.append(&mut loop_body);
     let advance = Stmt::Assign(
         idx.clone(),

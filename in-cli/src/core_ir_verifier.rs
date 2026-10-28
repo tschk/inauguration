@@ -1738,6 +1738,16 @@ fn check_expr_with_array_borrow(
         }
         Expr::Unary { op, expr } => {
             check_expr_in_loop(fn_name, expr, facts, env, call_edges, loop_depth)?;
+            if crate::core_ir::rust_references::iteration_reference(op).is_some()
+                && expr_type(expr, facts, env).is_none_or(|typ| {
+                    crate::core_ir::rust_references::iteration_type(op, typ).is_none()
+                })
+            {
+                return Err((
+                    "type-mismatch".into(),
+                    "borrowed iteration requires a compatible sequence borrow".into(),
+                ));
+            }
             if matches!(
                 op.as_str(),
                 "-" | crate::core_ir::rust_references::NEGATE_VALUE
@@ -2437,6 +2447,11 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
             if crate::core_ir::rust_references::value_kind(op).is_some() =>
         {
             crate::core_ir::rust_references::value_type(op, expr_type(expr, facts, env)?)
+        }
+        Expr::Unary { op, expr }
+            if crate::core_ir::rust_references::iteration_reference(op).is_some() =>
+        {
+            crate::core_ir::rust_references::iteration_type(op, expr_type(expr, facts, env)?)
         }
         Expr::Unary { op, expr }
             if matches!(

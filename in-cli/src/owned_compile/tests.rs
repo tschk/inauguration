@@ -47,6 +47,12 @@ fn rust_borrowed_record_parameters_preserve_caller_storage() {
     }
     let path = temp_path("borrowed-record.rs");
     for body in [
+        "fn main()->i64{let mut rows=[Row{left:3,right:7},Row{left:11,right:17}];for row in &mut rows{update(row);}rows[0].right+rows[1].right+4}",
+        "fn main()->i64{let mut rows=[Row{left:3,right:7},Row{left:11,right:17}];for row in rows.iter_mut(){update(row);}rows[0].right+rows[1].right+4}",
+        "fn read(row:&Row)->i64{row.left+row.right}fn main()->i64{let rows=[Row{left:3,right:7},Row{left:11,right:17}];let mut sum=4;for row in rows.iter(){sum+=read(row);}sum}",
+        "fn main()->i64{let mut rows=[Row{left:3,right:7},Row{left:11,right:17},Row{left:5,right:13}];for row in &mut rows{if row.left==3{continue;}update(row);break;}rows[0].right+rows[1].right+rows[2].right-6}",
+        "fn apply(rows:&mut[Row;2]){for row in rows{update(row);}}fn main()->i64{let mut rows=[Row{left:3,right:7},Row{left:11,right:17}];apply(&mut rows);rows[0].right+rows[1].right+4}",
+        "fn read(row:&Row)->i64{row.left+row.right}fn sum(rows:&[Row;2])->i64{let mut result=4;for row in rows{result+=read(row);}result}fn main()->i64{let rows=[Row{left:3,right:7},Row{left:11,right:17}];sum(&rows)}",
         "fn make()->Box<Row>{Box::new(Row{left:19,right:23})}fn main()->i64{let mut value=make();update(&mut value);value.right}",
         "fn apply<T>(value:&mut Row,unused:T){value.right+=value.left;}fn make()->Box<Row>{Box::new(Row{left:19,right:23})}fn main()->i64{let mut value=make();apply(&mut value,7u8);value.right}",
         "fn make(left:i64,right:i64)->Box<Row>{Box::new(Row{left,right})}fn read(value:&Row)->i64{value.right}fn main()->i64{let mut value=make(19,23);let guard=make(3,7);update(&mut value);read(&value)+guard.right-7}",
@@ -109,6 +115,9 @@ fn rust_borrowed_record_parameters_preserve_caller_storage() {
         }
     }
     for source in [
+        "struct Row{left:i64,right:i64}fn apply<T>(row:&mut Row,tag:T){row.right=42;}fn main()->i64{let rows=[Row{left:3,right:7}];for row in &rows{apply(row,7u8);}42}",
+        "struct Row{left:i64,right:i64}fn apply(rows:&[Row;1]){for row in rows.iter_mut(){row.right=42;}}fn main()->i64{42}",
+        "struct Row{left:i64,right:i64}fn main()->i64{let rows=[Row{left:3,right:7}];for row in rows.iter(7){row.right;}42}",
         "struct Row{left:i64,right:i64}fn apply(value:&mut Row){value.right=42;}fn main()->i64{let value=Box::new(Row{left:19,right:23});apply(&value);42}",
         "struct Row{left:i64,right:i64}fn main()->i64{let value:Box<Row>=Box::new(&Row{left:19,right:23});42}",
         "struct Row{left:i64,right:i64}fn main()->i64{let value:Box<u32>=Box::<i64>::new(42);42}",

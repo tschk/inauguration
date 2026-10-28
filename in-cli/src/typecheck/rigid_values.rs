@@ -182,7 +182,12 @@ impl Check<'_> {
                     match op.as_str() {
                         crate::core_ir::rust_boxes::SHARED => Use::Borrow(false),
                         crate::core_ir::rust_boxes::MUTABLE => Use::Borrow(true),
-                        _ => rust_references::value_kind(op).map_or(usage, Use::Borrow),
+                        _ => rust_references::value_kind(op)
+                            .or_else(|| {
+                                rust_references::iteration_reference(op)
+                                    .and_then(rust_references::value_kind)
+                            })
+                            .map_or(usage, Use::Borrow),
                     },
                 );
             }

@@ -473,13 +473,6 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
     if !params.is_empty() || !scalar(ret) {
         return false;
     }
-    let internal_type = |typ: &Typ| {
-        scalar(typ)
-            || matches!(typ.canonical(), Typ::Array(item)
-            if matches!(item.canonical(), Typ::Int | Typ::Bool | Typ::Float))
-            || matches!(typ.canonical(), Typ::Vector(item)
-            if matches!(item.canonical(), Typ::Int | Typ::Bool | Typ::Float | Typ::String))
-    };
     let reachable = super::native::native_entry_module(module, entry);
     if !crate::typecheck::TypeChecker::new()
         .typed_proof_functions(&reachable.decls)
@@ -563,6 +556,15 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
         .iter()
         .map(|(name, fields)| ((*name).to_string(), fields.to_vec()))
         .collect::<std::collections::HashMap<_, _>>();
+    let internal_type = |typ: &Typ| {
+        scalar(typ)
+            || matches!(typ.canonical(), Typ::Array(item)
+            if matches!(item.canonical(), Typ::Int | Typ::Bool | Typ::Float)
+                || matches!(item.canonical(), Typ::Named(name)
+                    if crate::native_emit::struct_layout::flat_record_fields(&return_structs, &name).is_ok()))
+            || matches!(typ.canonical(), Typ::Vector(item)
+            if matches!(item.canonical(), Typ::Int | Typ::Bool | Typ::Float | Typ::String))
+    };
     let supported_return = |ret: &Typ| {
         if internal_type(ret) {
             return true;

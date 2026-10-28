@@ -2137,6 +2137,32 @@ impl TypeChecker {
                     }),
                     rhs: Box::new(Expr::IntLit(0)),
                 };
+            } else if matches!(method, "iter" | "iter_mut")
+                && matches!(receiver, Typ::Array(_) | Typ::Vector(_))
+            {
+                let op = if method == "iter_mut" {
+                    crate::core_ir::rust_references::ITER_MUTABLE
+                } else {
+                    crate::core_ir::rust_references::ITER_SHARED
+                };
+                if args.len() == 1
+                    && self.expr_type(&args[0], facts, env).is_some_and(|typ| {
+                        crate::core_ir::rust_references::iteration_type(op, typ).is_some()
+                    })
+                {
+                    *expr = Expr::Unary {
+                        op: op.into(),
+                        expr: Box::new(args[0].clone()),
+                    };
+                } else {
+                    *expr = Expr::Ident(
+                        crate::core_ir::type_proofs::ResolutionFailure::Invalid(
+                            "sequence iteration requires zero arguments and a compatible borrow"
+                                .into(),
+                        )
+                        .symbol(),
+                    );
+                }
             } else if method == "clone"
                 && matches!(&receiver, Typ::Vector(item) if matches!(item.canonical(), Typ::Int | Typ::Float | Typ::Bool))
             {
@@ -2842,6 +2868,25 @@ impl TypeChecker {
                     }
                     let mut inner = env.clone();
                     if let crate::core_ir::LoopKind::For { binding } = kind {
+                        if let Some(iterator) = cond.as_mut()
+                            && let Some(source @ Typ::Named(_)) =
+                                self.expr_type(iterator, facts, env)
+                            && let Typ::Named(name) = &source
+                            && let Some(reference) = crate::core_ir::rust_references::decode(name)
+                        {
+                            let op = if reference.mutable {
+                                crate::core_ir::rust_references::ITER_MUTABLE
+                            } else {
+                                crate::core_ir::rust_references::ITER_SHARED
+                            };
+                            if crate::core_ir::rust_references::iteration_type(op, source).is_some()
+                            {
+                                *iterator = Expr::Unary {
+                                    op: op.into(),
+                                    expr: Box::new(std::mem::replace(iterator, Expr::UnitLit)),
+                                };
+                            }
+                        }
                         let element = cond
                             .as_ref()
                             .and_then(|value| self.expr_type(value, facts, env));
@@ -4280,6 +4325,14 @@ impl TypeChecker {
                 if crate::core_ir::rust_references::value_kind(op).is_some() =>
             {
                 crate::core_ir::rust_references::value_type(op, self.expr_type(expr, facts, env)?)
+            }
+            Expr::Unary { op, expr }
+                if crate::core_ir::rust_references::iteration_reference(op).is_some() =>
+            {
+                crate::core_ir::rust_references::iteration_type(
+                    op,
+                    self.expr_type(expr, facts, env)?,
+                )
             }
             Expr::Unary { op, expr }
                 if matches!(
