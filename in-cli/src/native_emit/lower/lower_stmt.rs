@@ -2264,11 +2264,14 @@ pub(crate) fn lower_match(
                 emitter.emit_u32(aarch64::cmp_reg64(9, 1));
                 Some((emitter.emit_insn(aarch64::b_cond(1, 0)), 1))
             } else {
-                if lower_expr::native_expr_type(scrutinee, ctx, functions)
-                    .map(|typ| typ.canonical())
-                    != Some(Typ::String)
-                {
-                    return Err("native-lower: string pattern requires a String scrutinee".into());
+                if let Some(t) = lower_expr::native_expr_type(scrutinee, ctx, functions) {
+                    if t.canonical() != Typ::String {
+                        if !matches!(t.canonical(), Typ::Named(_) | Typ::Generic(_)) {
+                            return Err(
+                                "native-lower: string pattern requires a String scrutinee".into()
+                            );
+                        }
+                    }
                 }
                 None
             };
