@@ -520,12 +520,8 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
     ) -> Option<usize> {
         match typ.canonical() {
             Typ::Int | Typ::Bool | Typ::Float | Typ::String => Some(1),
-            Typ::Vector(item)
-                if matches!(
-                    item.canonical(),
-                    Typ::Int | Typ::Bool | Typ::Float | Typ::String
-                ) =>
-            {
+            Typ::Vector(item) => {
+                layout_words(&item, structs, active)?;
                 Some(3)
             }
             Typ::Named(name) => {
@@ -553,10 +549,13 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
         let Typ::Named(name) = ret.canonical() else {
             return false;
         };
+        if layout_words(ret, &structs, &mut std::collections::HashSet::new()).is_none() {
+            return false;
+        }
         let layout = if cfg!(target_arch = "x86_64") {
             crate::native_emit::struct_layout::x86_fields(&return_structs, &name)
         } else {
-            crate::native_emit::struct_layout::scalar_fields(&return_structs, &name)
+            crate::native_emit::struct_layout::arm_fields(&return_structs, &name)
         };
         layout.is_ok_and(|fields| {
             // ARM returns words in x0..x7; x86 stages words in a u16-offset frame.
@@ -566,9 +565,11 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
                 8
             };
             fields.len() <= max_words
-                && fields
-                    .iter()
-                    .all(|(_, typ)| scalar(typ) && typ.canonical() != Typ::Void)
+                && fields.iter().all(|(_, typ)| {
+                    (scalar(typ) && typ.canonical() != Typ::Void)
+                        || (cfg!(target_arch = "x86_64")
+                            && matches!(typ.canonical(), Typ::Vector(_)))
+                })
         })
     };
     reachable.decls.iter().all(|decl| match decl {
@@ -578,6 +579,16 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
             }
             if params.iter().all(|(_, typ)| internal_type(typ)) {
                 return true;
+            }
+            // Aggregate fields may carry a known vector header. Standalone
+            // vectors of records still require their own element-transfer ABI.
+            if params.iter().any(|(_, typ)| {
+                !internal_type(typ)
+                    && (!matches!(typ.canonical(), Typ::Named(_))
+                        || layout_words(typ, &structs, &mut std::collections::HashSet::new())
+                            .is_none())
+            }) {
+                return false;
             }
             if cfg!(target_arch = "x86_64") {
                 // Each named argument is staged through the backend's scalar-field
@@ -594,7 +605,8 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
                             .is_ok_and(|fields| {
                                 fields.len() <= usize::from(u16::MAX) / 8
                                     && fields.iter().all(|(_, field)| {
-                                        scalar(field) && field.canonical() != Typ::Void
+                                        (scalar(field) && field.canonical() != Typ::Void)
+                                            || matches!(field.canonical(), Typ::Vector(_))
                                     })
                             })
                     });
@@ -662,7 +674,7 @@ mod tests {
         let module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
         assert_eq!(
             rust_entry_can_execute(&module, "main", "main"),
-            cfg!(target_arch = "aarch64")
+            cfg!(any(target_arch = "aarch64", target_arch = "x86_64"))
         );
         for field in [
             Typ::Array(Box::new(Typ::Int)),

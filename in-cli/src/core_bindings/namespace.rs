@@ -1,7 +1,7 @@
 use super::*;
 
 /// Qualify a dependency before merging its declarations into another module.
-pub(crate) fn qualify_module_decls(decls: &mut [Decl], module: &str) {
+pub(crate) fn qualify_module_decls(decls: &mut Vec<Decl>, module: &str) {
     let module = module.trim_matches(':');
     if module.is_empty() {
         return;
@@ -20,86 +20,89 @@ pub(crate) fn qualify_module_decls(decls: &mut [Decl], module: &str) {
             _ => {}
         }
     }
-    for decl in decls {
-        let associated = matches!(decl, Decl::Function { .. } | Decl::Global { .. });
-        let mut scope = match decl {
-            Decl::Function { name, .. }
-            | Decl::Global { name, .. }
-            | Decl::Struct { name, .. }
-            | Decl::Class { name, .. }
-            | Decl::Interface { name, .. } => {
-                *name = qualified(name, module, root);
-                name.rsplit_once("::")
-                    .map(|(scope, _)| scope.to_string())
-                    .unwrap_or_else(|| module.into())
-            }
-            _ => continue,
-        };
-        // Flattened inherent and trait method symbols retain their owner's module.
-        if associated {
-            let mut owner = Some(scope.as_str());
-            let mut lexical = None;
-            while let Some(candidate) = owner {
-                if types.contains(candidate) {
-                    lexical = candidate
-                        .rsplit_once("::")
-                        .map(|(module, _)| module.to_string());
-                    break;
+    crate::core_ir::tuples::project_declarations(decls, |decls| {
+        for decl in decls {
+            let associated = matches!(decl, Decl::Function { .. } | Decl::Global { .. });
+            let mut scope = match decl {
+                Decl::Function { name, .. }
+                | Decl::Global { name, .. }
+                | Decl::Struct { name, .. }
+                | Decl::Class { name, .. }
+                | Decl::Interface { name, .. } => {
+                    *name = qualified(name, module, root);
+                    name.rsplit_once("::")
+                        .map(|(scope, _)| scope.to_string())
+                        .unwrap_or_else(|| module.into())
                 }
-                owner = candidate.rsplit_once("::").map(|(parent, _)| parent);
+                _ => continue,
+            };
+            // Flattened inherent and trait method symbols retain their owner's module.
+            if associated {
+                let mut owner = Some(scope.as_str());
+                let mut lexical = None;
+                while let Some(candidate) = owner {
+                    if types.contains(candidate) {
+                        lexical = candidate
+                            .rsplit_once("::")
+                            .map(|(module, _)| module.to_string());
+                        break;
+                    }
+                    owner = candidate.rsplit_once("::").map(|(parent, _)| parent);
+                }
+                if let Some(module) = lexical {
+                    scope = module;
+                }
             }
-            if let Some(module) = lexical {
-                scope = module;
-            }
-        }
-        let mut candidates = HashSet::new();
-        match decl {
-            Decl::Function { body, .. } => super::reserve_body(body, &mut candidates),
-            Decl::Global {
-                init: Some(value), ..
-            } => super::reserve_expr(value, &mut candidates),
-            Decl::Class { methods, .. } => {
-                for method in methods {
-                    if let Decl::Function { body, .. } = method {
-                        super::reserve_body(body, &mut candidates);
+            let mut candidates = HashSet::new();
+            match decl {
+                Decl::Function { body, .. } => super::reserve_body(body, &mut candidates),
+                Decl::Global {
+                    init: Some(value), ..
+                } => super::reserve_expr(value, &mut candidates),
+                Decl::Class { methods, .. } => {
+                    for method in methods {
+                        if let Decl::Function { body, .. } = method {
+                            super::reserve_body(body, &mut candidates);
+                        }
                     }
                 }
+                _ => {}
             }
-            _ => {}
-        }
-        let references = references(&scope, root, &values, candidates);
-        let mut reserved = values.clone();
-        reserved.extend(references.keys().cloned());
-        match decl {
-            Decl::Function { params, body, .. } => {
-                super::normalize_function_with_references(params, body, &reserved, &references)
-            }
-            Decl::Global {
-                init: Some(value), ..
-            } => super::normalize_initializer_with_references(value, &reserved, &references),
-            Decl::Class { methods, .. } => {
-                for method in methods {
-                    if let Decl::Function { params, body, .. } = method {
-                        super::normalize_function_with_references(
-                            params,
-                            body,
-                            &reserved,
-                            &references,
-                        );
+            let references = references(&scope, root, &values, candidates);
+            let mut reserved = values.clone();
+            reserved.extend(references.keys().cloned());
+            match decl {
+                Decl::Function { params, body, .. } => {
+                    super::normalize_function_with_references(params, body, &reserved, &references)
+                }
+                Decl::Global {
+                    init: Some(value), ..
+                } => super::normalize_initializer_with_references(value, &reserved, &references),
+                Decl::Class { methods, .. } => {
+                    for method in methods {
+                        if let Decl::Function { params, body, .. } = method {
+                            super::normalize_function_with_references(
+                                params,
+                                body,
+                                &reserved,
+                                &references,
+                            );
+                        }
                     }
                 }
+                _ => {}
             }
-            _ => {}
+            let type_name = |name: &str| resolve(name, &scope, root, &types).map(Typ::Named);
+            let value_name = |name: &str| resolve(name, &scope, root, &values);
+            let names = NominalNames {
+                generic_type: None,
+                type_name: &type_name,
+                value_name: &value_name,
+                constructors: true,
+            };
+            declaration(decl, &names, &HashSet::new());
         }
-        let type_name = |name: &str| resolve(name, &scope, root, &types).map(Typ::Named);
-        let names = NominalNames {
-            generic_type: None,
-            type_name: &type_name,
-            value_name: &|_| None,
-            constructors: true,
-        };
-        declaration(decl, &names, &HashSet::new());
-    }
+    });
 }
 
 /// Apply the exact declaration name projection to retained receiver and target proofs.
@@ -148,7 +151,10 @@ pub(crate) fn qualify_module_artifact(
 }
 
 fn qualified(name: &str, module: &str, root: &str) -> String {
-    if crate::core_ir::tuples::fields(name).is_some() || name.starts_with(&format!("{root}::")) {
+    if crate::core_ir::tuples::fields(name).is_some()
+        || crate::core_ir::rust_options::payload(name).is_some()
+        || name.starts_with(&format!("{root}::"))
+    {
         name.into()
     } else {
         format!("{module}::{name}")
@@ -322,6 +328,11 @@ fn typ(value: &mut Typ, names: &NominalNames<'_>, generics: &HashSet<String>) {
                 typ(&mut reference.referent, names, generics);
                 typ(&mut reference.runtime, names, generics);
                 *value = crate::core_ir::rust_references::typ(reference);
+                return;
+            }
+            if let Some(mut payload) = crate::core_ir::rust_options::payload(name) {
+                typ(&mut payload, names, generics);
+                *value = crate::core_ir::rust_options::typ(payload);
                 return;
             }
             if let Some(fields) = crate::core_ir::tuples::fields(name) {
@@ -528,10 +539,17 @@ fn declaration(decl: &mut Decl, names: &NominalNames<'_>, outer: &HashSet<String
         }
         Decl::Struct { name, fields, .. } => {
             let tuple = crate::core_ir::tuples::fields(name).is_some();
+            let option = crate::core_ir::rust_options::payload(name);
+            let projected_option = option.map(|mut payload| {
+                typ(&mut payload, names, &generics);
+                crate::core_ir::rust_options::typ(payload)
+            });
             for (_, value) in fields.iter_mut() {
                 typ(value, names, &generics);
             }
-            if tuple {
+            if let Some(Typ::Named(target)) = projected_option {
+                *name = target;
+            } else if tuple {
                 if let Typ::Named(target) = crate::core_ir::tuples::typ(
                     &fields
                         .iter()
@@ -837,6 +855,58 @@ mod tests {
             .check_module(&module)
             .unwrap();
         let report = crate::core_ir_verifier::verify_for_entry(&module, "dep::main");
+        assert!(report.ok, "{report:?}");
+    }
+
+    #[test]
+    fn dependency_qualification_coalesces_structural_aliases_without_hiding_duplicates() {
+        for shape in ["(String, Row)", "(Option<i64>, Row)"] {
+            let qualified_shape = shape.replace("Row", "dep::Row");
+            let source = format!(
+                "struct Row {{ value:i64 }} fn first(x:{shape})->{shape}{{x}} fn second(x:{qualified_shape})->{qualified_shape}{{x}} fn main()->i64{{42}}"
+            );
+            let parsed = crate::compiler::rust_front::parse_rust_source(&source).unwrap();
+            let parsed =
+                crate::typecheck::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            for repeated in [false, true] {
+                let mut artifact =
+                    crate::boundary_ir::CompileArtifact::from_semantic(parsed.clone());
+                if repeated {
+                    let schema = artifact
+                        .semantic
+                        .decls
+                        .iter()
+                        .find(|decl| {
+                            matches!(decl, Decl::Struct { name, .. }
+                            if crate::core_ir::tuples::fields(name).is_some()
+                                || crate::core_ir::rust_options::payload(name).is_some())
+                        })
+                        .unwrap()
+                        .clone();
+                    artifact.semantic.decls.push(schema);
+                }
+                qualify_module_artifact(&mut artifact, "dep").unwrap();
+                let normalized = crate::typecheck::normalize_module(
+                    crate::parser_registry::ParserId::Rust,
+                    &artifact.semantic,
+                );
+                let report = crate::core_ir_verifier::verify_for_entry(&normalized, "dep::main");
+                assert_eq!(report.ok, !repeated, "{shape}: {report:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn dependency_qualification_preserves_function_items_inside_options() {
+        let source = "struct Shape{decoder:Option<fn(i64)->i64>}fn decode(x:i64)->i64{x+1}fn negate(x:i64)->i64{-x}const SHAPE:Shape=Shape{decoder:Some(decode)};fn main()->i64{match SHAPE.decoder{Some(f)=>f(41),_=>9}}";
+        let mut artifact =
+            crate::compiler::rust_front::parse_rust_artifact_source(source, "dep").unwrap();
+        qualify_module_artifact(&mut artifact, "dep").unwrap();
+        let normalized = crate::typecheck::normalize_module(
+            crate::parser_registry::ParserId::Rust,
+            &artifact.semantic,
+        );
+        let report = crate::core_ir_verifier::verify_for_entry(&normalized, "dep::main");
         assert!(report.ok, "{report:?}");
     }
 

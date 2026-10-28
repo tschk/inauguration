@@ -560,11 +560,15 @@ pub(super) fn rhs_type(
         syn::Type::Reference(reference) => {
             let value = rhs_type(&reference.elem, frame, active)?;
             let dependencies = value.dependencies();
-            if reference.lifetime.is_some() {
+            if reference
+                .lifetime
+                .as_ref()
+                .is_some_and(|lifetime| !frame.owns_reference_lifetime(lifetime))
+            {
                 return Ok(failure_result(crate::core_ir::type_proofs::prefer_failure(
                     structural_failure(value),
                     Some(unsupported(
-                        "alias reference lifetime requires source specialization",
+                        "reference lifetime is not an active source binder",
                     )),
                 ))
                 .with_dependencies(dependencies));

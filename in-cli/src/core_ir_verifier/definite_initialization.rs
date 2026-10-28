@@ -1,6 +1,7 @@
 //! Source-local initialization proof for explicit declarations without values.
 //! This is separate from type inference and from MIR register definition checks.
 use super::*;
+use crate::core_ir::MatchPattern;
 
 #[derive(Clone)]
 struct State {
@@ -291,8 +292,52 @@ fn statement(
             Ok(false)
         }
         Stmt::Break | Stmt::Continue => Ok(false),
-        Stmt::Throw(_) | Stmt::Try { .. } | Stmt::Propagate => {
-            Err(unsupported(owner, "exception control flow"))
+        Stmt::Throw(value) => {
+            expression(value, state, context, owner)?;
+            Ok(false)
+        }
+        Stmt::Propagate => Ok(true),
+        Stmt::Try { body, catches } => {
+            let entry = state.clone();
+            let mut normal = Vec::new();
+            let mut success = entry.clone();
+            if statements(body, &mut success, context, owner)? {
+                normal.push(success);
+            }
+            for catch in catches {
+                // A call can throw before any preceding assignment completes.
+                // Do not carry success-path writes into a handler's proof.
+                let mut handler = entry.clone();
+                let pattern = MatchPattern::parse(&catch.pattern)?;
+                let binding = match &pattern {
+                    MatchPattern::IdentPat(name) => Some(name.clone()),
+                    _ => None,
+                };
+                match pattern {
+                    MatchPattern::IdentPat(name) => {
+                        handler.unreadable.remove(&name);
+                        handler.types.insert(name, Typ::Generic("_".into()));
+                    }
+                    MatchPattern::WildPat
+                    | MatchPattern::IntPat(_)
+                    | MatchPattern::BoolPat(_)
+                    | MatchPattern::StringPat(_) => {}
+                    _ => return Err(unsupported(owner, "an unowned exception pattern")),
+                }
+                if statements(&catch.body, &mut handler, context, owner)? {
+                    // The caught value is a handler-local binding, even when
+                    // its spelling shadows an uninitialized enclosing local.
+                    if let Some(name) = binding {
+                        if entry.unreadable.contains(&name) {
+                            handler.unreadable.insert(name);
+                        } else {
+                            handler.unreadable.remove(&name);
+                        }
+                    }
+                    normal.push(handler);
+                }
+            }
+            Ok(join(state, &normal))
         }
         Stmt::FieldAssign { base, value, .. } => {
             if !expression(base, state, context, owner)? {
@@ -779,7 +824,7 @@ mod tests {
         ]);
     }
     #[test]
-    fn declaration_bearing_exception_and_unlifted_closure_control_is_explicitly_unsupported() {
+    fn exception_paths_join_only_normal_initialized_completions() {
         for statement in [
             Stmt::Try {
                 body: vec![],
@@ -787,24 +832,70 @@ mod tests {
             },
             Stmt::Throw(Expr::IntLit(1)),
             Stmt::Propagate,
+        ] {
+            check(vec![
+                declare(),
+                statement,
+                Stmt::Return(Some(Expr::IntLit(42))),
+            ])
+            .unwrap();
+        }
+        for handler in [vec![Stmt::Throw(Expr::IntLit(7))], vec![assign()]] {
+            check(vec![
+                declare(),
+                Stmt::Try {
+                    body: vec![assign()],
+                    catches: vec![crate::core_ir::CatchArm {
+                        pattern: "err".into(),
+                        body: handler,
+                    }],
+                },
+                result(),
+            ])
+            .unwrap();
+        }
+        expect_uninitialized(vec![declare(), Stmt::Throw(Expr::Ident("value".into()))]);
+        for handler in [vec![], vec![result()]] {
+            expect_uninitialized(vec![
+                declare(),
+                Stmt::Try {
+                    body: vec![assign()],
+                    catches: vec![crate::core_ir::CatchArm {
+                        pattern: "err".into(),
+                        body: handler,
+                    }],
+                },
+                result(),
+            ]);
+        }
+        for handler in [vec![], vec![assign()]] {
+            expect_uninitialized(vec![
+                declare(),
+                Stmt::Try {
+                    body: vec![assign()],
+                    catches: vec![crate::core_ir::CatchArm {
+                        pattern: "value".into(),
+                        body: handler,
+                    }],
+                },
+                result(),
+            ]);
+        }
+        let error = check(vec![
+            declare(),
             Stmt::Expr(Expr::Closure {
                 params: vec![],
                 ret: Typ::Int,
                 body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
                 captures: vec![],
             }),
-        ] {
-            let error = check(vec![
-                declare(),
-                statement,
-                Stmt::Return(Some(Expr::IntLit(42))),
-            ])
-            .unwrap_err();
-            assert!(
-                error.starts_with("definite-initialization-unsupported:"),
-                "{error}"
-            );
-        }
+            Stmt::Return(Some(Expr::IntLit(42))),
+        ])
+        .unwrap_err();
+        assert!(
+            error.starts_with("definite-initialization-unsupported:"),
+            "{error}"
+        );
     }
     #[test]
     fn unused_invalid_global_is_not_a_function_root_but_real_initializer_dependencies_propagate() {

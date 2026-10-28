@@ -41,6 +41,245 @@ fn default_request(
 }
 
 #[test]
+fn rust_let_else_preserves_matching_scope_effects_and_divergence() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    for source in [
+        "struct Pair{x:i64,y:i64}fn main()->i64{let Pair{x,y}=(Pair{x:20,y:22})else{return 9;};x+y}",
+        "struct Row{tag:i64,value:i64}fn main()->i64{let Row{tag:0,value}=(Row{tag:1,value:9})else{return 42;};value}",
+        "fn main()->i64{let value=41;let (0,value)=(1,9)else{return value+1;};value}",
+        "static mut CALLS:i64=0;fn read()->(i64,i64){unsafe{CALLS+=1;}(0,41)}fn main()->i64{let(0,value)=read()else{return 9;};value+unsafe{CALLS}}",
+        "fn main()->i64{let mut n=0;while n<2{n+=1;let(0,value)=(n,9)else{continue;};return value;}42}",
+        "enum Node{Number(i64),Ident(String),End}fn read(node:&Node)->i64{let Node::Ident(text)=node else{return 9;};text.len()as i64+40}fn main()->i64{read(&Node::Ident(\"2a\".to_string()))}",
+        "enum Node{Number(i64),Ident(String),End}fn read(node:Node)->i64{let Node::Number(value)=node else{return 42;};value}fn main()->i64{read(Node::End)}",
+        "enum Node{Data{x:i64,y:i64},End}static mut N:i64=0;fn step()->i64{unsafe{N+=1;N}}fn main()->i64{let Node::Data{x,y}=(Node::Data{y:step(),x:step()})else{return 9;};x*20+y+1}",
+        "enum State{Cold=-7,Hot=9}fn main()->i64{match State::Hot{State::Cold=>9,State::Hot=>42,_=>0}}",
+        "enum State{Cold=-7,Hot=9}use State::*;fn main()->i64{match State::Hot{Cold=>9,Hot=>42,_=>0}}",
+        "enum State{Cold=-7,Hot=9}use State::{Cold,Hot};fn main()->i64{match Hot{Cold=>9,Hot=>42,_=>0}}",
+        "enum State{Cold=-7,Hot=9}use State as Mode;fn main()->i64{match Mode::Hot{Mode::Cold=>9,Mode::Hot=>42,_=>0}}",
+        "mod states{pub enum State{Cold,Hot}pub use State::*;}use states::*;fn main()->i64{match Hot{Cold=>9,Hot=>42,_=>0}}",
+        "enum State{Cold,Hot}use State::Hot as Warm;fn main()->i64{let Warm=State::Cold else{return 42;};9}",
+        "enum First{Tag}enum Second{Tag}use First::*;fn main()->i64{use Second::Tag;match Second::Tag{Tag=>42,_=>9}}",
+        "enum Outcome{Ok(i64),Err(i64)}use Outcome::*;fn read()->Outcome{Ok(42)}fn main()->i64{match read(){Ok(value)=>value,Err(_)=>9,_=>0}}",
+        "enum Outcome{Ok(i64),Err(i64)}use Outcome::*;fn read()->Outcome{Err(42)}fn main()->i64{match read(){Ok(_)=>9,Err(value)=>value,_=>0}}",
+        "enum Outcome{Ok(i64),Err(i64)}use Outcome::*;fn main()->i64{let mut result=9;if let Err(value)=Err(42){result=value;}result}",
+        "fn read()->Option<u32>{Some(42)}fn main()->i64{let Some(value)=read()else{return 9;};value as i64}",
+        "fn read()->Option<u32>{None}fn main()->i64{let Some(value)=read()else{return 42;};value as i64}",
+        "fn read()->Option<u32>{Some(0)}fn main()->i64{match read(){None=>9,Some(value)=>value as i64+42,_=>0}}",
+        "use core::option::Option::{Some as Present,None as Empty};type Maybe=Option<u32>;fn read()->Maybe{Present(42)}fn main()->i64{match read(){Empty=>9,Present(value)=>value as i64,_=>0}}",
+        "fn read()->Option<Option<u32>>{Some(Some(42))}fn main()->i64{match read(){Some(Some(value))=>value as i64,_=>9}}",
+        "fn id<T>(value:Option<T>)->Option<T>{value}fn read()->Option<u32>{Some(42)}fn main()->i64{let Some(value)=id(read())else{return 9;};value as i64}",
+        "fn read(value:Option<u32>)->i64{match value{Some(value)=>value as i64,_=>9}}fn main()->i64{read(Some(42))}",
+        "use core::option::Option::*;fn read()->Option<u32>{Some(42)}fn main()->i64{let Some(value)=read()else{return 9;};value as i64}",
+        "mod mir{pub type VReg=u32;}use mir::*;fn read()->Result<Option<VReg>,String>{Ok(Some(42))}fn main()->Result<i64,String>{let Some(value)=read()?else{return Ok(9);};Ok(value as i64)}",
+        "fn read()->Option<&'static str>{Some(\"2a\")}fn main()->i64{let Some(value)=read()else{return 9;};value.len()as i64+40}",
+        "fn read()->Option<&'static str>{None}fn main()->i64{let Some(value)=read()else{return 42;};value.len()as i64}",
+        "fn read<'a>(value:&'a str)->Option<&'a str>{Some(value)}fn main()->i64{let Some(value)=read(\"2a\")else{return 9;};value.len()as i64+40}",
+        "mod data{pub struct Row{pub x:i64,pub y:i64}}use data::Row as Pair;fn read()->Option<Pair>{Some(data::Row{x:19,y:23})}fn main()->i64{let Some(value)=read()else{return 9;};value.x+value.y}",
+        "struct Pair{x:i64,y:i64}fn read()->Option<Pair>{None}fn main()->i64{let Some(value)=read()else{return 42;};value.x+value.y}",
+        "struct Row{name:String,items:Vec<i64>}fn read()->Option<Row>{None}fn main()->i64{let Some(value)=read()else{return 42;};value.name.len()as i64+value.items.len()as i64}",
+    ] {
+        let path = temp_path("owned-let-else.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            let out = temp_path("owned-let-else-native");
+            let report = compile_owned(&default_request(
+                path.clone(),
+                target,
+                Some("main"),
+                Some(out.clone()),
+            ));
+            assert!(report.success, "{source}: {report:?}");
+            if target == CompileTarget::Jit {
+                assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{report:?}");
+            } else {
+                assert_eq!(
+                    std::process::Command::new(&out).status().unwrap().code(),
+                    Some(42)
+                );
+                fs::remove_file(out).unwrap();
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+    for source in [
+        "fn main()->i64{let (0,value)=(1,9)else{(0,42)};value}",
+        "enum First{Tag}enum Second{Tag}use First::*;use Second::*;fn main()->i64{match First::Tag{Tag=>9,_=>42}}",
+        "enum First{Tag}enum Second{Tag}use First::*;use Second::*;fn main()->i64{if false{match First::Tag{Tag=>9,_=>42};}42}",
+        "fn read()->Option<u32>{Some(42u64)}fn main()->i64{let Some(value)=read()else{return 9;};value as i64}",
+        "fn main()->i64{match (true,42u32){Some(value)=>value as i64,_=>9}}",
+        "fn read()->Option<&'missing str>{Some(\"x\")}fn main()->i64{let Some(value)=read()else{return 9;};value.len()as i64}",
+        "struct Pair{x:i64,y:i64}struct Other{x:i64,y:i64}fn read()->Option<Pair>{Some(Other{x:19,y:23})}fn main()->i64{let Some(value)=read()else{return 9;};value.x+value.y}",
+        "struct Node{next:Node}fn read()->Option<Node>{None}fn main()->i64{let Some(value)=read()else{return 42;};9}",
+    ] {
+        let path = temp_path("owned-let-else-invalid.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        assert!(
+            !report.success && !report.execution_started,
+            "{source}: {report:?}"
+        );
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_ordered_map_aliases_construct_owned_empty_storage() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    for source in [
+        "type Bindings=std::collections::BTreeMap<(String,String),Result<String,String>>;fn main()->i64{let map=Bindings::new();if map.is_empty() && map.len()==0usize{42}else{9}}",
+        "use std::collections::BTreeMap as Ordered;type Bindings<T>=Ordered<(String,String),Result<T,String>>;fn main()->i64{let map=Bindings::<String>::new();if map.is_empty(){42}else{9}}",
+        "fn main()->i64{let map=std::collections::BTreeMap::<u64,bool>::new();if map.len()==0usize{42}else{9}}",
+        "mod types{pub struct Other;}use crate::types::*;type Bindings=std::collections::BTreeMap<String,Result<String,String>>;fn main()->i64{let map=Bindings::new();if map.is_empty(){42}else{9}}",
+        "mod std{pub mod collections{pub struct BTreeMap;}}type Bindings=::std::collections::BTreeMap<String,bool>;fn main()->i64{let map=Bindings::new();if map.is_empty(){42}else{9}}",
+    ] {
+        let path = temp_path("owned-map.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            let out = temp_path("owned-map-native");
+            let report = compile_owned(&default_request(
+                path.clone(),
+                target,
+                Some("main"),
+                Some(out.clone()),
+            ));
+            assert!(report.success, "{source}: {report:?}");
+            if target == CompileTarget::Jit {
+                assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{report:?}");
+            } else {
+                assert_eq!(
+                    std::process::Command::new(&out).status().unwrap().code(),
+                    Some(42)
+                );
+                fs::remove_file(out).unwrap();
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn rust_owned_u64_parsing_preserves_values_errors_and_mapping_effects() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    for (text, radix) in [
+        ("2a", 16),
+        ("+2A", 16),
+        ("0", 10),
+        ("101010", 2),
+        ("16", 36),
+        ("18446744073709551615", 10),
+        ("ffffffffffffffff", 16),
+        ("18446744073709551616", 10),
+        ("10000000000000000", 16),
+        ("2", 2),
+        ("-1", 10),
+        ("", 10),
+        ("+", 10),
+        (" 42", 10),
+        ("42 ", 10),
+        ("0x2a", 16),
+        ("42\0", 10),
+        ("٤٢", 10),
+    ] {
+        let main = match u64::from_str_radix(text, radix) {
+            Ok(expected) => format!(
+                "let value=read({text:?},{radix})?;Ok(if value=={expected}u64 && unsafe{{COUNT}}==0 {{42}}else{{9}})"
+            ),
+            Err(_) => format!(
+                "if let Err(_)=read({text:?},{radix}){{return Ok(unsafe{{COUNT}}+41);}}Ok(9)"
+            ),
+        };
+        let source = format!(
+            "static mut COUNT:i64=0;fn mapped()->i64{{unsafe{{COUNT+=1;}}91}}fn read(text:&str,radix:u32)->Result<u64,i64>{{if radix==10{{text.parse::<u64>().map_err(|_|mapped())}}else{{Ok(u64::from_str_radix(text,radix).map_err(|_|mapped())?+0u64)}}}}fn main()->Result<i64,i64>{{{main}}}"
+        );
+        let path = temp_path("owned-u64-parse.rs");
+        fs::write(&path, &source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            let out = temp_path("owned-u64-parse-native");
+            let request = default_request(path.clone(), target, Some("main"), Some(out.clone()));
+            let report = compile_owned(&request);
+            assert!(report.success, "{text:?}/{radix}: {report:?}");
+            if target == CompileTarget::Jit {
+                assert!(report.execution_started, "{report:?}");
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{text:?}/{radix}"
+                );
+            } else {
+                assert_eq!(
+                    std::process::Command::new(&out).status().unwrap().code(),
+                    Some(42),
+                    "{text:?}/{radix}"
+                );
+                fs::remove_file(out).unwrap();
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+    for source in [
+        "fn main()->Result<u64,i64>{u64::from_str_radix(42,16).map_err(|_|91)}",
+        "fn main()->Result<u64,i64>{u64::from_str_radix(\"2a\",16u64).map_err(|_|91)}",
+        "fn main()->Result<u64,i64>{u64::from_str_radix(\"2a\").map_err(|_|91)}",
+        "fn main()->Result<u64,i64>{u64::from_str_radix(\"bad\",10).map_err(|error|error)}",
+        "fn main()->Result<u64,i64>{u64::from_str_radix(\"bad\",10).map_err(|_|{return 91;})}",
+        "fn main()->Result<i64,i64>{let first=u64::from_str_radix(\"bad\",10).map_err(|_|91);let second=u64::from_str_radix(\"42\",10).map_err(|_|92);if let Err(_)=first{return Ok(42);}Ok(9)}",
+        "fn main()->Result<i64,i64>{u64::from_str_radix(\"bad\",10).map_err(|_|91);Ok(42)}",
+        "struct str{value:i64}impl str{fn parse<T>(&self)->Result<u64,i64>{Ok(self.value as u64)}}fn read(text:&str)->Result<u64,i64>{text.parse::<u64>().map_err(|_|91)}fn main()->Result<u64,i64>{read(&str{value:7})}",
+        "mod own{pub struct String{pub value:i64}impl String{pub fn parse<T>(&self)->Result<u64,i64>{Ok(self.value as u64)}}}fn read(text:&own::String)->Result<u64,i64>{text.parse::<u64>().map_err(|_|91)}fn main()->Result<u64,i64>{read(&own::String{value:7})}",
+    ] {
+        let path = temp_path("owned-u64-parse-unsupported.rs");
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        assert!(
+            !report.success && !report.execution_started,
+            "{source}: {report:?}"
+        );
+        fs::remove_file(path).unwrap();
+    }
+    for radix in [1, 37] {
+        let path = temp_path("owned-u64-invalid-radix.rs");
+        let source = format!(
+            "fn main()->Result<u64,i64>{{u64::from_str_radix(\"42\",{radix}).map_err(|_|91)}}"
+        );
+        fs::write(&path, &source).unwrap();
+        let out = temp_path("owned-u64-invalid-radix-native");
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Native,
+            Some("main"),
+            Some(out.clone()),
+        ));
+        assert!(report.success, "{report:?}");
+        assert!(
+            std::process::Command::new(&out)
+                .status()
+                .unwrap()
+                .code()
+                .is_none(),
+            "out-of-range radix must panic, not map to an error"
+        );
+        fs::remove_file(out).unwrap();
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
 fn rust_borrowed_slices_preserve_lengths_and_element_values() {
     if !super::jit::host_supports_jit() {
         return;
@@ -1304,6 +1543,7 @@ fn owned_compile_rejects_unknown_field_write_before_execution() {
 fn rust_jit_executes_explicit_scalar_vector_constructors() {
     for text in [
         "fn main()->i64{let mut items=vec![20];items.extend(vec![22]);items[0]+items[1]}",
+        "struct Bag{tag:i64,items:Vec<i64>}fn make()->Bag{Bag{tag:7,items:vec![13,22]}}fn take(bag:Bag)->i64{bag.tag+bag.items[0]+bag.items[1]}fn main()->i64{take(make())}",
         "mod Vec{pub fn with_capacity(value:i64)->i64{value}} fn main()->i64{Vec::with_capacity(42)}",
         "struct Reader{value:i64} impl Reader{fn take(&self,items:Vec<i64>)->i64{if items.capacity()>=10{self.value}else{0}}} fn main()->i64{let reader=Reader{value:42};reader.take(Vec::with_capacity(10))}",
         "struct Bag{items:Vec<i64>} fn main()->i64{let mut bag=Bag{items:Vec::new()};bag.items=Vec::with_capacity(10);if bag.items.capacity()>=10{42}else{0}}",
@@ -9980,6 +10220,18 @@ fn rust_concrete_aliases_and_scoped_imports_preserve_values() {
         (
             "concrete-assignment",
             "type A=B;type B=i64;fn main()->i64{let value:A;value=42;value}",
+        ),
+        (
+            "owned-glob-in-result",
+            "mod owned{pub type Word=u64;}use owned::*;fn answer()->Result<Word,i64>{Ok(42)}fn main()->Result<Word,i64>{answer()}",
+        ),
+        (
+            "owned-glob-inner-scope",
+            "type Word=u8;mod owned{pub type Word=u64;}fn main()->i64{use owned::*;let value:Word=4294967296;((value>>32)+41)as i64}",
+        ),
+        (
+            "owned-glob-private-reexport-back-edge",
+            "pub use common::*;mod common{pub use inner::*;mod inner{pub use path::*;pub use iter::*;mod path{pub type Word=u64;}mod iter{use crate::Word;pub type Selected=Word;}}}fn main()->i64{let value:Selected=4294967296;((value>>32)+41)as i64}",
         ),
         (
             "block-import-chain",

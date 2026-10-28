@@ -1101,6 +1101,40 @@ pub(crate) fn lower_stdlib_call(
         })?;
     }
     match cleaned_kebab.as_str() {
+        crate::compiler::rust_front::integer_parse::STR_BYTE => {
+            crate::native_emit::stdlib_wrappers::validate_intrinsic_call(
+                target,
+                functions
+                    .get(target)
+                    .map(|function| (function.params.as_slice(), &function.ret)),
+                args.iter()
+                    .map(|arg| super::lower_expr::native_expr_type(arg, ctx, functions)),
+            )
+            .map_err(|_| "native-lower: string byte requires String and Int")?;
+            let temporary = ctx.acquire_call_arg_temps(fn_name)?;
+            lower_expr_into(emitter, ctx, &args[0], 0, functions, pending_calls, fn_name)?;
+            emitter.emit_u32(aarch64::str64(0, REG_SP, ctx.call_arg_temps[temporary]));
+            lower_expr_into(emitter, ctx, &args[1], 1, functions, pending_calls, fn_name)?;
+            emitter.emit_u32(aarch64::ldr64(0, REG_SP, ctx.call_arg_temps[temporary]));
+            ctx.release_call_arg_temps();
+            emitter.emit_u32(aarch64::cmp_reg64(0, REG_XZR));
+            let null = emitter.emit_insn(aarch64::b_cond(0, 0));
+            emitter.emit_u32(aarch64::ldr64(2, 0, 0));
+            emitter.emit_u32(aarch64::cmp_reg64(1, 2));
+            let outside = emitter.emit_insn(aarch64::b_cond(2, 0)); // unsigned >=
+            emitter.emit_u32(aarch64::add_reg64(0, 0, 1));
+            emitter.emit_u32(aarch64::ldrb(0, 0, 8));
+            let end = emitter.emit_insn(aarch64::b(0));
+            let failure = emitter.len();
+            emitter.emit_insns(&aarch64::load_i64(0, -1));
+            emitter.patch_u32(null, aarch64::b_cond(0, failure as i32 - null as i32));
+            emitter.patch_u32(outside, aarch64::b_cond(2, failure as i32 - outside as i32));
+            emitter.patch_u32(end, aarch64::b(emitter.len() as i32 - end as i32));
+            if rd != 0 {
+                emitter.emit_u32(aarch64::mov_reg64(rd, 0));
+            }
+            return Ok(true);
+        }
         "display" if args.len() == 1 => {
             lower_expr_into(
                 emitter,

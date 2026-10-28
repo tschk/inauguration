@@ -202,6 +202,12 @@ fn reference_coercion_uncertain(left: &Typ, right: &Typ, depth: usize) -> bool {
                     && reference_coercion_uncertain(&left.element, &right.element, depth + 1);
             }
             if let (Some(left), Some(right)) = (
+                crate::core_ir::rust_options::payload(left),
+                crate::core_ir::rust_options::payload(right),
+            ) {
+                return reference_coercion_uncertain(&left, &right, depth + 1);
+            }
+            if let (Some(left), Some(right)) = (
                 crate::core_ir::tuples::fields(left),
                 crate::core_ir::tuples::fields(right),
             ) {
@@ -244,6 +250,9 @@ fn owned_type(typ: &Typ, depth: usize) -> bool {
             }
             if let Some(reference) = crate::core_ir::rust_references::decode(name) {
                 return owned_type(&reference.referent, depth + 1);
+            }
+            if let Some(payload) = crate::core_ir::rust_options::payload(name) {
+                return owned_type(&payload, depth + 1);
             }
             if let Some(fields) = crate::core_ir::tuples::fields(name) {
                 return fields.iter().all(|(_, typ)| owned_type(typ, depth + 1));
@@ -388,6 +397,12 @@ fn unify_source(
                     ));
                 }
                 return Ok(());
+            }
+            if let (Some(left), Some(right)) = (
+                crate::core_ir::rust_options::payload(left),
+                crate::core_ir::rust_options::payload(right),
+            ) {
+                return unify_source(&left, &right, names, bindings, depth + 1);
             }
             if let (Some(left), Some(right)) = (
                 crate::core_ir::tuples::fields(left),

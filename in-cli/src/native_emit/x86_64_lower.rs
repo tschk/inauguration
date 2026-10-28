@@ -3206,6 +3206,46 @@ fn lower_builtin_call(
         }
     }
     match target_name {
+        crate::compiler::rust_front::integer_parse::STR_BYTE => {
+            if x86_64::is_32bit() || ctx.string_layout != X86StringLayout::Instring {
+                return Err(
+                    "x86_64-lower: owned string bytes require 64-bit instring layout".into(),
+                );
+            }
+            crate::native_emit::stdlib_wrappers::validate_intrinsic_call(
+                target_name,
+                ctx.functions
+                    .get(target_name)
+                    .map(|function| (function.params.as_slice(), &function.ret)),
+                args.iter().map(|arg| scalar_expr_type(arg, ctx)),
+            )
+            .map_err(|_| "x86_64-lower: string byte requires String and Int")?;
+            lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+            emitter.emit_insns(&x86_64::push_r(RAX));
+            lower_expr_into(emitter, ctx, &args[1], RCX, pending_calls)?;
+            emitter.emit_insns(&x86_64::pop_r(RAX));
+            emitter.emit_insns(&x86_64::test_rr(RAX, RAX));
+            let null = emitter.len();
+            emitter.emit_insns(&x86_64::jcc_near(4, 0));
+            emitter.emit_insns(&x86_64::mov_r_m(RDX, RAX, 0));
+            emitter.emit_insns(&x86_64::cmp_rr(RCX, RDX));
+            let outside = emitter.len();
+            emitter.emit_insns(&x86_64::jcc_near(3, 0)); // unsigned >=
+            emitter.emit_insns(&x86_64::add_rr(RAX, RCX));
+            emitter.emit_insns(&x86_64::add_rmi8(RAX, 8));
+            emitter.emit_insns(&x86_64::movzx_m8(RAX, RAX));
+            let end = emitter.len();
+            emitter.emit_insns(&x86_64::jmp_rel32(0));
+            let failure = emitter.len();
+            emitter.emit_insns(&x86_64::load_i64(RAX, -1));
+            emitter.patch_u32(null + 2, (failure as i32 - null as i32 - 6) as u32);
+            emitter.patch_u32(outside + 2, (failure as i32 - outside as i32 - 6) as u32);
+            emitter.patch_u32(end + 1, (emitter.len() as i32 - end as i32 - 5) as u32);
+            if target_reg != RAX {
+                emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+            }
+            Ok(true)
+        }
         "str-len" | "str_len" | "__inrt_str_len" if args.len() == 1 => {
             if x86_64::is_32bit() {
                 return Err("x86_64-lower: string length requires 64-bit mode".into());

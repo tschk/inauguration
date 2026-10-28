@@ -44,7 +44,8 @@ pub(crate) fn x86_fields(
     fields(structs, name, FieldLayout::X86)
 }
 
-/// ARM aggregates transfer scalar arrays as pointer/length words.
+/// ARM aggregates transfer scalar arrays as pointer/length words. Vector headers
+/// occupy pointer/length/capacity words independently of the pointee's layout.
 pub(crate) fn arm_fields(
     structs: &HashMap<String, Vec<(String, Typ)>>,
     name: &str,
@@ -89,6 +90,11 @@ fn fields(
                 typ @ (Typ::Int | Typ::Bool | Typ::String | Typ::Float) => out.push((field, typ)),
                 typ @ Typ::Vector(_) if matches!(layout, FieldLayout::X86) => {
                     out.push((field, typ))
+                }
+                Typ::Vector(_) if matches!(layout, FieldLayout::Arm) => {
+                    for suffix in ["ptr", "len", "cap"] {
+                        out.push((format!("{field}.{suffix}"), Typ::Int));
+                    }
                 }
                 Typ::Array(item)
                     if matches!(layout, FieldLayout::Arm)

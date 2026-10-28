@@ -1151,6 +1151,11 @@ impl TypeChecker {
             let typ = scrutinee_value.typ;
             let mut types = Vec::with_capacity(arms.len());
             for arm in arms.iter_mut() {
+                if let Some(typ) = &typ {
+                    crate::core_ir::rust_options::pattern(&mut arm.pattern, typ, &|name| {
+                        facts.structs.get(name).cloned()
+                    });
+                }
                 let inner = typ
                     .as_ref()
                     .and_then(|typ| self.pattern_environment(&arm.pattern, typ, facts, env));
@@ -1418,6 +1423,15 @@ impl TypeChecker {
         } else if let Expr::Call { callee, args } = expr {
             let inline_const = matches!(callee.as_ref(),Expr::Ident(name)if name==crate::core_ir::INLINE_CONST)
                 && args.len() == 1;
+            let option_payload = if matches!(callee.as_ref(),Expr::Ident(name)if name==crate::core_ir::rust_options::SOME)
+            {
+                expected.and_then(|typ| match typ {
+                    Typ::Named(name) => crate::core_ir::rust_options::payload(name),
+                    _ => None,
+                })
+            } else {
+                None
+            };
             let tuple_context = if matches!(callee.as_ref(),Expr::Ident(name)if name==crate::core_ir::tuples::VALUE)
             {
                 expected.and_then(|typ| match typ {
@@ -1497,10 +1511,14 @@ impl TypeChecker {
                         .and_then(|params| params.get(index))
                         .map(|(_, typ)| typ.clone())
                 };
-                let destination = tuple_context
-                    .as_ref()
-                    .and_then(|fields| fields.get(index))
-                    .map(|(_, typ)| typ.clone())
+                let destination = option_payload
+                    .clone()
+                    .or_else(|| {
+                        tuple_context
+                            .as_ref()
+                            .and_then(|fields| fields.get(index))
+                            .map(|(_, typ)| typ.clone())
+                    })
                     .or_else(|| {
                         if repeat && index == 0 {
                             repeat_element.clone()
@@ -1634,6 +1652,17 @@ impl TypeChecker {
         let resolved_call_type = resolved_arguments.as_ref().and_then(|types| {
             rust_floats::call_type_with_arguments(self, expr, expected, facts, env, types).map(Some)
         });
+        if let Some(typ) = resolved_arguments.as_deref().and_then(|arguments| {
+            crate::core_ir::rust_options::constructor(expr, expected, arguments, &|name| {
+                facts.structs.get(name).cloned()
+            })
+        }) {
+            return ResolvedValue {
+                typ: Some(typ),
+                c_kind,
+                values: None,
+            };
+        }
         if let ResolvePolicy::RustCallables { lower, word64 } = policy {
             let typ = rust_callables::finish(
                 self,
@@ -2743,6 +2772,9 @@ impl TypeChecker {
                         .expr_type(scrutinee, facts, env)
                         .unwrap_or(Typ::Generic("_".into()));
                     for arm in arms {
+                        crate::core_ir::rust_options::pattern(&mut arm.pattern, &typ, &|name| {
+                            facts.structs.get(name).cloned()
+                        });
                         let mut inner = self
                             .pattern_environment(&arm.pattern, &typ, facts, env)
                             .unwrap_or_else(|| env.clone());
@@ -4833,19 +4865,24 @@ pub fn normalize_module_with_semantics(
 
 fn erase_rust_callable_metadata(module: &mut UnifiedModule) {
     use crate::core_ir::{rust_callables as source, type_proofs::ResolutionFailure};
-    crate::core_bindings::rewrite_named_types(&mut module.decls, &|name| {
-        if !source::is_encoded(name) {
-            return None;
-        }
-        let value = Typ::Named(name.into());
-        if let Some(failure) = crate::core_ir::type_proofs::failure_in_type(&value) {
-            return Some(failure.typ());
-        }
-        if source::signature_of(&value).is_some() {
-            Some(Typ::Int)
-        } else {
-            Some(ResolutionFailure::Unsupported("malformed Rust callable signature".into()).typ())
-        }
+    crate::core_ir::tuples::project_declarations(&mut module.decls, |decls| {
+        crate::core_bindings::rewrite_named_types(decls, &|name| {
+            if !source::is_encoded(name) {
+                return None;
+            }
+            let value = Typ::Named(name.into());
+            if let Some(failure) = crate::core_ir::type_proofs::failure_in_type(&value) {
+                return Some(failure.typ());
+            }
+            if source::signature_of(&value).is_some() {
+                Some(Typ::Int)
+            } else {
+                Some(
+                    ResolutionFailure::Unsupported("malformed Rust callable signature".into())
+                        .typ(),
+                )
+            }
+        });
     });
     for decl in &mut module.decls {
         if let Decl::Function { body, .. } = decl {
@@ -5401,6 +5438,31 @@ fn normalize_parser_type(parser_id: ParserId, typ: &Typ) -> Typ {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn option_schemas_coalesce_only_after_metadata_erasure() {
+        for source in [
+            "fn first(x:Option<fn(i64)->i64>)->Option<fn(i64)->i64>{x}fn second(x:Option<fn(bool)->bool>)->Option<fn(bool)->bool>{x}fn main()->i64{42}",
+            "fn first(x:Option<[i64;2]>)->Option<[i64;2]>{x}fn second(x:Option<[i64;3]>)->Option<[i64;3]>{x}fn main()->i64{42}",
+        ] {
+            let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
+            let result = |wanted| {
+                parsed
+                    .decls
+                    .iter()
+                    .find_map(|decl| match decl {
+                        Decl::Function { name, ret, .. } if name == wanted => Some(ret),
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            assert_ne!(result("first"), result("second"), "source types differ");
+            let normalized =
+                super::normalize_module(crate::parser_registry::ParserId::Rust, &parsed);
+            let report = crate::core_ir_verifier::verify_for_entry(&normalized, "main");
+            assert!(report.ok, "{report:?}");
+        }
+    }
+
     #[test]
     fn numeric_cast_type_projects_destination_before_value_spills() {
         let checker = TypeChecker::new();

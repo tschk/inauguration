@@ -5,6 +5,7 @@ pub(crate) mod rust_arrays;
 pub(crate) mod rust_callables;
 pub(crate) mod rust_floats;
 pub(crate) mod rust_generics;
+pub(crate) mod rust_options;
 pub(crate) mod rust_references;
 pub(crate) mod source_types;
 pub(crate) mod tuples;

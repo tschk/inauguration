@@ -15,8 +15,11 @@ use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use syn::parse::Parser;
 
+mod collections;
+mod enums;
 mod function_access;
 mod imports;
+pub(crate) mod integer_parse;
 mod type_aliases;
 mod unary_methods;
 
@@ -94,6 +97,8 @@ fn parse_rust_source_unit(
     let _aliases = frame.enter();
     let mut artifact = lower_file_items_at(&file, base_dir, owns_crate_root)?;
     retain_alias_declaration_failures(&mut artifact, failures);
+    integer_parse::retain_helpers(&mut artifact.semantic)?;
+    collections::retain_helpers(&mut artifact.semantic);
     artifact.boundary = extract_boundary_module(&file, module_id);
     Ok(artifact)
 }
@@ -978,7 +983,9 @@ fn lower_file_items_at_visited(
                 }
             }
             syn::Item::Enum(e) => {
-                if let Some(decl) = lower_enum(e) {
+                if let Some(owned) = enums::declarations(e) {
+                    decls.extend(owned);
+                } else if let Some(decl) = lower_enum(e) {
                     decls.push(decl);
                 }
             }
@@ -2561,10 +2568,14 @@ fn err_pattern_binding(pat: &syn::Pat) -> Option<String> {
     let syn::Pat::TupleStruct(tuple) = pat else {
         return None;
     };
-    (tuple.path.segments.last()?.ident == "Err")
-        .then(|| tuple.elems.first())
-        .flatten()
-        .and_then(pattern_name)
+    (tuple.path.segments.last()?.ident == "Err"
+        && type_aliases::enum_variant(&tuple.path).is_none())
+    .then(|| tuple.elems.first())
+    .flatten()
+    .and_then(|pattern| match pattern {
+        syn::Pat::Wild(_) => Some("_".into()),
+        pattern => pattern_name(pattern),
+    })
 }
 
 fn nominal_path_name(path: &syn::Path) -> String {
@@ -2766,6 +2777,13 @@ fn rust_integer_constant(path: &syn::Path, call_target: bool) -> Option<String> 
         && matches!(member.arguments, syn::PathArguments::None)
         && crate::typecheck::rust_integers::wrapping_operator(&member.ident.to_string()).is_some();
     let owner_type = type_aliases::resolve_value_owner(&owner);
+    if call_target
+        && matches!(member.arguments, syn::PathArguments::None)
+        && let Ok(Some(typ)) = &owner_type
+        && let Some(target) = collections::member(typ, &member.ident.to_string())
+    {
+        return Some(target);
+    }
     let resolved = match owner_type {
         Ok(Some(Typ::Named(name))) => Some(name),
         Ok(Some(Typ::Generic(_))) => {
@@ -2801,6 +2819,13 @@ fn rust_integer_constant(path: &syn::Path, call_target: bool) -> Option<String> 
         );
     }
 
+    if call_target
+        && kind == "u64"
+        && member.ident == "from_str_radix"
+        && matches!(member.arguments, syn::PathArguments::None)
+    {
+        return Some(integer_parse::U64_PARSE.into());
+    }
     if !known_constant && !known_wrapping {
         return Some(
             crate::core_ir::type_proofs::ResolutionFailure::Unsupported(format!(
@@ -3004,7 +3029,22 @@ fn map_type(ty: &syn::Type) -> Typ {
                         last.as_deref().unwrap_or_default()
                     ))
                 }
-                Some("String" | "str") => Typ::String,
+                Some("String" | "str") => {
+                    // A nominal named String/str is not a standard string.
+                    // Keep its owner for method dispatch before ABI erasure.
+                    let standard = if last.as_deref() == Some("str") {
+                        syn::parse_quote!(::core::primitive::str)
+                    } else {
+                        syn::parse_quote!(::std::string::String)
+                    };
+                    match (
+                        type_aliases::source_signature_type(ty),
+                        type_aliases::source_signature_type(&standard),
+                    ) {
+                        (Ok(source), Ok(standard)) if source == standard => Typ::String,
+                        _ => Typ::Named(nominal_path_name(&tp.path)),
+                    }
+                }
                 Some("bool") => Typ::Bool,
                 Some("f32" | "f64") if type_aliases::current().is_none() => {
                     rust_float_path(&tp.path)
@@ -3673,6 +3713,76 @@ fn lower_tuple_let_bindings(pattern: &syn::Pat, value: Expr, out: &mut Vec<Stmt>
     }
 }
 
+/// Match-bound names are scoped to an arm in Core IR. Return them as a tuple
+/// before introducing the surrounding let bindings, preserving the old scope
+/// for both the initializer and the diverging else branch.
+fn lower_let_else(
+    local: &syn::Local,
+    local_types: &mut HashMap<String, String>,
+) -> Option<Vec<Stmt>> {
+    let init = local.init.as_ref()?;
+    let (_, otherwise) = init.diverge.as_ref()?;
+    let pattern = &local.pat;
+    if matches!(pattern, syn::Pat::Type(_)) {
+        return None;
+    }
+    struct Bindings {
+        names: Vec<syn::Ident>,
+        unsupported: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Bindings {
+        fn visit_pat_ident(&mut self, binding: &'ast syn::PatIdent) {
+            self.unsupported |= binding.by_ref.is_some() || binding.subpat.is_some();
+            if type_aliases::enum_variant(&syn::Path::from(binding.ident.clone())).is_none() {
+                self.names.push(binding.ident.clone());
+            }
+        }
+
+        fn visit_pat_tuple_struct(&mut self, pattern: &'ast syn::PatTupleStruct) {
+            // An unowned Result/Option constructor has no proven discriminant
+            // or payload projection. Keep its opaque initialized binders.
+            self.unsupported |= type_aliases::enum_variant(&pattern.path).is_none();
+            syn::visit::visit_pat_tuple_struct(self, pattern);
+        }
+
+        fn visit_pat(&mut self, pattern: &'ast syn::Pat) {
+            if let syn::Pat::Path(pattern) = pattern {
+                self.unsupported |= type_aliases::enum_variant(&pattern.path).is_none();
+            }
+            syn::visit::visit_pat(self, pattern);
+        }
+    }
+    let mut bindings = Bindings {
+        names: Vec::new(),
+        unsupported: false,
+    };
+    syn::visit::Visit::visit_pat(&mut bindings, pattern);
+    if bindings.unsupported {
+        return None;
+    }
+    let otherwise_value = lower_expr_with_types(otherwise, &mut local_types.clone());
+    if !crate::core_ir::expr_diverges(&otherwise_value) {
+        return Some(vec![Stmt::Expr(Expr::Ident(
+            crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                "let-else requires a proven diverging else branch".into(),
+            )
+            .symbol(),
+        ))]);
+    }
+    let names = &bindings.names;
+    let value = &init.expr;
+    let block: syn::Block = syn::parse_quote!({
+        let (#(#names,)*) = match #value {
+            #pattern => (#(#names,)*),
+            _ => #otherwise,
+        };
+    });
+    Some(lower_block_no_implicit_return_with_types(
+        &block,
+        local_types,
+    ))
+}
+
 fn lower_block_inner_with_types_go(
     block: &syn::Block,
     wrap_implicit_return: bool,
@@ -3683,6 +3793,19 @@ fn lower_block_inner_with_types_go(
         match stmt {
             syn::Stmt::Local(local) => {
                 if let Some(init) = &local.init {
+                    if init.diverge.is_some() {
+                        if let Some(body) = lower_let_else(local, local_types) {
+                            out.extend(body);
+                        } else {
+                            lower_unsupported_local_pattern(
+                                &local.pat,
+                                &init.expr,
+                                local_types,
+                                &mut out,
+                            );
+                        }
+                        continue;
+                    }
                     if tuple_let_pattern(&local.pat) {
                         let mut names = HashSet::new();
                         if !tuple_let_names(&local.pat, &mut names)
@@ -3766,7 +3889,7 @@ fn lower_block_inner_with_types_go(
                     }
                     if let syn::Expr::Try(try_expr) = init.expr.as_ref() {
                         let typ = local_decl_type(&local.pat, local_types);
-                        let value = lower_expr_with_types(&try_expr.expr, local_types);
+                        let value = lower_fallible_expr(&try_expr.expr, local_types);
                         local_types.insert(format!("{LENGTH_LOCAL}{name}"), String::new());
                         out.push(Stmt::Let(name, typ, value));
                         out.push(Stmt::Propagate);
@@ -3937,7 +4060,7 @@ fn lower_match_with_types(
             }
             MatchArm {
                 guard,
-                pattern: arm.pat.to_token_stream().to_string(),
+                pattern: enums::pattern(&arm.pat),
                 body,
             }
         })
@@ -3957,10 +4080,7 @@ fn lower_if_with_types(
             && let Some(binding) = err_pattern_binding(&expr_let.pat)
         {
             out.push(Stmt::Try {
-                body: vec![Stmt::Expr(lower_expr_with_types(
-                    &expr_let.expr,
-                    local_types,
-                ))],
+                body: vec![Stmt::Expr(lower_fallible_expr(&expr_let.expr, local_types))],
                 catches: vec![CatchArm {
                     pattern: binding,
                     body: lower_block_no_implicit_return_with_types(&eif.then_branch, local_types),
@@ -3984,7 +4104,7 @@ fn lower_if_with_types(
         let arms = vec![
             MatchArm {
                 guard: None,
-                pattern: expr_let.pat.to_token_stream().to_string(),
+                pattern: enums::pattern(&expr_let.pat),
                 body: then_body,
             },
             MatchArm {
@@ -4023,10 +4143,7 @@ fn lower_expr_stmt(
         syn::Expr::Break(_) => out.push(Stmt::Break),
         syn::Expr::Continue(_) => out.push(Stmt::Continue),
         syn::Expr::Try(try_expr) => {
-            out.push(Stmt::Expr(lower_expr_with_types(
-                &try_expr.expr,
-                local_types,
-            )));
+            out.push(Stmt::Expr(lower_fallible_expr(&try_expr.expr, local_types)));
             out.push(Stmt::Propagate);
         }
         syn::Expr::If(eif) => lower_if_with_types(eif, false, out, local_types),
@@ -4107,13 +4224,19 @@ fn lower_return_expr(
         return;
     }
     let syn::Expr::Call(call) = expr else {
-        out.push(Stmt::Return(Some(lower_expr_with_types(expr, local_types))));
+        out.push(Stmt::Return(Some(lower_fallible_expr(expr, local_types))));
         return;
     };
     let Some(name) = rust_path_name(&call.func) else {
-        out.push(Stmt::Return(Some(lower_expr_with_types(expr, local_types))));
+        out.push(Stmt::Return(Some(lower_fallible_expr(expr, local_types))));
         return;
     };
+    if let syn::Expr::Path(path) = call.func.as_ref()
+        && type_aliases::enum_variant(&path.path).is_some()
+    {
+        out.push(Stmt::Return(Some(lower_fallible_expr(expr, local_types))));
+        return;
+    }
     match (name.as_str(), call.args.len()) {
         ("Ok", 1) => out.push(Stmt::Return(Some(lower_expr_with_types(
             call.args.first().expect("one Ok argument"),
@@ -4125,7 +4248,7 @@ fn lower_return_expr(
                 local_types,
             )));
         }
-        _ => out.push(Stmt::Return(Some(lower_expr_with_types(expr, local_types)))),
+        _ => out.push(Stmt::Return(Some(lower_fallible_expr(expr, local_types)))),
     }
 }
 
@@ -4198,13 +4321,18 @@ thread_local! {
 }
 
 fn lower_expr_with_types(expr: &syn::Expr, local_types: &mut HashMap<String, String>) -> Expr {
-    lower_expr_in_position(expr, local_types, false)
+    lower_expr_in_position(expr, local_types, false, false)
+}
+
+fn lower_fallible_expr(expr: &syn::Expr, local_types: &mut HashMap<String, String>) -> Expr {
+    lower_expr_in_position(expr, local_types, false, true)
 }
 
 fn lower_expr_in_position(
     expr: &syn::Expr,
     local_types: &mut HashMap<String, String>,
     call_target: bool,
+    fallible_result: bool,
 ) -> Expr {
     let _length_shadows = LengthShadowScope::new(local_types);
     // Transparent syntax wrappers do not consume structural recursion budget.
@@ -4228,7 +4356,7 @@ fn lower_expr_in_position(
             args: Vec::new(),
         };
     }
-    let out = lower_expr_with_types_inner(expr, local_types, call_target);
+    let out = lower_expr_with_types_inner(expr, local_types, call_target, fallible_result);
     EXPR_DEPTH.with(|d| d.set(depth));
     out
 }
@@ -4281,6 +4409,7 @@ fn lower_expr_with_types_inner(
     expr: &syn::Expr,
     local_types: &mut HashMap<String, String>,
     call_target: bool,
+    fallible_result: bool,
 ) -> Expr {
     match expr {
         syn::Expr::Lit(l) => match &l.lit {
@@ -4390,10 +4519,14 @@ fn lower_expr_with_types_inner(
             } else {
                 if call_target && let Some(resolved) = type_aliases::resolve_trait_static(&p.path) {
                     resolved.unwrap_or_else(|proof| proof.symbol())
+                } else if let Some(target) = rust_integer_constant(&p.path, call_target)
+                    .or_else(|| rust_float_member(&p.path, call_target))
+                {
+                    target
+                } else if let Some(value) = enums::path_value(&scoped_path, call_target) {
+                    return value;
                 } else {
-                    rust_integer_constant(&p.path, call_target)
-                        .or_else(|| rust_float_member(&p.path, call_target))
-                        .unwrap_or(path)
+                    path
                 }
             })
         }
@@ -4578,7 +4711,12 @@ fn lower_expr_with_types_inner(
             }
         }
         syn::Expr::Call(c) => {
-            let callee = lower_expr_in_position(&c.func, local_types, true);
+            let callee = lower_expr_in_position(&c.func, local_types, true, false);
+            if !fallible_result
+                && matches!(&callee, Expr::Ident(name) if name == integer_parse::U64_PARSE)
+            {
+                return integer_parse::unmaterialized_result();
+            }
             let args: Vec<Expr> = c
                 .args
                 .iter()
@@ -4608,6 +4746,15 @@ fn lower_expr_with_types_inner(
             }
         }
         syn::Expr::MethodCall(m) => {
+            if let Some(call) = integer_parse::decimal_call(m, local_types)
+                .or_else(|| integer_parse::map_error(m, local_types))
+            {
+                return if fallible_result {
+                    call
+                } else {
+                    integer_parse::unmaterialized_result()
+                };
+            }
             let mut args = Vec::with_capacity(m.args.len() + 1);
             args.push(lower_expr_with_types(&m.receiver, local_types));
             args.extend(m.args.iter().map(|a| lower_expr_with_types(a, local_types)));
@@ -4728,7 +4875,22 @@ fn lower_expr_with_types_inner(
                 }
             }
         }
-        syn::Expr::Try(t) => lower_expr_with_types(&t.expr, local_types),
+        syn::Expr::Try(t) => {
+            // A nested `?` must propagate before its enclosing expression can
+            // consume the success payload, just like a statement-level `?`.
+            let value = "#rust-result-value".to_string();
+            Expr::Block {
+                body: vec![
+                    Stmt::Let(
+                        value.clone(),
+                        None,
+                        lower_fallible_expr(&t.expr, local_types),
+                    ),
+                    Stmt::Propagate,
+                ],
+                result: Some(Box::new(Expr::Ident(value))),
+            }
+        }
         syn::Expr::Await(a) => lower_expr_with_types(&a.base, local_types),
         syn::Expr::Async(a) => Expr::Closure {
             params: vec![],
@@ -4759,7 +4921,7 @@ fn lower_expr_with_types_inner(
                 scrutinee: Box::new(lower_expr_with_types(&binding.expr, local_types)),
                 arms: vec![
                     MatchValueArm {
-                        pattern: binding.pat.to_token_stream().to_string(),
+                        pattern: enums::pattern(&binding.pat),
                         guard: None,
                         value: lower_block_value(&value.then_branch, local_types),
                     },
@@ -4840,7 +5002,7 @@ fn lower_expr_with_types_inner(
                 .map(|arm| {
                     let mut inner = length_pattern_locals(&arm.pat, local_types);
                     MatchValueArm {
-                        pattern: arm.pat.to_token_stream().to_string(),
+                        pattern: enums::pattern(&arm.pat),
                         guard: arm
                             .guard
                             .as_ref()
@@ -4903,22 +5065,24 @@ fn lower_expr_with_types_inner(
             }],
             captures: vec![],
         },
-        syn::Expr::Struct(s) => Expr::StructInit {
-            name: nominal_path_name(&s.path),
-            fields: s
-                .fields
-                .iter()
-                .map(|f| {
-                    (
-                        match &f.member {
-                            syn::Member::Unnamed(idx) => format!("_{}", idx.index),
-                            _ => f.member.to_token_stream().to_string(),
-                        },
-                        lower_expr_with_types(&f.expr, local_types),
-                    )
-                })
-                .collect(),
-        },
+        syn::Expr::Struct(s) => {
+            enums::record_value(s, local_types).unwrap_or_else(|| Expr::StructInit {
+                name: nominal_path_name(&s.path),
+                fields: s
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        (
+                            match &f.member {
+                                syn::Member::Unnamed(idx) => format!("_{}", idx.index),
+                                _ => f.member.to_token_stream().to_string(),
+                            },
+                            lower_expr_with_types(&f.expr, local_types),
+                        )
+                    })
+                    .collect(),
+            })
+        }
         other => {
             if let syn::Expr::Verbatim(ts) = other {
                 let text: String = ts

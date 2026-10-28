@@ -280,6 +280,10 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("str-to-int", IntrinsicRet::Int),
     ("str-is-int", IntrinsicRet::Bool),
     ("str-index-of", IntrinsicRet::Int),
+    (
+        crate::compiler::rust_front::integer_parse::STR_BYTE,
+        IntrinsicRet::Int,
+    ),
     ("str-table-has", IntrinsicRet::Bool),
     ("str-table-get-int", IntrinsicRet::Int),
     ("array-len", IntrinsicRet::Int),
@@ -414,6 +418,9 @@ pub(crate) fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
     }
     match name {
         crate::core_ir::COMPILER_UNREACHABLE => return Some(&[]),
+        crate::compiler::rust_front::integer_parse::STR_BYTE => {
+            return Some(&[Typ::String, Typ::Int]);
+        }
         "__inrt_array_len" => return Some(&[Typ::Int]),
         crate::inrt::INRT_VECTOR_CLONE => return Some(&[Typ::Int, Typ::Int, Typ::Int]),
         crate::inrt::INRT_VECTOR_EXTEND => return Some(&[Typ::Int, Typ::Int, Typ::Int, Typ::Int]),

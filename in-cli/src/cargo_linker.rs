@@ -440,25 +440,30 @@ fn dependency_function_aliases(
 }
 
 pub fn merge_dependency_modules(main: &mut UnifiedModule, deps: Vec<(String, UnifiedModule)>) {
-    let is_tuple_schema = |decl: &&Decl| {
+    let is_structural_schema = |decl: &&Decl| {
         matches!(decl, Decl::Struct { name, fields, type_params }
-            if type_params.is_empty() && crate::core_ir::tuples::fields(name).as_ref() == Some(fields))
+            if type_params.is_empty() && crate::core_ir::tuples::fields(name)
+                .or_else(|| crate::core_ir::rust_options::fields(name)).as_ref() == Some(fields))
     };
-    let mut tuple_schemas: std::collections::HashSet<_> =
-        main.decls.iter().filter(is_tuple_schema).cloned().collect();
+    let mut structural_schemas: std::collections::HashSet<_> = main
+        .decls
+        .iter()
+        .filter(is_structural_schema)
+        .cloned()
+        .collect();
     for (crate_name, mut dep_module) in deps {
         main.regions.append(&mut dep_module.regions);
-        // Tuple identities are structural, not crate-local. Coalesce schemas
+        // Tuple and Option identities are structural, not crate-local. Coalesce schemas
         // shared by different artifacts, never duplicates within one source or
         // malformed declarations that must still fail verification.
         let mut schemas = HashMap::new();
-        for decl in dep_module.decls.iter().filter(is_tuple_schema) {
+        for decl in dep_module.decls.iter().filter(is_structural_schema) {
             *schemas.entry(decl.clone()).or_insert(0usize) += 1;
         }
         dep_module
             .decls
-            .retain(|decl| !tuple_schemas.contains(decl) || schemas[decl] != 1);
-        tuple_schemas.extend(schemas.into_keys());
+            .retain(|decl| !structural_schemas.contains(decl) || schemas[decl] != 1);
+        structural_schemas.extend(schemas.into_keys());
         if crate_name.is_empty() || crate_name.starts_with("in-") {
             main.decls.append(&mut dep_module.decls);
             continue;
@@ -1115,39 +1120,44 @@ direct_dep = { path = "direct_dep" }
     }
 
     #[test]
-    fn dependency_tuple_merging_keeps_source_conflicts_visible() {
-        let crate::core_ir::Typ::Named(name) =
-            crate::core_ir::tuples::typ(&[crate::core_ir::Typ::Int])
-        else {
-            unreachable!()
-        };
-        let schema = Decl::Struct {
-            fields: crate::core_ir::tuples::fields(&name).unwrap(),
-            name,
-            type_params: vec![],
-        };
-        for copies in [1, 2] {
-            let mut main = UnifiedModule::new(vec![schema.clone()]);
-            merge_dependency_modules(
-                &mut main,
-                vec![(
-                    "dep".into(),
-                    UnifiedModule::new(vec![schema.clone(); copies]),
-                )],
-            );
-            let report = crate::core_ir_verifier::verify_module(
-                &main,
-                &crate::core_ir_verifier::VerifyOptions {
-                    entry: None,
-                    require_entry: false,
-                },
-            );
-            assert_eq!(report.ok, copies == 1, "{report:?}");
-            if copies > 1 {
-                assert_eq!(
-                    report.reason_code.as_deref(),
-                    Some("duplicate-top-level-name")
+    fn dependency_structural_merging_keeps_source_conflicts_visible() {
+        for typ in [
+            crate::core_ir::tuples::typ(&[crate::core_ir::Typ::Int]),
+            crate::core_ir::rust_options::typ(crate::core_ir::Typ::Int),
+        ] {
+            let crate::core_ir::Typ::Named(name) = typ else {
+                unreachable!()
+            };
+            let schema = Decl::Struct {
+                fields: crate::core_ir::tuples::fields(&name)
+                    .or_else(|| crate::core_ir::rust_options::fields(&name))
+                    .unwrap(),
+                name,
+                type_params: vec![],
+            };
+            for copies in [1, 2] {
+                let mut main = UnifiedModule::new(vec![schema.clone()]);
+                merge_dependency_modules(
+                    &mut main,
+                    vec![(
+                        "dep".into(),
+                        UnifiedModule::new(vec![schema.clone(); copies]),
+                    )],
                 );
+                let report = crate::core_ir_verifier::verify_module(
+                    &main,
+                    &crate::core_ir_verifier::VerifyOptions {
+                        entry: None,
+                        require_entry: false,
+                    },
+                );
+                assert_eq!(report.ok, copies == 1, "{report:?}");
+                if copies > 1 {
+                    assert_eq!(
+                        report.reason_code.as_deref(),
+                        Some("duplicate-top-level-name")
+                    );
+                }
             }
         }
     }

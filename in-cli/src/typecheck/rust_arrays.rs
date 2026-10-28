@@ -593,6 +593,8 @@ fn erase_type(typ: Typ) -> Typ {
                 reference.referent = erase_type(reference.referent);
                 reference.runtime = erase_type(reference.runtime);
                 crate::core_ir::rust_references::typ(reference)
+            } else if let Some(payload) = crate::core_ir::rust_options::payload(&name) {
+                crate::core_ir::rust_options::typ(erase_type(payload))
             } else if let Some(fields) = crate::core_ir::tuples::fields(&name) {
                 crate::core_ir::tuples::typ(
                     &fields
@@ -615,15 +617,17 @@ pub(super) fn normalize(checker: &TypeChecker, module: &mut UnifiedModule) {
         return;
     }
     let _ = checker.resolve_typed_operators(module, ResolvePolicy::RustFixedArrays, None, None);
-    crate::core_bindings::rewrite_type_annotations(&mut module.decls, &|name| {
-        rust_arrays::decode(name).map(|_| erase_type(Typ::Named(name.into())))
-    });
-    crate::core_opt::map_decl_exprs_mut(&mut module.decls, &mut |expr| {
-        if let Expr::Unary { op, expr: inner } = expr
-            && rust_arrays::value_length(op).is_some()
-        {
-            *expr = *std::mem::replace(inner, Box::new(Expr::UnitLit));
-        }
+    crate::core_ir::tuples::project_declarations(&mut module.decls, |decls| {
+        crate::core_bindings::rewrite_type_annotations(decls, &|name| {
+            rust_arrays::decode(name).map(|_| erase_type(Typ::Named(name.into())))
+        });
+        crate::core_opt::map_decl_exprs_mut(decls, &mut |expr| {
+            if let Expr::Unary { op, expr: inner } = expr
+                && rust_arrays::value_length(op).is_some()
+            {
+                *expr = *std::mem::replace(inner, Box::new(Expr::UnitLit));
+            }
+        });
     });
 }
 

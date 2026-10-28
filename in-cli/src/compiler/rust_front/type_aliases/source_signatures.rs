@@ -178,13 +178,17 @@ pub(super) fn builtin(
         ["Result"] | ["std" | "core", "result", "Result"] => ("std:result:Result", 2),
         ["Option"] | ["std" | "core", "option", "Option"] => ("std:option:Option", 1),
         ["Vec"] | ["std" | "alloc", "vec", "Vec"] => ("std:vec:Vec", 1),
+        ["std" | "alloc", "collections", "BTreeMap"]
+        | ["std" | "alloc", "collections", "btree_map", "BTreeMap"] => {
+            ("std:collections:BTreeMap", 2)
+        }
         _ => return Ok(None),
     };
     // Import declarations name the constructor itself, not an application.
     // A type spelling without arguments still has Some(PathArguments::None)
     // and must satisfy its arity below.
     if arity > 0 && context.arguments.is_none() {
-        return Ok(None);
+        return Ok(Some(Resolved::Type(leaf(name))));
     }
     let (args, dependencies) = arguments(context.arguments, active)?;
     if args.len() != arity {

@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 mod declarations;
+mod enum_variants;
 mod generic_aliases;
 mod source_signatures;
 mod trait_statics;
@@ -255,15 +256,35 @@ enum Binding {
 struct Scope {
     aliases: Vec<syn::Ident>,
     parameters: bool,
+    lifetimes: HashMap<String, Presence>,
     bindings: HashMap<String, Binding>,
     imports: HashMap<String, Vec<Binding>>,
     values: HashMap<String, Binding>,
+    enums: HashMap<String, Rc<syn::ItemEnum>>,
     active_types: HashSet<String>,
     active_values: HashSet<String>,
     glob: bool,
+    glob_sources: Vec<(Vec<String>, bool, Presence, syn::Visibility)>,
     conditional: bool,
 }
 impl Scope {
+    fn glob_sources(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                Self::glob_sources(&path.tree, prefix, out);
+                prefix.pop();
+            }
+            syn::UseTree::Group(group) => {
+                for tree in &group.items {
+                    Self::glob_sources(tree, prefix, out);
+                }
+            }
+            syn::UseTree::Glob(_) => out.push(prefix.clone()),
+            _ => {}
+        }
+    }
+
     fn insert(&mut self, name: String, value: Binding) {
         let duplicate =
             !matches!(&value, Binding::Conditional) && !self.active_types.insert(name.clone());
@@ -293,6 +314,13 @@ impl Scope {
                 && let syn::Item::Type(alias) = item
             {
                 scope.aliases.push(alias.ident.clone());
+            }
+            if presence == Presence::Active
+                && let syn::Item::Enum(item) = item
+            {
+                scope
+                    .enums
+                    .insert(item.ident.to_string(), Rc::new(item.clone()));
             }
             let named = match item {
                 syn::Item::Type(item) => Some((
@@ -344,6 +372,16 @@ impl Scope {
                         item.leading_colon.is_some(),
                         &mut leaves,
                     );
+                    let mut globs = Vec::new();
+                    Self::glob_sources(&item.tree, &mut Vec::new(), &mut globs);
+                    scope.glob_sources.extend(globs.into_iter().map(|path| {
+                        (
+                            path,
+                            item.leading_colon.is_some(),
+                            presence,
+                            item.vis.clone(),
+                        )
+                    }));
                     for (name, target) in leaves {
                         let binding = target.map_or(Binding::UnknownImport, |(path, absolute)| {
                             Binding::Import(path, absolute)
@@ -533,9 +571,24 @@ impl Frame {
             };
             scope.insert(parameter.ident.to_string(), binding);
         }
+        for parameter in generics.lifetimes() {
+            scope.lifetimes.insert(
+                parameter.lifetime.ident.to_string(),
+                attrs_presence(&parameter.attrs),
+            );
+        }
         let mut frame = self.clone();
         frame.locals.push(Rc::new(scope));
         frame
+    }
+    fn owns_reference_lifetime(&self, lifetime: &syn::Lifetime) -> bool {
+        matches!(lifetime.ident.to_string().as_str(), "static" | "_")
+            || self
+                .locals
+                .iter()
+                .rev()
+                .find_map(|scope| scope.lifetimes.get(&lifetime.ident.to_string()))
+                == Some(&Presence::Active)
     }
     pub(super) fn enter(&self) -> Guard {
         Guard(CURRENT.with(|value| value.replace(Some(self.clone()))))
@@ -556,6 +609,58 @@ impl Drop for Guard {
 pub(super) fn current() -> Option<Frame> {
     CURRENT.with(|value| value.borrow().clone())
 }
+
+/// Variant value lookup is separate from type lookup: enum globs export no types.
+pub(super) fn enum_variant(path: &syn::Path) -> Option<(String, syn::Variant, i64)> {
+    enum_variants::resolve(path).ok().flatten()
+}
+
+pub(super) fn enum_pattern_variant(
+    path: &syn::Path,
+) -> Result<Option<(String, syn::Variant, i64)>, Failure> {
+    enum_variants::resolve(path)
+}
+
+fn qualified_enum_variant(path: &syn::Path) -> Option<(String, syn::Variant, i64)> {
+    let mut owner = path.clone();
+    let member = owner.segments.pop()?.into_value();
+    if owner.segments.is_empty() {
+        return None;
+    }
+    owner.segments.pop_punct();
+    let typ = syn::Type::Path(syn::TypePath {
+        qself: None,
+        path: owner.clone(),
+    });
+    let Typ::Named(identity) = source_signature_type(&typ).ok()? else {
+        return None;
+    };
+    let mut identity = crate::core_ir::source_types::nominal_identity(&identity)?
+        .split("::")
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let name = identity.pop()?;
+    let frame = current()?;
+    let item = frame.catalog.modules.get(&identity)?.enums.get(&name)?;
+    let mut tag = 0i64;
+    for variant in &item.variants {
+        match attrs_presence(&variant.attrs) {
+            Presence::Inactive => continue,
+            Presence::Conditional => return None,
+            Presence::Active => {}
+        }
+        if let Some((_, value)) = &variant.discriminant {
+            tag = crate::core_ir::parse_int_literal(&super::compact_rust_tokens(value))?;
+        }
+        if variant.ident == member.ident {
+            identity.push(name);
+            return Some((identity.join("::"), variant.clone(), tag));
+        }
+        tag = tag.checked_add(1)?;
+    }
+    None
+}
+
 pub(super) fn suspend() -> Guard {
     Guard(CURRENT.with(|value| value.replace(None)))
 }
@@ -915,6 +1020,226 @@ fn scope_binding(
     Ok((typ, value))
 }
 
+/// Collect declarations, not their runtime carriers: two different source
+/// aliases to u32 are still competing glob imports. Cyclic reexports can reach
+/// the same declaration repeatedly without creating an ambiguity.
+fn glob_candidates(
+    scope: &Scope,
+    frame: &Frame,
+    name: &str,
+    access: &[String],
+    active: &mut HashSet<Key>,
+    seen: &mut HashSet<Vec<String>>,
+    candidates: &mut std::collections::BTreeSet<Vec<String>>,
+) -> Result<(), Failure> {
+    for (path, absolute, presence, visibility) in &scope.glob_sources {
+        if !visibility_extent(visibility, &frame.module)?.permits(access) {
+            continue;
+        }
+        if *presence != Presence::Active {
+            return Err(unsupported(
+                "glob import depends on unresolved cfg predicates",
+            ));
+        }
+        let context = LookupContext {
+            arguments: None,
+            caller_active: None,
+            declaration: true,
+            alias_target: false,
+            source_qualified: false,
+            ordinary_value_owner: false,
+            constant_value: false,
+            trait_position: false,
+            nominal_arguments: 0,
+            unsupported_nominal_arguments: false,
+        };
+        let target = resolve_parts(
+            path,
+            *absolute,
+            false,
+            frame,
+            &frame.module,
+            active,
+            context,
+        )?
+        .visibility()
+        .0;
+        // An enum glob contributes variants, never type aliases or modules.
+        if enum_variants::identity(&target, frame).is_some() {
+            continue;
+        }
+        // Runtime enum owners may have no unapplied storage type. Query their
+        // source identity rather than treating a variant-only glob as a module.
+        let standard_enum = if matches!(target, Resolved::Missing) {
+            let _source = source_signatures::ensure_source_context(frame);
+            resolve_parts(
+                path,
+                *absolute,
+                false,
+                frame,
+                &frame.module,
+                active,
+                context,
+            )?
+            .visibility()
+            .0
+        } else {
+            target.clone()
+        };
+        if matches!(standard_enum,Resolved::Type(Typ::Named(ref name)) if matches!(name.as_str(),"#rust-source-signature:std:option:Option"|"#rust-source-signature:std:result:Result"))
+        {
+            continue;
+        }
+        // Ordering is already owned by the atomic frontend. Do not mistake a
+        // source module shadowing std/core for that standard enum.
+        if matches!(target, Resolved::Missing)
+            && matches!(
+                path.iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+                ["std" | "core", "sync", "atomic", "Ordering"]
+            )
+            && (*absolute
+                || matches!(
+                    resolve_parts(
+                        &path[..1],
+                        false,
+                        false,
+                        frame,
+                        &frame.module,
+                        active,
+                        context
+                    )?
+                    .visibility()
+                    .0,
+                    Resolved::Missing
+                ))
+        {
+            continue;
+        }
+        let Resolved::Module(module) = target else {
+            return Err(unsupported(
+                "glob source module is not owned by this source",
+            ));
+        };
+        let Some(source) = frame.catalog.modules.get(&module) else {
+            return Err(unsupported(
+                "glob source module is not owned by this source",
+            ));
+        };
+        if source.conditional {
+            return Err(unsupported(
+                "glob source depends on unresolved cfg predicates",
+            ));
+        }
+        if !seen.insert(module.clone()) {
+            continue;
+        }
+        let declared = Frame {
+            catalog: frame.catalog.clone(),
+            module: module.clone(),
+            locals: vec![],
+        };
+        // A private import back through a public reexport is not an export
+        // from this module. While its target is being resolved, traversing that
+        // same private edge again would manufacture an alias cycle.
+        if active.contains(&(module.clone(), 0, name.to_owned()))
+            && !source.bindings.contains_key(name)
+            && source.imports.get(name).is_some_and(|imports| {
+                imports.iter().all(|import| match import {
+                    Binding::Visible(_, visibility) => visibility_extent(visibility, &module)
+                        .is_ok_and(|extent| !extent.permits(&frame.module)),
+                    _ => false,
+                })
+            })
+        {
+            continue;
+        }
+        let (binding, _) = scope_binding(source, name, &declared, 0, active, false)?;
+        if let Some(binding) = binding {
+            let visible = match binding {
+                Binding::Visible(_, visibility) => visibility_extent(&visibility, &module)?,
+                Binding::Conditional => {
+                    return Err(unsupported(
+                        "glob export depends on unresolved cfg predicates",
+                    ));
+                }
+                _ => Extent::Module(module.clone()),
+            };
+            if visible.permits(&frame.module) {
+                candidates.insert(module);
+            }
+        } else {
+            glob_candidates(source, &declared, name, access, active, seen, candidates)?;
+        }
+    }
+    Ok(())
+}
+
+fn scope_glob(
+    scope: &Scope,
+    frame: &Frame,
+    parts: &[String],
+    generic: bool,
+    access: &[String],
+    active: &mut HashSet<Key>,
+    context: LookupContext<'_>,
+) -> Result<Option<Resolved>, Failure> {
+    if scope.glob_sources.is_empty()
+        || (!context.alias_target
+            && !source_signatures::active()
+            && !matches!(primitive(parts, generic)?, Resolved::Missing))
+    {
+        return Ok(None);
+    }
+    let key = (
+        frame.module.clone(),
+        frame.locals.len(),
+        format!("#glob:{}", parts[0]),
+    );
+    if !active.insert(key.clone()) {
+        return Ok(None);
+    }
+    let result = (|| {
+        let mut candidates = std::collections::BTreeSet::new();
+        glob_candidates(
+            scope,
+            frame,
+            &parts[0],
+            access,
+            active,
+            &mut HashSet::new(),
+            &mut candidates,
+        )?;
+        if candidates.len() > 1 {
+            return Err(unsupported(format!(
+                "ambiguous source glob type `{}`",
+                parts[0]
+            )));
+        }
+        let Some(module) = candidates.pop_first() else {
+            return Ok(None);
+        };
+        resolve_parts(
+            parts,
+            false,
+            generic,
+            &Frame {
+                catalog: frame.catalog.clone(),
+                module,
+                locals: vec![],
+            },
+            access,
+            active,
+            context.qualified(),
+        )
+        .map(Some)
+    })();
+    active.remove(&key);
+    result
+}
+
 fn resolve_parts(
     parts: &[String],
     absolute: bool,
@@ -926,7 +1251,9 @@ fn resolve_parts(
 ) -> Result<Resolved, Failure> {
     let _query = generic_aliases::query()?;
     let Some(first) = parts.first() else {
-        return Ok(Resolved::Missing);
+        // `crate`, `self` and `super` can name a module on their own,
+        // including the source of a wildcard import.
+        return Ok(Resolved::Module(frame.module.clone()));
     };
     if first == "crate" {
         if !frame.catalog.owns_crate_root {
@@ -991,7 +1318,8 @@ fn resolve_parts(
             return Ok(value);
         }
         if !source_signatures::active()
-            && let Some(value) = runtime_result(parts, context, active)?
+            && let Some(value) =
+                runtime_map(parts, context, active)?.or(runtime_enum(parts, context, active)?)
         {
             return Ok(value);
         }
@@ -1031,6 +1359,10 @@ fn resolve_parts(
         } else if let Some(binding) = typ {
             selected = Some((binding, index + 1));
             break;
+        } else if let Some(value) =
+            scope_glob(scope, &declared, parts, generic, access, active, context)?
+        {
+            return Ok(value);
         }
     }
     if selected.is_none() {
@@ -1051,6 +1383,12 @@ fn resolve_parts(
             if value_only.is_none() {
                 value_only = value.map(|binding| (binding, 0));
             }
+        }
+        if selected.is_none()
+            && let Some(value) =
+                scope_glob(module, &declared, parts, generic, access, active, context)?
+        {
+            return Ok(value);
         }
     }
     if selected.is_none() && parts.len() == 1 && value_only.is_some() {
@@ -1272,9 +1610,6 @@ fn resolve_parts(
             }
         });
     }
-    // Unowned nominal paths retain the frontend's existing resolution boundary. A glob
-    // cannot establish alias identity; only explicit source bindings can do that.
-
     if context.source_qualified {
         return Ok(Resolved::Missing);
     }
@@ -1284,19 +1619,11 @@ fn resolve_parts(
             None => primitive(parts, generic)?,
         }
     } else {
-        match runtime_result(parts, context, active)? {
+        match runtime_map(parts, context, active)?.or(runtime_enum(parts, context, active)?) {
             Some(value) => value,
             None => primitive(parts, generic)?,
         }
     };
-    if context.alias_target
-        && (module.glob || frame.locals.iter().any(|scope| scope.glob))
-        && matches!(&result, Resolved::Type(_))
-    {
-        return Err(unsupported(format!(
-            "glob imports cannot prove primitive alias target `{first}`"
-        )));
-    }
     Ok(result)
 }
 fn has_generic_arguments(arguments: &syn::PathArguments) -> bool {
@@ -1307,10 +1634,7 @@ fn has_generic_arguments(arguments: &syn::PathArguments) -> bool {
     }
 }
 
-/// The owned Result ABI returns its success payload and carries errors in the
-/// runtime error slot. Resolve aliases through that same ABI, after lexical
-/// lookup, while retaining validation and dependencies of both source arguments.
-fn runtime_result(
+fn runtime_map(
     parts: &[String],
     context: LookupContext<'_>,
     active: &mut HashSet<Key>,
@@ -1321,10 +1645,46 @@ fn runtime_result(
             .map(String::as_str)
             .collect::<Vec<_>>()
             .as_slice(),
-        ["Result"] | ["std" | "core", "result", "Result"]
+        ["std" | "alloc", "collections", "BTreeMap"]
+            | ["std" | "alloc", "collections", "btree_map", "BTreeMap"]
     ) {
         return Ok(None);
     }
+    let Some((arguments, frame)) = context.arguments else {
+        return Ok(None);
+    };
+    if context.ordinary_value_owner && matches!(arguments, syn::PathArguments::None) {
+        return Ok(None);
+    }
+    let _source_context = source_signatures::ensure_source_context(frame);
+    let resolved = source_signatures::builtin(parts, context, active)?
+        .ok_or_else(|| unsupported("unresolved ordered map type"))?;
+    let dependencies = resolved.dependencies();
+    let source = source_signatures::exact(resolved)?;
+    let storage = super::collections::storage(&source)
+        .ok_or_else(|| unsupported("ordered map arguments lack owned storage"))?;
+    Ok(Some(
+        Resolved::Type(storage).with_dependencies(dependencies),
+    ))
+}
+
+/// Result uses the runtime error slot; Option retains an explicit value tag.
+/// Resolve aliases after lexical lookup, retaining every source dependency.
+fn runtime_enum(
+    parts: &[String],
+    context: LookupContext<'_>,
+    active: &mut HashSet<Key>,
+) -> Result<Option<Resolved>, Failure> {
+    let (name, arity) = match parts
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["Result"] | ["std" | "core", "result", "Result"] => ("Result", 2),
+        ["Option"] | ["std" | "core", "option", "Option"] => ("Option", 1),
+        _ => return Ok(None),
+    };
     let Some((arguments, frame)) = context.arguments else {
         return Ok(None);
     };
@@ -1334,20 +1694,20 @@ fn runtime_result(
         return Ok(None);
     }
     let syn::PathArguments::AngleBracketed(arguments) = arguments else {
-        return Err(Failure::Invalid(
-            "Result requires two type arguments".into(),
-        ));
+        return Err(Failure::Invalid(format!(
+            "{name} requires {arity} type arguments"
+        )));
     };
-    if arguments.args.len() != 2 {
-        return Err(Failure::Invalid(
-            "Result requires two type arguments".into(),
-        ));
+    if arguments.args.len() != arity {
+        return Err(Failure::Invalid(format!(
+            "{name} requires {arity} type arguments"
+        )));
     }
     let mut dependencies = generic_aliases::Dependencies::default();
     let mut payload = None;
     for (index, argument) in arguments.args.iter().enumerate() {
         let syn::GenericArgument::Type(argument) = argument else {
-            return Err(Failure::Invalid("Result requires type arguments".into()));
+            return Err(Failure::Invalid(format!("{name} requires type arguments")));
         };
         let value = generic_aliases::rhs_type(argument, frame, active)?;
         dependencies.merge(value.dependencies());
@@ -1355,13 +1715,40 @@ fn runtime_result(
             return Err(failure);
         }
         if index == 0 {
-            let Resolved::Type(typ) = value.visibility().0 else {
-                return Err(unsupported("Result payload requires an exact runtime type"));
+            let typ = match value.visibility().0 {
+                Resolved::Type(typ) => typ,
+                Resolved::Nominal(obligations) if obligations.len() == 1 => {
+                    let Some(NominalObligation::Application(application)) = obligations.first()
+                    else {
+                        return Err(unsupported(format!(
+                            "{name} payload requires an exact runtime type"
+                        )));
+                    };
+                    // structural_failure already checked arity, bounds and source
+                    // obligations. Keep the declared owner; layout validation still
+                    // requires its actual fields, including for inactive variants.
+                    let identity = application.identity.as_ref().ok_or_else(|| {
+                        unsupported(format!("{name} payload owner is not source-owned"))
+                    })?;
+                    Typ::Named(identity.join("::"))
+                }
+                _ => {
+                    return Err(unsupported(format!(
+                        "{name} payload requires an exact runtime type"
+                    )));
+                }
             };
             payload = Some(typ);
         }
     }
-    Ok(payload.map(|typ| Resolved::Type(typ).with_dependencies(dependencies)))
+    Ok(payload.map(|typ| {
+        Resolved::Type(if name == "Option" {
+            crate::core_ir::rust_options::typ(typ)
+        } else {
+            typ
+        })
+        .with_dependencies(dependencies)
+    }))
 }
 
 fn primitive(parts: &[String], generic: bool) -> Result<Resolved, Failure> {
@@ -1372,17 +1759,27 @@ fn primitive(parts: &[String], generic: bool) -> Result<Resolved, Failure> {
         {
             Some(name.as_str())
         }
+        [root, module, name]
+            if matches!(root.as_str(), "std" | "alloc")
+                && module == "string"
+                && name == "String" =>
+        {
+            Some("String")
+        }
         _ => None,
     };
     let path = syn::parse_str::<syn::Path>(&parts.join("::"))
         .map_err(|_| unsupported("unresolved type path"))?;
     let integer = rust_integer_path(&path);
-    if generic && (integer.is_some() || matches!(builtin, Some("bool" | "f32" | "f64"))) {
+    if generic
+        && (integer.is_some() || matches!(builtin, Some("bool" | "f32" | "f64" | "str" | "String")))
+    {
         return Err(Failure::Invalid(
             "primitive type requires zero generic arguments".into(),
         ));
     }
     match builtin {
+        Some("String" | "str") => return Ok(Resolved::Type(Typ::String)),
         Some("bool") => return Ok(Resolved::Type(Typ::Bool)),
         Some("f32") => {
             return Ok(Resolved::Type(crate::core_ir::rust_floats::typ(
@@ -1455,9 +1852,42 @@ pub(super) fn source_module_path(path: &syn::Path) -> Result<Option<Vec<String>>
     let Some(frame) = current() else {
         return Ok(None);
     };
-    match path_type(path, &frame, &mut HashSet::new(), false)?
-        .visibility()
-        .0
+    if path
+        .segments
+        .iter()
+        .any(|part| has_generic_arguments(&part.arguments))
+    {
+        return Ok(None);
+    }
+    let parts = path
+        .segments
+        .iter()
+        .map(|part| part.ident.to_string())
+        .collect::<Vec<_>>();
+    // A namespace query does not apply a generic enum/collection constructor.
+    // In particular, an absent variant in Option::* must not demand Option<T>.
+    match resolve_parts(
+        &parts,
+        path.leading_colon.is_some(),
+        false,
+        &frame,
+        &frame.module,
+        &mut HashSet::new(),
+        LookupContext {
+            arguments: None,
+            caller_active: None,
+            declaration: false,
+            alias_target: false,
+            source_qualified: false,
+            ordinary_value_owner: true,
+            constant_value: false,
+            trait_position: false,
+            nominal_arguments: 0,
+            unsupported_nominal_arguments: false,
+        },
+    )?
+    .visibility()
+    .0
     {
         Resolved::Module(module) => Ok(Some(module)),
         _ => Ok(None),
@@ -2312,20 +2742,95 @@ mod tests {
             type Local = u8;
         });
         let local = scoped.block(&block);
-        integer(&local, "Byte", "u8");
+        assert!(matches!(
+            query(&local, "Byte"),
+            Err(Failure::Unsupported(_))
+        ));
+        integer(&local, "self::Byte", "u8");
         assert!(matches!(
             query(&local, "Local"),
             Err(Failure::Unsupported(_))
         ));
+        let known = frame(
+            "mod first{pub use crate::second::*;}mod second{pub use crate::first::*;pub struct Other;}use first::*;type Byte=u8;",
+        );
+        integer(&known, "Byte", "u8");
+        integer(
+            &frame("mod owned{pub type u8=u16;}use owned::*;type Byte=u8;"),
+            "Byte",
+            "u16",
+        );
+        for source in [
+            "mod owned{pub use external::*;}use owned::*;type Byte=u8;",
+            "mod owned{pub use external::Unknown as u8;}use owned::*;type Byte=u8;",
+            "mod owned{}#[cfg(unknown)]use owned::*;type Byte=u8;",
+            "mod owned{}use crate::{owned::*,external::*};type Byte=u8;",
+        ] {
+            assert!(
+                matches!(query(&frame(source), "Byte"), Err(Failure::Unsupported(_))),
+                "{source}"
+            );
+        }
+    }
+    #[test]
+    fn owned_globs_resolve_unique_visible_aliases_in_their_declaration_scope() {
+        for source in [
+            "mod owned{pub type Word=u32;}use owned::*;type Selected=Word;",
+            "mod owned{pub type Word=u32;}mod export{pub use crate::owned::*;}use export::*;type Selected=Word;",
+            "pub type Word=u32;mod inner{use super::*;pub type Selected=Word;}type Selected=inner::Selected;",
+            "pub type Word=u32;mod inner{use crate::*;pub type Selected=Word;}type Selected=inner::Selected;",
+            "mod first{pub use crate::second::*;}mod second{pub use crate::first::*;pub type Word=u32;}use first::*;type Selected=Word;",
+            "mod owned{pub type Word=u32;}mod hidden{type Word=u8;}use owned::*;use hidden::*;type Selected=Word;",
+            "mod owned{pub type Word=u32;}mod outer{pub use crate::owned::*;}use owned::*;use outer::*;type Selected=Word;",
+            "pub use common::*;mod common{pub use inner::*;mod inner{pub use path::*;pub use iter::*;mod path{pub type Word=u32;}mod iter{use crate::Word;pub type Selected=Word;}}}",
+        ] {
+            integer(&frame(source), "Selected", "u32");
+        }
+        let root = frame("type Word=u8;mod owned{pub type Word=u32;}");
+        let block: syn::Block = syn::parse_quote!({
+            use crate::owned::*;
+            type Selected = Word;
+        });
+        integer(&root.block(&block), "Selected", "u32");
+        integer(
+            &frame(
+                "mod a{pub type Word=u8;}mod b{pub type Word=u32;}use a::*;use b::*;use b::Word;type Selected=Word;",
+            ),
+            "Selected",
+            "u32",
+        );
+        for source in [
+            "mod a{pub type Word=u8;}mod b{pub type Word=u32;}use a::*;use b::*;type Selected=Word;",
+            "mod a{pub type Word=u32;}mod b{pub type Word=u32;}use a::*;use b::*;type Selected=Word;",
+            "mod owned{type Word=u32;}use owned::*;type Selected=Word;",
+            "mod owned{pub type Word=u32;}use owned::*;use external::*;type Selected=Word;",
+            "mod a{pub use inner::*;mod inner{type Word=u32;pub type Alias=crate::a::Word;}}type Selected=a::Alias;",
+        ] {
+            assert!(
+                matches!(
+                    query(&frame(source), "Selected"),
+                    Err(Failure::Unsupported(_))
+                ),
+                "{source}"
+            );
+        }
     }
     #[test]
     fn unowned_standard_module_aliases_and_expression_inference_remain_unowned() {
         let root = frame(
-            "use std::sync::atomic as atom;use core::sync::atomic as core_atom;use external::module as external_module;type Recursive=Vec<Recursive>;",
+            "use std::sync::atomic::Ordering::*;use std::sync::atomic as atom;use core::sync::atomic as core_atom;use external::module as external_module;type Recursive=Vec<Recursive>;",
         );
         assert_eq!(query(&root, "atom::AtomicU32").unwrap(), None);
         assert_eq!(query(&root, "core_atom::AtomicU32").unwrap(), None);
+        assert_eq!(query(&root, "std::sync::atomic::AtomicU32").unwrap(), None);
         assert_eq!(query(&root, "Vec<_>").unwrap(), None);
+        integer(
+            &frame(
+                "mod std{pub mod sync{pub mod atomic{pub mod Ordering{pub type u8=u16;}}}}use std::sync::atomic::Ordering::*;type Byte=u8;",
+            ),
+            "Byte",
+            "u16",
+        );
         assert!(matches!(
             query(&root, "external_module::AtomicU32"),
             Err(Failure::Unsupported(_))

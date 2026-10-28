@@ -1,4 +1,4 @@
-//! Typed tuples use ordinary Core IR structs after expression type resolution.
+//! Typed tuples and owned Options use ordinary Core IR structs after type resolution.
 use super::{Decl, Expr, Stmt, Typ, UnifiedModule};
 use std::collections::BTreeMap;
 
@@ -32,12 +32,14 @@ enum Shape {
     Tuple(Vec<Shape>),
     Array(Box<Shape>),
     Vector(Box<Shape>),
+    Option(Box<Shape>),
 }
 
 impl Shape {
     fn from_type(typ: &Typ) -> Self {
-        // Preserve source proofs until reference and numeric operator resolution.
+        // Preserve source proofs until reference, array and numeric operator resolution.
         if super::rust_references::has_reference_proof(typ)
+            || matches!(typ, Typ::Named(name) if super::rust_arrays::decode(name).is_some())
             || matches!(typ, Typ::Named(name) if super::rust_integer_type_name(name).is_some() || super::rust_floats::is_proof(name))
         {
             return Self::Core(typ.clone());
@@ -48,10 +50,16 @@ impl Shape {
             _ => {}
         }
         match typ.canonical() {
-            Typ::Named(name) => match decode(&name) {
-                Some(items) => Self::Tuple(items),
-                None => Self::Core(Typ::Named(name)),
-            },
+            Typ::Named(name) => {
+                if let Some(payload) = super::rust_options::payload(&name) {
+                    Self::Option(Box::new(Self::from_type(&payload)))
+                } else {
+                    match decode(&name) {
+                        Some(items) => Self::Tuple(items),
+                        None => Self::Core(Typ::Named(name)),
+                    }
+                }
+            }
             typ => Self::Core(typ),
         }
     }
@@ -61,6 +69,7 @@ impl Shape {
             Self::Tuple(items) => Typ::Named(encode(&items)),
             Self::Array(item) => Typ::Array(Box::new(item.into_type())),
             Self::Vector(item) => Typ::Vector(Box::new(item.into_type())),
+            Self::Option(item) => super::rust_options::typ(item.into_type()),
         }
     }
 }
@@ -106,7 +115,7 @@ pub(crate) fn fields(name: &str) -> Option<Vec<(String, Typ)>> {
     )
 }
 
-/// Project generated tuple identities while retaining preexisting schema conflicts.
+/// Project generated aggregate identities while retaining preexisting schema conflicts.
 pub(crate) fn project_declarations(decls: &mut Vec<Decl>, mut project: impl FnMut(&mut [Decl])) {
     let originals: Vec<_> = decls
         .iter()
@@ -115,18 +124,20 @@ pub(crate) fn project_declarations(decls: &mut Vec<Decl>, mut project: impl FnMu
                 name,
                 fields: actual,
                 type_params,
-            } => fields(name).map(|expected| {
-                let canonical = type_params.is_empty() && &expected == actual;
-                (
-                    name.clone(),
-                    canonical,
-                    Decl::Struct {
-                        name: name.clone(),
-                        fields: expected,
-                        type_params: vec![],
-                    },
-                )
-            }),
+            } => fields(name)
+                .or_else(|| super::rust_options::fields(name))
+                .map(|expected| {
+                    let canonical = type_params.is_empty() && &expected == actual;
+                    (
+                        name.clone(),
+                        canonical,
+                        Decl::Struct {
+                            name: name.clone(),
+                            fields: expected,
+                            type_params: vec![],
+                        },
+                    )
+                }),
             _ => None,
         })
         .collect();
@@ -174,11 +185,18 @@ pub(crate) fn register(module: &mut UnifiedModule) {
     fn add(typ: &Typ, shapes: &mut BTreeMap<String, Vec<(String, Typ)>>) {
         match typ {
             Typ::Named(name) if !shapes.contains_key(name) => {
-                if let Some(fields) = fields(name) {
+                if let Some(fields) = fields(name).or_else(|| super::rust_options::fields(name)) {
                     shapes.insert(name.clone(), fields.clone());
                     for (_, typ) in fields {
                         add(&typ, shapes);
                     }
+                } else if let Some(signature) = super::rust_callables::signature_of(typ) {
+                    signature.visit_types(&mut |typ| add(typ, shapes));
+                } else if let Some(reference) = super::rust_references::decode(name) {
+                    add(&reference.referent, shapes);
+                    add(&reference.runtime, shapes);
+                } else if let Some(array) = super::rust_arrays::decode(name) {
+                    add(&array.element, shapes);
                 }
             }
             Typ::Array(item) | Typ::Vector(item) => add(item, shapes),
@@ -366,37 +384,43 @@ mod tests {
 
     #[test]
     fn registration_is_idempotent_and_conflicting_names_fail_verification() {
-        let typ = typ(&[Typ::Int, Typ::Bool]);
-        let Typ::Named(name) = &typ else {
-            panic!("tuple type");
-        };
-        let function = Decl::Function {
-            name: "main".into(),
-            params: vec![("pair".into(), typ.clone())],
-            ret: Typ::Int,
-            body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
-            type_params: vec![],
-        };
-        let mut module = UnifiedModule::new(vec![function.clone()]);
-        register(&mut module);
-        let registered = module.clone();
-        register(&mut module);
-        assert_eq!(module, registered);
-        assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
-        let mut conflicting = UnifiedModule::new(vec![
-            Decl::Struct {
-                name: name.clone(),
-                fields: vec![("wrong".into(), Typ::String)],
+        for typ in [
+            typ(&[Typ::Int, Typ::Bool]),
+            super::super::rust_options::typ(Typ::Int),
+            super::super::rust_options::typ(Typ::Array(Box::new(Typ::Void))),
+            super::super::rust_options::typ(super::super::rust_arrays::typ(Typ::Void, 2)),
+        ] {
+            let Typ::Named(name) = &typ else {
+                panic!("tuple type");
+            };
+            let function = Decl::Function {
+                name: "main".into(),
+                params: vec![("pair".into(), typ.clone())],
+                ret: Typ::Int,
+                body: vec![Stmt::Return(Some(Expr::IntLit(42)))],
                 type_params: vec![],
-            },
-            function,
-        ]);
-        register(&mut conflicting);
-        let report = crate::core_ir_verifier::verify_for_entry(&conflicting, "main");
-        assert_eq!(
-            report.reason_code.as_deref(),
-            Some("duplicate-top-level-name")
-        );
+            };
+            let mut module = UnifiedModule::new(vec![function.clone()]);
+            register(&mut module);
+            let registered = module.clone();
+            register(&mut module);
+            assert_eq!(module, registered);
+            assert!(crate::core_ir_verifier::verify_for_entry(&module, "main").ok);
+            let mut conflicting = UnifiedModule::new(vec![
+                Decl::Struct {
+                    name: name.clone(),
+                    fields: vec![("wrong".into(), Typ::String)],
+                    type_params: vec![],
+                },
+                function,
+            ]);
+            register(&mut conflicting);
+            let report = crate::core_ir_verifier::verify_for_entry(&conflicting, "main");
+            assert_eq!(
+                report.reason_code.as_deref(),
+                Some("duplicate-top-level-name")
+            );
+        }
     }
 
     #[test]

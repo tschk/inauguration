@@ -1929,10 +1929,23 @@ impl Pass<'_> {
                 None
             }
             Expr::Field { .. } | Expr::Index { .. } => {
-                let kind = self
+                let mut kind = self
                     .checker
                     .expr_type(expr, self.facts, env)
                     .and_then(|typ| typ_kind(&typ, self.semantics));
+                if kind.is_none()
+                    && let Some(place) = source_place(expr)
+                    && self
+                        .resolve_place(place.clone())
+                        .is_some_and(|place| self.aggregate_sources.contains(&place.root))
+                {
+                    // A known parameter constrains this aggregate column just
+                    // as an unowned parameter defers it; siblings stay separate.
+                    if let Some(expected) = expected {
+                        self.bind_projection_kind(place.clone(), expected);
+                    }
+                    kind = self.projection_kind(place);
+                }
                 if (self.unresolved_width || !self.active_projections.is_empty())
                     && let Some(place) = source_place(expr)
                 {
