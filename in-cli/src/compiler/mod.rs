@@ -19,6 +19,8 @@ pub mod icore;
 pub mod metadata;
 pub mod mir;
 pub mod mir_emit;
+#[cfg(test)]
+pub mod mir_emit_tests;
 pub mod mir_emit_x86;
 pub mod mir_lower;
 pub mod mir_scalar_lower;
