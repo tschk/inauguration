@@ -18,7 +18,6 @@ pub(super) fn parser_preference_from_cli(parser: ParserCli) -> super::types::Age
         ParserCli::Auto => super::types::AgentParserPreference::Auto,
         ParserCli::In => super::types::AgentParserPreference::In,
         ParserCli::Icore => super::types::AgentParserPreference::Icore,
-        ParserCli::Force(_) => super::types::AgentParserPreference::Auto,
     }
 }
 

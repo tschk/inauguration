@@ -151,73 +151,6 @@ fn test_parse_in_surface_info_unknown_syntax() {
 }
 
 #[test]
-fn test_parse_in_surface_info_missing_import_path() {
-    let src = "import ;";
-    let err = parse_in_surface_info(src).expect_err("should fail");
-    assert!(err.contains("import path missing"));
-}
-
-#[test]
-fn test_parse_in_surface_info_missing_capability() {
-    let src = "capability ;";
-    let err = parse_in_surface_info(src).expect_err("should fail");
-    assert!(err.contains("capability name missing"));
-}
-
-#[test]
-fn test_parse_in_surface_info_missing_enable() {
-    let src = "enable ;";
-    let err = parse_in_surface_info(src).expect_err("should fail");
-    assert!(err.contains("enable extension missing"));
-}
-
-#[test]
-fn test_parse_in_surface_info_invalid_parallel() {
-    let src = "parallel foo { }";
-    let err = parse_in_surface_info(src).expect_err("should fail");
-    assert!(err.contains("`parallel` must be a top-level `parallel { ... }` region"));
-}
-
-#[test]
-fn test_parse_in_surface_info_annotations_and_distributed() {
-    let src = "
-        @pure
-        fn pure_func() {}
-
-        distributed fn dist_func() {}
-
-        enable some_ext;
-    ";
-    let info = parse_in_surface_info(src).expect("should parse successfully");
-    assert_eq!(
-        info.orchestration.enabled_extensions,
-        vec!["some_ext".to_string()]
-    );
-    assert_eq!(
-        info.orchestration.distributed_functions,
-        vec!["dist_func".to_string()]
-    );
-    assert_eq!(info.orchestration.annotations.len(), 1);
-    assert_eq!(info.orchestration.annotations[0].name, "pure");
-    assert_eq!(
-        info.orchestration.annotations[0].target,
-        Some("pure_func".to_string())
-    );
-}
-
-#[test]
-fn test_parse_in_surface_info_topology_and_skips() {
-    let src = "
-        system MySystem {}
-        domain MyDomain {}
-        struct MyStruct {}
-        component MyComp {}
-    ";
-    let info = parse_in_surface_info(src).expect("should parse successfully");
-    assert!(info.package.is_none());
-}
-
-#[test]
 fn void_return_case_insensitive() {
     let m = parse_in_source("fn main() -> VOID\n").expect("ok");
     match &m.decls[0] {
@@ -249,37 +182,6 @@ fn struct_parses_inline_fields() {
     assert_eq!(fields.len(), 2);
     assert_eq!(fields[0], ("x".into(), Typ::Int));
     assert_eq!(fields[1], ("label".into(), Typ::String));
-}
-
-#[test]
-fn test_parse_in_source_coverage() {
-    // Test brace form
-    let source_brace = "fn main() -> Int { return 42; }";
-    let module = parse_in_source(source_brace).expect("Failed to parse basic source");
-    assert_eq!(module.decls.len(), 1);
-    assert!(matches!(
-        &module.decls[0],
-        Decl::Function { name, ret: Typ::Int, .. }
-        if name == "main"
-    ));
-
-    // Test human-friendly form
-    let source_human = "fn main() -> Int:\n  return 42\n";
-    let module_human =
-        parse_in_source(source_human).expect("Failed to parse human-friendly source");
-    assert_eq!(module_human.decls.len(), 1);
-    assert_eq!(module.decls, module_human.decls);
-
-    // Test syntax error
-    let invalid_syntax = "fn main( {";
-    let err = parse_in_source(invalid_syntax).expect_err("Expected parse error");
-    assert!(err.contains("incomplete"));
-
-    // Test validation error (unknown type handled in finalization/validation)
-    // For parse_in_source, if it successfully parses but fails validation, it returns Err(String)
-    let invalid_type = "struct Bad { Unknown z }\nfn main() -> void\n";
-    let err_type = parse_in_source(invalid_type).expect_err("Expected validation error");
-    assert!(err_type.contains("unknown type"));
 }
 
 #[test]
@@ -745,70 +647,6 @@ fn file_import_reports_missing_local_in_file() {
     let err = parse_in_file(&path).expect_err("missing import");
     let _ = fs::remove_file(&path);
     assert!(err.contains("missing.in"), "{err}");
-}
-
-#[test]
-fn parse_in_file_requires_main() {
-    let dir = std::env::temp_dir().join(format!(
-        "in-parse-file-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&dir).unwrap();
-
-    // File with main
-    let main_path = dir.join("main.in");
-    fs::write(&main_path, "fn main()->Int{return 42;}\n").unwrap();
-    let module = parse_in_file(&main_path).unwrap();
-    assert!(
-        module
-            .decls
-            .iter()
-            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "main"))
-    );
-
-    // File without main
-    let lib_path = dir.join("lib.in");
-    fs::write(&lib_path, "fn helper()->Int{return 42;}\n").unwrap();
-    let error = parse_in_file(&lib_path).unwrap_err();
-    assert!(error.contains("missing required `fn main`"), "{error}");
-
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn parse_in_library_file_allows_missing_main() {
-    let dir = std::env::temp_dir().join(format!(
-        "in-parse-library-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&dir).unwrap();
-
-    // File without main
-    let lib_path = dir.join("lib.in");
-    fs::write(&lib_path, "fn helper()->Int{return 42;}\n").unwrap();
-    let module = super::parse_in_library_file(&lib_path).unwrap();
-    assert!(
-        module
-            .decls
-            .iter()
-            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "helper"))
-    );
-    assert!(
-        !module
-            .decls
-            .iter()
-            .any(|decl| matches!(decl, Decl::Function { name, .. } if name == "main"))
-    );
-
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

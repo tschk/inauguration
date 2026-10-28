@@ -1113,15 +1113,10 @@ impl MatchPattern {
             let pats: Result<Vec<_>, _> = parts.iter().map(|p| MatchPattern::parse(p)).collect();
             return Ok(MatchPattern::ArrayPat(pats?));
         }
-        if let Some(open) = s.find(['{', '('])
-            && ((s.as_bytes()[open] == b'{' && s.ends_with('}'))
-                || (s.as_bytes()[open] == b'(' && s.ends_with(')')))
+        if let Some(open) = s.find('{')
+            && s.ends_with('}')
         {
-            let name = s[..open]
-                .split("::")
-                .map(str::trim)
-                .collect::<Vec<_>>()
-                .join("::");
+            let name = trim_match_pat(&s[..open]);
             let valid_path = name.split("::").all(|segment| {
                 // Rust's identifier parser includes Unicode XID and raw identifiers.
                 syn::parse_str::<syn::Ident>(segment).is_ok()
@@ -1137,13 +1132,8 @@ impl MatchPattern {
                 let inner = &s[open + 1..s.len() - 1];
                 let field_strs = split_match_pat_args(inner);
                 let mut fields = Vec::new();
-                for (index, f) in field_strs.into_iter().enumerate() {
-                    if s.as_bytes()[open] == b'(' {
-                        // Tuple structs use the same positional fields as their
-                        // schema. Retain variant paths too: even an unowned enum
-                        // match must shadow free functions with its binders.
-                        fields.push((format!("_{index}"), MatchPattern::parse(&f)?));
-                    } else if let Some((field_name, field_pat)) = f.split_once(':') {
+                for f in field_strs {
+                    if let Some((field_name, field_pat)) = f.split_once(':') {
                         let fn_trim = trim_match_pat(field_name);
                         let fp_trim = trim_match_pat(field_pat);
                         if fn_trim.is_empty() {
@@ -1161,7 +1151,10 @@ impl MatchPattern {
                         ));
                     }
                 }
-                return Ok(MatchPattern::StructPat { name, fields });
+                return Ok(MatchPattern::StructPat {
+                    name: name.to_string(),
+                    fields,
+                });
             }
         }
         // A lone `_` discards; other source identifiers bind a value.
@@ -1369,34 +1362,11 @@ pub struct MethodSig {
     pub ret: Typ,
 }
 
-/// A borrow region. Borrowed from Vale/Valen: values live in a region, and a
-/// region is either uniquely owned (`mut`) or immortal and shareable (`share`).
-/// Fronts record which parameters are `noalias` inside `mut` so the native
-/// lowerer can keep those pointers from aliasing each other.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BorrowRegion {
-    pub id: String,
-    pub kind: RegionKind,
-    /// Parameter names the front proved do not alias inside this region.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub noalias: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RegionKind {
-    /// Single owner. Pointer parameters here are `noalias`.
-    Mut,
-    /// Immortal shared region. Values may alias; the lowerer must not assume otherwise.
-    Share,
-}
-
 /// Single-module view produced by language fronts before lowering to textual SIL.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnifiedModule {
     pub identity: CoreModuleIdentity,
     pub decls: Vec<Decl>,
-    pub regions: Vec<BorrowRegion>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1419,30 +1389,12 @@ impl UnifiedModule {
         Self {
             identity: CoreModuleIdentity::default(),
             decls,
-            regions: Vec::new(),
         }
     }
 
     #[must_use]
     pub fn with_identity(decls: Vec<Decl>, identity: CoreModuleIdentity) -> Self {
-        Self {
-            identity,
-            decls,
-            regions: Vec::new(),
-        }
-    }
-
-    /// Record that `params` do not alias inside the `mut` region.
-    /// Idempotent: calling twice with the same names does not duplicate them.
-    ///
-    /// Facts belong to the module and survive moves, cloning and normalization.
-    pub fn mark_noalias(&mut self, params: &[&str]) {
-        crate::region_facts::mark_noalias(self, params);
-    }
-
-    #[must_use]
-    pub fn noalias_params(&self) -> Vec<String> {
-        crate::region_facts::noalias_params(self)
+        Self { identity, decls }
     }
 
     #[must_use]

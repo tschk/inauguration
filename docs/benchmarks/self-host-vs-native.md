@@ -28,18 +28,6 @@ Compares **inauguration’s owned Rust front** (`in build` on `in-cli/src/main.r
 | JIT lowering µs (last run) | 36,667 |
 | Front stats OK | True |
 | Native `--out` | blocked — in build: native compilation failed (native-lowering-failed) |
-
-Historical measurement from `feat/native-lowering-and-coverage`, 2026-09-29,
-debug `in`, no `IN_DEBUG` (before the port to current main):
-
-| Run | Result | Time |
-| --- | --- | --- |
-| `in compile --path in-cli/src/main.rs --target jit` | parsed 1773, typed 520, 1580 call edges; refused to execute because `run` calls unresolved std (`IN3002`) | 1.72 s |
-| `in compile` of a 1000-iteration Rust `while` | executed, result 1000 | 115 ms |
-
-That debug build printed unresolved-call traces only with `IN_DEBUG=1`. These
-numbers are not a measurement of current main; rustc was not rebuilt, and the
-checked-in cargo number is still the 2026-07-05 incremental release build.
 <!-- BENCH:SELF_HOST_END -->
 
 ## vs rustc (same shipped binary today)

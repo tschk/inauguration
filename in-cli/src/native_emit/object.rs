@@ -8,7 +8,8 @@ use crate::native_emit::elf::{
     THUMBV8M_MAIN_NONE_EABI_TRIPLE, X86RelocatableObject, aarch64_linux_exit_code,
     arm32_linux_exit_code, arm32_return_i32_object_code, write_aarch64_executable,
     write_aarch64_relocatable_object, write_arm32_executable, write_arm32_relocatable_object,
-    write_thumb_relocatable_object, write_x86_data_object,
+    write_executable, write_thumb_relocatable_object, write_x86_data_object,
+    x86_64_linux_exit_code,
 };
 use crate::native_emit::macho::{MachOImage, MachOLinkage, write_image};
 use crate::native_emit::target::AARCH64_NONE_TRIPLE;
@@ -58,7 +59,7 @@ pub(crate) fn try_emit_native_object(
     match (request.target_triple, request.linkage) {
         (ELF_LINUX_TRIPLE, NativeLinkage::StaticLib) => emit_x86_64_elf_object(request),
         (ELF_LINUX_TRIPLE, NativeLinkage::Executable) => {
-            emit_x86_64_elf_executable(request).map(Some)
+            Ok(Some(emit_x86_64_elf_executable(request)))
         }
         (COFF_WINDOWS_TRIPLE, NativeLinkage::Executable) => {
             Ok(Some(emit_x86_64_pe_executable(request)))
@@ -351,19 +352,22 @@ fn emit_aarch64_macho_archive(
     }))
 }
 
-fn emit_x86_64_elf_executable(
-    request: &NativeObjectRequest<'_>,
-) -> Result<NativeObjectArtifact, String> {
-    let bytes = super::elf::lower_x86_executable(request.module, request.entry)?;
-    Ok(NativeObjectArtifact {
+fn emit_x86_64_elf_executable(request: &NativeObjectRequest<'_>) -> NativeObjectArtifact {
+    let exe = ElfExecutable {
+        code: x86_64_linux_exit_code(request.exit_code),
+        entry_offset: 0,
+    };
+    let mut bytes = Vec::new();
+    write_executable(&exe, &mut bytes);
+    NativeObjectArtifact {
         bytes,
         artifact_kind: "elf-executable",
         backend_level: "owned-native-subset-x86_64",
         runtime_level: "linux-syscall-exit",
         reason_code: "native-x86_64-linux-exit-subset",
-        reason: "inauguration lowers x86_64 Linux executable bodies with writable data, error storage and owned runtime imports",
+        reason: "inauguration owns ELF64 Linux executable emission for const-evaluable scalar entry functions on this target",
         abi_manifest: None,
-    })
+    }
 }
 
 fn emit_x86_64_freestanding_object(
@@ -946,7 +950,7 @@ mod tests {
 
     #[test]
     fn dispatches_x86_64_linux_executable() {
-        let module = scalar_answer_module();
+        let module = UnifiedModule::new(Vec::new());
         let request = NativeObjectRequest {
             target_triple: ELF_LINUX_TRIPLE,
             linkage: NativeLinkage::Executable,
