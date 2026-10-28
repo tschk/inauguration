@@ -70,6 +70,14 @@ fn json_report_includes_core_graph_and_parser_decision() {
 }
 
 #[test]
+fn json_report_records_source_size() {
+    let temp = temp_source("report", "in", "fn main() -> void { return; }\n");
+    let report = json_report(&temp.path, &AgentModeConfig::default()).expect("report");
+    assert_eq!(report.size_timing.source_lines, 1);
+    assert!(report.size_timing.source_bytes > 0);
+}
+
+#[test]
 fn json_report_formats_correctly_as_json_value() {
     let temp = temp_source("json_format", "in", "fn main() -> void { return; }\n");
     let config = AgentModeConfig {
