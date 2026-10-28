@@ -264,7 +264,9 @@ pub(crate) fn error_bindings(body: &[Stmt]) -> std::collections::BTreeSet<String
     let mut queue: VecDeque<_> = seeds.into();
     while let Some(name) = queue.pop_front() {
         if found.insert(name.clone()) {
-            queue.extend(aliases.get(&name).into_iter().flatten().cloned());
+            if let Some(alias) = aliases.get(&name) {
+                queue.extend(alias.iter().cloned());
+            }
         }
     }
     found
