@@ -346,6 +346,10 @@ pub enum ParserCli {
     In,
     /// JSON [`ParserId::Icore`] interchange (`.icore` files).
     Icore,
+    /// Force a specific front. Used by the foreign-stage manifest, which names
+    /// the parser explicitly instead of trusting the extension. Not a CLI flag.
+    #[value(skip)]
+    Force(ParserId),
 }
 
 /// Resolved frontend for `in build`.
@@ -423,6 +427,7 @@ pub fn resolve_parser_id_with_env(
     match cli {
         ParserCli::In => ResolvedBuildParser::CoreIr(ParserId::In),
         ParserCli::Icore => ResolvedBuildParser::CoreIr(ParserId::Icore),
+        ParserCli::Force(id) => ResolvedBuildParser::CoreIr(id),
         ParserCli::Auto => {
             if let Some(m) = read_magic_parser_directive(path) {
                 match m {
