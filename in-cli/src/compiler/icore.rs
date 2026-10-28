@@ -608,6 +608,84 @@ fn validate_module(
 
 #[cfg(test)]
 mod tests {
+    struct TempDirGuard {
+        path: std::path::PathBuf,
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn parses_icore_file_returns_unified_module() {
+        let dir = std::env::temp_dir().join(format!("icore-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let _guard = TempDirGuard { path: dir.clone() };
+
+        let file_path = dir.join("test.icore");
+        let j = r#"{
+            "icoreVersion": 2,
+            "decls": [
+                {
+                    "kind": "function",
+                    "name": "main",
+                    "params": [],
+                    "return": "Int",
+                    "body": [
+                        {
+                            "kind": "return",
+                            "expr": { "kind": "int", "value": 42 }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        fs::write(&file_path, j).unwrap();
+
+        let m = super::parse_icore_file(&file_path).expect("parse_icore_file ok");
+        let body = m
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Function { name, body, .. } if name == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main body");
+        assert_eq!(body, &vec![Stmt::Return(Some(Expr::IntLit(42)))]);
+    }
+
+    #[test]
+    fn parses_icore_file_handles_missing_file() {
+        let dir = std::env::temp_dir().join(format!("icore-test-missing-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let _guard = TempDirGuard { path: dir.clone() };
+
+        let missing_path = dir.join("missing.icore");
+        let err = super::parse_icore_file(&missing_path).expect_err("expected error");
+        assert!(
+            err.contains("No such file or directory")
+                || err.contains("system cannot find the file specified"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parses_icore_file_handles_invalid_json() {
+        let dir = std::env::temp_dir().join(format!("icore-test-invalid-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let _guard = TempDirGuard { path: dir.clone() };
+
+        let file_path = dir.join("invalid.icore");
+        let j = r#"{ "icoreVersion": 2, "decls": [ "#;
+        fs::write(&file_path, j).unwrap();
+
+        let err = super::parse_icore_file(&file_path).expect_err("expected error");
+        assert!(err.contains("icore JSON"), "unexpected error: {}", err);
+    }
+
     #[test]
     fn explicit_float_literals_preserve_binary64_values_and_signed_zero() {
         for (value, expected) in [
