@@ -91,16 +91,6 @@ pub(super) fn extract_lua(src: &[u8], root: Node<'_>) -> Result<Vec<Decl>, Strin
 
     let mut func_nodes = Vec::new();
     collect_kinds(root, &["function_declaration"], &mut func_nodes);
-    func_nodes.retain(|node| {
-        let mut parent = node.parent();
-        while let Some(node) = parent {
-            if matches!(node.kind(), "function_declaration" | "function_definition") {
-                return false;
-            }
-            parent = node.parent();
-        }
-        true
-    });
     for n in func_nodes {
         if let Some(d) = lua_function_decl(src, n) {
             decls.push(d);
@@ -128,10 +118,6 @@ fn lua_function_decl<'a>(src: &[u8], n: Node<'a>) -> Option<Decl> {
         }
     };
     let raw = node_txt(src, name_n).trim();
-    // Table methods need a receiver representation before they can be free functions.
-    if raw.contains(':') {
-        return None;
-    }
     let compact = raw.replace(['.', ':'], "_");
     let name = normalize_entry(&compact);
     let params = lua_params(src, n);

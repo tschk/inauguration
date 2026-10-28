@@ -58,31 +58,3 @@ fn lua_newline_end(bytes: &[u8], at: usize) -> usize {
 
 const KEEP:Option<fn(&str)->Option<String>>=Some(lua_string_literal);
 fn main(args:Vec<String>)->i64{42}
-
-mod source_patterns {
-    enum Kind { Type(i64), Flag(bool) }
-    fn typ() -> bool { false }
-    fn flag() -> i64 { 7 }
-    // Unowned enum matching must still bind values, not the free functions
-    // with the same names. Neither arm contains an invalid scalar operation.
-    fn visit(value: Kind) -> i64 {
-        match value {
-            Kind::Type(typ) => typ,
-            Kind::Flag(flag) => if !flag { 42 } else { 0 },
-        }
-    }
-    fn invalid() -> bool { false }
-    fn closure_parameter() -> bool {
-        let apply = |(invalid, _): (bool, i64)| !invalid;
-        apply((false, 7))
-    }
-    struct Statement { value: i64 }
-    fn map_statement<T>(value: Statement, other: T) -> Statement { value }
-    fn sequence_bindings(statements: Vec<Statement>) {
-        for statement in statements {
-            match statement {
-                value => { map_statement(value, 42i64); }
-            }
-        }
-    }
-}

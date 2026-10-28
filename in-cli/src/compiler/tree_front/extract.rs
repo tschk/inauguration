@@ -4597,39 +4597,6 @@ end
     }
 
     #[test]
-    fn lua_method_inside_function_does_not_leak_receiver() {
-        let src = r#"
-function makeCounter(start)
-  local counter = {
-    value = start
-  }
-  function counter:inc()
-    return 1
-  end
-  return counter
-end
-function answer()
-  return 42
-end
-"#;
-        let m = parse_lang(try_lang_for(ParserId::Lua).unwrap(), src, extract_lua).expect("ok");
-        let make = m
-            .decls
-            .iter()
-            .find(|d| matches!(d, Decl::Function { name, .. } if name == "makeCounter"))
-            .expect("makeCounter");
-        let Decl::Function { body, .. } = make else {
-            panic!("function");
-        };
-        let dumped = format!("{body:?}");
-        assert!(
-            dumped.contains(crate::core_ir::UNSUPPORTED_DEFINED_BODY),
-            "unsupported table construction must not invent a zero initializer: {dumped}"
-        );
-        assert_eq!(m.decls.len(), 2, "nested methods are not sibling functions");
-    }
-
-    #[test]
     fn lua_local_function_extracts_as_decl() {
         let src = r#"
 local function helper(value)

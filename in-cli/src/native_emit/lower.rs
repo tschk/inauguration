@@ -412,7 +412,7 @@ pub struct LoweringDegradation {
 }
 
 impl LoweringDegradation {
-    pub(crate) fn skipped_function(function: &str, reason: &str) -> Self {
+    fn skipped_function(function: &str, reason: &str) -> Self {
         Self {
             code: DEGRADATION_SKIPPED_FUNCTION.to_string(),
             function: function.to_string(),
@@ -576,7 +576,6 @@ fn lower_function_to_buffer(
     strings: &HashMap<String, i64>,
     globals: &HashMap<String, u64>,
     global_types: &HashMap<String, Typ>,
-    noalias: &[String],
 ) -> Result<FunctionBuffer, String> {
     let mut emitter = CodeEmitter::new();
     let mut pending_calls = Vec::new();
@@ -596,7 +595,6 @@ fn lower_function_to_buffer(
         global_types,
         &mut pending_globals,
         0,
-        noalias,
     );
     let external_refs = TL_EXTERNAL_REFS.with(|refs| std::mem::take(&mut *refs.borrow_mut()));
     lowered?;
@@ -699,7 +697,6 @@ pub fn lower_module_with_jobs(
     let functions = collect_functions(module)?;
     let structs = collect_structs(module);
     let strings = collect_strings(module);
-    let noalias = module.noalias_params();
     let globals = super::global_data::collect_globals(module, &structs)?;
     let super::global_data::DataSection {
         bytes: data,
@@ -777,7 +774,6 @@ pub fn lower_module_with_jobs(
                     &strings,
                     &globals,
                     &global_types,
-                    &noalias,
                 ) {
                     Ok(buf) => bufs.push(buf),
                     Err(e) => {
@@ -793,7 +789,6 @@ pub fn lower_module_with_jobs(
                 let strings = &strings;
                 let globals = &globals;
                 let global_types = &global_types;
-                let noalias = &noalias;
                 let chunks: Vec<Vec<String>> = names
                     .chunks(names.len().div_ceil(jobs))
                     .map(|c| c.to_vec())
@@ -812,7 +807,6 @@ pub fn lower_module_with_jobs(
                                 strings,
                                 globals,
                                 global_types,
-                                noalias,
                             ) {
                                 Ok(buf) => bufs.push((name, buf)),
                                 Err(e) => {
@@ -1052,7 +1046,6 @@ fn lower_function(
     global_types: &HashMap<String, Typ>,
     pending_globals: &mut Vec<(u32, u64)>,
     _fn_start_offset: u32,
-    noalias: &[String],
 ) -> Result<(), String> {
     ensure_return_type(&func.ret, &func.name, structs)?;
     reject_unsupported_function(func, structs)?;
@@ -1175,35 +1168,6 @@ fn lower_function(
         let incoming_off = stack_base + 8 * arg_idx;
         emitter.emit_u32(aarch64::ldr64(15, aarch64::REG_SP, incoming_off));
         emitter.emit_u32(aarch64::str64(15, aarch64::REG_SP, *local_off));
-    }
-    // Compare saved words, including stack arguments, before dereferencing receivers.
-    let noalias_slots: Vec<u32> = noalias
-        .iter()
-        .filter_map(|name| {
-            if !func.params.iter().any(|(param, _)| param == name) {
-                return None;
-            }
-            ctx.receiver_pointers
-                .get(name)
-                .or_else(|| ctx.params.get(name))
-                .copied()
-                .or_else(|| match ctx.locals.get(name) {
-                    Some(LocalSlot::Scalar(offset)) => Some(*offset),
-                    Some(LocalSlot::ArrayParam { ptr_offset, .. }) => Some(*ptr_offset),
-                    _ => None,
-                })
-        })
-        .collect();
-    for (index, left) in noalias_slots.iter().enumerate() {
-        for right in &noalias_slots[index + 1..] {
-            emitter.emit_u32(aarch64::ldr64(14, aarch64::REG_SP, *left));
-            emitter.emit_u32(aarch64::ldr64(15, aarch64::REG_SP, *right));
-            emitter.emit_u32(aarch64::cmp_reg64(14, aarch64::REG_XZR));
-            emitter.emit_u32(aarch64::b_cond(aarch64::COND_EQ, 16));
-            emitter.emit_u32(aarch64::cmp_reg64(14, 15));
-            emitter.emit_u32(aarch64::b_cond(aarch64::COND_NE, 8));
-            emitter.emit_u32(aarch64::brk(0x6E0A));
-        }
     }
     for (name, typ) in &func.params {
         if name == "self"

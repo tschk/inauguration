@@ -500,15 +500,11 @@ struct Pass<'a> {
     projection_kinds: HashMap<String, HashMap<Vec<Projection>, Kind>>,
     active_place: Option<SourcePlace>,
     projection_failure: std::cell::Cell<bool>,
-    projection_facts: usize,
     return_type: Option<Typ>,
     const_env: Option<HashMap<String, i64>>,
 }
 impl Pass<'_> {
     fn resolve_place(&self, mut place: SourcePlace) -> Option<SourcePlace> {
-        if self.projection_failure.get() {
-            return None;
-        }
         let mut seen = HashSet::new();
         loop {
             if place.path.len() > 128 || !seen.insert(place.root.clone()) {
@@ -532,22 +528,11 @@ impl Pass<'_> {
         };
         if place.path.is_empty() {
             self.unresolved_bindings.insert(place.root);
-        } else if self
-            .unresolved_projections
-            .entry(place.root)
-            .or_default()
-            .insert(place.path)
-        {
-            self.record_projection_fact();
-        }
-    }
-    fn record_projection_fact(&mut self) {
-        // A depth limit alone admits exponentially many recursive field paths.
-        // Refuse an unbounded source graph before cloning it on every fixed-point
-        // iteration; partial inference must never be treated as a proven width.
-        self.projection_facts += 1;
-        if self.projection_facts > 16_384 {
-            self.projection_failure.set(true);
+        } else {
+            self.unresolved_projections
+                .entry(place.root)
+                .or_default()
+                .insert(place.path);
         }
     }
     fn defer_binding(&mut self, name: &str) {
@@ -585,15 +570,11 @@ impl Pass<'_> {
         if !place.path.is_empty() {
             // First owned column evidence is stable. A conflicting later source
             // kind is checked against it by the ordinary strong mismatch guard.
-            if let std::collections::hash_map::Entry::Vacant(entry) = self
-                .projection_kinds
+            self.projection_kinds
                 .entry(place.root)
                 .or_default()
                 .entry(place.path)
-            {
-                entry.insert(kind);
-                self.record_projection_fact();
-            }
+                .or_insert(kind);
         }
     }
     fn inherit_projection_kinds(&mut self, source: SourcePlace) {
@@ -2551,7 +2532,6 @@ pub(crate) fn normalize(
             projection_kinds: HashMap::new(),
             active_place: None,
             projection_failure: std::cell::Cell::new(false),
-            projection_facts: 0,
             return_type: None,
             const_env: None,
         };
@@ -2571,11 +2551,10 @@ pub(crate) fn normalize(
                         pass.projection_kinds.clone(),
                     );
                     pass.body(body, &mut initial.clone(), typ_kind(ret, semantics));
-                    if pass.projection_failure.get()
-                        || before.0 == pass.inferred
-                            && before.1 == pass.unresolved_bindings
-                            && before.2 == pass.unresolved_projections
-                            && before.3 == pass.projection_kinds
+                    if before.0 == pass.inferred
+                        && before.1 == pass.unresolved_bindings
+                        && before.2 == pass.unresolved_projections
+                        && before.3 == pass.projection_kinds
                     {
                         break;
                     }
@@ -2583,7 +2562,7 @@ pub(crate) fn normalize(
                 pass.rewrite = true;
                 pass.body(body, &mut initial, typ_kind(ret, semantics));
                 if pass.projection_failure.get() {
-                    body.insert(0,Stmt::Expr(Expr::Ident(core_ir::type_proofs::ResolutionFailure::Unsupported("aggregate source dependency cycle, depth or complexity exceeds bounded resolution".into()).symbol())));
+                    body.insert(0,Stmt::Expr(Expr::Ident(core_ir::type_proofs::ResolutionFailure::Unsupported("aggregate source dependency cycle or depth exceeds bounded resolution".into()).symbol())));
                 }
 
                 if params
@@ -2607,11 +2586,10 @@ pub(crate) fn normalize(
                         pass.projection_kinds.clone(),
                     );
                     pass.value(value, Some(typ), &mut globals.clone(), None);
-                    if pass.projection_failure.get()
-                        || before.0 == pass.inferred
-                            && before.1 == pass.unresolved_bindings
-                            && before.2 == pass.unresolved_projections
-                            && before.3 == pass.projection_kinds
+                    if before.0 == pass.inferred
+                        && before.1 == pass.unresolved_bindings
+                        && before.2 == pass.unresolved_projections
+                        && before.3 == pass.projection_kinds
                     {
                         break;
                     }
@@ -2626,7 +2604,7 @@ pub(crate) fn normalize(
                     {
                         prior
                     } else {
-                        Expr::Ident(core_ir::type_proofs::ResolutionFailure::Unsupported("aggregate source dependency cycle, depth or complexity exceeds bounded resolution".into()).symbol())
+                        Expr::Ident(core_ir::type_proofs::ResolutionFailure::Unsupported("aggregate source dependency cycle or depth exceeds bounded resolution".into()).symbol())
                     };
                 }
                 if unsupported_type(typ, &facts, semantics, &mut HashSet::new()) {

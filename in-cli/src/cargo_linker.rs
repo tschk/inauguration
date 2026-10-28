@@ -106,13 +106,6 @@ pub fn compile_cargo_dependencies(project_dir: &Path) -> Vec<(String, UnifiedMod
 }
 
 pub fn compile_cargo_dependency_artifacts(project_dir: &Path) -> Vec<(String, CompileArtifact)> {
-    compile_cargo_dependency_artifacts_for_target(project_dir, None)
-}
-
-pub(crate) fn compile_cargo_dependency_artifacts_for_target(
-    project_dir: &Path,
-    target: Option<&str>,
-) -> Vec<(String, CompileArtifact)> {
     let mut modules = Vec::new();
 
     let metadata = match get_cargo_metadata(project_dir) {
@@ -136,63 +129,10 @@ pub(crate) fn compile_cargo_dependency_artifacts_for_target(
     };
 
     let all_dep_ids = collect_transitive_dependencies(root_id, nodes);
-    let target_cfg = rust_target_cfg(target);
-    compile_resolved_dependencies(
-        &all_dep_ids,
-        nodes,
-        &pkg_manifest,
-        &pkg_by_id,
-        target_cfg.as_deref(),
-        &mut modules,
-    );
+
+    compile_resolved_dependencies(&all_dep_ids, &pkg_manifest, &pkg_by_id, &mut modules);
 
     modules
-}
-
-pub(crate) fn parse_crate_root_artifact(
-    path: &Path,
-    project_dir: &Path,
-    target: Option<&str>,
-) -> Result<CompileArtifact, String> {
-    let Some(metadata) = get_cargo_metadata(project_dir) else {
-        return rust_front::parse_rust_artifact(path);
-    };
-    let root = metadata["resolve"]["root"].as_str().unwrap_or("");
-    let nodes = metadata["resolve"]["nodes"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    rust_front::parse_rust_artifact_with_cargo_cfg(
-        path,
-        &resolved_features(nodes, root),
-        rust_target_cfg(target).as_deref(),
-    )
-}
-
-fn resolved_features(nodes: &[serde_json::Value], package: &str) -> Vec<String> {
-    nodes
-        .iter()
-        .find(|node| node["id"].as_str() == Some(package))
-        .and_then(|node| node["features"].as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|feature| feature.as_str().map(str::to_owned))
-        .collect()
-}
-
-fn rust_target_cfg(target: Option<&str>) -> Option<Vec<String>> {
-    let mut command = Command::new("rustc");
-    command.args(["--print", "cfg"]);
-    if let Some(target) = target {
-        command.args(["--target", target]);
-    }
-    let output = command.output().ok()?;
-    output.status.success().then(|| {
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::to_owned)
-            .collect()
-    })
 }
 
 fn build_pkg_maps(
@@ -253,10 +193,8 @@ fn collect_transitive_dependencies<'a>(
 
 fn compile_resolved_dependencies(
     all_dep_ids: &[&str],
-    nodes: &[serde_json::Value],
     pkg_manifest: &HashMap<&str, PathBuf>,
     pkg_by_id: &HashMap<&str, &serde_json::Value>,
-    target_cfg: Option<&[String]>,
     modules: &mut Vec<(String, CompileArtifact)>,
 ) {
     let mut already_compiled: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -324,23 +262,12 @@ fn compile_resolved_dependencies(
                     if in_registry && tree_bytes > 40_000 {
                         continue;
                     }
-                    // Cargo resolves features per package. Do not lower both sides
-                    // of a dependency's mutually exclusive cfg(feature) declarations.
-                    let features = resolved_features(nodes, dep_id);
-                    let namespace = crate_name.replace('-', "_");
                     if let Ok(Ok(module)) =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let mut artifact = rust_front::parse_rust_artifact_with_cargo_cfg(
-                                &lib_rs, &features, target_cfg,
-                            )?;
-                            crate::core_bindings::qualify_module_artifact(
-                                &mut artifact,
-                                &namespace,
-                            )?;
-                            Ok::<_, String>(artifact)
+                            rust_front::parse_rust_artifact(&lib_rs)
                         }))
                     {
-                        modules.push((namespace, module));
+                        modules.push((crate_name.to_string(), module));
                     }
                 }
             }
@@ -440,25 +367,7 @@ fn dependency_function_aliases(
 }
 
 pub fn merge_dependency_modules(main: &mut UnifiedModule, deps: Vec<(String, UnifiedModule)>) {
-    let is_tuple_schema = |decl: &&Decl| {
-        matches!(decl, Decl::Struct { name, fields, type_params }
-            if type_params.is_empty() && crate::core_ir::tuples::fields(name).as_ref() == Some(fields))
-    };
-    let mut tuple_schemas: std::collections::HashSet<_> =
-        main.decls.iter().filter(is_tuple_schema).cloned().collect();
     for (crate_name, mut dep_module) in deps {
-        main.regions.append(&mut dep_module.regions);
-        // Tuple identities are structural, not crate-local. Coalesce schemas
-        // shared by different artifacts, never duplicates within one source or
-        // malformed declarations that must still fail verification.
-        let mut schemas = HashMap::new();
-        for decl in dep_module.decls.iter().filter(is_tuple_schema) {
-            *schemas.entry(decl.clone()).or_insert(0usize) += 1;
-        }
-        dep_module
-            .decls
-            .retain(|decl| !tuple_schemas.contains(decl) || schemas[decl] != 1);
-        tuple_schemas.extend(schemas.into_keys());
         if crate_name.is_empty() || crate_name.starts_with("in-") {
             main.decls.append(&mut dep_module.decls);
             continue;
@@ -607,6 +516,74 @@ pub fn merge_dependency_artifacts(
     Ok(())
 }
 
+#[allow(dead_code)]
+fn prefix_calls(stmts: &mut [Stmt], crate_name: &str, _in_prefixed: bool) {
+    for stmt in stmts {
+        match stmt {
+            // Type qualification is performed by the shared namespace walker;
+            // a declaration has no initializer call to prefix.
+            Stmt::Declare(..) => {}
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) => prefix_call_expr(expr, crate_name),
+            Stmt::Let(_, _, expr) | Stmt::Assign(_, expr) => prefix_call_expr(expr, crate_name),
+            Stmt::If {
+                then_body,
+                else_body,
+                cond,
+                ..
+            } => {
+                prefix_call_expr(cond, crate_name);
+                prefix_calls(then_body, crate_name, false);
+                prefix_calls(else_body, crate_name, false);
+            }
+            Stmt::Loop { body, cond, .. } => {
+                if let Some(cond_expr) = cond {
+                    prefix_call_expr(cond_expr, crate_name);
+                }
+                prefix_calls(body, crate_name, false);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    prefix_calls(&mut arm.body, crate_name, false);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn prefix_call_expr(expr: &mut Expr, crate_name: &str) {
+    match expr {
+        Expr::Call { callee, args, .. } => {
+            if let Expr::Ident(name) = callee.as_mut() {
+                if !name.contains("::") {
+                    *name = format!("{crate_name}::{name}");
+                }
+            }
+            prefix_call_expr(callee.as_mut(), crate_name);
+            for arg in args.iter_mut() {
+                prefix_call_expr(arg, crate_name);
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            prefix_call_expr(lhs.as_mut(), crate_name);
+            prefix_call_expr(rhs.as_mut(), crate_name);
+        }
+        Expr::Unary { expr: inner, .. } => prefix_call_expr(inner.as_mut(), crate_name),
+        Expr::Field { base, .. } => prefix_call_expr(base.as_mut(), crate_name),
+        Expr::Index { base, index } => {
+            prefix_call_expr(base.as_mut(), crate_name);
+            prefix_call_expr(index.as_mut(), crate_name);
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, field_expr) in fields.iter_mut() {
+                prefix_call_expr(field_expr, crate_name);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,107 +618,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
-    }
-
-    #[test]
-    fn cargo_dependencies_select_features_and_target_cfg_before_lowering() {
-        for enabled in [false, true] {
-            let temp = TempDirGuard::new();
-            fs::create_dir_all(temp.path.join("src")).unwrap();
-            fs::create_dir_all(temp.path.join("dep/src")).unwrap();
-            fs::write(temp.path.join("src/lib.rs"), "").unwrap();
-            fs::write(temp.path.join("dep/Cargo.toml"), "[package]\nname=\"cfg-dep\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[features]\nselected=[]\n").unwrap();
-            fs::write(temp.path.join("dep/src/lib.rs"), "#[cfg(feature=\"selected\")]pub const SELECTED:bool=true;#[cfg(not(feature=\"selected\"))]pub const SELECTED:bool=false;pub mod child;").unwrap();
-            fs::write(temp.path.join("dep/src/child.rs"), "#[cfg(feature=\"selected\")]pub type Byte=u8;#[cfg(not(feature=\"selected\"))]pub type Byte=u16;pub fn value()->Byte{42}#[cfg(all(unix,target_os=\"linux\"))]pub const PLATFORM:bool=true;#[cfg(all(windows,target_os=\"windows\"))]pub const PLATFORM:bool=false;").unwrap();
-            let features = if enabled { "[\"selected\"]" } else { "[]" };
-            fs::write(temp.path.join("Cargo.toml"), format!("[package]\nname=\"cfg-caller\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[dependencies]\ncfg-dep={{path=\"dep\",features={features}}}\n")).unwrap();
-            for (target, unix) in [
-                ("x86_64-unknown-linux-gnu", true),
-                ("x86_64-pc-windows-msvc", false),
-            ] {
-                let dependencies =
-                    compile_cargo_dependency_artifacts_for_target(&temp.path, Some(target));
-                let (_, artifact) = dependencies
-                    .iter()
-                    .find(|(name, _)| name == "cfg_dep")
-                    .unwrap();
-                for (expected_name, expected) in [
-                    ("cfg_dep::SELECTED", enabled),
-                    ("cfg_dep::child::PLATFORM", unix),
-                ] {
-                    let values: Vec<_> = artifact
-                        .semantic
-                        .decls
-                        .iter()
-                        .filter_map(|decl| match decl {
-                            Decl::Global {
-                                name,
-                                init: Some(value),
-                                ..
-                            } if name == expected_name => Some(value.as_ref()),
-                            _ => None,
-                        })
-                        .collect();
-                    assert_eq!(
-                        values,
-                        vec![&Expr::BoolLit(expected)],
-                        "{target}: {expected_name}"
-                    );
-                }
-                assert!(
-                    crate::typecheck::TypeChecker::new()
-                        .typed_proof_nodes(&artifact.semantic.decls)
-                        .is_empty()
-                );
-            }
-        }
-    }
-
-    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
-    #[test]
-    fn cargo_crates_keep_names_and_operator_proofs_separate_from_the_binary() {
-        let temp = TempDirGuard::new();
-        fs::create_dir_all(temp.path.join("src")).unwrap();
-        fs::write(temp.path.join("Cargo.toml"), "[package]\nname=\"caller\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[features]\ndefault=[\"selected\"]\nselected=[]\n[dependencies]\nleft-value={path=\"left\"}\nright={path=\"right\"}\n").unwrap();
-        fs::write(
-            temp.path.join("src/lib.rs"),
-            "pub type Result<T>=std::result::Result<T,()>;pub fn answer()->i64{let pair:(i64,i64)=(5,0);pair.0}",
-        )
-        .unwrap();
-        let path = temp.path.join("src/main.rs");
-        fs::write(&path, "type Result<T>=std::result::Result<T,()>;#[cfg(all(feature=\"selected\",unix))]fn answer()->i64{left_value::answer()+right::answer()+caller::answer()}#[cfg(not(all(feature=\"selected\",unix)))]fn answer()->i64{7}fn main()->i64{answer()}").unwrap();
-        for (directory, package, value, increment) in
-            [("left", "left-value", 7, 10), ("right", "right", 4, 16)]
-        {
-            fs::create_dir_all(temp.path.join(directory).join("src")).unwrap();
-            fs::write(
-                temp.path.join(directory).join("Cargo.toml"),
-                format!("[package]\nname=\"{package}\"\nversion=\"0.1.0\"\nedition=\"2021\"\n"),
-            )
-            .unwrap();
-            fs::write(temp.path.join(directory).join("src/lib.rs"), format!("pub type Result<T>=std::result::Result<T,()>;pub struct Row{{value:i64}}impl std::ops::Neg for Row{{type Output=i64;fn neg(self)->i64{{self.value+helper()}}}}fn helper()->i64{{let pair:(i64,i64)=({increment},0);pair.0}}pub fn answer()->i64{{-Row{{value:{value}}}}}")).unwrap();
-        }
-        let report =
-            crate::owned_compile::compile_owned(&crate::owned_compile::OwnedCompileRequest {
-                path,
-                module_id: "caller".into(),
-                parser: crate::parser_registry::ParserCli::Auto,
-                target: crate::owned_compile::CompileTarget::Jit,
-                entry: Some("main".into()),
-                out: None,
-                linkage: crate::native_emit::NativeLinkage::Executable,
-                target_triple: None,
-                jobs: 1,
-                debug: false,
-                profile: crate::emit_profile::EmitProfile::Default,
-                emit: None,
-                base: None,
-            });
-        assert!(report.success && report.execution_started, "{report:?}");
-        assert_eq!(
-            report.eval_result,
-            Some(crate::owned_compile::EvalValue::Int(42))
-        );
     }
 
     #[test]
@@ -964,34 +840,6 @@ direct_dep = { path = "direct_dep" }
     }
 
     #[test]
-    fn test_get_manifest_valid() {
-        let temp = TempDirGuard::new();
-        fs::write(
-            temp.path.join("Cargo.toml"),
-            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"src/my_lib.rs\"\n",
-        )
-        .unwrap();
-
-        let manifest = get_manifest(&temp.path).expect("manifest should be parsed");
-        assert_eq!(manifest.package_name.as_deref(), Some("my-crate"));
-        assert_eq!(manifest.lib_path.as_deref(), Some("src/my_lib.rs"));
-    }
-
-    #[test]
-    fn test_get_manifest_partial() {
-        let temp = TempDirGuard::new();
-        fs::write(
-            temp.path.join("Cargo.toml"),
-            "[package]\nname = \"partial-crate\"\n",
-        )
-        .unwrap();
-
-        let manifest = get_manifest(&temp.path).expect("manifest should be parsed");
-        assert_eq!(manifest.package_name.as_deref(), Some("partial-crate"));
-        assert_eq!(manifest.lib_path, None);
-    }
-
-    #[test]
     fn test_find_crate_root_default() {
         let temp = TempDirGuard::new();
         let src_dir = temp.path.join("src");
@@ -1036,26 +884,6 @@ direct_dep = { path = "direct_dep" }
         .unwrap();
 
         assert_eq!(find_crate_root(&nested_dir).unwrap(), lib_rs);
-    }
-
-    #[test]
-    fn test_get_manifest_success() {
-        let temp = TempDirGuard::new();
-        let manifest = temp.path.join("Cargo.toml");
-        fs::write(
-            &manifest,
-            "[package]\nname = \"test-package\"\n[lib]\npath = \"src/lib.rs\"\n",
-        )
-        .unwrap();
-        let result = get_manifest(&temp.path).unwrap();
-        assert_eq!(result.package_name.as_deref(), Some("test-package"));
-        assert_eq!(result.lib_path.as_deref(), Some("src/lib.rs"));
-    }
-
-    #[test]
-    fn test_get_manifest_no_file() {
-        let temp = TempDirGuard::new();
-        assert!(get_manifest(&temp.path).is_none());
     }
 
     #[test]
@@ -1112,105 +940,6 @@ direct_dep = { path = "direct_dep" }
         );
         assert_eq!(find_crate_root(&temp.path), Ok(second));
         Ok(())
-    }
-
-    #[test]
-    fn dependency_tuple_merging_keeps_source_conflicts_visible() {
-        let crate::core_ir::Typ::Named(name) =
-            crate::core_ir::tuples::typ(&[crate::core_ir::Typ::Int])
-        else {
-            unreachable!()
-        };
-        let schema = Decl::Struct {
-            fields: crate::core_ir::tuples::fields(&name).unwrap(),
-            name,
-            type_params: vec![],
-        };
-        for copies in [1, 2] {
-            let mut main = UnifiedModule::new(vec![schema.clone()]);
-            merge_dependency_modules(
-                &mut main,
-                vec![(
-                    "dep".into(),
-                    UnifiedModule::new(vec![schema.clone(); copies]),
-                )],
-            );
-            let report = crate::core_ir_verifier::verify_module(
-                &main,
-                &crate::core_ir_verifier::VerifyOptions {
-                    entry: None,
-                    require_entry: false,
-                },
-            );
-            assert_eq!(report.ok, copies == 1, "{report:?}");
-            if copies > 1 {
-                assert_eq!(
-                    report.reason_code.as_deref(),
-                    Some("duplicate-top-level-name")
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_merge_dependency_modules() {
-        let mut main = UnifiedModule::new(vec![]);
-
-        let mut in_dep = UnifiedModule::new(vec![Decl::Struct {
-            name: "InStruct".into(),
-            fields: vec![],
-            type_params: vec![],
-        }]);
-        in_dep.mark_noalias(&["left", "right"]);
-
-        let ext_dep = UnifiedModule::new(vec![Decl::Function {
-            name: "ext_func".into(),
-            params: vec![],
-            ret: crate::core_ir::Typ::Void,
-            body: vec![],
-            type_params: vec![],
-        }]);
-
-        let empty_dep = UnifiedModule::new(vec![Decl::Function {
-            name: "empty_func".into(),
-            params: vec![],
-            ret: crate::core_ir::Typ::Void,
-            body: vec![],
-            type_params: vec![],
-        }]);
-
-        merge_dependency_modules(
-            &mut main,
-            vec![
-                ("in-core".into(), in_dep),
-                ("my_crate".into(), ext_dep),
-                ("".into(), empty_dep),
-            ],
-        );
-
-        assert_eq!(main.decls.len(), 4);
-        assert_eq!(main.noalias_params(), vec!["left", "right"]);
-
-        assert!(
-            main.decls
-                .iter()
-                .any(|d| matches!(d, Decl::Struct { name, .. } if name == "InStruct"))
-        );
-        assert!(
-            main.decls
-                .iter()
-                .any(|d| matches!(d, Decl::Function { name, .. } if name == "ext_func"))
-        );
-        assert!(
-            main.decls
-                .iter()
-                .any(|d| matches!(d, Decl::Function { name, .. } if name == "my_crate::ext_func"))
-        );
-        assert!(
-            main.decls
-                .iter()
-                .any(|d| matches!(d, Decl::Function { name, .. } if name == "empty_func"))
-        );
     }
 }
 
@@ -1368,43 +1097,6 @@ mod retained_artifact_tests {
                 .unary_methods
                 .contains_key(&("dep::Row".into(), "-".into()))
         );
-    }
-
-    #[test]
-    fn test_merge_dependency_modules_merges_decls_and_generates_aliases() {
-        let mut main = UnifiedModule::new(vec![callable("main_func", 1)]);
-        let dep1 = UnifiedModule::new(vec![callable("dep1_func", 2)]);
-        let dep2 = UnifiedModule::new(vec![callable("dep2_func", 3)]);
-
-        let deps = vec![("in-dep".into(), dep1), ("dep2".into(), dep2)];
-
-        merge_dependency_modules(&mut main, deps);
-
-        assert_eq!(main.decls.len(), 4);
-
-        let has_main_func = main
-            .decls
-            .iter()
-            .any(|d| matches!(d, Decl::Function { name, .. } if name == "main_func"));
-        assert!(has_main_func);
-
-        let has_dep1_func = main
-            .decls
-            .iter()
-            .any(|d| matches!(d, Decl::Function { name, .. } if name == "dep1_func"));
-        assert!(has_dep1_func);
-
-        let has_dep2_func = main
-            .decls
-            .iter()
-            .any(|d| matches!(d, Decl::Function { name, .. } if name == "dep2_func"));
-        assert!(has_dep2_func);
-
-        let has_dep2_alias = main
-            .decls
-            .iter()
-            .any(|d| matches!(d, Decl::Function { name, .. } if name == "dep2::dep2_func"));
-        assert!(has_dep2_alias);
     }
 
     #[test]

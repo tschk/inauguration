@@ -231,7 +231,7 @@ pub(crate) fn cmd_compile(
     Ok(())
 }
 
-fn parse_base(value: &str) -> Result<u64> {
+pub(crate) fn parse_base(value: &str) -> Result<u64> {
     if let Some(stripped) = value.strip_prefix("0x") {
         u64::from_str_radix(stripped, 16)
             .map_err(|_| InError::Message(format!("invalid hex --base: {value}")))

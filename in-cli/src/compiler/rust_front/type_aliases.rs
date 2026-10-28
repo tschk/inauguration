@@ -16,34 +16,6 @@ pub(super) fn validate_declarations(
     declarations::validate(file, catalog)
 }
 
-struct SourceCfg {
-    features: HashSet<String>,
-    target: Option<HashSet<String>>,
-}
-thread_local! {
-    static SOURCE_CFG: RefCell<Option<SourceCfg>> = const { RefCell::new(None) };
-}
-
-pub(super) fn with_cargo_cfg<R>(
-    features: &[String],
-    target: Option<&[String]>,
-    parse: impl FnOnce() -> R,
-) -> R {
-    struct Restore(Option<SourceCfg>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            SOURCE_CFG.with(|current| *current.borrow_mut() = self.0.take());
-        }
-    }
-    let _restore = Restore(SOURCE_CFG.with(|current| {
-        current.replace(Some(SourceCfg {
-            features: features.iter().cloned().collect(),
-            target: target.map(|cfg| cfg.iter().cloned().collect()),
-        }))
-    }));
-    parse()
-}
-
 /// Source-only cfg truth. Unknown flags/features never select a host configuration.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Presence {
@@ -73,51 +45,6 @@ fn meta_arguments(list: &syn::MetaList) -> Option<Vec<syn::Meta>> {
         .map(|values| values.into_iter().collect())
 }
 fn cfg_predicate(meta: &syn::Meta) -> Presence {
-    // The Rust frontend compiles ordinary source, not a rustc test harness.
-    // This is the source compilation mode, independent of this compiler's own
-    // cfg(test), which is enabled when running its regression suite.
-    if matches!(meta, syn::Meta::Path(path) if path.is_ident("test")) {
-        return Presence::Inactive;
-    }
-    if let syn::Meta::NameValue(value) = meta
-        && value.path.is_ident("feature")
-        && let syn::Expr::Lit(literal) = &value.value
-        && let syn::Lit::Str(feature) = &literal.lit
-    {
-        return SOURCE_CFG.with(|current| match current.borrow().as_ref() {
-            Some(cfg) if cfg.features.contains(&feature.value()) => Presence::Active,
-            Some(_) => Presence::Inactive,
-            None => Presence::Conditional,
-        });
-    }
-    if let Some(key) = meta.path().get_ident().map(ToString::to_string)
-        && (key == "unix" || key == "windows" || key.starts_with("target_"))
-    {
-        let predicate = match meta {
-            syn::Meta::Path(_) => Some(key),
-            syn::Meta::NameValue(value) => match &value.value {
-                syn::Expr::Lit(literal) => match &literal.lit {
-                    syn::Lit::Str(value) => Some(format!("{key}={:?}", value.value())),
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        };
-        if let Some(predicate) = predicate {
-            return SOURCE_CFG.with(|current| {
-                match current
-                    .borrow()
-                    .as_ref()
-                    .and_then(|cfg| cfg.target.as_ref())
-                {
-                    Some(target) if target.contains(&predicate) => Presence::Active,
-                    Some(_) => Presence::Inactive,
-                    None => Presence::Conditional,
-                }
-            });
-        }
-    }
     let syn::Meta::List(list) = meta else {
         return Presence::Conditional;
     };
@@ -593,7 +520,6 @@ struct NominalApplication {
     generics: syn::Generics,
     arguments: usize,
     unsupported_arguments: bool,
-    infer_arguments: bool,
 }
 #[derive(Clone)]
 enum NominalObligation {
@@ -752,7 +678,7 @@ fn path_type(
     active: &mut HashSet<Key>,
     alias_target: bool,
 ) -> Result<Resolved, Failure> {
-    path_type_with_mode(path, frame, active, alias_target, false, false, false)
+    path_type_with_mode(path, frame, active, alias_target, false, false)
 }
 fn path_type_with_mode(
     path: &syn::Path,
@@ -761,7 +687,6 @@ fn path_type_with_mode(
     alias_target: bool,
     declaration: bool,
     trait_position: bool,
-    ordinary_value_owner: bool,
 ) -> Result<Resolved, Failure> {
     let _query = generic_aliases::query()?;
     let caller_active = active.clone();
@@ -797,7 +722,7 @@ fn path_type_with_mode(
             declaration,
             alias_target,
             source_qualified: false,
-            ordinary_value_owner,
+            ordinary_value_owner: false,
             constant_value: false,
             trait_position,
             nominal_arguments: path
@@ -853,13 +778,6 @@ fn scope_binding(
         }
         let key = (declared.module.clone(), depth, name.to_string());
         if !active.insert(key.clone()) {
-            // `mod answer; use answer::answer;` binds a module and a value.
-            // Probing the value import's prefix must use the existing module,
-            // not recursively probe that same import as a competing type.
-            if matches!(&typ, Some(Binding::Visible(binding, _)) if matches!(binding.as_ref(), Binding::Module(_)))
-            {
-                continue;
-            }
             return Err(Failure::Invalid(format!("cyclic type alias `{name}`")));
         }
         let target = resolve_parts(
@@ -987,11 +905,6 @@ fn resolve_parts(
         }
         if source_signatures::active()
             && let Some(value) = source_signatures::builtin(parts, context, active)?
-        {
-            return Ok(value);
-        }
-        if !source_signatures::active()
-            && let Some(value) = runtime_result(parts, context, active)?
         {
             return Ok(value);
         }
@@ -1137,7 +1050,6 @@ fn resolve_parts(
                         generics,
                         arguments: context.nominal_arguments,
                         unsupported_arguments: context.unsupported_nominal_arguments,
-                        infer_arguments: context.ordinary_value_owner,
                     },
                 )]))
             }
@@ -1284,10 +1196,7 @@ fn resolve_parts(
             None => primitive(parts, generic)?,
         }
     } else {
-        match runtime_result(parts, context, active)? {
-            Some(value) => value,
-            None => primitive(parts, generic)?,
-        }
+        primitive(parts, generic)?
     };
     if context.alias_target
         && (module.glob || frame.locals.iter().any(|scope| scope.glob))
@@ -1306,64 +1215,6 @@ fn has_generic_arguments(arguments: &syn::PathArguments) -> bool {
         syn::PathArguments::Parenthesized(_) => true,
     }
 }
-
-/// The owned Result ABI returns its success payload and carries errors in the
-/// runtime error slot. Resolve aliases through that same ABI, after lexical
-/// lookup, while retaining validation and dependencies of both source arguments.
-fn runtime_result(
-    parts: &[String],
-    context: LookupContext<'_>,
-    active: &mut HashSet<Key>,
-) -> Result<Option<Resolved>, Failure> {
-    if !matches!(
-        parts
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .as_slice(),
-        ["Result"] | ["std" | "core", "result", "Result"]
-    ) {
-        return Ok(None);
-    }
-    let Some((arguments, frame)) = context.arguments else {
-        return Ok(None);
-    };
-    // Value-owner paths such as Result::is_ok infer their type parameters;
-    // they are not type annotations missing a pair of arguments.
-    if context.ordinary_value_owner && matches!(arguments, syn::PathArguments::None) {
-        return Ok(None);
-    }
-    let syn::PathArguments::AngleBracketed(arguments) = arguments else {
-        return Err(Failure::Invalid(
-            "Result requires two type arguments".into(),
-        ));
-    };
-    if arguments.args.len() != 2 {
-        return Err(Failure::Invalid(
-            "Result requires two type arguments".into(),
-        ));
-    }
-    let mut dependencies = generic_aliases::Dependencies::default();
-    let mut payload = None;
-    for (index, argument) in arguments.args.iter().enumerate() {
-        let syn::GenericArgument::Type(argument) = argument else {
-            return Err(Failure::Invalid("Result requires type arguments".into()));
-        };
-        let value = generic_aliases::rhs_type(argument, frame, active)?;
-        dependencies.merge(value.dependencies());
-        if let Some(failure) = structural_failure(value.clone()) {
-            return Err(failure);
-        }
-        if index == 0 {
-            let Resolved::Type(typ) = value.visibility().0 else {
-                return Err(unsupported("Result payload requires an exact runtime type"));
-            };
-            payload = Some(typ);
-        }
-    }
-    Ok(payload.map(|typ| Resolved::Type(typ).with_dependencies(dependencies)))
-}
-
 fn primitive(parts: &[String], generic: bool) -> Result<Resolved, Failure> {
     let builtin = match parts {
         [name] => Some(name.as_str()),
@@ -1490,7 +1341,7 @@ pub(super) fn resolve_trait_ufcs(
 /// External/unowned trait identities retain their existing unsupported boundary.
 pub(super) fn trait_path_failure(path: &syn::Path) -> Option<Failure> {
     let frame = current()?;
-    path_type_with_mode(path, &frame, &mut HashSet::new(), false, false, true, false)
+    path_type_with_mode(path, &frame, &mut HashSet::new(), false, false, true)
         .err()
         .filter(Failure::is_invalid)
 }
@@ -1893,13 +1744,6 @@ fn nominal_application(application: &NominalApplication) -> Result<(), Failure> 
         .collect();
     let (minimum, maximum) = generic_arity(generics);
     if application.arguments < minimum || application.arguments > maximum {
-        // An expression such as Row::new(value) may infer Row<T>; a type
-        // annotation or an alias RHS must still supply its required arguments.
-        if application.infer_arguments && application.arguments == 0 {
-            return Err(unsupported(
-                "nominal value owner requires generic argument inference",
-            ));
-        }
         return Err(Failure::Invalid(format!(
             "nominal type requires {minimum}..={maximum} type arguments, found {}",
             application.arguments
@@ -1931,7 +1775,7 @@ fn nominal_application(application: &NominalApplication) -> Result<(), Failure> 
 }
 
 pub(super) fn validate_alias_declaration(path: &syn::Path, frame: &Frame) -> Result<(), Failure> {
-    let value = path_type_with_mode(path, frame, &mut HashSet::new(), false, true, false, false)?;
+    let value = path_type_with_mode(path, frame, &mut HashSet::new(), false, true, false)?;
     structural_failure(value).map_or(Ok(()), Err)
 }
 

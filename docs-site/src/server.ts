@@ -77,4 +77,4 @@ if (import.meta.main) {
   console.log(`inauguration docs-site → http://localhost:${server.port}`);
 }
 
-export { server, fetch, renderer, serveIndex };
+export { server, fetch, renderer };

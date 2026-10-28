@@ -283,7 +283,7 @@ fn walk_expr(expr: &Expr, locals: &HashSet<String>, out: &mut Vec<String>) {
     crate::core_ir::for_each_expr_child(expr, &mut |child| walk_expr(child, locals, out));
 }
 
-pub(crate) fn declaration_name(decl: &Decl) -> &str {
+fn declaration_name(decl: &Decl) -> &str {
     match decl {
         Decl::Function { name, .. }
         | Decl::Struct { name, .. }
@@ -395,30 +395,6 @@ pub fn resolve_deps_for_entry_with_bindings(
         files_parsed += 1;
     }
 
-    if entry.is_some() {
-        // Loading a Rust file also discovers constants unrelated to the entry.
-        // They are not roots: do not validate or emit their unevaluated values.
-        // Keep caller declarations, reached constants, runtime initializers and
-        // private source-validation globals (which are not constant values).
-        // Retained method bodies can become reachable after operator dispatch.
-        let mut references = Vec::new();
-        for decl in &expanded.decls {
-            walk_decl(decl, &HashSet::new(), &mut references);
-        }
-        let references: HashSet<_> = references.into_iter().collect();
-        let mut index = 0;
-        expanded.decls.retain(|decl| {
-            let caller = index < module.decls.len();
-            index += 1;
-            caller
-                || visited.contains(declaration_name(decl))
-                || references.contains(declaration_name(decl))
-                || !matches!(decl, Decl::Global {
-                    mutable: false, constant_value: true, init, ..
-                } if init.as_deref().is_none_or(|expr| !crate::core_opt::expr_has_effects(expr)))
-        });
-    }
-
     Ok(ResolveResult {
         module: expanded,
         unary_methods,
@@ -443,10 +419,7 @@ mod tests {
             std::env::temp_dir().join(format!("resolve_entry_{}_{}", std::process::id(), id));
         fs::create_dir_all(root.join("src")).unwrap();
         for (name, source) in [
-            (
-                "callback",
-                "pub const UNUSED:i64=unknown::VALUE;pub const VALUE:i64=37;pub const EFFECT:i64=unknown::effect();pub static STATE:i64=0;const SUPPORT:i64=11;pub fn unselected()->i64{SUPPORT}pub fn answer()->i64{VALUE+5}",
-            ),
+            ("callback", "pub fn answer()->i64{42}"),
             ("schema", "pub struct Entry{pub value:i64}"),
             ("guard", "pub fn allowed()->bool{true}"),
             ("unrelated", "pub fn answer()->i64{0}"),
@@ -509,10 +482,6 @@ mod tests {
         assert_eq!(reached.files_parsed, 3);
         for name in [
             "sample::callback::answer",
-            "sample::callback::VALUE",
-            "sample::callback::SUPPORT",
-            "sample::callback::EFFECT",
-            "sample::callback::STATE",
             "sample::schema::Entry",
             "sample::guard::allowed",
         ] {
@@ -531,20 +500,6 @@ mod tests {
                 .decls
                 .iter()
                 .any(|decl| declaration_name(decl) == "sample::unrelated::answer")
-        );
-        assert!(
-            !reached
-                .module
-                .decls
-                .iter()
-                .any(|decl| declaration_name(decl) == "sample::callback::UNUSED")
-        );
-        let all = resolve_deps(&module, &db).unwrap();
-        assert!(
-            all.module
-                .decls
-                .iter()
-                .any(|decl| declaration_name(decl) == "sample::callback::UNUSED")
         );
         assert_eq!(resolve_deps(&module, &db).unwrap().files_parsed, 4);
         fs::remove_dir_all(root).unwrap();
