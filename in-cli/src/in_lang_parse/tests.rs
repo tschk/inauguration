@@ -283,6 +283,21 @@ fn test_parse_in_source_coverage() {
 }
 
 #[test]
+fn test_parse_in_source() {
+    let src = "fn main() -> void { }";
+    let module = parse_in_source(src).expect("should parse basic source");
+    assert_eq!(module.decls.len(), 1);
+
+    let bad_src = "fn main() -> void {";
+    let err = parse_in_source(bad_src).expect_err("should fail to parse bad source");
+    assert!(err.contains("incomplete declaration at line 1"));
+
+    let validation_err_src = "struct S { UnknownType x }\nfn main() -> void {}";
+    let err = parse_in_source(validation_err_src).expect_err("should fail validation");
+    assert!(err.contains("unknown type in struct S field x"));
+}
+
+#[test]
 fn struct_parses_multiline_fields() {
     let src = r#"
 struct Card {
