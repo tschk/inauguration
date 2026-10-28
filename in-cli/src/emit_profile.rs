@@ -195,6 +195,40 @@ mod tests {
         );
         assert!(EmitProfile::resolve(EmitProfile::Default, true, true).is_err());
         assert!(EmitProfile::resolve(EmitProfile::Lean, true, false).is_err());
+
+        // Error on both harden and lean flags
+        assert!(EmitProfile::resolve(EmitProfile::Harden, true, true).is_err());
+
+        // Conflict when lean flag is true but profile is explicitly Harden
+        assert!(EmitProfile::resolve(EmitProfile::Harden, false, true).is_err());
+
+        // Profile explicit wins with no flags
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Harden, false, false).unwrap(),
+            EmitProfile::Harden
+        );
+
+        // Profile explicit + matching flag
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Harden, true, false).unwrap(),
+            EmitProfile::Harden
+        );
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Lean, false, true).unwrap(),
+            EmitProfile::Lean
+        );
+
+        // Flags apply to default profile
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Default, false, true).unwrap(),
+            EmitProfile::Lean
+        );
+
+        // Base default
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Default, false, false).unwrap(),
+            EmitProfile::Default
+        );
     }
 
     #[test]
