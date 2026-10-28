@@ -5,7 +5,7 @@ use crate::boundary_ir::UnaryMethodBindings;
 use crate::core_ir::rust_references;
 use std::collections::BTreeMap;
 
-fn standard_neg(path: &syn::Path, file: &syn::File) -> bool {
+pub(super) fn standard_ops_trait(path: &syn::Path, file: &syn::File, trait_name: &str) -> bool {
     let mut imports = HashMap::new();
     let mut shadowed = HashSet::new();
     let mut external_aliases = BTreeMap::new();
@@ -117,7 +117,7 @@ fn standard_neg(path: &syn::Path, file: &syn::File) -> bool {
         return parts.len() == 3
             && matches!(parts[0].as_str(), "std" | "core")
             && parts[1] == "ops"
-            && parts[2] == "Neg";
+            && parts[2] == trait_name;
     }
 }
 
@@ -261,7 +261,7 @@ pub(super) fn generic_neg_obligations(
                         _ => return None,
                     };
                     last.arguments = syn::PathArguments::None;
-                    if !standard_neg(&path, file) {
+                    if !standard_ops_trait(&path, file, "Neg") {
                         return None;
                     }
                     obligations.push(NegObligation {
@@ -354,7 +354,7 @@ pub(super) fn collect(file: &syn::File) -> UnaryMethodBindings {
         let Some((negative, trait_path, _)) = &implementation.trait_ else {
             continue;
         };
-        if negative.is_some() || !standard_neg(trait_path, file) {
+        if negative.is_some() || !standard_ops_trait(trait_path, file, "Neg") {
             continue;
         }
         let receiver_type = map_type(&implementation.self_ty);
@@ -494,7 +494,7 @@ mod collector_tests {
         syn::parse_file(source).unwrap()
     }
     fn neg(path: &str, prelude: &str) -> bool {
-        standard_neg(&syn::parse_str(path).unwrap(), &parsed(prelude))
+        standard_ops_trait(&syn::parse_str(path).unwrap(), &parsed(prelude), "Neg")
     }
     #[test]
     fn known_inactive_items_cannot_supply_or_shadow_neg_bindings() {
