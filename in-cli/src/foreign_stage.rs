@@ -253,6 +253,76 @@ mod tests {
     }
 
     #[test]
+    fn load_manifest_success() {
+        let dir = scratch();
+        fs::write(
+            dir.join(FOREIGN_STAGE_FILE),
+            "[project]\nname = \"test\"\nentry = \"main\"\n[[sources]]\npath = \"a.c\"\n",
+        )
+        .expect("write");
+        let manifest = load_manifest(&dir).expect("load").expect("some");
+        assert_eq!(manifest.project.name, "test");
+        assert_eq!(manifest.project.entry, "main");
+        assert_eq!(manifest.sources.len(), 1);
+        assert_eq!(manifest.sources[0].path, "a.c");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_manifest_empty_name() {
+        let dir = scratch();
+        fs::write(dir.join(FOREIGN_STAGE_FILE), "[project]\nname = \"\"\n").expect("write");
+        let err = load_manifest(&dir).expect_err("should fail");
+        assert!(err.contains("project.name is empty"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_manifest_parse_error() {
+        let dir = scratch();
+        fs::write(
+            dir.join(FOREIGN_STAGE_FILE),
+            "[project]\nbad_key = \"val\"\n",
+        )
+        .expect("write");
+        let err = load_manifest(&dir).expect_err("should fail");
+        assert!(err.contains("parse"));
+        assert!(err.contains("unknown project key `bad_key`"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_manifest_missing_name() {
+        let text = "[project]\nentry = \"main\"\n";
+        let err = parse_manifest(text).expect_err("should fail");
+        assert_eq!(err, "foreign stage: [project] name is required");
+    }
+
+    #[test]
+    fn parse_manifest_outside_section() {
+        let text = "name = \"test\"\n";
+        let err = parse_manifest(text).expect_err("should fail");
+        assert_eq!(
+            err,
+            "foreign stage: `name` is outside [project] or [[sources]]"
+        );
+    }
+
+    #[test]
+    fn parse_manifest_unknown_source_key() {
+        let text = "[project]\nname = \"test\"\n[[sources]]\npath = \"a.c\"\nbad = \"v\"\n";
+        let err = parse_manifest(text).expect_err("should fail");
+        assert_eq!(err, "foreign stage: unknown source key `bad`");
+    }
+
+    #[test]
+    fn parse_manifest_missing_path() {
+        let text = "[project]\nname = \"test\"\n[[sources]]\nparser = \"c\"\n";
+        let err = parse_manifest(text).expect_err("should fail");
+        assert_eq!(err, "foreign stage: [[sources]] is missing path");
+    }
+
+    #[test]
     fn stages_c_and_marks_noalias_across_the_merge() {
         let dir = scratch();
         fs::write(
