@@ -1062,12 +1062,15 @@ impl Pass<'_> {
                     root: name.clone(),
                     path: vec![],
                 });
-                for path in self.active_projections.clone() {
+
+                let active_projections = std::mem::take(&mut self.active_projections);
+                for path in &active_projections {
                     self.defer_place(SourcePlace {
                         root: name.clone(),
-                        path,
+                        path: path.clone(),
                     });
                 }
+                self.active_projections = active_projections;
                 if self.unresolved_width
                     && matches!(env.get(name),Some(Typ::Vector(item)) if matches!(item.as_ref(),Typ::Int | Typ::Generic(_)))
                 {
@@ -1952,11 +1955,14 @@ impl Pass<'_> {
                     if self.unresolved_width {
                         self.defer_place(place.clone());
                     }
-                    for path in self.active_projections.clone() {
+
+                    let active_projections = std::mem::take(&mut self.active_projections);
+                    for path in &active_projections {
                         let mut selected = place.clone();
-                        selected.path.extend(path);
+                        selected.path.extend(path.clone());
                         self.defer_place(selected);
                     }
+                    self.active_projections = active_projections;
                 }
                 let old = std::mem::replace(&mut self.unresolved_width, false);
                 let paths = std::mem::take(&mut self.active_projections);
