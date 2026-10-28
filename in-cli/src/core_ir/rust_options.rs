@@ -117,6 +117,31 @@ pub(crate) fn constructor(
     });
     let payload_type =
         destination.or_else(|| some.then(|| arguments.first().cloned().flatten()).flatten())?;
+    if some && let Some(actual) = arguments.first().and_then(Option::as_ref) {
+        let reference = |typ: &Typ| match typ {
+            Typ::Named(name) => super::rust_references::decode(name),
+            _ => None,
+        };
+        let agrees = match (reference(&payload_type), reference(actual)) {
+            (Some(expected), Some(actual)) => {
+                (!expected.mutable || actual.mutable)
+                    && super::rust_references::same_source_type(
+                        &expected.referent,
+                        &actual.referent,
+                    )
+            }
+            (Some(_), None) => super::rust_references::aggregate_referent(&payload_type).is_none(),
+            (None, Some(_)) => super::rust_references::aggregate_referent(actual).is_none(),
+            _ => true,
+        };
+        if !agrees {
+            let failure = super::type_proofs::ResolutionFailure::Invalid(
+                "Option payload reference disagrees with its source destination".into(),
+            );
+            *expr = Expr::Ident(failure.symbol());
+            return Some(failure.typ());
+        }
+    }
     let Typ::Named(name) = typ(payload_type.clone()) else {
         unreachable!()
     };

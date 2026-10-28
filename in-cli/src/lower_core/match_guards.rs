@@ -337,7 +337,7 @@ fn expand_match(
     names: &HashSet<String>,
     counter: &mut usize,
     native_patterns: bool,
-    whole_binding_type: Option<&Typ>,
+    pattern_schema: Option<(&Typ, &crate::typecheck::Facts)>,
 ) -> Vec<Stmt> {
     while ["__match_value_", "__match_done_"]
         .iter()
@@ -349,7 +349,11 @@ fn expand_match(
     let done = format!("__match_done_{counter}");
     *counter += 1;
     let mut out = vec![
-        Stmt::Let(value.clone(), None, scrutinee),
+        Stmt::Let(
+            value.clone(),
+            pattern_schema.map(|(typ, _)| typ.clone()),
+            scrutinee,
+        ),
         Stmt::Let(done.clone(), Some(Typ::Bool), Expr::BoolLit(false)),
     ];
     // One gate per arm avoids duplicating the remaining arms on every guard failure.
@@ -365,21 +369,21 @@ fn expand_match(
             None => selected,
         };
         let pattern = MatchPattern::parse(&arm.pattern).ok();
-        let whole_type =
-            whole_binding_type.filter(|_| matches!(pattern, Some(MatchPattern::IdentPat(_))));
-        let test = ((native_patterns && complex_pattern(&arm.pattern)) || whole_type.is_some())
+        let test = ((native_patterns && complex_pattern(&arm.pattern)) || pattern_schema.is_some())
             .then_some(pattern)
             .flatten()
             .and_then(|pattern| {
-                let (test, mut bindings) = pattern_test(&pattern, Expr::Ident(value.clone()))?;
-                if let Some(typ) = whole_type {
-                    for binding in &mut bindings {
-                        if let Stmt::Let(_, binding_type, _) = binding {
-                            *binding_type = Some(typ.clone());
-                        }
-                    }
+                if let Some((typ, facts)) = pattern_schema {
+                    value_pattern_test(
+                        &arm.pattern,
+                        typ,
+                        &|name| facts.pattern_fields(name),
+                        Expr::Ident(value.clone()),
+                    )
+                    .ok()
+                } else {
+                    pattern_test(&pattern, Expr::Ident(value.clone()))
                 }
-                Some((test, bindings))
             });
         let matched = if let Some((cond, mut bindings)) = test {
             bindings.extend(body);
@@ -648,17 +652,19 @@ fn prepare_native_patterns(
                             return false;
                         }
                     }
-                    // Ordinary typed struct Let copying already defines the ABI and
-                    // value semantics. Bind once before the guard, within that arm.
+                    // Preserve field borrows as well as whole-value copies when
+                    // preparing arm-local bindings for native storage.
                     if let Some(typ @ Typ::Named(name)) = typ.as_ref()
-                        && arms.iter().any(|arm| {
-                            matches!(
-                                MatchPattern::parse(&arm.pattern),
-                                Ok(MatchPattern::IdentPat(_))
+                        && (crate::core_ir::rust_references::has_reference_proof(typ)
+                            || (arms.iter().any(|arm| {
+                                matches!(
+                                    MatchPattern::parse(&arm.pattern),
+                                    Ok(MatchPattern::IdentPat(_))
+                                )
+                            }) && crate::native_emit::struct_layout::scalar_fields(
+                                structs, name,
                             )
-                        })
-                        && crate::native_emit::struct_layout::scalar_fields(structs, name)
-                            .is_ok_and(|fields| !fields.is_empty())
+                            .is_ok_and(|fields| !fields.is_empty())))
                     {
                         expanded = Some(expand_match(
                             std::mem::replace(scrutinee, Expr::UnitLit),
@@ -666,7 +672,7 @@ fn prepare_native_patterns(
                             names,
                             counter,
                             true,
-                            Some(typ),
+                            Some((typ, facts)),
                         ));
                     }
                 }
@@ -872,7 +878,7 @@ pub(crate) fn value_pattern_test<'a>(
             *typ = bindings
                 .iter()
                 .find(|(binding, _)| binding == name)
-                .map(|(_, typ)| typ.clone());
+                .map(|(_, typ)| crate::core_ir::rust_references::erase_type(typ.clone()));
         }
     }
     Ok((test, statements))

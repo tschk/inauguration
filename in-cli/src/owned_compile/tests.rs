@@ -58,6 +58,9 @@ fn rust_borrowed_record_parameters_preserve_caller_storage() {
         "struct Outer{guard:i64,row:Row}struct Wrap<'a>{outer:&'a mut Outer}fn replace(wrapper:&mut Wrap){wrapper.outer.row=Row{left:19,right:23};}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:3,right:5}};let mut wrapper=Wrap{outer:&mut outer};replace(&mut wrapper);outer.row.left+outer.row.right+outer.guard-7}",
         "fn relay(value:&mut Row)->&mut Row{while value.left<19{value.left+=1;}value}fn main()->i64{let mut value=Row{left:17,right:23};let alias=relay(&mut value);update(alias);value.right}",
         "struct Outer{guard:i64,row:Row}fn project(outer:&mut Outer)->&mut Row{while outer.row.left<19{outer.row.left+=1;}&mut outer.row}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:17,right:23}};let alias=project(&mut outer);update(alias);outer.row.right+outer.guard-7}",
+        "struct Outer{guard:i64,row:Row}fn apply<T>(row:&mut Row,unused:T){row.right=row.right+row.left;}fn relay(outer:&mut Outer){match outer{Outer{row,guard:_}=>apply(row,7u8)}}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:19,right:23}};relay(&mut outer);outer.row.right+outer.guard-7}",
+        "struct Outer{guard:i64,row:Row}fn apply<T>(row:&mut Row,unused:T){row.right=row.right+row.left;}fn relay(outer:&mut Outer){match outer{Outer{row,guard:_}if row.left==19=>apply(row,7u8),_=>()}}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:19,right:23}};relay(&mut outer);outer.row.right+outer.guard-7}",
+        "struct Outer{guard:i64,row:Row}struct Wrap<'a>{outer:&'a mut Outer}fn apply<T>(row:&mut Row,unused:T){row.right=row.right+row.left;}fn relay(wrapper:&mut Wrap){match wrapper{Wrap{outer:Outer{row,guard:_}}=>apply(row,7u8)}}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:19,right:23}};let mut wrapper=Wrap{outer:&mut outer};relay(&mut wrapper);outer.row.right+outer.guard-7}",
     ] {
         let source = format!(
             "#[derive(Clone,Copy)]struct Row{{left:i64,right:i64}}fn update(value:&mut Row){{value.right+=value.left;}}{body}"
@@ -87,6 +90,22 @@ fn rust_borrowed_record_parameters_preserve_caller_storage() {
                 fs::remove_file(out).unwrap();
             }
         }
+    }
+    for source in [
+        "struct Row{left:i64,right:i64}struct Outer{row:Row}fn apply<T>(row:&mut Row,unused:T){row.right=row.right+row.left;}fn relay(outer:&Outer){match outer{Outer{row}=>apply(row,7u8)}}fn main()->i64{let outer=Outer{row:Row{left:19,right:23}};relay(&outer);42}",
+        "struct Row{left:i64,right:i64}struct Outer{row:Row}struct Wrap<'a>{outer:&'a mut Outer}fn apply<T>(row:&mut Row,unused:T){row.right=row.right+row.left;}fn relay(wrapper:&Wrap){match wrapper{Wrap{outer:Outer{row}}=>apply(row,7u8)}}fn main()->i64{let mut outer=Outer{row:Row{left:19,right:23}};let wrapper=Wrap{outer:&mut outer};relay(&wrapper);42}",
+    ] {
+        fs::write(&path, source).unwrap();
+        let report = compile_owned(&default_request(
+            path.clone(),
+            CompileTarget::Jit,
+            Some("main"),
+            None,
+        ));
+        assert!(
+            !report.success && !report.execution_started,
+            "{source}: {report:?}"
+        );
     }
     fs::remove_file(path).unwrap();
 }
@@ -127,6 +146,10 @@ fn rust_let_else_preserves_matching_scope_effects_and_divergence() {
         "fn read()->Option<&'static str>{Some(\"2a\")}fn main()->i64{let Some(value)=read()else{return 9;};value.len()as i64+40}",
         "fn read()->Option<&'static str>{None}fn main()->i64{let Some(value)=read()else{return 42;};value.len()as i64}",
         "fn read<'a>(value:&'a str)->Option<&'a str>{Some(value)}fn main()->i64{let Some(value)=read(\"2a\")else{return 9;};value.len()as i64+40}",
+        "struct Row{left:i64,right:i64}fn read<'a>(row:&'a Row)->Option<&'a Row>{Some(row)}fn main()->i64{let row=Row{left:19,right:23};let Some(value)=read(&row)else{return 9;};value.left+value.right}",
+        "struct Row{left:i64,right:i64}fn read<'a>(row:&'a Row)->Option<&'a Row>{None}fn main()->i64{let row=Row{left:19,right:23};let Some(value)=read(&row)else{return row.left+row.right;};value.right}",
+        "struct Row{left:i64,right:i64}fn read<'a>(row:&'a mut Row)->Option<&'a mut Row>{while row.left<19{row.left+=1;}Some(row)}fn main()->i64{let mut row=Row{left:17,right:23};let Some(value)=read(&mut row)else{return 9;};value.right+=value.left;row.right}",
+        "mod data{pub struct Row{pub left:i64,pub right:i64}}type Pair=data::Row;fn read<'a>(row:&'a mut Pair)->Option<&'a Pair>{Some(row)}fn main()->i64{let mut row=Pair{left:19,right:23};let Some(value)=read(&mut row)else{return 9;};value.left+value.right}",
         "mod data{pub struct Row{pub x:i64,pub y:i64}}use data::Row as Pair;fn read()->Option<Pair>{Some(data::Row{x:19,y:23})}fn main()->i64{let Some(value)=read()else{return 9;};value.x+value.y}",
         "struct Pair{x:i64,y:i64}fn read()->Option<Pair>{None}fn main()->i64{let Some(value)=read()else{return 42;};value.x+value.y}",
         "struct Row{name:String,items:Vec<i64>}fn read()->Option<Row>{None}fn main()->i64{let Some(value)=read()else{return 42;};value.name.len()as i64+value.items.len()as i64}",
@@ -162,6 +185,11 @@ fn rust_let_else_preserves_matching_scope_effects_and_divergence() {
         "fn main()->i64{match (true,42u32){Some(value)=>value as i64,_=>9}}",
         "fn read()->Option<&'missing str>{Some(\"x\")}fn main()->i64{let Some(value)=read()else{return 9;};value.len()as i64}",
         "struct Pair{x:i64,y:i64}struct Other{x:i64,y:i64}fn read()->Option<Pair>{Some(Other{x:19,y:23})}fn main()->i64{let Some(value)=read()else{return 9;};value.x+value.y}",
+        "struct Row{left:i64,right:i64}struct Other{left:i64,right:i64}fn read<'a>(row:&'a Other)->Option<&'a Row>{Some(row)}fn main()->i64{let row=Other{left:19,right:23};let Some(value)=read(&row)else{return 9;};value.left+value.right}",
+        "struct Row{left:i64,right:i64}fn read<'a>(row:&'a Row)->Option<&'a mut Row>{Some(row)}fn main()->i64{let row=Row{left:19,right:23};let Some(value)=read(&row)else{return 9;};value.left+value.right}",
+        "struct Row{left:i64,right:i64}fn read<'a>(row:&'a Row)->Option<Row>{Some(row)}fn main()->i64{let row=Row{left:19,right:23};let Some(value)=read(&row)else{return 9;};value.left+value.right}",
+        "struct Row{left:i64,right:i64}fn read<'a>(row:Row)->Option<&'a Row>{Some(row)}fn main()->i64{let row=Row{left:19,right:23};let Some(value)=read(row)else{return 9;};value.left+value.right}",
+        "struct Row{left:i64,right:i64}fn read<'a>(row:&'a Row)->Option<&'a mut Row>{Some(row)}fn main()->i64{42}",
         "struct Node{next:Node}fn read()->Option<Node>{None}fn main()->i64{let Some(value)=read()else{return 42;};9}",
     ] {
         let path = temp_path("owned-let-else-invalid.rs");

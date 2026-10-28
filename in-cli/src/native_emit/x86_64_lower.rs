@@ -1541,7 +1541,7 @@ fn lower_stmt(
         }
         Stmt::Let(name, typ, expr) => {
             if let Some(&pointer) = ctx.receiver_pointers.get(name) {
-                lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
+                lower_record_address(emitter, ctx, expr, RAX, pending_calls)?;
                 emitter.emit_insns(&x86_64::str64(RAX, pointer as u16));
                 return Ok(());
             }
@@ -4590,11 +4590,11 @@ fn lower_struct_init(
             } else {
                 format!("{prefix}.{field}")
             };
-            if let Expr::StructInit { fields, .. } = value {
-                store(emitter, ctx, fields, &field, slots, pending_calls)?;
-            } else if let Some(&slot) = slots.get(&field) {
-                lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+            if let Some(&slot) = slots.get(&field) {
+                lower_call_argument(emitter, ctx, value, RAX, pending_calls)?;
                 emitter.emit_insns(&x86_64::str64(RAX, slot as u16));
+            } else if let Expr::StructInit { fields, .. } = value {
+                store(emitter, ctx, fields, &field, slots, pending_calls)?;
             } else {
                 let nested: HashMap<_, _> = slots
                     .iter()

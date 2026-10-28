@@ -5060,7 +5060,13 @@ fn lower_expr_with_types_inner(
         },
         syn::Expr::Struct(s) => {
             enums::record_value(s, local_types).unwrap_or_else(|| Expr::StructInit {
-                name: nominal_path_name(&s.path),
+                name: match map_type(&syn::Type::Path(syn::TypePath {
+                    qself: s.qself.clone(),
+                    path: s.path.clone(),
+                })) {
+                    Typ::Named(name) => name,
+                    _ => nominal_path_name(&s.path),
+                },
                 fields: s
                     .fields
                     .iter()
@@ -8281,7 +8287,7 @@ mod forwarding_generic_contract_tests {
             };
             assert_eq!(type_params, &["T"]);
             assert_eq!(params[0].1, Typ::Generic("T".into()));
-            assert_eq!(ret, &Typ::Named("crate::child::Output".into()));
+            assert_eq!(ret, &Typ::Named("child::Output".into()));
             assert_eq!(
                 body.iter()
                     .filter(|stmt| matches!(stmt, Stmt::Return(Some(Expr::Call { .. }))))

@@ -182,6 +182,24 @@ pub(crate) fn lower_stmt(
         Stmt::Declare(name, typ) => ctx.alloc_declared_local(name, typ, fn_name),
         Stmt::Let(name, typ, expr) => {
             ctx.alloc_let_local(name, typ.as_ref(), expr, fn_name, functions)?;
+            if let Some(&pointer) = ctx.receiver_pointers.get(name)
+                && lower_expr::native_expr_type(expr, ctx, functions)
+                    .as_ref()
+                    .and_then(crate::core_ir::rust_references::aggregate_referent)
+                    .is_none()
+            {
+                super::lower_call::lower_struct_ptr_arg(
+                    emitter,
+                    ctx,
+                    expr,
+                    0,
+                    functions,
+                    pending_calls,
+                    fn_name,
+                )?;
+                emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, pointer));
+                return Ok(());
+            }
             lower_store_local(emitter, ctx, name, expr, functions, pending_calls, fn_name)
         }
         Stmt::If {

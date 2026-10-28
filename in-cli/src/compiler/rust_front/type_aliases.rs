@@ -1668,6 +1668,16 @@ fn runtime_map(
     ))
 }
 
+fn nominal_runtime_type(obligations: &[NominalObligation]) -> Option<Typ> {
+    let [NominalObligation::Application(application)] = obligations else {
+        return None;
+    };
+    nominal_application(application).ok()?;
+    let typ = Typ::Named(application.identity.as_ref()?.join("::"));
+    // A source owner must not become a builtin merely by sharing its spelling.
+    (typ.canonical() == typ).then_some(typ)
+}
+
 /// Result uses the runtime error slot; Option retains an explicit value tag.
 /// Resolve aliases after lexical lookup, retaining every source dependency.
 fn runtime_enum(
@@ -1717,20 +1727,10 @@ fn runtime_enum(
         if index == 0 {
             let typ = match value.visibility().0 {
                 Resolved::Type(typ) => typ,
-                Resolved::Nominal(obligations) if obligations.len() == 1 => {
-                    let Some(NominalObligation::Application(application)) = obligations.first()
-                    else {
-                        return Err(unsupported(format!(
-                            "{name} payload requires an exact runtime type"
-                        )));
-                    };
-                    // structural_failure already checked arity, bounds and source
-                    // obligations. Keep the declared owner; layout validation still
-                    // requires its actual fields, including for inactive variants.
-                    let identity = application.identity.as_ref().ok_or_else(|| {
+                Resolved::Nominal(obligations) => {
+                    nominal_runtime_type(&obligations).ok_or_else(|| {
                         unsupported(format!("{name} payload owner is not source-owned"))
-                    })?;
-                    Typ::Named(identity.join("::"))
+                    })?
                 }
                 _ => {
                     return Err(unsupported(format!(
@@ -1810,16 +1810,16 @@ pub(super) fn resolve_in(frame: &Frame, path: &syn::Path) -> Result<Option<Typ>,
         Resolved::Type(typ) => Ok(Some(typ)),
         Resolved::Nominal(obligations) => {
             let failure = obligations
-                .into_iter()
+                .iter()
                 .filter_map(|obligation| match obligation {
-                    NominalObligation::Failure(failure) => Some(failure),
+                    NominalObligation::Failure(failure) => Some(failure.clone()),
                     NominalObligation::Projection => Some(projection_failure()),
                     _ => None,
                 })
                 .fold(None, |failure, next| {
                     crate::core_ir::type_proofs::prefer_failure(failure, Some(next))
                 });
-            failure.map_or(Ok(None), Err)
+            failure.map_or_else(|| Ok(nominal_runtime_type(&obligations)), Err)
         }
         Resolved::Value | Resolved::Constant(_) | Resolved::Missing | Resolved::Module(_) => {
             Ok(None)
@@ -2931,7 +2931,10 @@ mod tests {
             query(&root.generics(&generics), "Byte").unwrap(),
             Some(Typ::Generic("Byte".into()))
         );
-        assert_eq!(query(&root, "Decoy").unwrap(), None);
+        assert_eq!(
+            query(&root, "Decoy").unwrap(),
+            Some(Typ::Named("Nominal".into()))
+        );
         assert_eq!(query(&root, "Nominal::u8").unwrap(), None);
     }
     #[test]
@@ -2953,7 +2956,10 @@ mod tests {
         );
         assert!(matches!(query(&root, "Byte"), Err(Failure::Unsupported(_))));
         integer(&root, "Generic<u8>", "u8");
-        assert_eq!(query(&root, "Decoy").unwrap(), None);
+        assert_eq!(
+            query(&root, "Decoy").unwrap(),
+            Some(Typ::Named("nominal::u64".into()))
+        );
         assert!(matches!(query(&root, "::u8"), Err(Failure::Unsupported(_))));
         integer(&root, "::core::primitive::u8", "u8");
     }

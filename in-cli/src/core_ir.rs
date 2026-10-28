@@ -1185,9 +1185,40 @@ impl MatchPattern {
         typ: &Typ,
         schema: &impl Fn(&str) -> Option<&'a [(String, Typ)]>,
     ) -> Result<Vec<(String, Typ)>, String> {
+        self.typed_bindings_with_mode(typ, schema, None)
+    }
+
+    fn typed_bindings_with_mode<'a>(
+        &self,
+        typ: &Typ,
+        schema: &impl Fn(&str) -> Option<&'a [(String, Typ)]>,
+        borrow: Option<bool>,
+    ) -> Result<Vec<(String, Typ)>, String> {
+        // A structural pattern auto-dereferences its scrutinee, but bindings
+        // borrow its fields. A shared layer cannot acquire mutable bindings.
+        if !matches!(self, Self::IdentPat(_))
+            && let Typ::Named(name) = typ
+            && let Some(reference) = rust_references::decode(name)
+        {
+            return self.typed_bindings_with_mode(
+                &reference.referent,
+                schema,
+                Some(borrow.unwrap_or(true) && reference.mutable),
+            );
+        }
         let mut bindings = Vec::new();
         match self {
-            Self::IdentPat(name) => bindings.push((name.clone(), typ.clone())),
+            Self::IdentPat(name) => {
+                let typ = match borrow {
+                    Some(mutable) => rust_references::typ(rust_references::ReferenceType {
+                        mutable,
+                        referent: typ.clone(),
+                        runtime: rust_references::erase_type(typ.clone()),
+                    }),
+                    None => typ.clone(),
+                };
+                bindings.push((name.clone(), typ));
+            }
             Self::TuplePat(items) if items.is_empty() => {
                 if typ.canonical() != Typ::Void {
                     return Err(format!("unit pattern does not match {typ:?}"));
@@ -1205,7 +1236,7 @@ impl MatchPattern {
                         .find(|(name, _)| name == field)
                         .map(|(_, typ)| typ)
                         .ok_or_else(|| format!("unknown pattern field `{name}.{field}`"))?;
-                    bindings.extend(pattern.typed_bindings(field_type, schema)?);
+                    bindings.extend(pattern.typed_bindings_with_mode(field_type, schema, borrow)?);
                 }
             }
             Self::TuplePat(items) | Self::ArrayPat(items) => {
@@ -1259,7 +1290,7 @@ impl MatchPattern {
                             _ => unreachable!(),
                         }
                     };
-                    bindings.extend(pattern.typed_bindings(item_type, schema)?);
+                    bindings.extend(pattern.typed_bindings_with_mode(item_type, schema, borrow)?);
                 }
             }
             Self::RestPat => return Err("rest pattern requires a sequence".into()),

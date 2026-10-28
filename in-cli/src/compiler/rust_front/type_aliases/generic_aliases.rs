@@ -573,21 +573,27 @@ pub(super) fn rhs_type(
                 ))
                 .with_dependencies(dependencies));
             }
-            if let Some(typ) = concrete(&value) {
-                if matches!(
-                    typ.canonical(),
-                    Typ::Int | Typ::Bool | Typ::Float | Typ::String
-                ) {
-                    let runtime = crate::core_ir::rust_references::erase_type(typ.clone());
-                    return Ok(Resolved::Type(crate::core_ir::rust_references::typ(
-                        crate::core_ir::rust_references::ReferenceType {
-                            mutable: reference.mutability.is_some(),
-                            referent: typ,
-                            runtime,
-                        },
-                    ))
-                    .with_dependencies(dependencies));
-                }
+            let referent = concrete(&value)
+                .filter(|typ| {
+                    matches!(
+                        typ.canonical(),
+                        Typ::Int | Typ::Bool | Typ::Float | Typ::String
+                    )
+                })
+                .or_else(|| match value.clone().visibility().0 {
+                    Resolved::Nominal(obligations) => nominal_runtime_type(&obligations),
+                    _ => None,
+                });
+            if let Some(typ) = referent {
+                let runtime = crate::core_ir::rust_references::erase_type(typ.clone());
+                return Ok(Resolved::Type(crate::core_ir::rust_references::typ(
+                    crate::core_ir::rust_references::ReferenceType {
+                        mutable: reference.mutability.is_some(),
+                        referent: typ,
+                        runtime,
+                    },
+                ))
+                .with_dependencies(dependencies));
             }
             Ok(failure_result(crate::core_ir::type_proofs::prefer_failure(
                 structural_failure(value),
