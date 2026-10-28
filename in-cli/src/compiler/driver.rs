@@ -252,6 +252,28 @@ mod tests {
     }
 
     #[test]
+    fn test_compile_in_file_writes_artifact_and_metadata_contents() {
+        let dir = std::env::temp_dir().join(format!(
+            "in_cli_test_contents_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("test_module_meta.in");
+        fs::write(&source_path, "fn main() -> Int { return 42; }").unwrap();
+        let spec = ComponentSpec::host_executable("test_module_meta", Some("main"));
+        let result = compile_in_file(&source_path, &spec, true);
+        assert!(result.is_ok(), "result was not ok: {:?}", result.err());
+        let (out_path, meta_path) = result.unwrap();
+        assert!(!fs::read(&out_path).unwrap().is_empty());
+        let meta = fs::read_to_string(meta_path.expect("metadata path")).unwrap();
+        assert!(meta.contains("test_module_meta"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn test_compile_in_file_source_not_found() {
         let dir = std::env::temp_dir().join(format!(
             "in_cli_test_missing_{}",
