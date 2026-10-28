@@ -9553,6 +9553,42 @@ fn rust_retained_neg_dispatch_executes_generic_owned_shared_mutable_and_field_pr
             88,
         ),
         (
+            "retained-borrowed-fields",
+            r#"
+            struct Row { left:i64, right:i64 }
+            impl std::ops::Neg for &Row {
+                type Output=i64;
+                fn neg(self)->i64 {
+                    let mut value=self.right;
+                    while value>self.left { value-=1; }
+                    value+self.right
+                }
+            }
+            fn main()->i64 { let row=Row{left:19,right:23}; -(&row) }
+        "#,
+            42,
+        ),
+        (
+            "retained-reference-self-return",
+            r#"
+            struct Row { left:i64, right:i64 }
+            impl<'a> std::ops::Neg for &'a Row {
+                type Output=Self;
+                fn neg(self)->Self {
+                    let mut value=self.right;
+                    while value>self.left { value-=1; }
+                    self
+                }
+            }
+            fn main()->i64 {
+                let row=Row{left:19,right:23};
+                let returned=-(&row);
+                returned.left+returned.right
+            }
+        "#,
+            42,
+        ),
+        (
             "two-forwarding-aliases",
             r#"
             struct Row{x:i64}
@@ -9575,15 +9611,28 @@ fn rust_retained_neg_dispatch_executes_generic_owned_shared_mutable_and_field_pr
         let path = temp_path(&format!("retained-neg-{name}.rs"));
         fs::write(&path, source).unwrap();
         for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
-            let mut request = default_request(path.clone(), CompileTarget::Jit, Some("main"), None);
-            request.profile = profile;
-            let report = compile_owned(&request);
-            assert!(report.success, "{name} {profile:?}: {report:?}");
-            assert_eq!(
-                report.eval_result,
-                Some(EvalValue::Int(expected)),
-                "{name} {profile:?}: {report:?}"
-            );
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                let out = temp_path("retained-neg-native");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(report.success, "{name} {target:?} {profile:?}: {report:?}");
+                if target == CompileTarget::Jit {
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(expected)),
+                        "{name} {profile:?}: {report:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some((expected & 255) as i32),
+                        "{name} {profile:?}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
         }
         fs::remove_file(path).unwrap();
     }

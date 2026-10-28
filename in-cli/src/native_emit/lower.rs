@@ -233,11 +233,16 @@ fn build_assembly(
 /// Handles `std::process::exit` → `_exit` (C ABI in libSystem) and
 /// raw source names → C ABI symbols with a leading underscore on macOS.
 pub fn native_link_name(name: &str) -> String {
-    if name.starts_with('#') {
-        // Private IR names can contain JSON and arbitrary UTF-8. Encode every byte
-        // before legacy cleanup so distinct internal names remain distinct. The
-        // letter-leading namespace is disjoint from all public mappings below,
-        // which start with an underscore; private functions have no C ABI name.
+    if name.starts_with('#')
+        || name.bytes().any(|byte| {
+            !byte.is_ascii_alphanumeric()
+                && !matches!(byte, b'_' | b'$' | b'.' | b':' | b' ' | b'-' | b'<' | b'>')
+        })
+    {
+        // Private IR and complex Rust receiver names are not C ABI symbols.
+        // Encode every byte before legacy cleanup to retain their full identity.
+        // The letter-leading namespace is disjoint from public mappings below,
+        // which start with an underscore.
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut symbol = String::from("in$private$");
         for byte in name.bytes() {
@@ -293,6 +298,21 @@ mod native_link_name_tests {
         // Even public source names containing '$' retain their ABI underscore.
         assert_ne!(native_link_name("#"), native_link_name("in$private$23"));
         assert_eq!(native_link_name("in$private$23"), "_in$private$23");
+        for source in [
+            "&Row::neg",
+            "&mut Row::neg",
+            "&'a Row::neg",
+            "Row<'_>::read",
+        ] {
+            let symbol = native_link_name(source);
+            assert!(symbol.starts_with("in$private$"), "{source}: {symbol}");
+            assert!(
+                symbol
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'.'))
+            );
+            assert_ne!(symbol, native_link_name(&source.replace(['&', '\''], "")));
+        }
     }
 
     #[test]

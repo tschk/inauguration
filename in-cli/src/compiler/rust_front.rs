@@ -2231,10 +2231,9 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
                                 },
                             )
                         } else if let Typ::Named(name) = &proof
-                            && let Some(mut reference) =
-                                crate::core_ir::rust_references::decode(name)
+                            && let Some(reference) = crate::core_ir::rust_references::decode(name)
                         {
-                            reference.runtime = runtime;
+                            // A by-value reference receiver already names its pointee layout.
                             crate::core_ir::rust_references::typ(reference)
                         } else {
                             runtime
@@ -2283,13 +2282,7 @@ fn lower_impl(i: &syn::ItemImpl) -> Vec<Decl> {
             decls.push(declaration);
         }
     }
-    let mut self_proof = map_type(&i.self_ty);
-    if let Typ::Named(name) = &self_proof
-        && let Some(mut reference) = crate::core_ir::rust_references::decode(name)
-    {
-        reference.runtime = Typ::Named(self_type.clone());
-        self_proof = crate::core_ir::rust_references::typ(reference);
-    }
+    let self_proof = map_type(&i.self_ty);
     crate::core_bindings::rewrite_type_annotations(&mut decls, &|name| {
         (name == "Self" || name.starts_with("Self::")).then(|| {
             resolve_impl_type(Typ::Named(name.into()), &self_proof, i)

@@ -2295,7 +2295,7 @@ fn lower_match(
                 emitter.emit_insns(&x86_64::jcc_near(5, 0));
                 Some(site)
             } else {
-                if scalar_expr_type(scrutinee, ctx) != Some(typ) {
+                if scalar_expr_type(scrutinee, ctx).map(|typ| typ.canonical()) != Some(typ) {
                     return Err(
                         "x86_64-lower: scalar pattern requires a compatible scrutinee".into(),
                     );
@@ -2334,7 +2334,8 @@ fn lower_match(
                 emitter.emit_insns(&x86_64::jcc_near(5, 0));
                 Some(site)
             } else {
-                if scalar_expr_type(scrutinee, ctx) != Some(Typ::String) {
+                if scalar_expr_type(scrutinee, ctx).map(|typ| typ.canonical()) != Some(Typ::String)
+                {
                     return Err("x86_64-lower: string pattern requires a String scrutinee".into());
                 }
                 None
