@@ -1,0 +1,5 @@
+⚡ Optimize type alias Option iteration
+
+💡 What: Replaced `into_iter().flatten()` with a direct `if let Some(...)` unwrap in `type_aliases.rs`.
+🎯 Why: Prevents the creation of unnecessary intermediate iterator combinators.
+📊 Measured Improvement: Direct measurement timed out, but the change logically removes iterator overhead.
