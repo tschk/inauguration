@@ -24,3 +24,10 @@ test("serveIndex constructs RenderContext correctly and calls renderer", async (
     renderer.render = originalRender;
   }
 });
+
+test("serveIndex handles custom request url correctly", async () => {
+  const req = new Request("http://localhost/some/custom/path");
+  const res = await serveIndex(req);
+
+  expect(res.status).toBe(200);
+});
