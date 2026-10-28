@@ -47,7 +47,6 @@ fn generate_module_with_closures() -> UnifiedModule {
             package: None,
             module: Some("test".to_string()),
         },
-        regions: vec![],
         decls: vec![func],
     }
 }

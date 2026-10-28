@@ -253,32 +253,6 @@ module with a reachable trap instead of guessing a result.
 
 Tree-sitter fronts share scalar body conventions (`return`, `let`, `if`, `while`, calls). Extend each `ParserId` with tests in `in test` / polyglot corpora before raising maturity in `in languages`.
 
-`jit` on a language means its front already emits those bodies and `in compile --target jit` runs them. Rust is included: a scalar `fn answer() -> i64 { 42 }` executes in-process. rustc is a parity check, not the engine. A reachable trap still refuses to run, for Rust the same as for C, because the trap would exit this process.
-
-`inauguration.foreign.toml` stages several such sources into one JIT unit; see [languages.md](languages.md).
-
-## Replacing LLVM, without becoming LLVM
-
-Valen lowers to LLVM and then asks LLVM for aliasing, inlining, and layout. This compiler already emits AArch64 and x86_64 itself. The replacement is to stop sending work to LLVM, not to reimplement its pass manager.
-
-What already replaces it:
-
-- Machine code is emitted here (`native_emit`). No IR round-trip.
-- `mut` region parameter pointers are compared in the native prologue. Equal non-null addresses trap. This checks pointer identity, not overlapping memory ranges or LLVM's full `noalias` contract; it does not enable alias-based optimization.
-- Uncompilable functions become traps (`IN3001`) instead of a silent miscompile. LLVM would reject or miscompile the same gap.
-
-Done without LLVM:
-
-- Inlining is a Core IR pass (`inline_small_functions`, threshold 2).
-- `?` on x86_64 returns 0 when the error flag `throw` already sets. AArch64 already did that.
-
-Also done, same convention as AArch64, no LLVM:
-
-- Struct return on x86_64 is one field per register, `rax` then `rdx` then `rcx`. A caller that assigns the call into a struct local stores those registers back. More than three fields fails closed.
-- `for` over a local with `ptr` and `len` walks that pair. A loop with no length slot still rejects. Running the body once is not iteration.
-
-Do not add an LLVM IR builder, a pass pipeline, or a borrow checker. The facts those compute already have a home on the module and in the prologue.
-
 ## See also
 
 - [in-language.md](in-language.md)

@@ -2374,57 +2374,6 @@ mod tests {
 
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
-    fn noalias_facts_survive_normalization_and_check_full_width_stack_arguments() {
-        use crate::emit_profile::EmitProfile;
-        use std::os::unix::process::ExitStatusExt;
-        const CHILD: &str = "IN_TEST_NOALIAS";
-        let profiles = [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden];
-        if let Ok(case) = std::env::var(CHILD) {
-            let (profile, pair) = case.split_once(':').unwrap();
-            let profile = profiles[profile.parse::<usize>().unwrap()];
-            let [left, right] = match pair {
-                "equal" => [1i64 << 32, 1i64 << 32],
-                "null" => [0, 0],
-                _ => [1i64 << 32, 2i64 << 32],
-            };
-            let mut module = crate::in_lang_parse::parse_in_source(&format!("fn check(p0:Int,p1:Int,p2:Int,p3:Int,p4:Int,p5:Int,p6:Int,p7:Int,left:Int,right:Int)->Int{{return 42;}}fn main()->Int{{return check(1,1,1,1,1,1,1,1,{left},{right});}}")).unwrap();
-            module.mark_noalias(&["left", "right"]);
-            let module = crate::typecheck::normalize_module(
-                crate::parser_registry::ParserId::In,
-                &module.clone(),
-            );
-            #[cfg(target_arch = "aarch64")]
-            {
-                use crate::native_emit::{NativeLinkage, lower::lower_module_with_jobs};
-                let serial =
-                    lower_module_with_jobs(&module, "main", NativeLinkage::Executable, 1).unwrap();
-                let parallel =
-                    lower_module_with_jobs(&module, "main", NativeLinkage::Executable, 4).unwrap();
-                assert_eq!(serial.code, parallel.code);
-            }
-            assert_eq!(invoke_module(&module, profile, &[]), Some(42));
-            return;
-        }
-        for profile in 0..profiles.len() {
-            for pair in ["distinct", "null", "equal"] {
-                let output = std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "jit_runtime::tests::noalias_facts_survive_normalization_and_check_full_width_stack_arguments"])
-                    .env(CHILD, format!("{profile}:{pair}"))
-                    .output().unwrap();
-                if pair == "equal" {
-                    assert!(
-                        matches!(output.status.signal(), Some(4 | 5)),
-                        "{profile}:{pair}: {output:?}"
-                    );
-                } else {
-                    assert!(output.status.success(), "{profile}:{pair}: {output:?}");
-                }
-            }
-        }
-    }
-
-    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
-    #[test]
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn compiler_private_print_keeps_output_order_and_source_overrides() {
         let source = r#"
@@ -5186,7 +5135,6 @@ fn main()->Int{#print(argument());#print_int(7);#print("\n");return print("ignor
         use crate::core_ir::{Decl, Expr, Stmt, Typ, UnifiedModule};
         let mut module = UnifiedModule {
             identity: Default::default(),
-            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![],

@@ -1393,7 +1393,7 @@ fn check_stmt(
             check_expr_in_loop(fn_name, index, facts, env, call_edges, loop_depth)?;
             check_expr_in_loop(fn_name, value, facts, env, call_edges, loop_depth)?;
             require_type(fn_name, "array index", &Typ::Int, index, facts, env)?;
-            match expr_type(base, facts, env).map(|typ| typ.canonical()) {
+            match expr_type(base, facts, env) {
                 Some(Typ::Array(item) | Typ::Vector(item)) => {
                     if let Some(value_typ) = expr_type(value, facts, env)
                         && *item != value_typ
@@ -2039,7 +2039,7 @@ fn check_expr_with_array_borrow(
             check_expr_with_array_borrow(fn_name, base, facts, env, call_edges, true, loop_depth)?;
             check_expr_in_loop(fn_name, index, facts, env, call_edges, loop_depth)?;
             require_type(fn_name, "array index", &Typ::Int, index, facts, env)?;
-            if let Some(base_typ) = expr_type(base, facts, env).map(|typ| typ.canonical())
+            if let Some(base_typ) = expr_type(base, facts, env)
                 && !matches!(base_typ, Typ::Array(_) | Typ::Vector(_))
                 && base_typ != Typ::Int
             {
@@ -2396,9 +2396,7 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
             Some(Typ::Array(Box::new(item_typ)))
         }
         Expr::Index { base, .. } => {
-            if let Some(Typ::Array(item) | Typ::Vector(item)) =
-                expr_type(base, facts, env).map(|typ| typ.canonical())
-            {
+            if let Some(Typ::Array(item) | Typ::Vector(item)) = expr_type(base, facts, env) {
                 Some(*item)
             } else if expr_type(base, facts, env) == Some(Typ::Int) {
                 // Indexing an Int pointer returns Int
