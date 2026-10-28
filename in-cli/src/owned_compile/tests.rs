@@ -6,14 +6,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::jit::resolve_jit_entry;
 use super::util::artifact_stem;
 
+static TEMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "inauguration-owned-compile-{}-{}-{name}",
+        "inauguration-owned-compile-{}-{}-{}-{name}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ))
 }
 
