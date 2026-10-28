@@ -712,6 +712,42 @@ fn explain_summarizes_successful_report() {
 }
 
 #[test]
+fn explain_formats_complex_report() {
+    let temp = temp_source(
+        "explain-complex",
+        "in",
+        r#"
+capability process.spawn;
+extern rust fn host_log(text: String) -> void requires process.stdout;
+struct Video { Int id }
+fn main() -> void { host_log("ready"); return; }
+"#,
+    );
+    let explanation = explain(&temp.path, &AgentModeConfig::default()).expect("explain");
+
+    let summary_str = explanation.summary.join(" | ");
+
+    assert!(
+        summary_str.contains("function") && summary_str.contains("struct"),
+        "{:?}",
+        explanation.summary
+    );
+    assert!(
+        summary_str.contains("SIL function")
+            && summary_str.contains("block")
+            && summary_str.contains("instruction")
+            && summary_str.contains("call edge"),
+        "{:?}",
+        explanation.summary
+    );
+    assert!(
+        summary_str.contains("diagnostic") && !summary_str.contains("no diagnostics"),
+        "{:?}",
+        explanation.summary
+    );
+}
+
+#[test]
 fn in_explain_formatting_logic() {
     let temp = temp_source("explain_format", "in", "fn main() -> void { return; }\n");
     let explanation = explain(&temp.path, &AgentModeConfig::default()).expect("explain");
