@@ -319,3 +319,47 @@ pub fn load_jit(module: &MirModule, runtime: &mut JitRuntime) -> Result<(), Stri
     let (code, functions) = emit_jit(module)?;
     runtime.load(&code, &functions, &[])
 }
+#[cfg(test)]
+mod tests {
+    use crate::compiler::mir::*;
+    use crate::compiler::mir_emit::emit_jit;
+
+    #[test]
+    fn test_emit_jit_basic_module() {
+        let mut module = MirModule::new();
+        module.functions.push(MirFunction {
+            name: "test".to_string(),
+            instructions: vec![
+                MirInst {
+                    op: MirOp::Mov,
+                    operands: vec![MirOperand::Reg(0), MirOperand::Imm(42)],
+                    offset: 0,
+                },
+                MirInst {
+                    op: MirOp::Ret,
+                    operands: vec![MirOperand::Reg(0)],
+                    offset: 0,
+                },
+            ],
+            vreg_count: 1,
+            frame_size: 0,
+            return_type: Some(crate::core_ir::Typ::Int),
+            param_types: vec![],
+            var_map: vec![],
+            value_types: vec![],
+            local_types: vec![],
+            is_external: false,
+        });
+
+        let result = emit_jit(&module);
+        assert!(
+            result.is_ok(),
+            "emit_jit should succeed for a valid basic MIR module"
+        );
+
+        let (code, functions) = result.unwrap();
+        assert!(!code.is_empty(), "Generated code should not be empty");
+        assert_eq!(functions.len(), 1, "There should be one function emitted");
+        assert_eq!(functions[0].0, "test", "The function name should match");
+    }
+}
