@@ -1086,4 +1086,63 @@ mod tests {
                 .any(|d| matches!(d, Decl::Function { name, .. } if name == "person_age"))
         );
     }
+
+    struct TempFileGuard {
+        path: std::path::PathBuf,
+    }
+    impl TempFileGuard {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("{}_{name}", std::process::id()));
+            Self { path }
+        }
+    }
+    impl Drop for TempFileGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn parses_icore_file_successfully() {
+        let guard = TempFileGuard::new("valid.icore");
+        let content = r#"{
+            "icoreVersion": 2,
+            "decls": [
+                {
+                    "kind": "function",
+                    "name": "main",
+                    "params": [],
+                    "return": "Void",
+                    "body": []
+                }
+            ]
+        }"#;
+        std::fs::write(&guard.path, content).unwrap();
+
+        let result = super::parse_icore_file(&guard.path);
+        assert!(result.is_ok());
+        let module = result.unwrap();
+        assert_eq!(module.decls.len(), 1);
+    }
+
+    #[test]
+    fn parses_icore_file_not_found() {
+        let path = std::env::temp_dir().join("non_existent_file_for_test.icore");
+        let result = super::parse_icore_file(&path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("No such file") || err.contains("not found"));
+    }
+
+    #[test]
+    fn parses_icore_file_invalid_json() {
+        let guard = TempFileGuard::new("invalid.icore");
+        let content = r#"{ "icoreVersion": 2, "decls": [ "#;
+        std::fs::write(&guard.path, content).unwrap();
+
+        let result = super::parse_icore_file(&guard.path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("icore JSON:"));
+    }
 }
