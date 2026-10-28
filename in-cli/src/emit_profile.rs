@@ -185,16 +185,43 @@ mod tests {
 
     #[test]
     fn resolve_flags() {
+        use EmitProfile::{Default, Harden, Lean};
+
+        // Default base
         assert_eq!(
-            EmitProfile::resolve(EmitProfile::Default, true, false).unwrap(),
-            EmitProfile::Harden
+            EmitProfile::resolve(Default, false, false).unwrap(),
+            Default
+        );
+        assert_eq!(EmitProfile::resolve(Default, true, false).unwrap(), Harden);
+        assert_eq!(EmitProfile::resolve(Default, false, true).unwrap(), Lean);
+        assert_eq!(
+            EmitProfile::resolve(Default, true, true).unwrap_err(),
+            "cannot combine --harden and --lean"
+        );
+
+        // Harden base
+        assert_eq!(EmitProfile::resolve(Harden, false, false).unwrap(), Harden);
+        assert_eq!(EmitProfile::resolve(Harden, true, false).unwrap(), Harden);
+        assert_eq!(
+            EmitProfile::resolve(Harden, false, true).unwrap_err(),
+            "--lean conflicts with --profile harden"
         );
         assert_eq!(
-            EmitProfile::resolve(EmitProfile::Lean, false, false).unwrap(),
-            EmitProfile::Lean
+            EmitProfile::resolve(Harden, true, true).unwrap_err(),
+            "cannot combine --harden and --lean"
         );
-        assert!(EmitProfile::resolve(EmitProfile::Default, true, true).is_err());
-        assert!(EmitProfile::resolve(EmitProfile::Lean, true, false).is_err());
+
+        // Lean base
+        assert_eq!(EmitProfile::resolve(Lean, false, false).unwrap(), Lean);
+        assert_eq!(EmitProfile::resolve(Lean, false, true).unwrap(), Lean);
+        assert_eq!(
+            EmitProfile::resolve(Lean, true, false).unwrap_err(),
+            "--harden conflicts with --profile lean"
+        );
+        assert_eq!(
+            EmitProfile::resolve(Lean, true, true).unwrap_err(),
+            "cannot combine --harden and --lean"
+        );
     }
 
     #[test]
