@@ -1087,3 +1087,84 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod parse_icore_file_tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDirGuard {
+        path: PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new() -> Self {
+            let id = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let temp_dir =
+                std::env::temp_dir().join(format!("icore_test_{}_{}", std::process::id(), id));
+            let _ = fs::remove_dir_all(&temp_dir);
+            fs::create_dir_all(&temp_dir).unwrap();
+            Self { path: temp_dir }
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn parses_valid_icore_file() {
+        let temp = TempDirGuard::new();
+        let file_path = temp.path.join("test.icore");
+
+        let json_content = r#"{
+            "icoreVersion": 2,
+            "decls": [
+                {
+                    "kind": "function",
+                    "name": "main",
+                    "params": [],
+                    "return": "Void",
+                    "body": []
+                }
+            ]
+        }"#;
+
+        let mut file = fs::File::create(&file_path).unwrap();
+        file.write_all(json_content.as_bytes()).unwrap();
+
+        let result = parse_icore_file(&file_path);
+        assert!(result.is_ok());
+        let module = result.unwrap();
+        assert_eq!(module.decls.len(), 1);
+    }
+
+    #[test]
+    fn fails_on_invalid_json() {
+        let temp = TempDirGuard::new();
+        let file_path = temp.path.join("test.icore");
+
+        let json_content = r#"{ invalid json }"#;
+
+        let mut file = fs::File::create(&file_path).unwrap();
+        file.write_all(json_content.as_bytes()).unwrap();
+
+        let result = parse_icore_file(&file_path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("icore JSON:"));
+    }
+
+    #[test]
+    fn fails_on_missing_file() {
+        let file_path = std::path::PathBuf::from("/nonexistent/file/path.icore");
+        let result = parse_icore_file(&file_path);
+        assert!(result.is_err());
+    }
+}
