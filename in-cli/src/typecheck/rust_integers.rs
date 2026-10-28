@@ -1062,11 +1062,15 @@ impl Pass<'_> {
                     root: name.clone(),
                     path: vec![],
                 });
-                for path in self.active_projections.clone() {
-                    self.defer_place(SourcePlace {
+                let mut active_places = Vec::with_capacity(self.active_projections.len());
+                for path in &self.active_projections {
+                    active_places.push(SourcePlace {
                         root: name.clone(),
-                        path,
+                        path: path.clone(),
                     });
+                }
+                for place in active_places {
+                    self.defer_place(place);
                 }
                 if self.unresolved_width
                     && matches!(env.get(name),Some(Typ::Vector(item)) if matches!(item.as_ref(),Typ::Int | Typ::Generic(_)))
@@ -1952,9 +1956,13 @@ impl Pass<'_> {
                     if self.unresolved_width {
                         self.defer_place(place.clone());
                     }
-                    for path in self.active_projections.clone() {
+                    let mut active_places = Vec::with_capacity(self.active_projections.len());
+                    for path in &self.active_projections {
                         let mut selected = place.clone();
-                        selected.path.extend(path);
+                        selected.path.extend(path.iter().cloned());
+                        active_places.push(selected);
+                    }
+                    for selected in active_places {
                         self.defer_place(selected);
                     }
                 }
