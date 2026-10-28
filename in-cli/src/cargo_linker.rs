@@ -516,74 +516,6 @@ pub fn merge_dependency_artifacts(
     Ok(())
 }
 
-#[allow(dead_code)]
-fn prefix_calls(stmts: &mut [Stmt], crate_name: &str, _in_prefixed: bool) {
-    for stmt in stmts {
-        match stmt {
-            // Type qualification is performed by the shared namespace walker;
-            // a declaration has no initializer call to prefix.
-            Stmt::Declare(..) => {}
-            Stmt::Expr(expr) | Stmt::Return(Some(expr)) => prefix_call_expr(expr, crate_name),
-            Stmt::Let(_, _, expr) | Stmt::Assign(_, expr) => prefix_call_expr(expr, crate_name),
-            Stmt::If {
-                then_body,
-                else_body,
-                cond,
-                ..
-            } => {
-                prefix_call_expr(cond, crate_name);
-                prefix_calls(then_body, crate_name, false);
-                prefix_calls(else_body, crate_name, false);
-            }
-            Stmt::Loop { body, cond, .. } => {
-                if let Some(cond_expr) = cond {
-                    prefix_call_expr(cond_expr, crate_name);
-                }
-                prefix_calls(body, crate_name, false);
-            }
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    prefix_calls(&mut arm.body, crate_name, false);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn prefix_call_expr(expr: &mut Expr, crate_name: &str) {
-    match expr {
-        Expr::Call { callee, args, .. } => {
-            if let Expr::Ident(name) = callee.as_mut() {
-                if !name.contains("::") {
-                    *name = format!("{crate_name}::{name}");
-                }
-            }
-            prefix_call_expr(callee.as_mut(), crate_name);
-            for arg in args.iter_mut() {
-                prefix_call_expr(arg, crate_name);
-            }
-        }
-        Expr::Binary { lhs, rhs, .. } => {
-            prefix_call_expr(lhs.as_mut(), crate_name);
-            prefix_call_expr(rhs.as_mut(), crate_name);
-        }
-        Expr::Unary { expr: inner, .. } => prefix_call_expr(inner.as_mut(), crate_name),
-        Expr::Field { base, .. } => prefix_call_expr(base.as_mut(), crate_name),
-        Expr::Index { base, index } => {
-            prefix_call_expr(base.as_mut(), crate_name);
-            prefix_call_expr(index.as_mut(), crate_name);
-        }
-        Expr::StructInit { fields, .. } => {
-            for (_, field_expr) in fields.iter_mut() {
-                prefix_call_expr(field_expr, crate_name);
-            }
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,6 +772,34 @@ direct_dep = { path = "direct_dep" }
     }
 
     #[test]
+    fn test_get_manifest_valid() {
+        let temp = TempDirGuard::new();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"src/my_lib.rs\"\n",
+        )
+        .unwrap();
+
+        let manifest = get_manifest(&temp.path).expect("manifest should be parsed");
+        assert_eq!(manifest.package_name.as_deref(), Some("my-crate"));
+        assert_eq!(manifest.lib_path.as_deref(), Some("src/my_lib.rs"));
+    }
+
+    #[test]
+    fn test_get_manifest_partial() {
+        let temp = TempDirGuard::new();
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            "[package]\nname = \"partial-crate\"\n",
+        )
+        .unwrap();
+
+        let manifest = get_manifest(&temp.path).expect("manifest should be parsed");
+        assert_eq!(manifest.package_name.as_deref(), Some("partial-crate"));
+        assert_eq!(manifest.lib_path, None);
+    }
+
+    #[test]
     fn test_find_crate_root_default() {
         let temp = TempDirGuard::new();
         let src_dir = temp.path.join("src");
@@ -884,6 +844,26 @@ direct_dep = { path = "direct_dep" }
         .unwrap();
 
         assert_eq!(find_crate_root(&nested_dir).unwrap(), lib_rs);
+    }
+
+    #[test]
+    fn test_get_manifest_success() {
+        let temp = TempDirGuard::new();
+        let manifest = temp.path.join("Cargo.toml");
+        fs::write(
+            &manifest,
+            "[package]\nname = \"test-package\"\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .unwrap();
+        let result = get_manifest(&temp.path).unwrap();
+        assert_eq!(result.package_name.as_deref(), Some("test-package"));
+        assert_eq!(result.lib_path.as_deref(), Some("src/lib.rs"));
+    }
+
+    #[test]
+    fn test_get_manifest_no_file() {
+        let temp = TempDirGuard::new();
+        assert!(get_manifest(&temp.path).is_none());
     }
 
     #[test]
@@ -940,6 +920,65 @@ direct_dep = { path = "direct_dep" }
         );
         assert_eq!(find_crate_root(&temp.path), Ok(second));
         Ok(())
+    }
+
+    #[test]
+    fn test_merge_dependency_modules() {
+        let mut main = UnifiedModule::new(vec![]);
+
+        let in_dep = UnifiedModule::new(vec![Decl::Struct {
+            name: "InStruct".into(),
+            fields: vec![],
+            type_params: vec![],
+        }]);
+
+        let ext_dep = UnifiedModule::new(vec![Decl::Function {
+            name: "ext_func".into(),
+            params: vec![],
+            ret: crate::core_ir::Typ::Void,
+            body: vec![],
+            type_params: vec![],
+        }]);
+
+        let empty_dep = UnifiedModule::new(vec![Decl::Function {
+            name: "empty_func".into(),
+            params: vec![],
+            ret: crate::core_ir::Typ::Void,
+            body: vec![],
+            type_params: vec![],
+        }]);
+
+        merge_dependency_modules(
+            &mut main,
+            vec![
+                ("in-core".into(), in_dep),
+                ("my_crate".into(), ext_dep),
+                ("".into(), empty_dep),
+            ],
+        );
+
+        assert_eq!(main.decls.len(), 4);
+
+        assert!(
+            main.decls
+                .iter()
+                .any(|d| matches!(d, Decl::Struct { name, .. } if name == "InStruct"))
+        );
+        assert!(
+            main.decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "ext_func"))
+        );
+        assert!(
+            main.decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "my_crate::ext_func"))
+        );
+        assert!(
+            main.decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "empty_func"))
+        );
     }
 }
 
@@ -1097,6 +1136,43 @@ mod retained_artifact_tests {
                 .unary_methods
                 .contains_key(&("dep::Row".into(), "-".into()))
         );
+    }
+
+    #[test]
+    fn test_merge_dependency_modules_merges_decls_and_generates_aliases() {
+        let mut main = UnifiedModule::new(vec![callable("main_func", 1)]);
+        let dep1 = UnifiedModule::new(vec![callable("dep1_func", 2)]);
+        let dep2 = UnifiedModule::new(vec![callable("dep2_func", 3)]);
+
+        let deps = vec![("in-dep".into(), dep1), ("dep2".into(), dep2)];
+
+        merge_dependency_modules(&mut main, deps);
+
+        assert_eq!(main.decls.len(), 4);
+
+        let has_main_func = main
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "main_func"));
+        assert!(has_main_func);
+
+        let has_dep1_func = main
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "dep1_func"));
+        assert!(has_dep1_func);
+
+        let has_dep2_func = main
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "dep2_func"));
+        assert!(has_dep2_func);
+
+        let has_dep2_alias = main
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Function { name, .. } if name == "dep2::dep2_func"));
+        assert!(has_dep2_alias);
     }
 
     #[test]
