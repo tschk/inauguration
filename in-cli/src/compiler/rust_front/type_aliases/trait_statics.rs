@@ -228,7 +228,17 @@ impl Index {
         }
         // This seam does not claim modules, primitives, generic parameters, or
         // external paths merely because their last segment matches a method.
-        let (identity, receiver_generic) = match nominal(&owner, frame) {
+        let receiver = path_type_with_mode(
+            &owner,
+            frame,
+            &mut HashSet::new(),
+            false,
+            false,
+            false,
+            true,
+        )
+        .and_then(|value| nominal_result(value, frame));
+        let (identity, receiver_generic) = match receiver {
             Ok(Some(value)) => value,
             Err(failure) if failure.is_invalid() => return Some(Err(failure)),
             _ => return None,
@@ -714,7 +724,7 @@ fn constrained(generics: &syn::Generics) -> bool {
     !generics.params.is_empty() || generics.where_clause.is_some()
 }
 fn trait_nominal(path: &syn::Path, frame: &Frame) -> Result<Option<(Identity, bool)>, Failure> {
-    let result = path_type_with_mode(path, frame, &mut HashSet::new(), false, false, true)?;
+    let result = path_type_with_mode(path, frame, &mut HashSet::new(), false, false, true, false)?;
     nominal_result(result, frame)
 }
 fn nominal(path: &syn::Path, frame: &Frame) -> Result<Option<(Identity, bool)>, Failure> {
@@ -989,6 +999,13 @@ mod tests {
     fn unrelated_generic_and_receiver_paths_remain_not_applicable() {
         let source = "trait Make{fn value()->i64;}struct Other;impl Make for Other{fn value()->i64{42}}struct Generic<T>{item:T}struct Row;impl Row{fn value(self)->i64{42}}";
         assert!(lookup(source, "Generic::<u8>::value").is_none());
+        assert!(lookup(source, "Generic::value").is_none());
+        assert!(
+            lookup(&format!("{source}type Missing=Generic;"), "Missing::value")
+                .unwrap()
+                .unwrap_err()
+                .is_invalid()
+        );
         assert!(lookup(source, "Row::value").is_none());
         assert!(lookup(source, "external::Other::value").is_none());
     }
