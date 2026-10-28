@@ -217,6 +217,7 @@ mod tests {
         assert!(result.is_ok(), "result was not ok: {:?}", result.err());
         let (out_path, meta_path) = result.unwrap();
         assert!(out_path.exists());
+        assert!(out_path.extension().is_some());
         assert!(meta_path.is_some());
         assert!(meta_path.unwrap().exists());
         fs::remove_dir_all(&dir).unwrap();
