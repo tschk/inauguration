@@ -513,22 +513,39 @@ mod tests {
 
     #[test]
     fn test_explain_diagnostic() {
-        let explanation = explain_diagnostic(DEGRADATION_SKIPPED_FUNCTION).unwrap();
-        assert_eq!(explanation.code, DEGRADATION_SKIPPED_FUNCTION);
-        assert!(matches!(
-            explanation.severity,
-            AgentDiagnosticSeverity::Warning
-        ));
+        let expl = explain_diagnostic(DEGRADATION_SKIPPED_FUNCTION).unwrap();
+        assert_eq!(expl.code, DEGRADATION_SKIPPED_FUNCTION);
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
+        let expl = explain_diagnostic(DEGRADATION_UNRESOLVED_CALL).unwrap();
+        assert_eq!(expl.code, DEGRADATION_UNRESOLVED_CALL);
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
+        let expl = explain_diagnostic("AGENT_NO_MAIN").unwrap();
+        assert_eq!(expl.code, "AGENT_NO_MAIN");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
+        let expl = explain_diagnostic("AGENT_PARSE_FAILED").unwrap();
+        assert_eq!(expl.code, "AGENT_PARSE_FAILED");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Error);
+        let expl = explain_diagnostic("AGENT_SWIFT_SIL_ROUTE").unwrap();
+        assert_eq!(expl.code, "AGENT_SWIFT_SIL_ROUTE");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Info);
+        let expl = explain_diagnostic("AGENT_IO_ERROR").unwrap();
+        assert_eq!(expl.code, "AGENT_IO_ERROR");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Error);
+        let expl = explain_diagnostic("AGENT_MISSING_CAPABILITY").unwrap();
+        assert_eq!(expl.code, "AGENT_MISSING_CAPABILITY");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
+        let expl = explain_diagnostic("INPKG001").unwrap();
+        assert_eq!(expl.code, "INPKG001");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
+        let expl = explain_diagnostic("INPKG002").unwrap();
+        assert_eq!(expl.code, "INPKG002");
+        assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
+        assert!(explain_diagnostic("UNKNOWN_CODE").is_none());
+    }
 
-        let explanation = explain_diagnostic(DEGRADATION_UNRESOLVED_CALL).unwrap();
-        assert_eq!(explanation.code, DEGRADATION_UNRESOLVED_CALL);
-        assert!(matches!(
-            explanation.severity,
-            AgentDiagnosticSeverity::Warning
-        ));
-
+    #[test]
+    fn explain_diagnostic_no_main_alias_and_text() {
         let explanation = explain_diagnostic("AGENT_NO_MAIN").unwrap();
-        assert_eq!(explanation.code, "AGENT_NO_MAIN");
         assert_eq!(
             explanation.expected_shape,
             "function named main for entrypoint-shaped reports"
@@ -540,29 +557,6 @@ mod tests {
 
         let explanation = explain_diagnostic("INAGENT010").unwrap();
         assert_eq!(explanation.code, "INAGENT010");
-        assert!(matches!(
-            explanation.severity,
-            AgentDiagnosticSeverity::Warning
-        ));
-
-        let explanation = explain_diagnostic("AGENT_PARSE_FAILED").unwrap();
-        assert_eq!(explanation.code, "AGENT_PARSE_FAILED");
-        assert!(matches!(
-            explanation.severity,
-            AgentDiagnosticSeverity::Error
-        ));
-
-        let explanation = explain_diagnostic("AGENT_SWIFT_SIL_ROUTE").unwrap();
-        assert_eq!(explanation.code, "AGENT_SWIFT_SIL_ROUTE");
-        assert!(matches!(
-            explanation.severity,
-            AgentDiagnosticSeverity::Info
-        ));
-
-        let explanation = explain_diagnostic("INPKG001").unwrap();
-        assert_eq!(explanation.code, "INPKG001");
-
-        let unknown = explain_diagnostic("UNKNOWN_CODE");
-        assert!(unknown.is_none());
+        assert_eq!(explanation.severity, AgentDiagnosticSeverity::Warning);
     }
 }
