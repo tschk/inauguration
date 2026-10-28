@@ -42,3 +42,50 @@ pub fn artifact_stem(path: &Path, fallback: &str) -> String {
         .unwrap_or(fallback)
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_target_label() {
+        assert_eq!(target_label(CompileTarget::Native), "native");
+        assert_eq!(target_label(CompileTarget::Jit), "jit");
+    }
+
+    #[test]
+    fn test_linkage_label() {
+        assert_eq!(linkage_label(NativeLinkage::Executable), "executable");
+        assert_eq!(linkage_label(NativeLinkage::Dylib), "dylib");
+        assert_eq!(linkage_label(NativeLinkage::StaticLib), "staticlib");
+    }
+
+    #[test]
+    fn test_default_linkage_label() {
+        assert_eq!(default_linkage_label(), "executable");
+    }
+
+    #[test]
+    fn test_emit_label() {
+        assert_eq!(
+            emit_label(Some(&OwnedEmit::Sci { base: 0x1000 })),
+            "sci:0x1000"
+        );
+        assert_eq!(emit_label(None), "default");
+    }
+
+    #[test]
+    fn test_path_extension_is() {
+        assert!(path_extension_is(Path::new("foo.txt"), "txt"));
+        assert!(path_extension_is(Path::new("foo.TXT"), "txt"));
+        assert!(!path_extension_is(Path::new("foo.txt"), "bin"));
+        assert!(!path_extension_is(Path::new("foo"), "txt"));
+    }
+
+    #[test]
+    fn test_artifact_stem() {
+        assert_eq!(artifact_stem(Path::new("foo.txt"), "fallback"), "foo");
+        assert_eq!(artifact_stem(Path::new(""), "fallback"), "fallback");
+        assert_eq!(artifact_stem(Path::new(".hidden"), "fallback"), ".hidden");
+    }
+}

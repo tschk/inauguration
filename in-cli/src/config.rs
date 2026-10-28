@@ -38,6 +38,9 @@ pub struct EnvConfig {
     pub install_dir: Option<String>,
     /// `IN_REPO`: override the GitHub repository slug for remote installs.
     pub repo_slug: Option<String>,
+    /// `IN_DEBUG`: print unresolved-call traces. Off by default; a self-host
+    /// of `main.rs` has thousands of them.
+    pub debug: bool,
 }
 
 impl EnvConfig {
@@ -58,6 +61,9 @@ impl EnvConfig {
             daemon_socket: std::env::var("IN_DAEMON_SOCKET").ok().map(PathBuf::from),
             install_dir: std::env::var("IN_INSTALL_DIR").ok(),
             repo_slug: std::env::var("IN_REPO").ok(),
+            debug: std::env::var("IN_DEBUG")
+                .ok()
+                .is_some_and(|v| parse_env_bool(&v)),
         }
     }
 
