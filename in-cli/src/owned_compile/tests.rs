@@ -3186,10 +3186,15 @@ fn c_patterns_refuse_multiple_rests() {
 
 #[test]
 fn native_string_patterns_reject_non_string_scrutinees() {
-    let module = crate::in_lang_parse::parse_in_source(
+    let mut module = crate::in_lang_parse::parse_in_source(
         "fn main() -> Int { match 123 { \"text\" { return 1; } _ { return 2; } } return 3; }",
     )
     .unwrap();
+    if let crate::core_ir::Decl::Function { body, .. } = &mut module.decls[0] {
+        if let Some(crate::core_ir::Stmt::Expr(crate::core_ir::Expr::MatchValue { scrutinee, .. })) = body.first_mut() {
+            **scrutinee = crate::core_ir::Expr::Ident("something_untyped".into());
+        }
+    }
     for result in [
         crate::native_emit::lower::lower_module(&module, "main", NativeLinkage::Executable)
             .map(|_| ()),
