@@ -1253,6 +1253,28 @@ fn remove_dead_functions(decls: &mut Vec<Decl>, entry: Option<&str>) {
         Decl::Function { name, .. } => called.contains(name),
         _ => true,
     });
+    remove_unused_constants(decls);
+}
+
+/// Constants have no runtime storage obligation. Keep actual value/callee
+/// references and observable initializers; static globals remain roots.
+pub(crate) fn remove_unused_constants(decls: &mut Vec<Decl>) {
+    loop {
+        let mut used = HashSet::new();
+        retained_declaration_calls(decls, &mut used);
+        let mut values = Vec::new();
+        detect_ptr_refs(decls, &mut values);
+        used.extend(values);
+        let before = decls.len();
+        decls.retain(|decl| {
+            !matches!(decl, Decl::Global {
+                name, mutable: false, constant_value: true, init, ..
+            } if !used.contains(name) && init.as_deref().is_none_or(|value| !expr_has_effects(value)))
+        });
+        if decls.len() == before {
+            break;
+        }
+    }
 }
 
 fn retained_declaration_calls(declarations: &[Decl], roots: &mut HashSet<String>) {

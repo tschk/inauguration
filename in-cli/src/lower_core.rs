@@ -2351,6 +2351,7 @@ mod tests {
     fn test_desugar_module_basic() {
         let mut module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Component {
                 name: "TestComponent".into(),
                 target: "wasm".into(),
@@ -2373,6 +2374,7 @@ mod tests {
     fn test_desugar_module_interface_skipped() {
         let mut module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Interface {
                 name: "TestInterface".into(),
                 methods: vec![],
@@ -2388,6 +2390,7 @@ mod tests {
     fn test_desugar_module_class_desugaring() {
         let mut module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Class {
                 name: "TestClass".into(),
                 fields: vec![("x".into(), Typ::Int)],
@@ -2453,6 +2456,7 @@ mod tests {
         ] {
             let mut module = UnifiedModule {
                 identity: Default::default(),
+                regions: vec![],
                 decls: vec![Decl::Function {
                     name: "main".into(),
                     params: vec![],
@@ -2560,6 +2564,7 @@ mod tests {
     fn test_lower_to_textual_sil() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![
                 Decl::Function {
                     name: "main".into(),
@@ -2595,6 +2600,7 @@ mod tests {
     fn test_lower_to_textual_sil_empty_bodies() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![
                 Decl::Function {
                     name: "main".into(),
@@ -2623,6 +2629,7 @@ mod tests {
     fn lower_orders_helpers_and_main() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![
                 Decl::Struct {
                     name: "S".into(),
@@ -2667,6 +2674,7 @@ mod tests {
     fn lower_emits_let_and_return_for_helper() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![
                 Decl::Function {
                     name: "twice".into(),
@@ -2697,6 +2705,7 @@ mod tests {
     fn lower_emits_function_ref_for_explicit_call() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![
                 Decl::Function {
                     name: "helper".into(),
@@ -2726,6 +2735,7 @@ mod tests {
     fn lower_omits_store_var_for_never_read_let_and_param() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![("unused".into(), Typ::Int)],
@@ -2749,6 +2759,7 @@ mod tests {
     fn lower_keeps_store_var_for_read_variable() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![],
@@ -2770,6 +2781,7 @@ mod tests {
     fn lower_folds_constant_integer_binop() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![],
@@ -2804,6 +2816,7 @@ mod tests {
     fn lower_folds_constant_unary_and_bool_binop() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![],
@@ -2846,6 +2859,7 @@ mod tests {
     fn lower_match_emits_conditional_arm_branches() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![("tag".into(), Typ::Int)],
@@ -2884,6 +2898,7 @@ mod tests {
     fn desugar_class_one_method() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Class {
                 name: "Point".into(),
                 fields: vec![("x".into(), Typ::Int), ("y".into(), Typ::Int)],
@@ -2915,6 +2930,7 @@ mod tests {
     fn desugar_class_two_methods() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Class {
                 name: "Point".into(),
                 fields: vec![("x".into(), Typ::Int), ("y".into(), Typ::Int)],
@@ -2952,6 +2968,7 @@ mod tests {
     fn desugar_method_call_rewrite() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![
                 Decl::Class {
                     name: "Point".into(),
@@ -3012,6 +3029,7 @@ mod tests {
     fn desugar_closure_captures_one_var() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![("x".into(), Typ::Int)],
@@ -3052,6 +3070,7 @@ mod tests {
     fn desugar_closure_captures_two_vars() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![("x".into(), Typ::Int), ("y".into(), Typ::Int)],
@@ -3095,6 +3114,7 @@ mod tests {
     fn desugar_closure_rewrites_captured_var_to_self_field() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![("x".into(), Typ::Int)],
@@ -3142,6 +3162,7 @@ mod tests {
     fn desugar_closure_hidden_fn_has_self_param() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![("x".into(), Typ::Int)],
@@ -3194,6 +3215,7 @@ mod tests {
     fn desugar_closure_no_captures_empty_struct() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![],
@@ -3312,6 +3334,7 @@ mod tests {
     fn lower_struct_match_pattern() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![("p".into(), Typ::Named("Point".into()))],
@@ -3352,6 +3375,7 @@ mod tests {
     fn lower_array_match_pattern() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![("arr".into(), Typ::Array(Box::new(Typ::Int)))],
@@ -3393,6 +3417,7 @@ mod tests {
     fn lower_tuple_match_pattern() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![("pair".into(), Typ::Named("Tuple".into()))],
@@ -3428,6 +3453,7 @@ mod tests {
     fn desugar_class_implements_interface() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![
                 Decl::Interface {
                     name: "Drawable".into(),
@@ -3471,6 +3497,7 @@ mod tests {
     fn desugar_interface_method_call() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![
                 Decl::Interface {
                     name: "Drawable".into(),
@@ -3535,6 +3562,7 @@ mod tests {
     fn desugar_interface_param_not_rewritten() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![
                 Decl::Interface {
                     name: "Drawable".into(),
@@ -3606,6 +3634,7 @@ mod tests {
     fn desugar_range_for_to_while() {
         let mut module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![],
