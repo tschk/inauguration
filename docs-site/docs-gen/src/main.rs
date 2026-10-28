@@ -529,6 +529,23 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_collect_markdown_error_path() -> io::Result<()> {
+        let (src_dir, _src_guard) = make_temp_dir("src_error");
+
+        let broken_symlink = src_dir.join("broken.md");
+        std::os::unix::fs::symlink("does_not_exist.md", &broken_symlink)?;
+
+        let mut out = Vec::new();
+        let result = collect_markdown(&src_dir, &src_dir, &mut out);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_render_nav_basic_sections() {
         let pages = vec![
             ("in-language".to_string(), "inlang (.in)".to_string()),
@@ -572,6 +589,17 @@ mod tests {
     }
 
     #[test]
+    fn test_doc_href() {
+        assert_eq!(doc_href("index", "about"), "about.html");
+        assert_eq!(doc_href("index", "index"), "index.html");
+        assert_eq!(doc_href("index", "dir/page"), "dir/page.html");
+        assert_eq!(doc_href("dir/index", "about"), "../about.html");
+        assert_eq!(doc_href("dir/index", "dir/page"), "page.html");
+        assert_eq!(doc_href("dir/index", "dir/index"), "index.html");
+        assert_eq!(doc_href("dir1/index", "dir2/page"), "../dir2/page.html");
+    }
+
+    #[test]
     fn test_render_nav_nested_class() {
         let pages = vec![
             ("benchmarks/README".to_string(), "Overview".to_string()),
@@ -585,5 +613,23 @@ mod tests {
         let nav_jit_active = render_nav(&pages, "benchmarks/jit");
         assert!(nav_jit_active
             .contains("<li><a href=\"jit.html\" class=\"active doc-nav-nested\">JIT</a></li>"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_markdown_io_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let (src_dir, _src_guard) = make_temp_dir("src_io_error");
+
+        let file_path = src_dir.join("no_perm.md");
+        fs::write(&file_path, "test").unwrap();
+
+        let mut perms = fs::metadata(&file_path).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&file_path, perms).unwrap();
+
+        let mut out = Vec::new();
+        let result = collect_markdown(&src_dir, &src_dir, &mut out);
+        assert!(result.is_err());
     }
 }
