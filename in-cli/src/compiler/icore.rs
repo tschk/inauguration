@@ -609,6 +609,67 @@ fn validate_module(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn parses_icore_file_valid() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        struct TempFileGuard(std::path::PathBuf);
+        impl Drop for TempFileGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let count = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path =
+            std::env::temp_dir().join(format!("test_valid_{}_{}.icore", std::process::id(), count));
+        let j = r#"{
+            "icoreVersion": 2,
+            "decls": [
+                {
+                    "kind": "function",
+                    "name": "main",
+                    "params": [],
+                    "return": "Void",
+                    "body": []
+                }
+            ]
+        }"#;
+        std::fs::write(&path, j).unwrap();
+        let _guard = TempFileGuard(path.clone());
+
+        let m = super::parse_icore_file(&path).expect("valid file");
+        assert_eq!(m.decls.len(), 1);
+    }
+
+    #[test]
+    fn parses_icore_file_invalid_json() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        struct TempFileGuard(std::path::PathBuf);
+        impl Drop for TempFileGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let count = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "test_invalid_{}_{}.icore",
+            std::process::id(),
+            count
+        ));
+        std::fs::write(&path, "not json").unwrap();
+        let _guard = TempFileGuard(path.clone());
+
+        let err = super::parse_icore_file(&path).expect_err("invalid json");
+        assert!(err.contains("icore JSON:"));
+    }
+
+    #[test]
+    fn parses_icore_file_not_found() {
+        let path = std::path::PathBuf::from("/does/not/exist/file.icore");
+        let err = super::parse_icore_file(&path).expect_err("file not found");
+        assert!(err.contains("No such file or directory") || err.contains("not found"));
+    }
+    #[test]
     fn explicit_float_literals_preserve_binary64_values_and_signed_zero() {
         for (value, expected) in [
             (serde_json::json!(1.5), 1.5f64),
