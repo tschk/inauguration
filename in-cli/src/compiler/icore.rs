@@ -1086,4 +1086,72 @@ mod tests {
                 .any(|d| matches!(d, Decl::Function { name, .. } if name == "person_age"))
         );
     }
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct TempDirGuard {
+        path: PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new(path: PathBuf) -> Self {
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn parses_icore_file_valid() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("in-icore-file-valid-{}", std::process::id()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let _guard = TempDirGuard::new(temp_dir.clone());
+        let path = temp_dir.join("test.icore");
+        let j = r#"{
+            "icoreVersion": 2,
+            "decls": [
+                {
+                    "kind": "function",
+                    "name": "main",
+                    "params": [],
+                    "return": "Void",
+                    "body": []
+                }
+            ]
+        }"#;
+        fs::write(&path, j).expect("write .icore");
+        let module = super::parse_icore_file(&path).expect("parse_icore_file");
+        assert_eq!(module.decls.len(), 1);
+    }
+
+    #[test]
+    fn parses_icore_file_invalid_json() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("in-icore-file-invalid-json-{}", std::process::id()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let _guard = TempDirGuard::new(temp_dir.clone());
+        let path = temp_dir.join("bad.icore");
+        fs::write(&path, "{ bad json }").expect("write .icore");
+        let err = super::parse_icore_file(&path).expect_err("should fail on invalid json");
+        assert!(err.contains("icore JSON:"));
+    }
+
+    #[test]
+    fn parses_icore_file_missing_file() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("in-icore-file-missing-{}", std::process::id()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let _guard = TempDirGuard::new(temp_dir.clone());
+        let path = temp_dir.join("missing.icore");
+        let err = super::parse_icore_file(&path).expect_err("should fail on missing file");
+        assert!(
+            err.contains("No such file or directory")
+                || err.contains("The system cannot find the file specified")
+        );
+    }
 }
