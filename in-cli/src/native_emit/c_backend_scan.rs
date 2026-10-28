@@ -351,4 +351,23 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn test_c_backend_scan_unsupported_match_pattern() {
+        use crate::core_ir::{Expr, MatchArm, Stmt};
+        let stmt = Stmt::Match {
+            scrutinee: Expr::Ident("x".to_string()),
+            arms: vec![MatchArm {
+                pattern: "Some(x)".to_string(),
+                guard: None,
+                body: vec![],
+            }],
+        };
+        let mut nodes = 0;
+        let result = count_stmt(&stmt, 0, &mut nodes);
+        assert_eq!(
+            result.unwrap_err(),
+            "c-backend: unsupported match pattern `Some(x)`"
+        );
+    }
 }
