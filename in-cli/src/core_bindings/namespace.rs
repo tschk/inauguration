@@ -153,6 +153,7 @@ pub(crate) fn qualify_module_artifact(
 fn qualified(name: &str, module: &str, root: &str) -> String {
     if crate::core_ir::tuples::fields(name).is_some()
         || crate::core_ir::rust_options::payload(name).is_some()
+        || crate::core_ir::rust_boxes::payload(name).is_some()
         || name.starts_with(&format!("{root}::"))
     {
         name.into()
@@ -330,6 +331,16 @@ fn typ(value: &mut Typ, names: &NominalNames<'_>, generics: &HashSet<String>) {
                 *value = crate::core_ir::rust_references::rebuild(name, reference);
                 return;
             }
+            if let Some(mut payload) = crate::core_ir::rust_boxes::payload(name) {
+                typ(&mut payload, names, generics);
+                *value = crate::core_ir::rust_boxes::typ(payload);
+                return;
+            }
+            if let Some(mut payload) = crate::core_ir::rust_boxes::address_payload(name) {
+                typ(&mut payload, names, generics);
+                *value = crate::core_ir::rust_boxes::address(payload);
+                return;
+            }
             if let Some(mut payload) = crate::core_ir::rust_options::payload(name) {
                 typ(&mut payload, names, generics);
                 *value = crate::core_ir::rust_options::typ(payload);
@@ -418,7 +429,13 @@ fn expr(value: &mut Expr, names: &NominalNames<'_>, generics: &HashSet<String>) 
             }
         }
         Expr::Ident(name) => {
-            if let Some(target) = (names.value_name)(name) {
+            if let Some(mut payload) = crate::core_ir::rust_boxes::constructor_payload(name) {
+                typ(&mut payload, names, generics);
+                *name = crate::core_ir::rust_boxes::typed_constructor(payload);
+            } else if let Some(mut payload) = crate::core_ir::rust_boxes::allocation_payload(name) {
+                typ(&mut payload, names, generics);
+                *name = crate::core_ir::rust_boxes::allocation(payload);
+            } else if let Some(target) = (names.value_name)(name) {
                 *name = target;
             }
         }
@@ -539,6 +556,10 @@ fn declaration(decl: &mut Decl, names: &NominalNames<'_>, outer: &HashSet<String
         }
         Decl::Struct { name, fields, .. } => {
             let tuple = crate::core_ir::tuples::fields(name).is_some();
+            let projected_box = crate::core_ir::rust_boxes::payload(name).map(|mut payload| {
+                typ(&mut payload, names, &generics);
+                crate::core_ir::rust_boxes::typ(payload)
+            });
             let option = crate::core_ir::rust_options::payload(name);
             let projected_option = option.map(|mut payload| {
                 typ(&mut payload, names, &generics);
@@ -547,7 +568,7 @@ fn declaration(decl: &mut Decl, names: &NominalNames<'_>, outer: &HashSet<String
             for (_, value) in fields.iter_mut() {
                 typ(value, names, &generics);
             }
-            if let Some(Typ::Named(target)) = projected_option {
+            if let Some(Typ::Named(target)) = projected_option.or(projected_box) {
                 *name = target;
             } else if tuple {
                 if let Typ::Named(target) = crate::core_ir::tuples::typ(

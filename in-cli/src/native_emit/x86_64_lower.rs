@@ -2768,9 +2768,26 @@ fn scalar_expr_type_with_bindings(
                 .functions
                 .get(name)
                 .map(|f| f.ret.clone())
+                .or_else(|| {
+                    crate::core_ir::rust_boxes::allocation_payload(name)
+                        .map(crate::core_ir::rust_boxes::address)
+                })
                 .or_else(|| crate::core_ir_verifier::intrinsic_return_type(name).cloned()),
             _ => None,
         },
+        Expr::Unary { op, expr }
+            if matches!(
+                op.as_str(),
+                crate::core_ir::rust_boxes::DEREF
+                    | crate::core_ir::rust_boxes::SHARED
+                    | crate::core_ir::rust_boxes::MUTABLE
+            ) =>
+        {
+            crate::core_ir::rust_boxes::value_type(
+                op,
+                &scalar_expr_type_with_bindings(expr, ctx, bindings)?,
+            )
+        }
         Expr::Unary { op, expr } if crate::core_ir::rust_references::value_kind(op).is_some() => {
             crate::core_ir::rust_references::value_type(
                 op,
@@ -4160,6 +4177,47 @@ fn lower_call_expr(
         }
     };
 
+    if let Some(payload) = crate::core_ir::rust_boxes::allocation_payload(&target_name) {
+        let [value] = args else {
+            return Err("x86_64-lower: Box allocation requires one value".into());
+        };
+        if ctx.functions.contains_key(&target_name) {
+            return Err("x86_64-lower: private Box allocation cannot be declared".into());
+        }
+        let layout = if crate::core_ir::rust_references::aggregate_referent(&payload).is_some() {
+            Typ::Int
+        } else {
+            payload.canonical()
+        };
+        let offsets = match layout {
+            Typ::Named(name) => {
+                let schema = crate::native_emit::struct_layout::x86_fields(ctx.structs, &name)?;
+                let fields: HashMap<_, _> = schema
+                    .iter()
+                    .rev()
+                    .map(|(field, _)| (field.clone(), ctx.alloc_slot()))
+                    .collect();
+                store_struct_value(emitter, ctx, value, &fields, pending_calls)?;
+                schema
+                    .iter()
+                    .map(|(field, _)| fields[field])
+                    .collect::<Vec<_>>()
+            }
+            Typ::Int | Typ::Bool | Typ::Float | Typ::String | Typ::Void => {
+                let slot = ctx.alloc_slot();
+                lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::str64(RAX, slot as u16));
+                vec![slot]
+            }
+            _ => return Err("x86_64-lower: Box payload needs an owned word layout".into()),
+        };
+        lower_heap_array(emitter, ctx, &offsets, pending_calls)?;
+        emitter.emit_insns(&x86_64::add_rmi8(RAX, 16));
+        if target_reg != RAX {
+            emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+        }
+        return Ok(());
+    }
     if target_name == crate::core_ir::COMPILER_UNREACHABLE {
         if !args.is_empty() || ctx.functions.contains_key(&target_name) {
             return Err(
@@ -4464,6 +4522,30 @@ fn store_struct_value(
     fields: &HashMap<String, u32>,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    let indirect = match expr {
+        Expr::Unary { op, expr: pointer } if op == crate::core_ir::rust_boxes::DEREF => {
+            Some((pointer.as_ref(), 0))
+        }
+        Expr::Field { base, name } => borrowed_field_place(ctx, base, name)?,
+        _ => None,
+    };
+    if let Some((pointer, offset)) = indirect {
+        let name = match scalar_expr_type(expr, ctx).map(|typ| typ.canonical()) {
+            Some(Typ::Named(name)) => name,
+            Some(Typ::Vector(_)) => "Vec".into(),
+            _ => return Err("x86_64-lower: indirect value needs a record layout".into()),
+        };
+        let schema = crate::native_emit::struct_layout::x86_fields(ctx.structs, &name)?;
+        lower_expr_into(emitter, ctx, pointer, RAX, pending_calls)?;
+        for (index, (field, _)) in schema.iter().enumerate() {
+            let destination = *fields
+                .get(field)
+                .ok_or("x86_64-lower: missing indirect record destination field")?;
+            emitter.emit_insns(&x86_64::mov_r_m(RCX, RAX, offset + (index * 8) as i32));
+            emitter.emit_insns(&x86_64::str64(RCX, destination as u16));
+        }
+        return Ok(());
+    }
     if matches!(
         expr,
         Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }
@@ -4620,6 +4702,17 @@ fn borrowed_field_place<'a>(
     base: &'a Expr,
     name: &str,
 ) -> Result<Option<(&'a Expr, i32)>, String> {
+    let base = if let Expr::Unary { op, expr } = base
+        && op == crate::core_ir::rust_boxes::DEREF
+        && scalar_expr_type(base, ctx)
+            .as_ref()
+            .and_then(crate::core_ir::rust_references::aggregate_referent)
+            .is_none()
+    {
+        expr.as_ref()
+    } else {
+        base
+    };
     if let Some(Typ::Named(record)) = scalar_expr_type(base, ctx)
         .as_ref()
         .and_then(crate::core_ir::rust_references::aggregate_referent)
@@ -4921,6 +5014,28 @@ fn lower_unary_expr(
     expr: &Expr,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if matches!(
+        op,
+        crate::core_ir::rust_boxes::DEREF
+            | crate::core_ir::rust_boxes::SHARED
+            | crate::core_ir::rust_boxes::MUTABLE
+    ) {
+        let source = if op == crate::core_ir::rust_boxes::DEREF {
+            expr.clone()
+        } else {
+            crate::core_ir::rust_boxes::data(expr.clone())
+        };
+        lower_expr_into(emitter, ctx, &source, target_reg, pending_calls)?;
+        if let Some(result) = scalar_expr_type(&source, ctx).as_ref().and_then(|typ| {
+            crate::core_ir::rust_boxes::value_type(crate::core_ir::rust_boxes::DEREF, typ)
+        }) && (crate::core_ir::rust_references::aggregate_referent(&result).is_some()
+            || (op == crate::core_ir::rust_boxes::DEREF
+                && !matches!(result.canonical(), Typ::Named(_))))
+        {
+            emitter.emit_insns(&x86_64::mov_r_m(target_reg, target_reg, 0));
+        }
+        return Ok(());
+    }
     if crate::core_ir::rust_references::value_kind(op).is_some() {
         if let Some(Typ::Named(name)) = scalar_expr_type(expr, ctx)
             .map(|typ| crate::core_ir::rust_references::dereferenced(&typ))

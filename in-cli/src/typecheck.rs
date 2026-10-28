@@ -1091,6 +1091,39 @@ impl TypeChecker {
         } = scope;
         let mut value_type = None;
         let expected = context.expected();
+        if let Expr::Unary { op, expr: inner } = expr
+            && op == "*"
+            && self
+                .expr_type(inner, facts, env)
+                .as_ref()
+                .and_then(crate::core_ir::rust_boxes::pointee)
+                .is_some()
+        {
+            *expr = crate::core_ir::rust_boxes::dereference(*std::mem::replace(
+                inner,
+                Box::new(Expr::UnitLit),
+            ));
+        }
+        if let Expr::Field { base, name } = expr
+            && name != crate::core_ir::rust_boxes::DATA
+        {
+            while self
+                .expr_type(base, facts, env)
+                .as_ref()
+                .and_then(crate::core_ir::rust_boxes::pointee)
+                .is_some()
+            {
+                **base = crate::core_ir::rust_boxes::dereference(std::mem::replace(
+                    base.as_mut(),
+                    Expr::UnitLit,
+                ));
+            }
+        }
+        if let Some(expected) = expected
+            && let Some(actual) = self.expr_type(expr, facts, env)
+        {
+            crate::core_ir::rust_boxes::coerce(expr, expected, &actual);
+        }
         let mut scoped_result = None;
         let mut resolved_arguments = None;
         let mut resolved_callee = None;
@@ -1423,7 +1456,19 @@ impl TypeChecker {
         } else if let Expr::Call { callee, args } = expr {
             let inline_const = matches!(callee.as_ref(),Expr::Ident(name)if name==crate::core_ir::INLINE_CONST)
                 && args.len() == 1;
-            let option_payload = if matches!(callee.as_ref(),Expr::Ident(name)if name==crate::core_ir::rust_options::SOME)
+            let option_payload = if matches!(callee.as_ref(),Expr::Ident(name)if crate::core_ir::rust_boxes::is_constructor(name))
+            {
+                let explicit = match callee.as_ref() {
+                    Expr::Ident(name) => crate::core_ir::rust_boxes::constructor_payload(name),
+                    _ => None,
+                };
+                explicit.or_else(|| {
+                    expected.and_then(|typ| match typ {
+                        Typ::Named(name) => crate::core_ir::rust_boxes::payload(name),
+                        _ => None,
+                    })
+                })
+            } else if matches!(callee.as_ref(),Expr::Ident(name)if name==crate::core_ir::rust_options::SOME)
             {
                 expected.and_then(|typ| match typ {
                     Typ::Named(name) => crate::core_ir::rust_options::payload(name),
@@ -1485,6 +1530,11 @@ impl TypeChecker {
                         _ => None,
                     }
                 };
+            let params = params.or_else(|| match callee.as_ref() {
+                Expr::Ident(name) => crate::core_ir::rust_boxes::allocation_payload(name)
+                    .map(|payload| vec![("value".into(), payload)]),
+                _ => None,
+            });
             let callee_value = self.resolve_typed_expr_context(
                 callee,
                 facts,
@@ -1653,12 +1703,38 @@ impl TypeChecker {
             rust_floats::call_type_with_arguments(self, expr, expected, facts, env, types).map(Some)
         });
         if let Some(typ) = resolved_arguments.as_deref().and_then(|arguments| {
-            crate::core_ir::rust_options::constructor(expr, expected, arguments, &|name| {
-                facts.structs.get(name).cloned()
+            crate::core_ir::rust_boxes::constructor(expr, expected, arguments).or_else(|| {
+                crate::core_ir::rust_options::constructor(expr, expected, arguments, &|name| {
+                    facts.structs.get(name).cloned()
+                })
             })
         }) {
             return ResolvedValue {
                 typ: Some(typ),
+                c_kind,
+                values: None,
+            };
+        }
+        if let Expr::Unary { op, .. } = expr
+            && let Some(actual) = resolved_operands
+                .as_ref()
+                .and_then(|types| types.first())
+                .and_then(Option::as_ref)
+            && let Some(typ) = crate::core_ir::rust_boxes::value_type(op, actual)
+        {
+            return ResolvedValue {
+                typ: Some(typ),
+                c_kind,
+                values: None,
+            };
+        }
+        if let Expr::Call { callee, args } = expr
+            && args.len() == 1
+            && let Expr::Ident(name) = callee.as_ref()
+            && let Some(payload) = crate::core_ir::rust_boxes::allocation_payload(name)
+        {
+            return ResolvedValue {
+                typ: Some(crate::core_ir::rust_boxes::address(payload)),
                 c_kind,
                 values: None,
             };
@@ -2676,6 +2752,17 @@ impl TypeChecker {
                     }
                 }
                 Stmt::FieldAssign { base, name, value } => {
+                    while self
+                        .expr_type(base, facts, env)
+                        .as_ref()
+                        .and_then(crate::core_ir::rust_boxes::pointee)
+                        .is_some()
+                    {
+                        *base = crate::core_ir::rust_boxes::dereference(std::mem::replace(
+                            base,
+                            Expr::UnitLit,
+                        ));
+                    }
                     if let Some(expected) = self.expr_type(
                         &Expr::Field {
                             base: Box::new(base.clone()),
@@ -4194,6 +4281,21 @@ impl TypeChecker {
             {
                 crate::core_ir::rust_references::value_type(op, self.expr_type(expr, facts, env)?)
             }
+            Expr::Unary { op, expr }
+                if matches!(
+                    op.as_str(),
+                    "*" | crate::core_ir::rust_boxes::DEREF
+                        | crate::core_ir::rust_boxes::SHARED
+                        | crate::core_ir::rust_boxes::MUTABLE
+                ) =>
+            {
+                let operand = self.expr_type(expr, facts, env)?;
+                if op == "*" {
+                    crate::core_ir::rust_boxes::pointee(&operand).or(Some(operand))
+                } else {
+                    crate::core_ir::rust_boxes::value_type(op, &operand)
+                }
+            }
             Expr::Unary { op, .. } if crate::core_ir::rust_callables::is_cast(op) => {
                 crate::core_ir::rust_callables::decode_cast(op)
                     .map(crate::core_ir::rust_callables::typ)
@@ -4380,6 +4482,22 @@ impl TypeChecker {
                         && let [value] = args.as_slice()
                     {
                         return self.expr_type(value, facts, env);
+                    }
+                    if let [value] = args.as_slice() {
+                        if crate::core_ir::rust_boxes::is_constructor(name) {
+                            if let Some(payload) =
+                                crate::core_ir::rust_boxes::constructor_payload(name)
+                            {
+                                return Some(crate::core_ir::rust_boxes::typ(payload));
+                            }
+                            return self
+                                .expr_type(value, facts, env)
+                                .map(crate::core_ir::rust_boxes::typ);
+                        }
+                        if let Some(payload) = crate::core_ir::rust_boxes::allocation_payload(name)
+                        {
+                            return Some(crate::core_ir::rust_boxes::address(payload));
+                        }
                     }
                     if matches!(
                         name.as_str(),

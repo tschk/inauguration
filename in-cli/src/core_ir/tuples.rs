@@ -126,6 +126,7 @@ pub(crate) fn project_declarations(decls: &mut Vec<Decl>, mut project: impl FnMu
                 type_params,
             } => fields(name)
                 .or_else(|| super::rust_options::fields(name))
+                .or_else(|| super::rust_boxes::fields(name))
                 .map(|expected| {
                     let canonical = type_params.is_empty() && &expected == actual;
                     (
@@ -185,7 +186,10 @@ pub(crate) fn register(module: &mut UnifiedModule) {
     fn add(typ: &Typ, shapes: &mut BTreeMap<String, Vec<(String, Typ)>>) {
         match typ {
             Typ::Named(name) if !shapes.contains_key(name) => {
-                if let Some(fields) = fields(name).or_else(|| super::rust_options::fields(name)) {
+                if let Some(fields) = fields(name)
+                    .or_else(|| super::rust_options::fields(name))
+                    .or_else(|| super::rust_boxes::fields(name))
+                {
                     shapes.insert(name.clone(), fields.clone());
                     for (_, typ) in fields {
                         add(&typ, shapes);
@@ -195,6 +199,8 @@ pub(crate) fn register(module: &mut UnifiedModule) {
                 } else if let Some(reference) = super::rust_references::decode(name) {
                     add(&reference.referent, shapes);
                     add(&reference.runtime, shapes);
+                } else if let Some(payload) = super::rust_boxes::address_payload(name) {
+                    add(&payload, shapes);
                 } else if let Some(array) = super::rust_arrays::decode(name) {
                     add(&array.element, shapes);
                 }

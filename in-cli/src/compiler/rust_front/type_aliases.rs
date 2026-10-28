@@ -1304,7 +1304,7 @@ fn resolve_parts(
         );
     }
     if absolute {
-        if !matches!(first.as_str(), "std" | "core") {
+        if !matches!(first.as_str(), "std" | "core" | "alloc") {
             if context.ordinary_value_owner || context.constant_value {
                 return Ok(Resolved::Missing);
             }
@@ -1678,7 +1678,7 @@ fn nominal_runtime_type(obligations: &[NominalObligation]) -> Option<Typ> {
     (typ.canonical() == typ).then_some(typ)
 }
 
-/// Result uses the runtime error slot; Option retains an explicit value tag.
+/// Result uses the error slot; Option and Box retain owned storage identities.
 /// Resolve aliases after lexical lookup, retaining every source dependency.
 fn runtime_enum(
     parts: &[String],
@@ -1693,6 +1693,7 @@ fn runtime_enum(
     {
         ["Result"] | ["std" | "core", "result", "Result"] => ("Result", 2),
         ["Option"] | ["std" | "core", "option", "Option"] => ("Option", 1),
+        ["Box"] | ["std" | "alloc", "boxed", "Box"] => ("Box", 1),
         _ => return Ok(None),
     };
     let Some((arguments, frame)) = context.arguments else {
@@ -1744,6 +1745,8 @@ fn runtime_enum(
     Ok(payload.map(|typ| {
         Resolved::Type(if name == "Option" {
             crate::core_ir::rust_options::typ(typ)
+        } else if name == "Box" {
+            crate::core_ir::rust_boxes::typ(typ)
         } else {
             typ
         })
@@ -1833,6 +1836,52 @@ pub(super) fn resolve_in(frame: &Frame, path: &syn::Path) -> Result<Option<Typ>,
 pub(super) fn source_signature_type(source: &syn::Type) -> Result<Typ, Failure> {
     let frame = current().ok_or_else(|| unsupported("source signature catalog is not active"))?;
     source_signatures::source_type(source, &frame)
+}
+
+/// Preserve explicit payload arguments and aliases after lexical ownership lookup.
+pub(super) fn box_constructor(path: &syn::Path) -> Option<String> {
+    let frame = current()?;
+    let _source = source_signatures::ensure_source_context(&frame);
+    let parts = path
+        .segments
+        .iter()
+        .map(|part| part.ident.to_string())
+        .collect::<Vec<_>>();
+    let context = LookupContext {
+        arguments: path.segments.last().and_then(|part| {
+            (!matches!(part.arguments, syn::PathArguments::None))
+                .then_some((&part.arguments, &frame))
+        }),
+        caller_active: None,
+        declaration: true,
+        alias_target: false,
+        source_qualified: false,
+        ordinary_value_owner: true,
+        constant_value: false,
+        trait_position: false,
+        nominal_arguments: 0,
+        unsupported_nominal_arguments: false,
+    };
+    let result = resolve_parts(
+        &parts,
+        path.leading_colon.is_some(),
+        context.arguments.is_some(),
+        &frame,
+        &frame.module,
+        &mut HashSet::new(),
+        context,
+    )
+    .ok()?;
+    let Resolved::Type(source) = result.visibility().0 else {
+        return None;
+    };
+    if matches!(&source, Typ::Named(name) if name == "#rust-source-signature:std:boxed:Box") {
+        return Some(crate::core_ir::rust_boxes::NEW.into());
+    }
+    let Typ::Named(owner) = super::collections::storage(&source)? else {
+        return None;
+    };
+    crate::core_ir::rust_boxes::payload(&owner).map(crate::core_ir::rust_boxes::typed_constructor)
 }
 pub(super) fn source_callable_signature(
     signature: &syn::Signature,

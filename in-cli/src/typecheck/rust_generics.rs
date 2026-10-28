@@ -251,6 +251,13 @@ fn owned_type(typ: &Typ, depth: usize) -> bool {
             if let Some(reference) = crate::core_ir::rust_references::decode(name) {
                 return owned_type(&reference.referent, depth + 1);
             }
+            if let Some(payload) = crate::core_ir::rust_boxes::payload(name)
+                .or_else(|| crate::core_ir::rust_boxes::address_payload(name))
+                .or_else(|| crate::core_ir::rust_boxes::constructor_payload(name))
+                .or_else(|| crate::core_ir::rust_boxes::allocation_payload(name))
+            {
+                return owned_type(&payload, depth + 1);
+            }
             if let Some(payload) = crate::core_ir::rust_options::payload(name) {
                 return owned_type(&payload, depth + 1);
             }
@@ -401,6 +408,12 @@ fn unify_source(
             if let (Some(left), Some(right)) = (
                 crate::core_ir::rust_options::payload(left),
                 crate::core_ir::rust_options::payload(right),
+            ) {
+                return unify_source(&left, &right, names, bindings, depth + 1);
+            }
+            if let (Some(left), Some(right)) = (
+                crate::core_ir::rust_boxes::payload(left),
+                crate::core_ir::rust_boxes::payload(right),
             ) {
                 return unify_source(&left, &right, names, bindings, depth + 1);
             }
@@ -818,6 +831,11 @@ fn contains_generic(typ: &Typ) -> bool {
                 .is_some_and(|array| contains_generic(&array.element))
                 || crate::core_ir::rust_references::decode(name)
                     .is_some_and(|reference| contains_generic(&reference.referent))
+                || crate::core_ir::rust_boxes::payload(name)
+                    .or_else(|| crate::core_ir::rust_boxes::address_payload(name))
+                    .or_else(|| crate::core_ir::rust_boxes::constructor_payload(name))
+                    .or_else(|| crate::core_ir::rust_boxes::allocation_payload(name))
+                    .is_some_and(|payload| contains_generic(&payload))
                 || crate::core_ir::tuples::fields(name)
                     .is_some_and(|fields| fields.iter().any(|(_, typ)| contains_generic(typ)))
         }
@@ -903,6 +921,9 @@ fn validate_template(
             .filter_map(|name| templates.get(name).cloned()),
     );
     normalize_with_checks(&mut audit, false);
+    // Check the same ordered stores as emission, not unresolved field/index
+    // modification markers which are not source function calls.
+    crate::lower_core::lower_value_spills(&mut audit.decls);
     // Original generic bodies are checked through their rigid instances.
     for declaration in &mut audit.decls {
         if let Decl::Function {
@@ -920,6 +941,10 @@ fn validate_template(
     let mut previous = Vec::new();
     for (name, signature) in additions.functions {
         previous.push((name.clone(), facts.functions.insert(name, signature)));
+    }
+    let mut previous_structs = Vec::new();
+    for (name, fields) in additions.structs {
+        previous_structs.push((name.clone(), facts.structs.insert(name, fields)));
     }
     let mut errors = Vec::new();
     let mut ownership = None;
@@ -939,6 +964,13 @@ fn validate_template(
             facts.functions.insert(name, signature);
         } else {
             facts.functions.remove(&name);
+        }
+    }
+    for (name, fields) in previous_structs {
+        if let Some(fields) = fields {
+            facts.structs.insert(name, fields);
+        } else {
+            facts.structs.remove(&name);
         }
     }
     if errors.is_empty() {

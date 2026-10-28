@@ -27,13 +27,16 @@ pub(crate) fn fields(name: &str) -> Option<Vec<(String, Typ)>> {
     ])
 }
 
-/// Inactive payload slots need owned initialization, not guessed pointer bits.
+/// Initialize inactive storage without allocating or following a Box pointee.
 fn zero(
     typ: &Typ,
     schema: &impl Fn(&str) -> Option<Vec<(String, Typ)>>,
     active: &mut std::collections::HashSet<String>,
 ) -> Option<Expr> {
     if let Typ::Named(name) = typ {
+        if super::rust_boxes::address_payload(name).is_some() {
+            return Some(Expr::IntLit(0));
+        }
         if let Some(kind) = super::rust_integer_type_name(name) {
             return Some(Expr::Unary {
                 op: format!("rust-integer-literal-{kind}"),

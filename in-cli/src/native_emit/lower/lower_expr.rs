@@ -746,6 +746,17 @@ pub(crate) fn borrowed_field_place<'a>(
     name: &str,
     functions: &HashMap<String, FunctionInfo>,
 ) -> Result<Option<(&'a Expr, u32)>, String> {
+    let base = if let Expr::Unary { op, expr } = base
+        && op == crate::core_ir::rust_boxes::DEREF
+        && native_expr_type(base, ctx, functions)
+            .as_ref()
+            .and_then(crate::core_ir::rust_references::aggregate_referent)
+            .is_none()
+    {
+        expr.as_ref()
+    } else {
+        base
+    };
     if let Some(Typ::Named(record)) = native_expr_type(base, ctx, functions)
         .as_ref()
         .and_then(crate::core_ir::rust_references::aggregate_referent)
@@ -1114,6 +1125,31 @@ pub(crate) fn lower_unary(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if matches!(
+        op,
+        crate::core_ir::rust_boxes::DEREF
+            | crate::core_ir::rust_boxes::SHARED
+            | crate::core_ir::rust_boxes::MUTABLE
+    ) {
+        let source = if op == crate::core_ir::rust_boxes::DEREF {
+            expr.clone()
+        } else {
+            crate::core_ir::rust_boxes::data(expr.clone())
+        };
+        lower_expr_into(emitter, ctx, &source, rd, functions, pending_calls, fn_name)?;
+        if let Some(result) = native_expr_type(&source, ctx, functions)
+            .as_ref()
+            .and_then(|typ| {
+                crate::core_ir::rust_boxes::value_type(crate::core_ir::rust_boxes::DEREF, typ)
+            })
+            && (crate::core_ir::rust_references::aggregate_referent(&result).is_some()
+                || (op == crate::core_ir::rust_boxes::DEREF
+                    && !matches!(result.canonical(), Typ::Named(_))))
+        {
+            emitter.emit_u32(aarch64::ldr64(rd, rd, 0));
+        }
+        return Ok(());
+    }
     if crate::core_ir::rust_references::value_kind(op).is_some() {
         if let Some(Typ::Named(name)) = native_expr_type(expr, ctx, functions)
             .map(|typ| crate::core_ir::rust_references::dereferenced(&typ))
@@ -1850,9 +1886,26 @@ fn native_expr_type_with_bindings(
                         .and_then(|(_, short)| functions.get(short))
                 })
                 .map(|function| function.ret.clone())
+                .or_else(|| {
+                    crate::core_ir::rust_boxes::allocation_payload(name)
+                        .map(crate::core_ir::rust_boxes::address)
+                })
                 .or_else(|| crate::core_ir_verifier::intrinsic_return_type(name).cloned()),
             _ => None,
         },
+        Expr::Unary { op, expr }
+            if matches!(
+                op.as_str(),
+                crate::core_ir::rust_boxes::DEREF
+                    | crate::core_ir::rust_boxes::SHARED
+                    | crate::core_ir::rust_boxes::MUTABLE
+            ) =>
+        {
+            crate::core_ir::rust_boxes::value_type(
+                op,
+                &native_expr_type_with_bindings(expr, ctx, functions, bindings)?,
+            )
+        }
         Expr::Unary { op, expr } if crate::core_ir::rust_references::value_kind(op).is_some() => {
             crate::core_ir::rust_references::value_type(
                 op,

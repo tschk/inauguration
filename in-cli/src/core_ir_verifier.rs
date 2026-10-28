@@ -350,6 +350,9 @@ pub(crate) fn intrinsic_return_type(name: &str) -> Option<&'static Typ> {
     }
     static VOID_RET: Typ = Typ::Void;
     static INT_RET: Typ = Typ::Int;
+    if crate::core_ir::rust_boxes::allocation_payload(name).is_some() {
+        return Some(&INT_RET);
+    }
     static STRING_RET: Typ = Typ::String;
     static BOOL_RET: Typ = Typ::Bool;
     static STRING_ARRAY_RET: std::sync::LazyLock<Typ> =
@@ -1118,10 +1121,8 @@ fn completion_match_with_fallthrough<'a>(
                 {
                     pending = false;
                 }
-                if typ.canonical() == Typ::Bool
-                    && let crate::core_ir::MatchPattern::BoolPat(value) = pattern
-                {
-                    bools[usize::from(*value)] = true;
+                if let Some(value) = crate::core_ir::binary_pattern_case(pattern, &typ, &schema) {
+                    bools[usize::from(value)] = true;
                     if bools.into_iter().all(|covered| covered) {
                         pending = false;
                     }
@@ -2062,6 +2063,24 @@ fn check_expr_with_array_borrow(
         }
         Expr::Call { callee, args, .. } => {
             if let Expr::Ident(name) = callee.as_ref() {
+                if let Some(payload) = crate::core_ir::rust_boxes::allocation_payload(name) {
+                    if facts.declared_functions.contains(name.as_str())
+                        || env.contains_key(name)
+                        || args.len() != 1
+                    {
+                        return Err(("invalid-box-allocation".into(), "private Box allocation requires one payload and cannot be declared or shadowed".into()));
+                    }
+                    check_expr_in_loop(fn_name, &args[0], facts, env, call_edges, loop_depth)?;
+                    if expr_type(&args[0], facts, env).map(|typ| typ.canonical())
+                        != Some(payload.canonical())
+                    {
+                        return Err((
+                            "type-mismatch".into(),
+                            "Box allocation payload does not match its owned layout".into(),
+                        ));
+                    }
+                    return Ok(());
+                }
                 if env.contains_key(name) && invoke_param_types(name).is_some() {
                     return Err((
                         "unresolved-symbol".into(),
@@ -2419,6 +2438,16 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
         {
             crate::core_ir::rust_references::value_type(op, expr_type(expr, facts, env)?)
         }
+        Expr::Unary { op, expr }
+            if matches!(
+                op.as_str(),
+                crate::core_ir::rust_boxes::DEREF
+                    | crate::core_ir::rust_boxes::SHARED
+                    | crate::core_ir::rust_boxes::MUTABLE
+            ) =>
+        {
+            crate::core_ir::rust_boxes::value_type(op, &expr_type(expr, facts, env)?)
+        }
         Expr::Unary { op, expr, .. } => match op.as_str() {
             "!" => Some(Typ::Bool),
             "bool-to-int" | "float-to-int" => Some(Typ::Int),
@@ -2464,6 +2493,12 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
             }
         }
         Expr::Call { callee, args } => {
+            if let Expr::Ident(name) = callee.as_ref()
+                && let Some(payload) = crate::core_ir::rust_boxes::allocation_payload(name)
+                && args.len() == 1
+            {
+                return Some(crate::core_ir::rust_boxes::address(payload));
+            }
             if let Expr::Ident(name) = callee.as_ref()
                 && name == crate::core_ir::BORROW
                 && let [value] = args.as_slice()

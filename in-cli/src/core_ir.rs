@@ -2,6 +2,7 @@
 
 pub(crate) mod array_copy;
 pub(crate) mod rust_arrays;
+pub(crate) mod rust_boxes;
 pub(crate) mod rust_callables;
 pub(crate) mod rust_floats;
 pub(crate) mod rust_generics;
@@ -199,6 +200,9 @@ pub(crate) fn numeric_negation_domain(
 impl Typ {
     /// Normalize language-specific named types to canonical Core IR primitives.
     pub fn canonical(&self) -> Typ {
+        if matches!(self, Typ::Named(name) if rust_boxes::address_payload(name).is_some()) {
+            return Typ::Int;
+        }
         if let Typ::Named(name) = self
             && let Some(reference) = rust_references::decode(name)
         {
@@ -238,6 +242,7 @@ impl Typ {
                 if rust_integer_type_name(name).is_some()
                     || rust_floats::is_proof(name)
                     || rust_references::decode(name).is_some()
+                    || rust_boxes::address_payload(name).is_some()
                     || rust_arrays::decode(name).is_some()
                     || rust_callables::is_encoded(name) =>
             {
@@ -547,6 +552,39 @@ pub(crate) fn match_value_type(
     )
 }
 
+/// Only closed two-case types admit coverage by complementary discriminator tags.
+pub(crate) fn binary_pattern_case<'a>(
+    pattern: &MatchPattern,
+    typ: &Typ,
+    schema: &impl Fn(&str) -> Option<&'a [(String, Typ)]>,
+) -> Option<bool> {
+    let typ = rust_references::dereferenced(typ);
+    if typ == Typ::Bool
+        && let MatchPattern::BoolPat(value) = pattern
+    {
+        return Some(*value);
+    }
+    let (Typ::Named(owner), MatchPattern::StructPat { name, fields }) = (&typ, pattern) else {
+        return None;
+    };
+    let payload = rust_options::payload(owner)?;
+    if name != owner || pattern.typed_bindings(&typ, schema).is_err() {
+        return None;
+    }
+    let tag = fields
+        .iter()
+        .find_map(|(field, value)| match (field.as_str(), value) {
+            ("tag", MatchPattern::BoolPat(tag)) => Some(*tag),
+            _ => None,
+        })?;
+    fields
+        .iter()
+        .all(|(field, value)| {
+            field == "tag" || (field == "value" && value.irrefutable(&payload, schema))
+        })
+        .then_some(tag)
+}
+
 pub(crate) fn match_value_exhaustive<'a>(
     typ: &Typ,
     arms: &[MatchValueArm],
@@ -569,11 +607,11 @@ pub(crate) fn match_value_exhaustive<'a>(
         {
             exhaustive = true;
         }
-        if let MatchPattern::BoolPat(value) = pattern {
+        if let Some(value) = binary_pattern_case(&pattern, typ, schema) {
             bools[usize::from(value)] = true;
         }
     }
-    exhaustive || (typ.canonical() == Typ::Bool && bools.into_iter().all(|covered| covered))
+    exhaustive || bools.into_iter().all(|covered| covered)
 }
 
 pub(crate) fn expr_contains_call(expr: &Expr) -> bool {

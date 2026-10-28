@@ -99,6 +99,13 @@ pub(crate) fn failure_in_type(value: &Typ) -> Option<ResolutionFailure> {
             if let Some(payload) = super::rust_options::payload(name) {
                 failure = prefer_failure(failure, failure_in_type(&payload));
             }
+            if let Some(payload) = super::rust_boxes::payload(name)
+                .or_else(|| super::rust_boxes::address_payload(name))
+                .or_else(|| super::rust_boxes::allocation_payload(name))
+                .or_else(|| super::rust_boxes::constructor_payload(name))
+            {
+                failure = prefer_failure(failure, failure_in_type(&payload));
+            }
             if let Some(fields) = super::tuples::fields(name) {
                 for (_, typ) in fields {
                     failure = prefer_failure(failure, failure_in_type(&typ));
@@ -150,6 +157,11 @@ pub(crate) fn metadata_present(decls: &[super::Decl], mode: MetadataKind) -> boo
                 typ(&reference.referent, mode) || typ(&reference.runtime, mode)
             })
             || super::rust_options::payload(name).is_some_and(|payload| typ(&payload, mode))
+            || super::rust_boxes::payload(name)
+                .or_else(|| super::rust_boxes::address_payload(name))
+                .or_else(|| super::rust_boxes::allocation_payload(name))
+                .or_else(|| super::rust_boxes::constructor_payload(name))
+                .is_some_and(|payload| typ(&payload, mode))
             || super::tuples::fields(name)
                 .is_some_and(|fields| fields.iter().any(|(_, value)| typ(value, mode)))
     }

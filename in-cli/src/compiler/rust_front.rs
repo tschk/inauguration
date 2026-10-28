@@ -4474,6 +4474,32 @@ fn lower_expr_with_types_inner(
             _ => Expr::Ident(l.lit.to_token_stream().to_string()),
         },
         syn::Expr::Path(p) => {
+            if call_target
+                && p.qself.is_none()
+                && p.path
+                    .segments
+                    .last()
+                    .is_some_and(|part| part.ident == "new")
+            {
+                let mut owner = p.path.clone();
+                owner.segments.pop();
+                if !owner.segments.is_empty()
+                    && let Some(constructor) = type_aliases::box_constructor(&owner)
+                {
+                    if !matches!(
+                        p.path.segments.last().unwrap().arguments,
+                        syn::PathArguments::None
+                    ) {
+                        return Expr::Ident(
+                            crate::core_ir::type_proofs::ResolutionFailure::Invalid(
+                                "Box::new requires zero method type arguments".into(),
+                            )
+                            .symbol(),
+                        );
+                    }
+                    return Expr::Ident(constructor);
+                }
+            }
             let scoped_path = match scoped_vector_path(&p.path) {
                 Ok(path) => path,
                 Err(proof) => return Expr::Ident(proof.symbol()),

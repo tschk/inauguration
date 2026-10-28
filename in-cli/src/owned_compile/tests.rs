@@ -47,7 +47,24 @@ fn rust_borrowed_record_parameters_preserve_caller_storage() {
     }
     let path = temp_path("borrowed-record.rs");
     for body in [
+        "fn make()->Box<Row>{Box::new(Row{left:19,right:23})}fn main()->i64{let mut value=make();update(&mut value);value.right}",
+        "fn apply<T>(value:&mut Row,unused:T){value.right+=value.left;}fn make()->Box<Row>{Box::new(Row{left:19,right:23})}fn main()->i64{let mut value=make();apply(&mut value,7u8);value.right}",
+        "fn make(left:i64,right:i64)->Box<Row>{Box::new(Row{left,right})}fn read(value:&Row)->i64{value.right}fn main()->i64{let mut value=make(19,23);let guard=make(3,7);update(&mut value);read(&value)+guard.right-7}",
+        "fn main()->i64{let mut value=Box::<Row>::new(Row{left:19,right:3});value.right=23;update(&mut value);value.right}",
+        "type Owned=Box<Row>;fn main()->i64{let mut value=Owned::new(Row{left:19,right:23});update(&mut value);let result=*value;result.right}",
+        "fn main()->i64{let row=Row{left:19,right:23};let value=Box::<&Row>::new(&row);value.left+value.right}",
+        "fn main()->i64{let mut row=Row{left:19,right:23};let mut value=Box::<&mut Row>::new(&mut row);value.right+=value.left;row.right}",
+        "fn read(value:&&Row)->i64{value.left+value.right}fn main()->i64{let row=Row{left:19,right:23};let value=Box::<&Row>::new(&row);read(&value)}",
+        "fn apply(value:&mut&mut Row){value.right+=value.left;}fn main()->i64{let mut row=Row{left:19,right:23};let mut value=Box::<&mut Row>::new(&mut row);apply(&mut value);row.right}",
+        "fn main()->i64{let mut value=Box::new(Box::new(Row{left:19,right:23}));value.right+=value.left;value.right}",
+        "struct Node{value:i64,next:Option<Box<Node>>}fn make()->Box<Node>{Box::new(Node{value:19,next:Some(Box::new(Node{value:23,next:None}))})}fn main()->i64{let node=make();match node.next{Some(tail)=>node.value+tail.value,None=>9}}",
+        "fn main()->i64{let value:Option<Box<Row>>=None;match value{Some(row)=>row.left,None=>42}}",
+        "static mut CALLS:i64=0;fn make()->Box<Row>{unsafe{CALLS+=1;}Box::new(Row{left:19,right:22})}fn main()->i64{let row=*make();row.left+row.right+unsafe{CALLS}}",
+        "fn main()->i64{let value=Box::<i64>::new(42);*value}",
+        "fn boxed<T>(value:T)->Box<T>{Box::new(value)}fn main()->i64{let mut value=boxed(Row{left:19,right:23});update(&mut value);value.right}",
+        "use std::boxed::Box as Heap;fn main()->i64{let mut value=Heap::new(Row{left:19,right:23});update(&mut value);value.right}",
         "fn main()->i64{let mut value=Row{left:19,right:23};update(&mut value);value.right}",
+        "struct Bag{items:Vec<i64>}fn apply(bag:&mut Bag){bag.items[0]+=bag.items[1];}fn main()->i64{let mut bag=Bag{items:vec![19,23]};apply(&mut bag);bag.items[0]}",
         "fn main()->i64{let mut value=Row{left:19,right:23};let alias=&mut value;update(alias);value.right}",
         "struct Outer{guard:i64,row:Row}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:19,right:23}};update(&mut outer.row);outer.row.right+outer.guard-7}",
         "struct Outer{guard:i64,row:Row}fn relay(outer:&mut Outer){update(&mut outer.row);}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:19,right:23}};relay(&mut outer);outer.row.right+outer.guard-7}",
@@ -92,6 +109,18 @@ fn rust_borrowed_record_parameters_preserve_caller_storage() {
         }
     }
     for source in [
+        "struct Row{left:i64,right:i64}fn apply(value:&mut Row){value.right=42;}fn main()->i64{let value=Box::new(Row{left:19,right:23});apply(&value);42}",
+        "struct Row{left:i64,right:i64}fn main()->i64{let value:Box<Row>=Box::new(&Row{left:19,right:23});42}",
+        "struct Row{left:i64,right:i64}fn main()->i64{let value:Box<u32>=Box::<i64>::new(42);42}",
+        "struct Row{left:i64,right:i64}fn main()->i64{let value=Box::<Row>::new(42);42}",
+        "fn main()->i64{let value=Box::<&i64>::new(42);42}",
+        "fn main()->i64{let value=Box::<&mut f64>::new(42.0);42}",
+        "struct Row{left:i64,right:i64}fn main()->i64{let value=Box::new::<Row>(Row{left:19,right:23});42}",
+        "fn duplicate<T>(value:Box<T>)->(Box<T>,Box<T>){(value,value)}fn main()->i64{let values=duplicate(Box::new(42i64));42}",
+        "fn invalid<T>(value:T)->Box<T>{Box::new(1)}fn main()->i64{let value=invalid(true);42}",
+        "fn invalid(value:&i64)->Box<&i64>{Box::<&i64>::new(42)}fn main()->i64{42}",
+        "fn main()->i64{let value:Option<i64>=None;match value{Some(x)if x>0=>x,None=>42}}",
+        "fn main()->i64{let value:Option<i64>=Some(7);match value{Some(0)=>42,None=>9}}",
         "struct Row{left:i64,right:i64}struct Outer{row:Row}fn apply<T>(row:&mut Row,unused:T){row.right=row.right+row.left;}fn relay(outer:&Outer){match outer{Outer{row}=>apply(row,7u8)}}fn main()->i64{let outer=Outer{row:Row{left:19,right:23}};relay(&outer);42}",
         "struct Row{left:i64,right:i64}struct Outer{row:Row}struct Wrap<'a>{outer:&'a mut Outer}fn apply<T>(row:&mut Row,unused:T){row.right=row.right+row.left;}fn relay(wrapper:&Wrap){match wrapper{Wrap{outer:Outer{row}}=>apply(row,7u8)}}fn main()->i64{let mut outer=Outer{row:Row{left:19,right:23}};let wrapper=Wrap{outer:&mut outer};relay(&wrapper);42}",
     ] {

@@ -28,7 +28,10 @@ fn is_addressable(expr: &Expr) -> bool {
     match expr {
         Expr::Ident(_) => true,
         Expr::Field { base, .. } | Expr::Index { base, .. } => is_addressable(base),
-        Expr::Unary { op, expr } if crate::core_ir::rust_references::value_kind(op).is_some() => {
+        Expr::Unary { op, expr }
+            if crate::core_ir::rust_references::value_kind(op).is_some()
+                || op == crate::core_ir::rust_boxes::DEREF =>
+        {
             is_addressable(expr)
         }
         Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW) =>
@@ -323,6 +326,11 @@ impl Lower {
                 **index = self.save((**index).clone(), out);
             }
             Expr::Field { base, .. } => self.stage_receiver_place(base, out),
+            Expr::Unary { op, expr: pointer } if op == crate::core_ir::rust_boxes::DEREF => {
+                // Capture the allocation address, never a copy of its pointee.
+                self.expr(pointer, out);
+                **pointer = self.save((**pointer).clone(), out);
+            }
             Expr::Unary { op, expr }
                 if crate::core_ir::rust_references::value_kind(op).is_some() =>
             {

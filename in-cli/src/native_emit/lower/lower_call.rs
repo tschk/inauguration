@@ -28,6 +28,24 @@ pub(crate) fn lower_call(
             "native-lower: dynamic call target unsupported in `{fn_name}`"
         ));
     };
+    if let Some(payload) = crate::core_ir::rust_boxes::allocation_payload(target) {
+        let [value] = args else {
+            return Err("native-lower: Box allocation requires one value".into());
+        };
+        if functions.contains_key(target) {
+            return Err("native-lower: private Box allocation cannot be declared".into());
+        }
+        return lower_box_allocation(
+            emitter,
+            ctx,
+            value,
+            &payload,
+            rd,
+            functions,
+            pending_calls,
+            fn_name,
+        );
+    }
     if target == crate::core_ir::COMPILER_UNREACHABLE {
         if !args.is_empty() || functions.contains_key(target) {
             return Err(
@@ -367,6 +385,96 @@ pub(crate) fn lower_call(
         emitter.emit_u32(aarch64::mov_reg64(rd, 0));
     }
     Ok(())
+}
+
+fn lower_box_allocation(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    value: &Expr,
+    payload: &Typ,
+    rd: u8,
+    functions: &HashMap<String, FunctionInfo>,
+    pending_calls: &mut Vec<PendingCall>,
+    fn_name: &str,
+) -> Result<(), String> {
+    let layout = if crate::core_ir::rust_references::aggregate_referent(payload).is_some() {
+        Typ::Int
+    } else {
+        payload.canonical()
+    };
+    let schema = match layout {
+        Typ::Named(name) => Some((
+            name.clone(),
+            crate::native_emit::struct_layout::arm_fields(ctx.structs, &name)?,
+        )),
+        Typ::Int | Typ::Bool | Typ::Float | Typ::String | Typ::Void => None,
+        _ => return Err("native-lower: Box payload needs an owned word layout".into()),
+    };
+    let words = schema.as_ref().map_or(1, |(_, fields)| fields.len().max(1));
+    let base = ctx.acquire_call_arg_slots(fn_name, words)?;
+    let result = (|| {
+        if let Some((name, fields)) = &schema {
+            let slots = fields
+                .iter()
+                .enumerate()
+                .map(|(index, (field, _))| (field.clone(), ctx.call_arg_temps[base + index]))
+                .collect();
+            lower_struct_expr_into_slots(
+                emitter,
+                ctx,
+                value,
+                name,
+                &slots,
+                functions,
+                pending_calls,
+                fn_name,
+            )?;
+            if fields.is_empty() {
+                emitter.emit_u32(aarch64::str64(
+                    aarch64::REG_XZR,
+                    aarch64::REG_SP,
+                    ctx.call_arg_temps[base],
+                ));
+            }
+        } else {
+            lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
+            emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, ctx.call_arg_temps[base]));
+        }
+        // Use the runtime's owned allocation arena; no Rust allocator or parser ABI is imported.
+        if TL_NATIVE_MODE.with(|mode| *mode.borrow()) {
+            emitter.emit_insns(&aarch64::load_i64(0, words as i64));
+            let site = emitter.len();
+            emitter.emit_u32(aarch64::bl(0));
+            ctx.pending_inrt_calls.push(PendingInrtCall {
+                site,
+                target: crate::inrt::INRT_VECTOR_ALLOC.into(),
+            });
+        } else {
+            emitter.emit_u32(aarch64::mov_reg64(0, 27));
+            emitter.emit_insns(&aarch64::load_i64(1, words as i64));
+            emitter.emit_insns(&aarch64::load_i64(
+                15,
+                crate::jit_runtime::allocate_array as *const () as i64,
+            ));
+            emitter.emit_u32(0xD63F_0000 | (15 << 5));
+            emitter.emit_u32(aarch64::add_imm64(0, 0, 16));
+        }
+        if rd != 0 {
+            emitter.emit_u32(aarch64::mov_reg64(rd, 0));
+        }
+        let scratch = super::pick_scratch(&[rd]);
+        for index in 0..words {
+            emitter.emit_u32(aarch64::ldr64(
+                scratch,
+                aarch64::REG_SP,
+                ctx.call_arg_temps[base + index],
+            ));
+            emitter.emit_u32(aarch64::str64(scratch, rd, (index * 8) as u32));
+        }
+        Ok(())
+    })();
+    ctx.release_call_arg_temps();
+    result
 }
 
 pub(crate) fn lower_inrt_call(

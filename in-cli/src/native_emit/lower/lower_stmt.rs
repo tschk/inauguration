@@ -1083,6 +1083,35 @@ pub(crate) fn lower_struct_expr_into_slots(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    let indirect = match expr {
+        Expr::Unary { op, expr: pointer } if op == crate::core_ir::rust_boxes::DEREF => {
+            Some((pointer.as_ref(), 0))
+        }
+        Expr::Field { base, name } => lower_expr::borrowed_field_place(ctx, base, name, functions)?,
+        _ => None,
+    };
+    if let Some((pointer, offset)) = indirect {
+        let compatible =
+            match lower_expr::native_expr_type(expr, ctx, functions).map(|typ| typ.canonical()) {
+                Some(Typ::Named(actual)) => actual == typ,
+                Some(Typ::Vector(_)) => typ == "Vec",
+                _ => false,
+            };
+        if !compatible {
+            return Err("native-lower: indirect record value type mismatch".into());
+        }
+        lower_expr::lower_expr_into(emitter, ctx, pointer, 0, functions, pending_calls, fn_name)?;
+        for (index, (field, _)) in crate::native_emit::struct_layout::arm_fields(ctx.structs, typ)?
+            .iter()
+            .enumerate()
+        {
+            let destination = *find_field_offset(fields, field)
+                .ok_or("native-lower: missing indirect record destination field")?;
+            emitter.emit_u32(aarch64::ldr64(3, 0, offset + (index * 8) as u32));
+            emitter.emit_u32(aarch64::str64(3, aarch64::REG_SP, destination));
+        }
+        return Ok(());
+    }
     if matches!(
         expr,
         Expr::Conditional { .. } | Expr::Block { .. } | Expr::MatchValue { .. }

@@ -46,6 +46,10 @@ fn contains(typ: &Typ, generic: bool, facts: &Facts, active: &mut HashSet<String
                 contains(&array.element, generic, facts, active)
             } else if let Some(reference) = rust_references::decode(name) {
                 contains(&reference.referent, generic, facts, active)
+            } else if let Some(payload) = crate::core_ir::rust_boxes::payload(name)
+                .or_else(|| crate::core_ir::rust_boxes::address_payload(name))
+            {
+                contains(&payload, generic, facts, active)
             } else if let Some(fields) = crate::core_ir::tuples::fields(name) {
                 fields
                     .iter()
@@ -175,7 +179,11 @@ impl Check<'_> {
                 self.expression(
                     operand,
                     env,
-                    rust_references::value_kind(op).map_or(usage, Use::Borrow),
+                    match op.as_str() {
+                        crate::core_ir::rust_boxes::SHARED => Use::Borrow(false),
+                        crate::core_ir::rust_boxes::MUTABLE => Use::Borrow(true),
+                        _ => rust_references::value_kind(op).map_or(usage, Use::Borrow),
+                    },
                 );
             }
             Expr::Index { base, index } => {

@@ -1,5 +1,6 @@
 //! Concrete owned storage for standard ordered maps.
 use super::*;
+use crate::core_ir::rust_references as references;
 
 const MAP: &str = "#rust-btree-map:";
 const RESULT: &str = "#rust-stored-result:";
@@ -35,8 +36,24 @@ pub(super) fn storage(source: &Typ) -> Option<Typ> {
                 let types = fields.iter().map(|(_, typ)| typ).collect::<Vec<_>>();
                 if let Some(Typ::Named(constructor)) = types.first() {
                     match (constructor.as_str(), types.as_slice()) {
+                        (
+                            "#rust-source-signature:ref" | "#rust-source-signature:ref-mut",
+                            [_, value],
+                        ) => {
+                            return references::value_type(
+                                if constructor == "#rust-source-signature:ref-mut" {
+                                    references::MUTABLE_VALUE
+                                } else {
+                                    references::SHARED_VALUE
+                                },
+                                storage(value)?,
+                            );
+                        }
                         ("#rust-source-signature:std:option:Option", [_, value]) => {
                             return Some(crate::core_ir::rust_options::typ(storage(value)?));
+                        }
+                        ("#rust-source-signature:std:boxed:Box", [_, value]) => {
+                            return Some(crate::core_ir::rust_boxes::typ(storage(value)?));
                         }
                         ("#rust-source-signature:std:result:Result", [_, value, error]) => {
                             let Typ::Named(shape) = crate::core_ir::tuples::typ(&[

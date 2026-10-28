@@ -51,6 +51,10 @@ fn address_type(reference: ReferenceType) -> Typ {
 
 pub(crate) fn aggregate_referent(value: &Typ) -> Option<Typ> {
     let Typ::Named(name) = value else { return None };
+    if let Some(payload) = super::rust_boxes::address_payload(name) {
+        let referent = payload.canonical();
+        return matches!(referent, Typ::Named(_)).then_some(referent);
+    }
     let reference = decode(name)?;
     let runtime = reference.runtime.canonical();
     (matches!(runtime, Typ::Named(_)) && crate::core_atomic::Kind::from_type(&runtime).is_none())

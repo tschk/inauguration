@@ -178,6 +178,7 @@ pub(super) fn builtin(
         ["Result"] | ["std" | "core", "result", "Result"] => ("std:result:Result", 2),
         ["Option"] | ["std" | "core", "option", "Option"] => ("std:option:Option", 1),
         ["Vec"] | ["std" | "alloc", "vec", "Vec"] => ("std:vec:Vec", 1),
+        ["Box"] | ["std" | "alloc", "boxed", "Box"] => ("std:boxed:Box", 1),
         ["std" | "alloc", "collections", "BTreeMap"]
         | ["std" | "alloc", "collections", "btree_map", "BTreeMap"] => {
             ("std:collections:BTreeMap", 2)
