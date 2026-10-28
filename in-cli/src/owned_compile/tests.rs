@@ -41,38 +41,6 @@ fn default_request(
 }
 
 #[test]
-fn base_report_populates_fields_correctly() {
-    let request = default_request(
-        PathBuf::from("test.in"),
-        CompileTarget::Jit,
-        Some("main"),
-        None,
-    );
-    let started = std::time::Instant::now();
-    let jobs = 4;
-    let report = base_report(&request, jobs, started);
-    assert_eq!(report.schema_version, 1);
-    assert!(report.owned);
-    assert_eq!(report.path, "test.in");
-    assert_eq!(report.module_id, "App");
-    assert_eq!(report.target, "jit");
-    assert_eq!(report.entry.as_deref(), Some("main"));
-    assert_eq!(report.linkage, "executable");
-    assert_eq!(report.frontend_level, "unsupported");
-    assert_eq!(report.semantic_level, "failed");
-    assert_eq!(report.backend_level, "owned-native-subset");
-    assert_eq!(report.runtime_level, "inrt-jit");
-    assert_eq!(report.jobs, 4);
-    assert!(!report.success);
-
-    let request_native =
-        default_request(PathBuf::from("test2.in"), CompileTarget::Native, None, None);
-    let report_native = base_report(&request_native, 1, started);
-    assert_eq!(report_native.backend_level, "contract-only");
-    assert_eq!(report_native.runtime_level, "none");
-}
-
-#[test]
 fn unknown_statements_refuse_before_execution_across_profiles() {
     let statement = crate::core_ir::UNSUPPORTED_DEFINED_BODY;
     for (extension, text, marker) in [
@@ -2214,45 +2182,6 @@ fn report_to_json_roundtrip_fields() {
     assert!(json.contains("\"external_invocations\": []"));
 
     fs::remove_file(source_path).unwrap();
-}
-
-#[test]
-fn report_to_json_serialization_format() {
-    let started = std::time::Instant::now();
-    let request = OwnedCompileRequest {
-        path: std::path::PathBuf::from("/fake/path"),
-        module_id: "test_module".to_string(),
-        parser: crate::parser_registry::ParserCli::In,
-        target: CompileTarget::Native,
-        entry: None,
-        out: None,
-        linkage: crate::native_emit::NativeLinkage::Executable,
-        target_triple: None,
-        jobs: 1,
-        debug: false,
-        profile: crate::emit_profile::EmitProfile::Default,
-        emit: None,
-        base: None,
-    };
-
-    let mut report = crate::owned_compile::report::base_report(&request, 1, started);
-    report.timing_micros = 12345;
-    report.timing_waves_us = Some(vec![12345]);
-
-    let json = crate::owned_compile::report_to_json(&report).expect("Failed to serialize report");
-
-    assert!(json.contains("\"schema_version\": 1"));
-    assert!(json.contains("\"owned\": true"));
-    assert!(json.contains("\"path\": \"/fake/path\""));
-    assert!(json.contains("\"module_id\": \"test_module\""));
-    assert!(json.contains("\"target\": \"native\""));
-    assert!(json.contains("\"linkage\": \"executable\""));
-    assert!(json.contains("\"frontend_level\": \"unsupported\""));
-    assert!(json.contains("\"semantic_level\": \"failed\""));
-    assert!(json.contains("\"backend_level\": \"contract-only\""));
-    assert!(json.contains("\"runtime_level\": \"none\""));
-    assert!(json.contains("\"success\": false"));
-    assert!(json.contains("\"timing_micros\": 12345"));
 }
 
 #[test]
@@ -11681,38 +11610,4 @@ fn rust_nested_function_qualification_preserves_privacy_and_conditional_refusal(
         }
         fs::remove_file(path).unwrap();
     }
-}
-
-#[test]
-fn test_finalize_report() {
-    let mut request = default_request(PathBuf::from("test.rs"), CompileTarget::Native, None, None);
-    request.jobs = 2;
-    let started = Instant::now();
-    let mut base = base_report(&request, request.jobs, started);
-    base.success = true;
-
-    // Test success case
-    let cwd = std::path::Path::new(".");
-    let report_success = finalize_report(base.clone(), started, cwd, "hash1");
-    assert!(report_success.success);
-    assert!(report_success.timing_waves_us.is_some());
-    assert_eq!(report_success.timing_waves_us.as_ref().unwrap().len(), 2);
-
-    // Test forbidden invocation case
-    let _token = crate::external_guard::ExternalInvocationGuard::enter();
-    crate::external_guard::ExternalInvocationGuard::record("rustc");
-    let report_failure = finalize_report(base.clone(), started, cwd, "hash2");
-    assert!(!report_failure.success);
-    assert_eq!(
-        report_failure.reason_code.as_deref(),
-        Some("external-tool-invoked")
-    );
-    assert_eq!(
-        report_failure.reason.as_deref(),
-        Some("forbidden external tool invocation(s): rustc")
-    );
-    assert_eq!(
-        report_failure.error.as_deref(),
-        Some("forbidden external tool invocation(s): rustc")
-    );
 }

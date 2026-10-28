@@ -220,17 +220,8 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("sti", IntrinsicRet::Void),
     ("pause", IntrinsicRet::Void),
     ("lidt", IntrinsicRet::Void),
-    ("lgdt", IntrinsicRet::Void),
-    ("ltr", IntrinsicRet::Void),
     ("invlpg", IntrinsicRet::Void),
     ("read-cr2", IntrinsicRet::Int),
-    ("read-cr3", IntrinsicRet::Int),
-    ("cr3-read", IntrinsicRet::Int),
-    ("write-cr3", IntrinsicRet::Void),
-    ("cr3-write", IntrinsicRet::Void),
-    ("rdmsr", IntrinsicRet::Int),
-    ("wrmsr", IntrinsicRet::Void),
-    ("wrmsr64", IntrinsicRet::Void),
     ("invoke", IntrinsicRet::Int),
     ("invoke1", IntrinsicRet::Int),
     ("invoke2", IntrinsicRet::Int),
@@ -434,10 +425,6 @@ pub(crate) fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
         "store8" | "store16" | "store32" | "store64" => &[Typ::Int, Typ::Int],
         "inb" | "inw" | "inl" => &[Typ::Int],
         "outb" | "outw" | "outl" => &[Typ::Int, Typ::Int],
-        "read-cr3" | "cr3-read" => &[],
-        "write-cr3" | "cr3-write" | "lgdt" | "ltr" | "rdmsr" => &[Typ::Int],
-        "wrmsr64" => &[Typ::Int, Typ::Int],
-        "wrmsr" | "mem-fill64" | "mem-copy64" => &[Typ::Int, Typ::Int, Typ::Int],
         "str-concat" | "str-eq" | "str-contains" | "str-starts-with" | "str-ends-with"
         | "str-index-of" | "path-join" | "write-file" | "env-set" | "str-table-has" => {
             &[Typ::String, Typ::String]
