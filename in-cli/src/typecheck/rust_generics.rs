@@ -429,7 +429,9 @@ fn concrete_source_agreement(
         Err(source_conflict(
             declared,
             actual,
-            "incompatible concrete Rust generic call types".into(),
+            format!(
+                "incompatible concrete Rust generic call types: expected {declared:?}, found {actual:?}"
+            ),
         ))
     } else {
         Ok(())
