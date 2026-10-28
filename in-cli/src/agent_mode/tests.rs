@@ -805,6 +805,41 @@ fn explain_formats_summary_correctly() {
 }
 
 #[test]
+fn explain_formats_summary_strings_correctly() {
+    let config = AgentModeConfig {
+        parser: AgentParserPreference::In,
+        ..Default::default()
+    };
+
+    let temp = temp_source(
+        "explain_summary",
+        "in",
+        r#"
+fn main() -> void { return; }
+struct User { Int id }
+"#,
+    );
+    let explanation = explain(&temp.path, &config).expect("explain");
+
+    assert!(
+        explanation
+            .summary
+            .contains(&"parser in via core_ir".to_string())
+    );
+    assert!(
+        explanation
+            .summary
+            .contains(&"2 decls, 1 functions, 1 structs".to_string())
+    );
+    assert!(
+        explanation
+            .summary
+            .contains(&"1 SIL functions, 2 blocks, 2 instructions, 0 call edges".to_string())
+    );
+    assert!(explanation.summary.contains(&"no diagnostics".to_string()));
+}
+
+#[test]
 fn json_report_returns_io_error_for_missing_file() {
     let missing_path = std::path::Path::new("does_not_exist_abc123.in");
     let result = json_report(&missing_path, &AgentModeConfig::default());
