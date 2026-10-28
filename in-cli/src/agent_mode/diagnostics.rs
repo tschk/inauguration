@@ -542,4 +542,21 @@ mod tests {
         assert_eq!(expl.severity, AgentDiagnosticSeverity::Warning);
         assert!(explain_diagnostic("UNKNOWN_CODE").is_none());
     }
+
+    #[test]
+    fn explain_diagnostic_no_main_alias_and_text() {
+        let explanation = explain_diagnostic("AGENT_NO_MAIN").unwrap();
+        assert_eq!(
+            explanation.expected_shape,
+            "function named main for entrypoint-shaped reports"
+        );
+        assert_eq!(
+            explanation.repair_hint,
+            "Add a top-level main function or confirm this module is intended as a library"
+        );
+
+        let explanation = explain_diagnostic("INAGENT010").unwrap();
+        assert_eq!(explanation.code, "INAGENT010");
+        assert_eq!(explanation.severity, AgentDiagnosticSeverity::Warning);
+    }
 }
