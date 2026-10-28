@@ -14,7 +14,11 @@ pub(crate) fn base_struct_name(name: &str) -> &str {
 }
 
 pub(crate) fn canonical_type(typ: &Typ) -> Typ {
-    typ.canonical()
+    if crate::core_ir::rust_references::aggregate_referent(typ).is_some() {
+        typ.clone()
+    } else {
+        typ.canonical()
+    }
 }
 
 pub(crate) fn pick_scratch(exclude: &[u8]) -> u8 {
@@ -45,9 +49,19 @@ pub(crate) fn emit_failure_return(
 pub(crate) fn field_path(expr: &Expr) -> Option<(&str, String)> {
     let mut names = Vec::new();
     let mut base = expr;
-    while let Expr::Field { base: parent, name } = base {
-        names.push(name.as_str());
-        base = parent;
+    loop {
+        match base {
+            Expr::Field { base: parent, name } => {
+                names.push(name.as_str());
+                base = parent;
+            }
+            Expr::Unary { op, expr }
+                if crate::core_ir::rust_references::value_kind(op).is_some() =>
+            {
+                base = expr;
+            }
+            _ => break,
+        }
     }
     let Expr::Ident(root) = base else {
         return None;
@@ -286,8 +300,11 @@ pub(crate) fn native_struct_fields(
     };
     let cleaned = fields
         .iter()
-        .map(|(name, field_ty)| match field_ty.canonical() {
+        .map(|(name, field_ty)| match canonical_type(field_ty) {
             typ @ (Typ::Int | Typ::Bool | Typ::String | Typ::Float) => Ok((name.clone(), typ)),
+            typ if crate::core_ir::rust_references::aggregate_referent(&typ).is_some() => {
+                Ok((name.clone(), typ))
+            }
             Typ::Named(inner) if structs.contains_key(inner.as_str()) => {
                 Ok((name.clone(), field_ty.clone()))
             }
@@ -315,10 +332,11 @@ pub(crate) fn native_struct_fields(
 }
 
 pub(crate) fn is_native_scalar_type(typ: &Typ) -> bool {
-    matches!(
-        canonical_type(typ),
-        Typ::Int | Typ::Bool | Typ::String | Typ::Float
-    )
+    crate::core_ir::rust_references::aggregate_referent(typ).is_some()
+        || matches!(
+            canonical_type(typ),
+            Typ::Int | Typ::Bool | Typ::String | Typ::Float
+        )
 }
 
 pub(crate) fn ensure_unit_sequence_layout(typ: &Typ) -> Result<(), String> {

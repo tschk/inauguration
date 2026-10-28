@@ -3838,7 +3838,9 @@ impl TypeChecker {
                     });
                     return;
                 }
-                if let Some(base_typ) = self.expr_type(base, facts, env).map(|typ| typ.canonical())
+                if let Some(base_typ) = self
+                    .expr_type(base, facts, env)
+                    .map(|typ| crate::core_ir::rust_references::dereferenced(&typ))
                     && let Typ::Named(struct_name) = &base_typ
                     && let Some(schema) = facts.structs.get(struct_name)
                     && !schema.iter().any(|(f, _)| f == name)
@@ -4124,7 +4126,9 @@ impl TypeChecker {
                 {
                     return Some(Typ::Int);
                 }
-                if let Some(base_typ) = self.expr_type(base, facts, env).map(|typ| typ.canonical())
+                if let Some(base_typ) = self
+                    .expr_type(base, facts, env)
+                    .map(|typ| crate::core_ir::rust_references::dereferenced(&typ))
                     && let Typ::Named(struct_name) = &base_typ
                     && let Some(schema) = facts.structs.get(struct_name)
                 {

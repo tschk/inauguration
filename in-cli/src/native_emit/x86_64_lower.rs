@@ -270,11 +270,12 @@ impl<'a> LowerCtx<'a> {
             // Preserve known struct parameters as field-addressable locals.
             // Unknown named types retain the scalar fallback used by the
             // partial native ABI.
-            if let Typ::Named(struct_name) = typ.canonical()
+            if let Typ::Named(struct_name) = crate::core_ir::rust_references::dereferenced(typ)
                 && ctx.structs.contains_key(&struct_name)
             {
-                ctx.alloc_local(name, typ)
+                ctx.alloc_local(name, &Typ::Named(struct_name))
                     .expect("known struct parameter must allocate");
+                ctx.scalar_types.insert(name.clone(), typ.clone());
             } else {
                 let offset = ctx.alloc_slot();
                 ctx.locals.insert(name.clone(), StackSlot::Scalar(offset));
@@ -294,6 +295,13 @@ impl<'a> LowerCtx<'a> {
         record_array_fields(self.structs, typ)?;
         self.scalar_types.insert(name.to_string(), typ.clone());
         if self.locals.contains_key(name) {
+            return Ok(());
+        }
+        if let Some(referent) = crate::core_ir::rust_references::aggregate_referent(typ) {
+            self.alloc_local(name, &referent)?;
+            let pointer = self.alloc_slot();
+            self.receiver_pointers.insert(name.into(), pointer);
+            self.scalar_types.insert(name.into(), typ.clone());
             return Ok(());
         }
         match typ {
@@ -1234,7 +1242,8 @@ fn lower_function(
     if !is_interrupt {
         for (i, (name, typ)) in func.params.iter().enumerate() {
             if let Some(StackSlot::Struct { fields }) = ctx.locals.get(name).cloned() {
-                let Typ::Named(struct_name) = typ.canonical() else {
+                let Typ::Named(struct_name) = crate::core_ir::rust_references::dereferenced(typ)
+                else {
                     unreachable!()
                 };
                 if x86_64::is_32bit()
@@ -1244,7 +1253,9 @@ fn lower_function(
                     return Err("x86_64-lower: struct parameter needs a supported scalar-field 64-bit layout".into());
                 }
                 let pointer_slot = ctx.alloc_slot();
-                if name == "self" {
+                if name == "self"
+                    || crate::core_ir::rust_references::aggregate_referent(typ).is_some()
+                {
                     ctx.receiver_pointers.insert(name.clone(), pointer_slot);
                 }
                 if i < param_regs.len() {
@@ -1485,7 +1496,9 @@ fn lower_stmt(
                     return Err("x86_64-lower: void return requires a unit value".into());
                 }
 
-                if let Typ::Named(name) = &ret_typ
+                if crate::core_ir::rust_references::aggregate_referent(&ctx.ret_typ).is_some() {
+                    lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
+                } else if let Typ::Named(name) = &ret_typ
                     && ctx.structs.contains_key(name)
                 {
                     if crate::native_emit::struct_layout::x86_fields(ctx.structs, name).is_err() {
@@ -1527,6 +1540,11 @@ fn lower_stmt(
             Ok(())
         }
         Stmt::Let(name, typ, expr) => {
+            if let Some(&pointer) = ctx.receiver_pointers.get(name) {
+                lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::str64(RAX, pointer as u16));
+                return Ok(());
+            }
             if let Expr::Ident(source) = expr
                 && let Some(slot @ StackSlot::InlineArray { .. }) = ctx.locals.get(source).cloned()
             {
@@ -1576,6 +1594,16 @@ fn lower_stmt(
             Ok(())
         }
         Stmt::Assign(name, expr) => {
+            if let Some(&pointer) = ctx.receiver_pointers.get(name)
+                && scalar_expr_type(expr, ctx)
+                    .as_ref()
+                    .and_then(crate::core_ir::rust_references::aggregate_referent)
+                    .is_some()
+            {
+                lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::str64(RAX, pointer as u16));
+                return Ok(());
+            }
             // Local bindings and parameters shadow globals.
             if !ctx.locals.contains_key(name)
                 && let Some(&offset) = ctx.globals.get(name)
@@ -1668,6 +1696,41 @@ fn lower_stmt(
         Stmt::FieldAssign {
             base, name, value, ..
         } => {
+            if let Some((pointer, offset)) = borrowed_field_place(ctx, base, name)? {
+                let typ = scalar_expr_type(
+                    &Expr::Field {
+                        base: Box::new(base.clone()),
+                        name: name.clone(),
+                    },
+                    ctx,
+                )
+                .ok_or("x86_64-lower: unknown borrowed field type")?;
+                if crate::core_ir::rust_references::aggregate_referent(&typ).is_none()
+                    && let Typ::Named(record) = typ.canonical()
+                {
+                    let schema =
+                        crate::native_emit::struct_layout::x86_fields(ctx.structs, &record)?;
+                    let fields: HashMap<_, _> = schema
+                        .iter()
+                        .rev()
+                        .map(|(field, _)| (field.clone(), ctx.alloc_slot()))
+                        .collect();
+                    store_struct_value(emitter, ctx, value, &fields, pending_calls)?;
+                    lower_expr_into(emitter, ctx, pointer, RCX, pending_calls)?;
+                    for (index, (field, _)) in schema.iter().enumerate() {
+                        emitter.emit_insns(&x86_64::ldr64(RAX, fields[field] as u16));
+                        emitter.emit_insns(&x86_64::mov_m_r(RCX, offset + (index * 8) as i32, RAX));
+                    }
+                    return Ok(());
+                }
+                let rhs = ctx.alloc_slot();
+                lower_expr_into(emitter, ctx, value, RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::str64(RAX, rhs as u16));
+                lower_expr_into(emitter, ctx, pointer, RCX, pending_calls)?;
+                emitter.emit_insns(&x86_64::ldr64(RAX, rhs as u16));
+                emitter.emit_insns(&x86_64::mov_m_r(RCX, offset, RAX));
+                return Ok(());
+            }
             if let Expr::Index { base: array, index } = base {
                 let typ =
                     scalar_expr_type(array, ctx).ok_or("x86_64-lower: unknown record array")?;
@@ -2674,7 +2737,7 @@ fn scalar_expr_type_with_bindings(
         Expr::Ident(name) => ctx
             .scalar_types
             .get(name)
-            .map(Typ::canonical)
+            .cloned()
             .or_else(|| ctx.functions.contains_key(name).then_some(Typ::Int)),
         Expr::Index { base, .. } => {
             match scalar_expr_type_with_bindings(base, ctx, bindings)?.canonical() {
@@ -2685,7 +2748,8 @@ fn scalar_expr_type_with_bindings(
         Expr::Field { base, name } => {
             let mut typ = scalar_expr_type_with_bindings(base, ctx, bindings)?;
             for field in name.split('.') {
-                let Typ::Named(struct_name) = typ else {
+                let Typ::Named(struct_name) = crate::core_ir::rust_references::dereferenced(&typ)
+                else {
                     return None;
                 };
                 typ = ctx
@@ -2694,7 +2758,7 @@ fn scalar_expr_type_with_bindings(
                     .iter()
                     .find(|(name, _)| name == field)?
                     .1
-                    .canonical();
+                    .clone();
             }
             Some(typ)
         }
@@ -2702,10 +2766,16 @@ fn scalar_expr_type_with_bindings(
             Expr::Ident(name) => ctx
                 .functions
                 .get(name)
-                .map(|f| f.ret.canonical())
+                .map(|f| f.ret.clone())
                 .or_else(|| crate::core_ir_verifier::intrinsic_return_type(name).cloned()),
             _ => None,
         },
+        Expr::Unary { op, expr } if crate::core_ir::rust_references::value_kind(op).is_some() => {
+            crate::core_ir::rust_references::value_type(
+                op,
+                scalar_expr_type_with_bindings(expr, ctx, bindings)?,
+            )
+        }
         Expr::Unary { op, expr }
             if op == "-"
                 || op == "vector-clone"
@@ -3158,7 +3228,15 @@ fn lower_builtin_call(
                 }
             }
             crate::core_atomic::check_order(op, args.last().unwrap())?;
-            let Expr::Ident(name) = &args[0] else {
+            let receiver = match &args[0] {
+                Expr::Unary { op, expr }
+                    if crate::core_ir::rust_references::value_kind(op).is_some() =>
+                {
+                    expr.as_ref()
+                }
+                value => value,
+            };
+            let Expr::Ident(name) = receiver else {
                 return Err("x86_64-lower: atomic receiver must be a static cell".into());
             };
             if ctx.locals.contains_key(name) || ctx.scalar_types.get(name) != Some(&kind.typ()) {
@@ -3894,6 +3972,59 @@ fn lower_call_argument(
     lower_expr_into(emitter, ctx, arg, target_reg, pending_calls)
 }
 
+fn lower_record_address(
+    emitter: &mut CodeEmitter,
+    ctx: &mut LowerCtx<'_>,
+    arg: &Expr,
+    target_reg: u8,
+    pending_calls: &mut Vec<PendingCall>,
+) -> Result<(), String> {
+    if scalar_expr_type(arg, ctx)
+        .as_ref()
+        .and_then(crate::core_ir::rust_references::aggregate_referent)
+        .is_some()
+    {
+        return lower_expr_into(emitter, ctx, arg, target_reg, pending_calls);
+    }
+    if let Expr::Field { base, name } = arg
+        && let Some((pointer, offset)) = borrowed_field_place(ctx, base, name)?
+    {
+        lower_expr_into(emitter, ctx, pointer, target_reg, pending_calls)?;
+        emitter.emit_insns(&x86_64::sub_rmi32(target_reg, -offset));
+        return Ok(());
+    }
+    if let Expr::Index { base, index } = arg {
+        let slots = stage_record_index(emitter, ctx, base, index, pending_calls)?;
+        load_record_index_address(emitter, ctx, slots)?;
+        emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+        return Ok(());
+    }
+    if let Some((local, field)) = super::lower::field_path(arg)
+        && !field.is_empty()
+    {
+        let prefix = format!("{field}.");
+        let Some(StackSlot::Struct { fields }) = ctx.locals.get(local) else {
+            return Err("x86_64-lower: borrowed field needs a known local layout".into());
+        };
+        let offset = fields
+            .iter()
+            .filter(|(name, _)| name.starts_with(&prefix))
+            .map(|(_, offset)| *offset)
+            .max()
+            .ok_or("x86_64-lower: borrowed field has no addressable storage")?;
+        if let Some(&pointer) = ctx.receiver_pointers.get(local) {
+            let root = *fields.values().max().unwrap();
+            emitter.emit_insns(&x86_64::ldr64(target_reg, pointer as u16));
+            emitter.emit_insns(&x86_64::sub_rmi32(target_reg, -((root - offset) as i32)));
+        } else {
+            emitter.emit_insns(&x86_64::mov_rr(target_reg, RBP));
+            emitter.emit_insns(&x86_64::sub_rmi32(target_reg, offset as i32 + 8));
+        }
+        return Ok(());
+    }
+    lower_call_argument(emitter, ctx, arg, target_reg, pending_calls)
+}
+
 fn lower_call_args(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -3923,6 +4054,10 @@ fn lower_call_args(
     for (index, arg) in args.iter().enumerate() {
         let slot = ctx.alloc_slot();
         if let Some((_, typ)) = params.as_ref().and_then(|params| params.get(index))
+            && crate::core_ir::rust_references::aggregate_referent(typ).is_some()
+        {
+            lower_record_address(emitter, ctx, arg, RAX, pending_calls)?;
+        } else if let Some((_, typ)) = params.as_ref().and_then(|params| params.get(index))
             && record_array_fields(ctx.structs, typ)?.is_some()
         {
             lower_typed_sequence_value(emitter, ctx, arg, typ, RAX, pending_calls)?;
@@ -3971,34 +4106,7 @@ fn lower_call_args(
         } else if matches!(params.as_ref().and_then(|params| params.get(index)), Some((name, Typ::Named(_))) if name == "self")
             && matches!(arg, Expr::Field { .. })
         {
-            let mut base = arg;
-            let mut path = Vec::new();
-            while let Expr::Field { base: parent, name } = base {
-                path.push(name.as_str());
-                base = parent;
-            }
-            path.reverse();
-            let Expr::Ident(local) = base else {
-                return Err("x86_64-lower: receiver field needs addressable storage".into());
-            };
-            let prefix = format!("{}.", path.join("."));
-            let Some(StackSlot::Struct { fields }) = ctx.locals.get(local) else {
-                return Err("x86_64-lower: receiver field needs a known local layout".into());
-            };
-            let offset = fields
-                .iter()
-                .filter(|(name, _)| name.starts_with(&prefix))
-                .map(|(_, offset)| *offset)
-                .max()
-                .ok_or("x86_64-lower: receiver field has no addressable storage")?;
-            if let Some(&pointer) = ctx.receiver_pointers.get(local) {
-                let root = *fields.values().max().unwrap();
-                emitter.emit_insns(&x86_64::ldr64(RAX, pointer as u16));
-                emitter.emit_insns(&x86_64::sub_rmi32(RAX, -((root - offset) as i32)));
-            } else {
-                emitter.emit_insns(&x86_64::mov_rr(RAX, RBP));
-                emitter.emit_insns(&x86_64::sub_rmi32(RAX, offset as i32 + 8));
-            }
+            lower_record_address(emitter, ctx, arg, RAX, pending_calls)?;
         } else {
             lower_call_argument(emitter, ctx, arg, RAX, pending_calls)?;
         }
@@ -4506,6 +4614,33 @@ fn lower_struct_init(
     Ok(())
 }
 
+fn borrowed_field_place<'a>(
+    ctx: &LowerCtx<'_>,
+    base: &'a Expr,
+    name: &str,
+) -> Result<Option<(&'a Expr, i32)>, String> {
+    if let Some(Typ::Named(record)) = scalar_expr_type(base, ctx)
+        .as_ref()
+        .and_then(crate::core_ir::rust_references::aggregate_referent)
+    {
+        let fields = crate::native_emit::struct_layout::x86_fields(ctx.structs, &record)?;
+        let prefix = format!("{name}.");
+        let index = fields
+            .iter()
+            .position(|(field, _)| field == name || field.starts_with(&prefix))
+            .ok_or_else(|| format!("x86_64-lower: unknown borrowed field `{record}.{name}`"))?;
+        let offset = index
+            .checked_mul(8)
+            .and_then(|offset| i32::try_from(offset).ok())
+            .ok_or("x86_64-lower: borrowed field offset overflow")?;
+        return Ok(Some((base, offset)));
+    }
+    if let Expr::Field { base, name: parent } = base {
+        return borrowed_field_place(ctx, base, &format!("{parent}.{name}"));
+    }
+    Ok(None)
+}
+
 fn lower_field_access(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -4514,6 +4649,33 @@ fn lower_field_access(
     name: &str,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if let Some((pointer, offset)) = borrowed_field_place(ctx, base, name)? {
+        let typ = scalar_expr_type(
+            &Expr::Field {
+                base: Box::new(base.clone()),
+                name: name.into(),
+            },
+            ctx,
+        )
+        .ok_or("x86_64-lower: unknown borrowed field type")?;
+        lower_expr_into(emitter, ctx, pointer, target_reg, pending_calls)?;
+        if crate::core_ir::rust_references::aggregate_referent(&typ).is_some()
+            || matches!(
+                typ.canonical(),
+                Typ::Int | Typ::Bool | Typ::Float | Typ::String | Typ::Vector(_) | Typ::Array(_)
+            )
+        {
+            emitter.emit_insns(&x86_64::mov_r_m(target_reg, target_reg, offset));
+        } else {
+            emitter.emit_insns(&x86_64::sub_rmi32(target_reg, -offset));
+        }
+        return Ok(());
+    }
+    if let Expr::Unary { op, expr } = base
+        && crate::core_ir::rust_references::value_kind(op).is_some()
+    {
+        return lower_field_access(emitter, ctx, target_reg, expr, name, pending_calls);
+    }
     if let Expr::Index { base: array, index } = base {
         let typ = scalar_expr_type(array, ctx).ok_or("x86_64-lower: unknown record array")?;
         let FlatRecordArray { fields: schema, .. } = record_array_fields(ctx.structs, &typ)?
@@ -4758,6 +4920,15 @@ fn lower_unary_expr(
     expr: &Expr,
     pending_calls: &mut Vec<PendingCall>,
 ) -> Result<(), String> {
+    if crate::core_ir::rust_references::value_kind(op).is_some() {
+        if let Some(Typ::Named(name)) = scalar_expr_type(expr, ctx)
+            .map(|typ| crate::core_ir::rust_references::dereferenced(&typ))
+            && ctx.structs.contains_key(&name)
+        {
+            return lower_record_address(emitter, ctx, expr, target_reg, pending_calls);
+        }
+        return lower_expr_into(emitter, ctx, expr, target_reg, pending_calls);
+    }
     if op == "!" && scalar_expr_type(expr, ctx).is_some_and(|typ| typ.canonical() == Typ::Float) {
         // Reuse the ordered Float equality path, including its NaN parity guard.
         return lower_binary_expr(

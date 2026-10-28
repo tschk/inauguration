@@ -1,13 +1,16 @@
-//! Transient Rust reference provenance, erased after operator dispatch.
-//! The proof identity and the preexisting owned representation are deliberately
-//! distinct; this does not introduce a native reference ABI.
+//! Rust reference provenance and the owned aggregate address ABI.
+//! Scalar views keep their existing representation; aggregate borrows retain
+//! their reference identity through native lowering instead of copying storage.
 use super::{Expr, Typ};
 use serde::{Deserialize, Serialize};
 
 const TYPE_PREFIX: &str = "#rust-reference-type:";
+const ADDRESS_PREFIX: &str = "#rust-reference-address:";
 pub(crate) const NEGATE_VALUE: &str = "#rust-negate";
 pub(crate) const SHARED_VALUE: &str = "#rust-reference-shared";
 pub(crate) const MUTABLE_VALUE: &str = "#rust-reference-mutable";
+const SHARED_ADDRESS: &str = "#rust-address-shared";
+const MUTABLE_ADDRESS: &str = "#rust-address-mutable";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReferenceType {
@@ -17,7 +20,11 @@ pub(crate) struct ReferenceType {
 }
 
 pub(crate) fn decode(name: &str) -> Option<ReferenceType> {
-    serde_json::from_str(name.strip_prefix(TYPE_PREFIX)?).ok()
+    serde_json::from_str(
+        name.strip_prefix(TYPE_PREFIX)
+            .or_else(|| name.strip_prefix(ADDRESS_PREFIX))?,
+    )
+    .ok()
 }
 
 pub(crate) fn typ(reference: ReferenceType) -> Typ {
@@ -27,10 +34,37 @@ pub(crate) fn typ(reference: ReferenceType) -> Typ {
     ))
 }
 
+pub(crate) fn rebuild(name: &str, reference: ReferenceType) -> Typ {
+    if name.starts_with(ADDRESS_PREFIX) {
+        address_type(reference)
+    } else {
+        typ(reference)
+    }
+}
+
+fn address_type(reference: ReferenceType) -> Typ {
+    Typ::Named(format!(
+        "{ADDRESS_PREFIX}{}",
+        serde_json::to_string(&reference).expect("reference type serializes")
+    ))
+}
+
+pub(crate) fn aggregate_referent(value: &Typ) -> Option<Typ> {
+    let Typ::Named(name) = value else { return None };
+    let reference = decode(name)?;
+    let runtime = reference.runtime.canonical();
+    (matches!(runtime, Typ::Named(_)) && crate::core_atomic::Kind::from_type(&runtime).is_none())
+        .then_some(runtime)
+}
+
+pub(crate) fn dereferenced(value: &Typ) -> Typ {
+    aggregate_referent(value).unwrap_or_else(|| value.canonical())
+}
+
 pub(crate) fn value_kind(op: &str) -> Option<bool> {
     match op {
-        SHARED_VALUE => Some(false),
-        MUTABLE_VALUE => Some(true),
+        SHARED_VALUE | SHARED_ADDRESS => Some(false),
+        MUTABLE_VALUE | MUTABLE_ADDRESS => Some(true),
         _ => None,
     }
 }
@@ -38,6 +72,13 @@ pub(crate) fn value_kind(op: &str) -> Option<bool> {
 pub(crate) fn value_type(op: &str, referent: Typ) -> Option<Typ> {
     let mutable = value_kind(op)?;
     let runtime = erase_type(referent.clone());
+    if matches!(op, SHARED_ADDRESS | MUTABLE_ADDRESS) {
+        return Some(erase_type(typ(ReferenceType {
+            mutable,
+            referent,
+            runtime,
+        })));
+    }
     Some(typ(ReferenceType {
         mutable,
         referent,
@@ -129,6 +170,13 @@ pub(crate) fn erase_type(value: Typ) -> Typ {
     match value {
         Typ::Named(name) => {
             if let Some(reference) = decode(&name) {
+                if aggregate_referent(&Typ::Named(name.clone())).is_some() {
+                    return address_type(ReferenceType {
+                        mutable: reference.mutable,
+                        referent: erase_type(reference.referent),
+                        runtime: erase_type(reference.runtime),
+                    });
+                }
                 return erase_type(reference.runtime);
             }
             if let Some(fields) = super::tuples::fields(&name) {
@@ -148,16 +196,13 @@ pub(crate) fn erase_type(value: Typ) -> Typ {
 }
 
 pub(crate) fn erase_value(value: &mut Expr) {
-    if let Expr::Unary { op, .. } = value
-        && op == NEGATE_VALUE
-    {
-        *op = "-".into();
-        return;
-    }
-    if let Expr::Unary { op, expr } = value
-        && value_kind(op).is_some()
-    {
-        *value = expr.as_ref().clone();
+    if let Expr::Unary { op, .. } = value {
+        match op.as_str() {
+            NEGATE_VALUE => *op = "-".into(),
+            SHARED_VALUE => *op = SHARED_ADDRESS.into(),
+            MUTABLE_VALUE => *op = MUTABLE_ADDRESS.into(),
+            _ => {}
+        }
     }
 }
 
@@ -191,7 +236,7 @@ pub(crate) fn qualify_receiver_identity(
 pub(crate) fn erase_declarations(decls: &mut Vec<super::Decl>) {
     super::tuples::project_declarations(decls, |decls| {
         crate::core_bindings::rewrite_named_types(decls, &|name| {
-            decode(name).map(|reference| erase_type(reference.runtime))
+            decode(name).map(|_| erase_type(Typ::Named(name.into())))
         });
         crate::core_opt::map_decl_exprs_mut(decls, &mut erase_value);
     });
@@ -251,12 +296,14 @@ mod tests {
         let tuple =
             super::super::tuples::typ(&[reference.clone(), Typ::Array(Box::new(reference))]);
         let erased = erase_type(tuple);
+        let address = address_type(ReferenceType {
+            mutable: false,
+            referent: Typ::Named("Row".into()),
+            runtime: Typ::Named("Row".into()),
+        });
         assert_eq!(
             erased,
-            super::super::tuples::typ(&[
-                Typ::Named("Row".into()),
-                Typ::Array(Box::new(Typ::Named("Row".into())))
-            ])
+            super::super::tuples::typ(&[address.clone(), Typ::Array(Box::new(address))])
         );
     }
     #[test]
@@ -311,6 +358,19 @@ mod tests {
         });
         assert_ne!(decorated, original);
         erase_declarations(&mut decorated);
+        let once = decorated.clone();
+        erase_declarations(&mut decorated);
+        assert_eq!(decorated, once);
+        crate::core_bindings::rewrite_named_types(&mut decorated, &|name| {
+            decode(name).map(|reference| reference.runtime)
+        });
+        crate::core_opt::map_decl_exprs_mut(&mut decorated, &mut |value| {
+            if let Expr::Unary { op, expr } = value
+                && matches!(op.as_str(), SHARED_ADDRESS | MUTABLE_ADDRESS)
+            {
+                *value = (**expr).clone();
+            }
+        });
         assert_eq!(decorated, original);
     }
 }

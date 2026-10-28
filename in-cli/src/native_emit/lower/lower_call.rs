@@ -497,13 +497,39 @@ pub(crate) fn lower_call_arg(
     fn_name: &str,
     param_name: &str,
 ) -> Result<u8, String> {
+    if crate::core_ir::rust_references::aggregate_referent(typ).is_some() {
+        if super::lower_expr::native_expr_type(arg, ctx, functions)
+            .as_ref()
+            .and_then(crate::core_ir::rust_references::aggregate_referent)
+            .is_some()
+        {
+            lower_expr_into(emitter, ctx, arg, reg, functions, pending_calls, fn_name)?;
+            return Ok(reg + 1);
+        }
+        let referent = match arg {
+            Expr::Unary { op, expr }
+                if crate::core_ir::rust_references::value_kind(op).is_some() =>
+            {
+                expr.as_ref()
+            }
+            value => value,
+        };
+        return lower_struct_ptr_arg(
+            emitter,
+            ctx,
+            referent,
+            reg,
+            functions,
+            pending_calls,
+            fn_name,
+        );
+    }
     match typ {
         Typ::Int | Typ::Bool | Typ::String | Typ::Float => {
             lower_expr_into(emitter, ctx, arg, reg, functions, pending_calls, fn_name)?;
             Ok(reg + 1)
         }
         Typ::Named(struct_name) => {
-            // ponytail: "self" parameter in impl methods is always &self (reference)
             if param_name == "self" {
                 if matches!(arg, Expr::Index { .. })
                     && !matches!(super::lower_expr::native_expr_type(arg, ctx, functions).map(|typ| typ.canonical()), Some(Typ::Named(actual)) if actual == *struct_name)
@@ -717,6 +743,11 @@ pub(crate) fn aggregate_scratch_fields(
         fn_name: &str,
         visited: &mut Vec<String>,
     ) -> Result<(), String> {
+        if crate::core_ir::rust_references::aggregate_referent(typ).is_some() {
+            fields.insert(prefix.to_string(), *next_offset);
+            *next_offset += 8;
+            return Ok(());
+        }
         match typ {
             Typ::Int | Typ::Bool | Typ::String | Typ::Float => {
                 fields.insert(prefix.to_string(), *next_offset);
@@ -791,6 +822,22 @@ pub(crate) fn lower_struct_ptr_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
+    if let Expr::Field { base, name } = arg
+        && let Some((pointer, offset)) =
+            super::lower_expr::borrowed_field_place(ctx, base, name, functions)?
+    {
+        lower_expr_into(
+            emitter,
+            ctx,
+            pointer,
+            reg,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        emitter.emit_u32(aarch64::add_imm64(reg, reg, offset as u16));
+        return Ok(reg + 1);
+    }
     if let Expr::Index { base, index } = arg {
         super::lower_expr::lower_record_index_address(
             emitter,
@@ -981,6 +1028,20 @@ pub(crate) fn lower_array_call_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
+    if let Expr::Unary { op, expr: source } = arg
+        && crate::core_ir::rust_references::value_kind(op).is_some()
+    {
+        return lower_array_call_arg(
+            emitter,
+            ctx,
+            source,
+            elem,
+            reg,
+            functions,
+            pending_calls,
+            fn_name,
+        );
+    }
     if let Expr::Unary { op, expr: source } = arg
         && let Some(count) = crate::core_ir::array_copy::count(op)
     {

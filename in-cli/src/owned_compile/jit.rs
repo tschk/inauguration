@@ -518,6 +518,14 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
         structs: &std::collections::HashMap<&str, &[(String, Typ)]>,
         active: &mut std::collections::HashSet<String>,
     ) -> Option<usize> {
+        if let Some(Typ::Named(referent)) = crate::core_ir::rust_references::aggregate_referent(typ)
+        {
+            if active.contains(&referent) {
+                return Some(1);
+            }
+            layout_words(&Typ::Named(referent), structs, active)?;
+            return Some(1);
+        }
         match typ.canonical() {
             Typ::Int | Typ::Bool | Typ::Float | Typ::String => Some(1),
             Typ::Vector(item) => {
@@ -616,7 +624,9 @@ pub(super) fn rust_entry_can_execute(module: &UnifiedModule, entry: &str, reques
             }
             let words = params.iter().try_fold(0usize, |total, (name, typ)| {
                 let layout = layout_words(typ, &structs, &mut std::collections::HashSet::new())?;
-                let words = if name == "self" && matches!(typ.canonical(), Typ::Named(_)) {
+                let words = if (name == "self" && matches!(typ.canonical(), Typ::Named(_)))
+                    || crate::core_ir::rust_references::aggregate_referent(typ).is_some()
+                {
                     1
                 } else {
                     layout

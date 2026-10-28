@@ -41,6 +41,57 @@ fn default_request(
 }
 
 #[test]
+fn rust_borrowed_record_parameters_preserve_caller_storage() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("borrowed-record.rs");
+    for body in [
+        "fn main()->i64{let mut value=Row{left:19,right:23};update(&mut value);value.right}",
+        "fn main()->i64{let mut value=Row{left:19,right:23};let alias=&mut value;update(alias);value.right}",
+        "struct Outer{guard:i64,row:Row}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:19,right:23}};update(&mut outer.row);outer.row.right+outer.guard-7}",
+        "struct Outer{guard:i64,row:Row}fn relay(outer:&mut Outer){update(&mut outer.row);}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:19,right:23}};relay(&mut outer);outer.row.right+outer.guard-7}",
+        "fn copy(mut value:Row){value.right=0;}fn read(value:&Row)->i64{value.right}fn main()->i64{let mut value=Row{left:19,right:23};update(&mut value);copy(value);read(&value)}",
+        "struct Holder<'a>{guard:i64,row:&'a mut Row}fn relay(holder:&mut Holder){update(holder.row);}fn main()->i64{let mut value=Row{left:19,right:23};let mut holder=Holder{guard:7,row:&mut value};relay(&mut holder);holder.row.right+holder.guard-7}",
+        "struct Holder<'a>{guard:i64,row:&'a mut Row}fn main()->i64{let mut value=Row{left:19,right:23};let holder=Holder{guard:7,row:&mut value};let guard=holder.guard;holder.row.right+=holder.row.left;value.right+guard-7}",
+        "struct Outer{guard:i64,row:Row}fn replace(outer:&mut Outer){outer.row=Row{left:19,right:23};}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:3,right:5}};replace(&mut outer);outer.row.left+outer.row.right+outer.guard-7}",
+        "struct Outer{guard:i64,row:Row}struct Wrap<'a>{outer:&'a mut Outer}fn replace(wrapper:&mut Wrap){wrapper.outer.row=Row{left:19,right:23};}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:3,right:5}};let mut wrapper=Wrap{outer:&mut outer};replace(&mut wrapper);outer.row.left+outer.row.right+outer.guard-7}",
+        "fn relay(value:&mut Row)->&mut Row{while value.left<19{value.left+=1;}value}fn main()->i64{let mut value=Row{left:17,right:23};let alias=relay(&mut value);update(alias);value.right}",
+        "struct Outer{guard:i64,row:Row}fn project(outer:&mut Outer)->&mut Row{while outer.row.left<19{outer.row.left+=1;}&mut outer.row}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:17,right:23}};let alias=project(&mut outer);update(alias);outer.row.right+outer.guard-7}",
+    ] {
+        let source = format!(
+            "#[derive(Clone,Copy)]struct Row{{left:i64,right:i64}}fn update(value:&mut Row){{value.right+=value.left;}}{body}"
+        );
+        fs::write(&path, &source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            let out = temp_path("borrowed-record-native");
+            let report = compile_owned(&default_request(
+                path.clone(),
+                target,
+                Some("main"),
+                Some(out.clone()),
+            ));
+            assert!(report.success, "{source}: {report:?}");
+            if target == CompileTarget::Jit {
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{source}: {report:?}"
+                );
+            } else {
+                assert_eq!(
+                    std::process::Command::new(&out).status().unwrap().code(),
+                    Some(42),
+                    "{source}"
+                );
+                fs::remove_file(out).unwrap();
+            }
+        }
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn rust_let_else_preserves_matching_scope_effects_and_divergence() {
     if !super::jit::host_supports_jit() {
         return;

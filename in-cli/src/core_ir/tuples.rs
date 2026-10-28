@@ -492,12 +492,13 @@ mod reference_shape_tests {
             .collect();
         assert_eq!(recovered, items);
         let erased = crate::core_ir::rust_references::erase_type(Typ::Named(name));
+        let address = crate::core_ir::rust_references::erase_type(reference);
         assert_eq!(
             erased,
             typ(&[
-                Typ::Named("Row".into()),
-                Typ::Array(Box::new(Typ::Named("Row".into()))),
-                Typ::Vector(Box::new(Typ::Named("Row".into()))),
+                address.clone(),
+                Typ::Array(Box::new(address.clone())),
+                Typ::Vector(Box::new(address)),
                 Typ::Named("#rust-integer-i8".into())
             ])
         );

@@ -973,7 +973,15 @@ pub(crate) fn lower_stdlib_call(
                 }
             }
             crate::core_atomic::check_order(op, args.last().unwrap())?;
-            let Expr::Ident(name) = &args[0] else {
+            let receiver = match &args[0] {
+                Expr::Unary { op, expr }
+                    if crate::core_ir::rust_references::value_kind(op).is_some() =>
+                {
+                    expr.as_ref()
+                }
+                value => value,
+            };
+            let Expr::Ident(name) = receiver else {
                 return Err("native-lower: atomic receiver must be a static cell".into());
             };
             if ctx.locals.contains_key(name) || ctx.global_types.get(name) != Some(&kind.typ()) {

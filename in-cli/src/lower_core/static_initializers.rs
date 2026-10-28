@@ -428,6 +428,18 @@ impl Eval<'_> {
                 }
             }
             Expr::Unary { op, expr } => {
+                if crate::core_ir::rust_references::value_kind(op).is_some() {
+                    let value = self.expr(expr, env)?;
+                    return matches!(
+                        value,
+                        Expr::ArrayLit(_)
+                            | Expr::StringLit(_)
+                            | Expr::IntLit(_)
+                            | Expr::BoolLit(_)
+                            | Expr::FloatLit(_)
+                    )
+                    .then_some(value);
+                }
                 if let Some(kind) = op
                     .strip_prefix("rust-checked-integer-")
                     .or_else(|| op.strip_prefix("rust-wrapping-integer-"))

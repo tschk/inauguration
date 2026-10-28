@@ -7211,7 +7211,10 @@ mod retained_unary_artifact_tests {
         else {
             unreachable!()
         };
-        assert_eq!(params[0].1, Typ::Named("Row".into()));
+        assert_eq!(
+            rust_references::aggregate_referent(&params[0].1),
+            Some(Typ::Named("Row".into()))
+        );
         assert!(
             matches!(&body[0],Stmt::Return(Some(Expr::Call{callee,..}))if matches!(callee.as_ref(),Expr::Ident(name)if name=="&Row::std::ops::Neg::neg"))
         );

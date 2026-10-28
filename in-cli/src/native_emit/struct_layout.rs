@@ -86,6 +86,10 @@ fn fields(
             } else {
                 format!("{prefix}.{field}")
             };
+            if crate::core_ir::rust_references::aggregate_referent(typ).is_some() {
+                out.push((field, Typ::Int));
+                continue;
+            }
             match typ.canonical() {
                 typ @ (Typ::Int | Typ::Bool | Typ::String | Typ::Float) => out.push((field, typ)),
                 typ @ Typ::Vector(_) if matches!(layout, FieldLayout::X86) => {

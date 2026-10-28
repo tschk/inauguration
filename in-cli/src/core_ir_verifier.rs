@@ -2385,8 +2385,8 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
             }),
         Expr::StructInit { name, .. } => Some(Typ::Named(name.clone())),
         Expr::Field { base, name, .. } => {
-            if let Some(Typ::Named(struct_name)) =
-                expr_type(base, facts, env).map(|typ| typ.canonical())
+            if let Some(Typ::Named(struct_name)) = expr_type(base, facts, env)
+                .map(|typ| crate::core_ir::rust_references::dereferenced(&typ))
                 && let Some(schema) = facts.structs.get(struct_name.as_str())
                 && let Some((_, typ)) = schema.iter().find(|(field, _)| field == name)
             {

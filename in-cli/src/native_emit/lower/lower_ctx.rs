@@ -583,7 +583,12 @@ fn alloc_nested_struct_slots_inner(
     }
     visited.push(base_name.to_string());
     for (field, field_ty) in fields {
-        match field_ty {
+        let physical = if crate::core_ir::rust_references::aggregate_referent(field_ty).is_some() {
+            &Typ::Int
+        } else {
+            field_ty
+        };
+        match physical {
             Typ::Void => {
                 return Err(
                     "native-lower: unit aggregate fields require a zero-width layout".into(),
@@ -830,6 +835,11 @@ impl<'a> LowerCtx<'a> {
                         abi_idx += 2;
                         continue;
                     }
+                    let referent = crate::core_ir::rust_references::aggregate_referent(typ);
+                    let struct_name = match &referent {
+                        Some(Typ::Named(name)) => name,
+                        _ => struct_name,
+                    };
                     let base = base_struct_name(struct_name);
                     let Some(fields) = structs.get(base) else {
                         let offset = ctx.alloc_slot();
@@ -843,7 +853,7 @@ impl<'a> LowerCtx<'a> {
                         abi_idx += 1;
                         continue;
                     };
-                    let slots = if name == "self" {
+                    let slots = if name == "self" || referent.is_some() {
                         let pointer_slot = ctx.alloc_slot();
                         if abi_idx < 8 {
                             ctx.param_stores.push((abi_idx as u8, pointer_slot));
@@ -959,6 +969,17 @@ impl<'a> LowerCtx<'a> {
             super::lower_util::ensure_unit_sequence_layout(typ)?;
         }
         if self.locals.contains_key(name) {
+            return Ok(());
+        }
+        if let Some(typ) = typ
+            && let Some(Typ::Named(referent)) =
+                crate::core_ir::rust_references::aggregate_referent(typ)
+            && self.structs.contains_key(base_struct_name(&referent))
+        {
+            self.alloc_local(name, Some(&Typ::Named(referent)), fn_name)?;
+            let pointer = self.alloc_slot();
+            self.receiver_pointers.insert(name.into(), pointer);
+            self.scalar_types.insert(name.into(), typ.clone());
             return Ok(());
         }
         match typ {

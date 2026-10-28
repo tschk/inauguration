@@ -327,7 +327,7 @@ fn typ(value: &mut Typ, names: &NominalNames<'_>, generics: &HashSet<String>) {
                 }
                 typ(&mut reference.referent, names, generics);
                 typ(&mut reference.runtime, names, generics);
-                *value = crate::core_ir::rust_references::typ(reference);
+                *value = crate::core_ir::rust_references::rebuild(name, reference);
                 return;
             }
             if let Some(mut payload) = crate::core_ir::rust_options::payload(name) {
@@ -843,7 +843,10 @@ mod tests {
             else {
                 panic!()
             };
-            assert_eq!(params[0].1, Typ::Named(owner.into()));
+            assert_eq!(
+                crate::core_ir::rust_references::aggregate_referent(&params[0].1),
+                Some(Typ::Named(owner.into()))
+            );
             let mut names = HashSet::new();
             super::super::reserve_body(body, &mut names);
             assert!(names.contains(helper));
@@ -916,7 +919,10 @@ mod tests {
         let mut module = crate::compiler::rust_front::parse_rust_source(source).unwrap();
         qualify_module_decls(&mut module.decls, "dep");
         let Decl::Function {params,body,..}=module.decls.iter().find(|decl|matches!(decl,Decl::Function {name,..} if name.contains("Thing::Read::read"))).unwrap() else {panic!()};
-        assert_eq!(params[0].1, Typ::Named("dep::child::Thing".into()));
+        assert_eq!(
+            crate::core_ir::rust_references::aggregate_referent(&params[0].1),
+            Some(Typ::Named("dep::child::Thing".into()))
+        );
         let mut names = HashSet::new();
         super::super::reserve_body(body, &mut names);
         assert!(names.contains("dep::child::helper"));
@@ -1256,8 +1262,14 @@ mod reference_metadata_namespace_tests {
         let Decl::Function { params, .. } = &decls[1] else {
             unreachable!()
         };
-        assert_eq!(params[0].1, Typ::Named("module::Row".into()));
-        assert_eq!(params[1].1, Typ::Named("&mutRow".into()));
+        assert_eq!(
+            rust_references::aggregate_referent(&params[0].1),
+            Some(Typ::Named("module::Row".into()))
+        );
+        assert_eq!(
+            rust_references::aggregate_referent(&params[1].1),
+            Some(Typ::Named("&mutRow".into()))
+        );
     }
 }
 

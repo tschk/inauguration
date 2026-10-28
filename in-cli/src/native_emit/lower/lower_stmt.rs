@@ -103,6 +103,17 @@ pub(crate) fn lower_stmt(
                     return Err("native-lower: void return requires a unit value".into());
                 }
                 match ret_typ {
+                    typ if crate::core_ir::rust_references::aggregate_referent(typ).is_some() => {
+                        lower_expr::lower_expr_into(
+                            emitter,
+                            ctx,
+                            expr,
+                            0,
+                            functions,
+                            pending_calls,
+                            fn_name,
+                        )?;
+                    }
                     Typ::Named(struct_name) => {
                         lower_struct_expr_into_regs(
                             emitter,
@@ -502,6 +513,16 @@ pub(crate) fn lower_store_local(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Some(&pointer) = ctx.receiver_pointers.get(name)
+        && lower_expr::native_expr_type(expr, ctx, functions)
+            .as_ref()
+            .and_then(crate::core_ir::rust_references::aggregate_referent)
+            .is_some()
+    {
+        lower_expr::lower_expr_into(emitter, ctx, expr, 0, functions, pending_calls, fn_name)?;
+        emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, pointer));
+        return Ok(());
+    }
     let slot = if ctx.locals.contains_key(name) {
         ctx.locals
             .get(name)
@@ -663,8 +684,55 @@ pub(crate) fn lower_field_assign(
         },
         ctx,
         functions,
-    )
-    .map(|typ| typ.canonical());
+    );
+    if field_type.as_ref().is_some_and(is_native_scalar_type)
+        && let Some((pointer, offset)) =
+            lower_expr::borrowed_field_place(ctx, base, name, functions)?
+    {
+        let saved_value = ctx.acquire_binop_temp(fn_name)?;
+        lower_expr::lower_expr_into(emitter, ctx, value, 0, functions, pending_calls, fn_name)?;
+        emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, saved_value));
+        lower_expr::lower_expr_into(emitter, ctx, pointer, 1, functions, pending_calls, fn_name)?;
+        emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, saved_value));
+        emitter.emit_u32(aarch64::str64(0, 1, offset));
+        ctx.release_binop_temp();
+        return Ok(());
+    }
+    if let Some(Typ::Named(record)) = field_type.as_ref().map(Typ::canonical)
+        && let Some((pointer, offset)) =
+            lower_expr::borrowed_field_place(ctx, base, name, functions)?
+    {
+        let schema = crate::native_emit::struct_layout::arm_fields(ctx.structs, &record)?;
+        let temp = ctx.acquire_call_arg_slots(fn_name, schema.len().max(8))?;
+        let staged = super::lower_call::aggregate_scratch_fields(
+            ctx,
+            &record,
+            ctx.call_arg_temps[temp],
+            fn_name,
+        )?;
+        lower_struct_expr_into_slots(
+            emitter,
+            ctx,
+            value,
+            &record,
+            &staged,
+            functions,
+            pending_calls,
+            fn_name,
+        )?;
+        lower_expr::lower_expr_into(emitter, ctx, pointer, 1, functions, pending_calls, fn_name)?;
+        for (index, (field, _)) in schema.iter().enumerate() {
+            let destination = usize::try_from(offset)
+                .ok()
+                .and_then(|offset| offset.checked_add(index.checked_mul(8)?))
+                .filter(|offset| *offset <= 4095 * 8)
+                .ok_or("native-lower: borrowed aggregate exceeds AArch64 store offset subset")?;
+            emitter.emit_u32(aarch64::ldr64(0, aarch64::REG_SP, staged[field]));
+            emitter.emit_u32(aarch64::str64(0, 1, destination as u32));
+        }
+        ctx.release_call_arg_temps();
+        return Ok(());
+    }
     let Some((base_name, prefix)) = super::lower_util::field_path(base) else {
         return Err(format!(
             "native-lower: field assignment base is not addressable in `{fn_name}`"
@@ -1107,6 +1175,21 @@ pub(crate) fn lower_struct_expr_into_slots(
                 let Some((_, field_typ)) = schema.iter().find(|(name, _)| name == field) else {
                     continue; // skip unknown fields
                 };
+                if crate::core_ir::rust_references::aggregate_referent(field_typ).is_some() {
+                    let offset = find_field_offset(fields, field)
+                        .ok_or("native-lower: missing reference field storage")?;
+                    lower_expr::lower_expr_into(
+                        emitter,
+                        ctx,
+                        value,
+                        0,
+                        functions,
+                        pending_calls,
+                        fn_name,
+                    )?;
+                    emitter.emit_u32(aarch64::str64(0, aarch64::REG_SP, *offset));
+                    continue;
+                }
                 if let Typ::Array(elem) = field_typ {
                     lower_array_expr_into_regs(
                         emitter,
@@ -1647,6 +1730,19 @@ pub(crate) fn lower_array_expr_into_regs(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Expr::Unary { op, expr: source } = expr
+        && crate::core_ir::rust_references::value_kind(op).is_some()
+    {
+        return lower_array_expr_into_regs(
+            emitter,
+            ctx,
+            source,
+            elem,
+            functions,
+            pending_calls,
+            fn_name,
+        );
+    }
     if let Expr::Unary { op, expr: source } = expr
         && let Some(count) = crate::core_ir::array_copy::count(op)
     {

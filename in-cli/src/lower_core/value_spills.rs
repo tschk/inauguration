@@ -28,6 +28,9 @@ fn is_addressable(expr: &Expr) -> bool {
     match expr {
         Expr::Ident(_) => true,
         Expr::Field { base, .. } | Expr::Index { base, .. } => is_addressable(base),
+        Expr::Unary { op, expr } if crate::core_ir::rust_references::value_kind(op).is_some() => {
+            is_addressable(expr)
+        }
         Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW) =>
         {
             matches!(args.as_slice(), [value] if is_addressable(value))
@@ -50,6 +53,10 @@ fn expr_needs_spills(expr: &Expr, facts: &crate::typecheck::Facts) -> bool {
         return true;
     }
     if matches!(expr, Expr::Field { base, .. } if !is_addressable(base)) {
+        return true;
+    }
+    if matches!(expr, Expr::Unary { op, expr } if crate::core_ir::rust_references::value_kind(op).is_some() && !is_addressable(expr))
+    {
         return true;
     }
     if let Expr::Call { callee, args } = expr
@@ -316,12 +323,22 @@ impl Lower {
                 **index = self.save((**index).clone(), out);
             }
             Expr::Field { base, .. } => self.stage_receiver_place(base, out),
+            Expr::Unary { op, expr }
+                if crate::core_ir::rust_references::value_kind(op).is_some() =>
+            {
+                self.stage_receiver_place(expr, out);
+            }
             Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW) => {
                 if let [value] = args.as_mut_slice() {
                     self.stage_receiver_place(value, out);
                 }
             }
-            _ => self.expr(expr, out),
+            _ => {
+                self.expr(expr, out);
+                if !is_addressable(expr) {
+                    *expr = self.save(expr.clone(), out);
+                }
+            }
         }
     }
 
@@ -492,6 +509,13 @@ impl Lower {
             }
             self.constants = constants;
             self.types = types;
+            return;
+        }
+
+        if let Expr::Unary { op, expr: referent } = expr
+            && crate::core_ir::rust_references::value_kind(op).is_some()
+        {
+            self.stage_receiver_place(referent, out);
             return;
         }
 

@@ -740,6 +740,34 @@ pub(crate) fn lower_struct_field_into(
     Ok(())
 }
 
+pub(crate) fn borrowed_field_place<'a>(
+    ctx: &LowerCtx<'_>,
+    base: &'a Expr,
+    name: &str,
+    functions: &HashMap<String, FunctionInfo>,
+) -> Result<Option<(&'a Expr, u32)>, String> {
+    if let Some(Typ::Named(record)) = native_expr_type(base, ctx, functions)
+        .as_ref()
+        .and_then(crate::core_ir::rust_references::aggregate_referent)
+    {
+        let fields = crate::native_emit::struct_layout::arm_fields(ctx.structs, &record)?;
+        let prefix = format!("{name}.");
+        let index = fields
+            .iter()
+            .position(|(field, _)| field == name || field.starts_with(&prefix))
+            .ok_or_else(|| format!("native-lower: unknown borrowed field `{record}.{name}`"))?;
+        let offset = index
+            .checked_mul(8)
+            .filter(|offset| *offset <= 4095)
+            .ok_or("native-lower: borrowed field exceeds AArch64 address offset subset")?;
+        return Ok(Some((base, offset as u32)));
+    }
+    if let Expr::Field { base, name: parent } = base {
+        return borrowed_field_place(ctx, base, &format!("{parent}.{name}"), functions);
+    }
+    Ok(None)
+}
+
 pub(crate) fn lower_field(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -750,6 +778,38 @@ pub(crate) fn lower_field(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if let Some((pointer, offset)) = borrowed_field_place(ctx, base, name, functions)? {
+        let typ = native_expr_type(
+            &Expr::Field {
+                base: Box::new(base.clone()),
+                name: name.into(),
+            },
+            ctx,
+            functions,
+        )
+        .ok_or("native-lower: unknown borrowed field type")?;
+        lower_expr_into(emitter, ctx, pointer, rd, functions, pending_calls, fn_name)?;
+        if super::lower_util::is_native_scalar_type(&typ) {
+            emitter.emit_u32(aarch64::ldr64(rd, rd, offset));
+        } else {
+            emitter.emit_u32(aarch64::add_imm64(rd, rd, offset as u16));
+        }
+        return Ok(());
+    }
+    if let Expr::Unary { op, expr } = base
+        && crate::core_ir::rust_references::value_kind(op).is_some()
+    {
+        return lower_field(
+            emitter,
+            ctx,
+            expr,
+            name,
+            rd,
+            functions,
+            pending_calls,
+            fn_name,
+        );
+    }
     if let Expr::Index { base: array, index } = base {
         let fields = lower_record_index_address(
             emitter,
@@ -1054,6 +1114,24 @@ pub(crate) fn lower_unary(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<(), String> {
+    if crate::core_ir::rust_references::value_kind(op).is_some() {
+        if let Some(Typ::Named(name)) = native_expr_type(expr, ctx, functions)
+            .map(|typ| crate::core_ir::rust_references::dereferenced(&typ))
+            && ctx.structs.contains_key(&name)
+        {
+            return super::lower_call::lower_struct_ptr_arg(
+                emitter,
+                ctx,
+                expr,
+                rd,
+                functions,
+                pending_calls,
+                fn_name,
+            )
+            .map(|_| ());
+        }
+        return lower_expr_into(emitter, ctx, expr, rd, functions, pending_calls, fn_name);
+    }
     if let Some(count) = crate::core_ir::array_copy::count(op) {
         return lower_array_copy(
             emitter,
@@ -1749,7 +1827,7 @@ fn native_expr_type_with_bindings(
         Expr::Field { base, name } => {
             let mut typ = native_expr_type_with_bindings(base, ctx, functions, bindings)?;
             for field in name.split('.') {
-                let struct_name = match typ.canonical() {
+                let struct_name = match crate::core_ir::rust_references::dereferenced(&typ) {
                     Typ::Named(name) => name,
                     Typ::Vector(_) => "Vec".to_string(),
                     _ => return None,
@@ -1775,6 +1853,12 @@ fn native_expr_type_with_bindings(
                 .or_else(|| crate::core_ir_verifier::intrinsic_return_type(name).cloned()),
             _ => None,
         },
+        Expr::Unary { op, expr } if crate::core_ir::rust_references::value_kind(op).is_some() => {
+            crate::core_ir::rust_references::value_type(
+                op,
+                native_expr_type_with_bindings(expr, ctx, functions, bindings)?,
+            )
+        }
         Expr::Unary { op, expr }
             if op == "-"
                 || op == "vector-clone"
