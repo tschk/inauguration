@@ -698,6 +698,14 @@ fn json_report_formatting() {
 }
 
 #[test]
+fn json_report_formatting_includes_function_count() {
+    let temp = temp_source("main", "in", "fn main() -> void { return; }\n");
+    let report = json_report(&temp.path, &AgentModeConfig::default()).expect("report");
+    let json = serde_json::to_string_pretty(&report).expect("json serialize");
+    assert!(json.contains("\"function_count\": 1"));
+}
+
+#[test]
 fn explain_summarizes_successful_report() {
     let temp = temp_source("explain", "in", "fn main() -> void { return; }\n");
     let explanation = explain(&temp.path, &AgentModeConfig::default()).expect("explain");
