@@ -3665,3 +3665,31 @@ fn c_global_function_addresses_are_declared_before_initializers() {
     assert!(declaration < initializer, "{c}");
     assert_inferred_c_executes(&module, "return (int)answer();");
 }
+
+#[test]
+fn unsupported_match_pattern_error() {
+    use crate::core_ir::MatchArm;
+    let module = UnifiedModule::new(vec![Decl::Function {
+        name: "test_unsupported_match".into(),
+        params: vec![("x".into(), Typ::Int)],
+        ret: Typ::Int,
+        body: vec![Stmt::Match {
+            scrutinee: Expr::Ident("x".into()),
+            arms: vec![MatchArm {
+                guard: None,
+                pattern: "SomeStruct { x: 1 }".into(),
+                body: vec![Stmt::Return(Some(Expr::IntLit(1)))],
+            }],
+        }],
+        type_params: vec![],
+    }]);
+
+    let result = emit_c_module(&module);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err();
+    assert!(
+        err_msg.contains("c-backend: unsupported match pattern `SomeStruct { x: 1 }`"),
+        "Unexpected error: {}",
+        err_msg
+    );
+}
