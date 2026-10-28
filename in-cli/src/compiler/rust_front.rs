@@ -30,14 +30,6 @@ pub fn parse_rust_artifact(path: &Path) -> Result<CompileArtifact, String> {
     parse_rust_path_artifact(path, true)
 }
 
-pub(crate) fn parse_rust_artifact_with_cargo_cfg(
-    path: &Path,
-    features: &[String],
-    target_cfg: Option<&[String]>,
-) -> Result<CompileArtifact, String> {
-    type_aliases::with_cargo_cfg(features, target_cfg, || parse_rust_artifact(path))
-}
-
 /// Parse a lazily discovered module without claiming that its source file owns `crate::`.
 pub(crate) fn parse_rust_module_artifact(path: &Path) -> Result<CompileArtifact, String> {
     parse_rust_path_artifact(path, false)
@@ -80,10 +72,7 @@ fn parse_rust_source_unit(
     base_dir: &Path,
     owns_crate_root: bool,
 ) -> Result<CompileArtifact, String> {
-    let mut file = syn::parse_file(src).map_err(|e| format!("rust parse failed: {e}"))?;
-    // Build one source catalog before lowering any module. Parsing external files
-    // as independent roots loses crate/super imports, visibility and alias proofs.
-    load_source_modules(&mut file.items, base_dir, base_dir, &mut HashSet::new(), 0)?;
+    let file = syn::parse_file(src).map_err(|e| format!("rust parse failed: {e}"))?;
     let catalog = if owns_crate_root {
         type_aliases::Catalog::new(&file)
     } else {
@@ -96,78 +85,6 @@ fn parse_rust_source_unit(
     retain_alias_declaration_failures(&mut artifact, failures);
     artifact.boundary = extract_boundary_module(&file, module_id);
     Ok(artifact)
-}
-
-fn load_source_modules(
-    items: &mut [syn::Item],
-    directory: &Path,
-    path_directory: &Path,
-    active: &mut HashSet<PathBuf>,
-    depth: usize,
-) -> Result<(), String> {
-    if depth >= 6 {
-        return Ok(());
-    }
-    for item in items {
-        if type_aliases::item_presence(item) == type_aliases::Presence::Inactive {
-            continue;
-        }
-        let syn::Item::Mod(module) = item else {
-            continue;
-        };
-        let name = module.ident.to_string();
-        if let Some((_, items)) = &mut module.content {
-            let nested = directory.join(&name);
-            load_source_modules(items, &nested, &nested, active, depth + 1)?;
-            continue;
-        }
-        let explicit = module.attrs.iter().find_map(|attribute| {
-            if !attribute.path().is_ident("path") {
-                return None;
-            }
-            let syn::Meta::NameValue(value) = &attribute.meta else {
-                return None;
-            };
-            let syn::Expr::Lit(literal) = &value.value else {
-                return None;
-            };
-            let syn::Lit::Str(path) = &literal.lit else {
-                return None;
-            };
-            // Unlike default child modules, #[path] in foo.rs is relative to
-            // foo.rs's directory, not its implicit foo/ child-module directory.
-            Some(path_directory.join(path.value()))
-        });
-        let path = explicit.or_else(|| {
-            [
-                directory.join(format!("{name}.rs")),
-                directory.join(&name).join("mod.rs"),
-            ]
-            .into_iter()
-            .find(|path| path.is_file())
-        });
-        let Some(path) = path else { continue };
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-        if !active.insert(canonical.clone()) {
-            return Err(format!("cyclic Rust source module: {}", path.display()));
-        }
-        let source = std::fs::read_to_string(&path)
-            .map_err(|error| format!("read Rust module {}: {error}", path.display()))?;
-        let mut file = syn::parse_file(&source)
-            .map_err(|error| format!("parse Rust module {}: {error}", path.display()))?;
-        let parent = path.parent().unwrap_or(directory);
-        let child_directory = if path.file_name().is_some_and(|name| name == "mod.rs") {
-            parent.to_path_buf()
-        } else {
-            parent.join(path.file_stem().unwrap_or_default())
-        };
-        load_source_modules(&mut file.items, &child_directory, parent, active, depth + 1)?;
-        module.attrs.extend(file.attrs);
-        module.content = Some((syn::token::Brace::default(), file.items));
-        module.semi = None;
-        active.remove(&canonical);
-    }
-    Ok(())
 }
 
 fn retain_alias_declaration_failures(
@@ -722,41 +639,26 @@ fn reject_integer_primitive_shadowing(items: &[syn::Item]) -> Result<(), String>
         }
         Ok(())
     };
-    struct NestedItems(Result<(), String>);
-    impl<'ast> syn::visit::Visit<'ast> for NestedItems {
-        fn visit_item(&mut self, item: &'ast syn::Item) {
-            // Modules are checked by their owning invocation below. Inactive
-            // items and unexpanded macro tokens must not introduce bindings.
-            if self.0.is_ok()
-                && !matches!(item, syn::Item::Mod(_))
-                && type_aliases::item_presence(item) != type_aliases::Presence::Inactive
-            {
-                syn::visit::visit_item(self, item);
-            }
-        }
-
-        fn visit_stmt(&mut self, statement: &'ast syn::Stmt) {
-            if self.0.is_err() {
-                return;
-            }
-            if let syn::Stmt::Item(item) = statement {
-                self.0 = reject_integer_primitive_shadowing(std::slice::from_ref(item));
+    fn nested_blocks(mut cursor: syn::buffer::Cursor<'_>) -> Result<(), String> {
+        while !cursor.eof() {
+            if let Some((inside, _, _, after)) = cursor.any_group() {
+                let tokens = inside.token_stream();
+                if let Ok(block) = syn::parse2::<syn::Block>(quote::quote!({ #tokens })) {
+                    for statement in &block.stmts {
+                        if let syn::Stmt::Item(item) = statement {
+                            reject_integer_primitive_shadowing(std::slice::from_ref(item))?;
+                        }
+                    }
+                }
+                nested_blocks(inside)?;
+                cursor = after;
+            } else if let Some((_, after)) = cursor.token_tree() {
+                cursor = after;
             } else {
-                syn::visit::visit_stmt(self, statement);
+                break;
             }
         }
-
-        fn visit_impl_item_fn(&mut self, method: &'ast syn::ImplItemFn) {
-            if type_aliases::attrs_presence(&method.attrs) != type_aliases::Presence::Inactive {
-                syn::visit::visit_impl_item_fn(self, method);
-            }
-        }
-
-        fn visit_trait_item_fn(&mut self, method: &'ast syn::TraitItemFn) {
-            if type_aliases::attrs_presence(&method.attrs) != type_aliases::Presence::Inactive {
-                syn::visit::visit_trait_item_fn(self, method);
-            }
-        }
+        Ok(())
     }
     for item in items {
         if type_aliases::item_presence(item) == type_aliases::Presence::Inactive {
@@ -831,6 +733,11 @@ fn reject_integer_primitive_shadowing(items: &[syn::Item]) -> Result<(), String>
             }
             syn::Item::Fn(value) => {
                 check_generics(&value.sig.generics)?;
+                for statement in &value.block.stmts {
+                    if let syn::Stmt::Item(item) = statement {
+                        reject_integer_primitive_shadowing(std::slice::from_ref(item))?;
+                    }
+                }
             }
             syn::Item::Mod(value) => {
                 if let Some((_, items)) = &value.content {
@@ -841,18 +748,8 @@ fn reject_integer_primitive_shadowing(items: &[syn::Item]) -> Result<(), String>
                 check_generics(&value.generics)?;
                 for item in &value.items {
                     match item {
-                        syn::ImplItem::Fn(value)
-                            if type_aliases::attrs_presence(&value.attrs)
-                                != type_aliases::Presence::Inactive =>
-                        {
-                            check_generics(&value.sig.generics)?
-                        }
-                        syn::ImplItem::Type(value)
-                            if type_aliases::attrs_presence(&value.attrs)
-                                != type_aliases::Presence::Inactive =>
-                        {
-                            check_name(&value.ident)?
-                        }
+                        syn::ImplItem::Fn(value) => check_generics(&value.sig.generics)?,
+                        syn::ImplItem::Type(value) => check_name(&value.ident)?,
                         _ => {}
                     }
                 }
@@ -862,18 +759,8 @@ fn reject_integer_primitive_shadowing(items: &[syn::Item]) -> Result<(), String>
                 check_generics(&value.generics)?;
                 for item in &value.items {
                     match item {
-                        syn::TraitItem::Fn(value)
-                            if type_aliases::attrs_presence(&value.attrs)
-                                != type_aliases::Presence::Inactive =>
-                        {
-                            check_generics(&value.sig.generics)?
-                        }
-                        syn::TraitItem::Type(value)
-                            if type_aliases::attrs_presence(&value.attrs)
-                                != type_aliases::Presence::Inactive =>
-                        {
-                            check_name(&value.ident)?
-                        }
+                        syn::TraitItem::Fn(value) => check_generics(&value.sig.generics)?,
+                        syn::TraitItem::Type(value) => check_name(&value.ident)?,
                         _ => {}
                     }
                 }
@@ -881,11 +768,10 @@ fn reject_integer_primitive_shadowing(items: &[syn::Item]) -> Result<(), String>
             _ => {}
         }
     }
-    let mut nested = NestedItems(Ok(()));
-    for item in items {
-        syn::visit::Visit::visit_item(&mut nested, item);
-    }
-    nested.0
+    let tokens =
+        syn::buffer::TokenBuffer::new2(items.iter().map(ToTokens::to_token_stream).collect());
+    nested_blocks(tokens.begin())?;
+    Ok(())
 }
 
 struct LoweredRustArtifact {
@@ -1015,11 +901,6 @@ fn lower_file_items_at_visited(
             syn::Item::ForeignMod(fm) => {
                 for item in &fm.items {
                     if let syn::ForeignItem::Fn(f) = item {
-                        if type_aliases::attrs_presence(&f.attrs)
-                            == type_aliases::Presence::Inactive
-                        {
-                            continue;
-                        }
                         decls.push(Decl::Function {
                             name: f.sig.ident.to_string(),
                             params: f
@@ -1051,11 +932,6 @@ fn lower_file_items_at_visited(
                     PrimitiveRootScope::new(primitive_root_generics(&tr.generics), true);
                 for item in &tr.items {
                     if let syn::TraitItem::Fn(method) = item {
-                        if type_aliases::attrs_presence(&method.attrs)
-                            == type_aliases::Presence::Inactive
-                        {
-                            continue;
-                        }
                         if let Some(block) = &method.default {
                             let f = syn::ItemFn {
                                 attrs: method.attrs.clone(),
@@ -3051,14 +2927,7 @@ fn map_type(ty: &syn::Type) -> Typ {
         }
         syn::Type::Infer(_) => Typ::Generic("_".into()),
         syn::Type::Reference(r) => {
-            // Borrowed slices use the owned runtime's length-bearing sequence
-            // header, not rustc's external fat-pointer ABI. A bare unsized slice
-            // still has no by-value representation.
-            let typ = if let syn::Type::Slice(slice) = r.elem.as_ref() {
-                Typ::Array(Box::new(map_type(&slice.elem)))
-            } else {
-                map_type(&r.elem)
-            };
+            let typ = map_type(&r.elem);
             if matches!(&typ, Typ::Vector(_)) {
                 // shortcut: vector borrows need an address ABI before header mutations can be shared.
                 Typ::Named("#unsupported-borrowed-vector".into())
@@ -4520,53 +4389,25 @@ fn lower_expr_with_types_inner(
         syn::Expr::Macro(mac) => opaque_macro_dependencies(&mac.mac, local_types),
         syn::Expr::Closure(closure) => {
             let mut closure_types = local_types.clone();
-            let mut body = Vec::new();
             let params = closure
                 .inputs
                 .iter()
-                .enumerate()
-                .map(|(index, input)| {
-                    let simple = simple_local_pattern(input);
-                    let name = if simple {
-                        pattern_name(input).unwrap_or_else(|| "_".to_string())
-                    } else {
-                        format!("#closure-parameter-{index}")
-                    };
+                .map(|input| {
+                    let name = pattern_name(input).unwrap_or_else(|| "_".to_string());
                     let typ = local_decl_type(input, &closure_types)
                         .unwrap_or_else(|| Typ::Generic("_".to_string()));
                     closure_types.insert(name.clone(), type_to_string(&typ));
                     closure_types.insert(format!("{LENGTH_LOCAL}{name}"), String::new());
-                    if !simple {
-                        let mut names = HashSet::new();
-                        if tuple_let_pattern(input)
-                            && tuple_bindings_supported(input)
-                            && tuple_let_names(input, &mut names)
-                        {
-                            for name in names {
-                                closure_types.remove(&name);
-                                closure_types
-                                    .insert(format!("{LENGTH_LOCAL}{name}"), String::new());
-                            }
-                            lower_tuple_let_bindings(input, Expr::Ident(name.clone()), &mut body);
-                        } else {
-                            unsupported_pattern_shadows(
-                                input,
-                                &name,
-                                &mut closure_types,
-                                &mut body,
-                            );
-                        }
-                    }
                     (name, typ)
                 })
                 .collect();
-            body.extend(match closure.body.as_ref() {
+            let body = match closure.body.as_ref() {
                 syn::Expr::Block(block) => lower_block_with_types(&block.block, &mut closure_types),
                 body => vec![Stmt::Return(Some(lower_expr_with_types(
                     body,
                     &mut closure_types,
                 )))],
-            });
+            };
             Expr::Closure {
                 params,
                 ret: match &closure.output {
@@ -4945,30 +4786,6 @@ mod tests {
     use crate::core_ir::FloatVal;
 
     #[test]
-    fn ordinary_compilation_excludes_test_items_before_module_and_type_resolution() {
-        for source in [
-            "#[cfg(test)]mod tests{static TEMP_COUNTER:NoSuchType=missing();}fn main()->i64{42}",
-            "#[cfg(test)]mod missing;fn main()->i64{42}",
-            "#[cfg(test)]mod tests{fn unused(){struct u8;}}fn main()->i64{42}",
-            "struct Row;impl Row{#[cfg(test)]fn unused<u8>(){struct u16;}}fn main()->i64{42}",
-            "#[cfg_attr(not(test),cfg(test))]mod missing;fn main()->i64{42}",
-            "#[cfg(all(test,feature=\"unknown\"))]type A=A;fn main()->i64{42}",
-            "#[cfg(not(test))]type Byte=u8;#[cfg(test)]type Byte=Byte;fn main()->Byte{42u8}",
-            "struct Row;impl Row{#[cfg(test)]fn value()->Missing{missing()}#[cfg(not(test))]fn value()->i64{42}}fn main()->i64{Row::value()}",
-            "trait Row{#[cfg(test)]fn test_only()->Missing{missing()}}fn main()->i64{42}",
-            "unsafe extern \"C\"{#[cfg(test)]fn test_only()->Missing;}fn main()->i64{42}",
-        ] {
-            let artifact = parse_rust_artifact_source(source, "ordinary").unwrap();
-            crate::core_ir_verifier::check_execution_contracts(&artifact.semantic)
-                .unwrap_or_else(|error| panic!("{source}: {error}"));
-            assert!(!artifact.semantic.decls.iter().any(|decl| {
-                matches!(decl, Decl::Global { name, .. } if name.contains("TEMP_COUNTER"))
-                    || matches!(decl, Decl::Function { name, .. } if name == "test_only")
-            }));
-        }
-    }
-
-    #[test]
     fn unused_alias_declaration_failures_survive_source_artifact_assembly() {
         for source in [
             "type A=B;type B=A;fn main()->i64{42}",
@@ -4994,25 +4811,33 @@ mod tests {
     }
 
     #[test]
-    fn unused_alias_declaration_failures_survive_external_modules() {
+    fn unused_alias_declaration_failures_survive_parallel_external_modules() {
         let directory =
             std::env::temp_dir().join(format!("in-unused-alias-proof-{}", std::process::id()));
         std::fs::create_dir_all(directory.join("nested")).unwrap();
         std::fs::write(directory.join("bad.rs"), "type A=B;type B=A;").unwrap();
         std::fs::write(directory.join("nested/mod.rs"), "pub mod child;").unwrap();
         std::fs::write(directory.join("nested/child.rs"), "fn unused(){type A=A;}").unwrap();
-        for source in [
-            "mod bad;fn main()->i64{42}",
-            "mod nested;fn main()->i64{42}",
+        let artifact = parse_rust_artifact_source_with_dir(
             "mod bad;mod nested;fn main()->i64{42}",
-        ] {
-            let artifact =
-                parse_rust_artifact_source_with_dir(source, "aliases", &directory).unwrap();
-            assert!(
-                crate::owned_compile::reject_invalid_type_proofs(&artifact.semantic).is_err(),
-                "{source}"
-            );
-        }
+            "aliases",
+            &directory,
+        )
+        .unwrap();
+        let proofs =
+            crate::typecheck::TypeChecker::new().typed_proof_nodes(&artifact.semantic.decls);
+        assert!(
+            proofs
+                .get("bad::#rust-source-alias-validation")
+                .is_some_and(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+            "{proofs:?}"
+        );
+        assert!(
+            proofs
+                .get("nested::child::#rust-source-alias-validation")
+                .is_some_and(crate::core_ir::type_proofs::ResolutionFailure::is_invalid),
+            "{proofs:?}"
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -5336,12 +5161,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("in-alias-module-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(
-            directory.join("algorithm.rs"),
-            "#[path=\"implementation.rs\"]mod inner;pub use inner::Algorithm;",
-        )
-        .unwrap();
-        std::fs::write(directory.join("implementation.rs"), "pub struct Algorithm;").unwrap();
+        std::fs::write(directory.join("algorithm.rs"), "pub struct Algorithm;").unwrap();
         let consumer = "use crate::Algorithm;pub fn from(value:Algorithm)->i64{42}";
         let consumer_path = directory.join("consumer.rs");
         std::fs::write(&consumer_path, consumer).unwrap();
@@ -5349,7 +5169,11 @@ mod tests {
         let artifact = parse_rust_artifact_source_with_dir(root, "root", &directory).unwrap();
         let proofs =
             crate::typecheck::TypeChecker::new().typed_proof_nodes(&artifact.semantic.decls);
-        assert!(proofs.is_empty(), "rooted external module: {proofs:?}");
+        assert!(!proofs.is_empty());
+        assert!(
+            proofs.values().all(|proof| !proof.is_invalid()),
+            "{proofs:?}"
+        );
         let isolated = parse_rust_module_artifact(&consumer_path).unwrap();
         let isolated_proofs =
             crate::typecheck::TypeChecker::new().typed_proof_nodes(&isolated.semantic.decls);

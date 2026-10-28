@@ -82,17 +82,6 @@ pub fn compile_native_artifact_with_report(
     linkage: NativeLinkage,
     out_path: &Path,
 ) -> Result<NativeArtifactOutcome, String> {
-    if cfg!(all(target_os = "linux", target_arch = "x86_64"))
-        && linkage == NativeLinkage::Executable
-    {
-        let bytes = crate::native_emit::elf::lower_x86_executable(module, entry)?;
-        std::fs::write(out_path, bytes)
-            .map_err(|error| format!("write native ELF `{}`: {error}", out_path.display()))?;
-        return Ok(NativeArtifactOutcome {
-            abi_path: None,
-            degradations: Vec::new(),
-        });
-    }
     let lowered = lower_native_module(module, entry, linkage)?;
     let degradations = lowered.degradations;
 

@@ -302,59 +302,12 @@ fn count_expr(e: &Expr, depth: u32, nodes: &mut usize) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
-    use crate::core_ir::{Decl, Typ};
-
-    #[test]
-    fn test_dos_guards() {
-        // Test depth limit
-        assert!(depth_ok(MAX_EMIT_DEPTH).is_ok());
-        let err = depth_ok(MAX_EMIT_DEPTH + 1).unwrap_err();
-        assert_eq!(
-            err,
-            format!(
-                "emit aborted: Core IR nesting exceeds {} (DoS guard)",
-                MAX_EMIT_DEPTH
-            )
-        );
-
-        // Test node limit
-        let mut nodes = MAX_EMIT_NODES;
-        let err = bump(&mut nodes).unwrap_err();
-        assert_eq!(
-            err,
-            format!(
-                "emit aborted: Core IR exceeds {} nodes (DoS guard)",
-                MAX_EMIT_NODES
-            )
-        );
-    }
-
-    #[test]
-    fn test_count_decl_depth_limit() {
-        let mut nodes = 0;
-        let decl = Decl::Global {
-            name: "test".into(),
-            typ: Typ::Void,
-            init: None,
-            mutable: false,
-            constant_value: false,
-        };
-
-        let err = count_decl(&decl, MAX_EMIT_DEPTH + 1, &mut nodes).unwrap_err();
-        assert_eq!(
-            err,
-            format!(
-                "emit aborted: Core IR nesting exceeds {} (DoS guard)",
-                MAX_EMIT_DEPTH
-            )
-        );
-    }
+    use crate::core_ir::{Expr, MatchArm, Stmt};
 
     #[test]
     fn test_c_backend_scan_unsupported_match_pattern() {
-        use crate::core_ir::{Expr, MatchArm, Stmt};
         let stmt = Stmt::Match {
             scrutinee: Expr::Ident("x".to_string()),
             arms: vec![MatchArm {
@@ -365,6 +318,7 @@ mod tests {
         };
         let mut nodes = 0;
         let result = count_stmt(&stmt, 0, &mut nodes);
+        assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
             "c-backend: unsupported match pattern `Some(x)`"

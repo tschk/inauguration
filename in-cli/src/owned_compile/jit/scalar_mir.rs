@@ -7,10 +7,6 @@ pub(super) fn try_lower(
     module: &UnifiedModule,
     entry: &str,
 ) -> Result<Option<LoweredModule>, String> {
-    // Scalar MIR has no borrow-region checks; retain the native prologue ABI.
-    if !module.noalias_params().is_empty() {
-        return Ok(None);
-    }
     if !module.decls.iter().any(|decl| {
         matches!(decl,
         Decl::Function { name, params, body, .. }

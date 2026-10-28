@@ -115,11 +115,7 @@ pub(crate) fn resolve_module_dependencies_with_bindings(
         );
     }
 
-    let caller_names: std::collections::HashSet<_> = module
-        .decls
-        .iter()
-        .map(dep_resolver::declaration_name)
-        .collect();
+    let original_count = module.decls.len();
     let mut normalized = crate::typecheck::normalize_module(
         crate::parser_registry::ParserId::Rust,
         &resolved_module.module,
@@ -185,15 +181,9 @@ pub(crate) fn resolve_module_dependencies_with_bindings(
                 .unwrap_or_else(|| "invalid imported source".into())
         ));
     }
+    let imports = normalized.decls.split_off(original_count);
     let mut expanded = module.clone();
-    // Normalization removes inline constants and generic templates, and may
-    // append specializations. Declaration positions no longer identify owners.
-    expanded.decls.extend(
-        normalized
-            .decls
-            .into_iter()
-            .filter(|decl| !caller_names.contains(dep_resolver::declaration_name(decl))),
-    );
+    expanded.decls.extend(imports);
     let mut artifact = crate::boundary_ir::CompileArtifact::from_semantic(expanded);
     artifact.unary_methods = resolved_module.unary_methods;
     Ok(artifact)
@@ -297,7 +287,7 @@ pub(super) fn compile_jit_with_execution_state(
     let lowered = if let Some(lowered) = scalar_mir {
         Ok(lowered)
     } else if cfg!(target_arch = "x86_64") {
-        x86_64_lower::lower_jit_module(module, &resolved_entry, compile_only).map(|result| {
+        x86_64_lower::lower_module(module, &resolved_entry).map(|result| {
             native_emit::lower::LoweredModule {
                 code: result.code,
                 data: result.data,
@@ -312,7 +302,7 @@ pub(super) fn compile_jit_with_execution_state(
                     .map(|o| (o, result.codegen_base))
                     .collect(),
                 external_refs: Vec::new(),
-                degradations: result.degradations,
+                degradations: Vec::new(),
                 error_slot_refs: Vec::new(),
             }
         })
@@ -942,18 +932,6 @@ mod imported_rust_validation_tests {
             "pub fn exported()->i64{{{id}::bad_local::answer()}}"
         ))
         .unwrap();
-        let constants = crate::compiler::rust_front::parse_rust_source(&format!(
-            "const A:i64=1;const B:i64=2;const C:i64=3;fn main()->i64{{{id}::complement::answer()}}"
-        ))
-        .unwrap();
-        let resolved =
-            resolve_module_dependencies(&constants, Some("main"), CompileTarget::Jit).unwrap();
-        assert_eq!(
-            &resolved.decls[..constants.decls.len()],
-            constants.decls.as_slice()
-        );
-        assert!(resolved.decls.iter().any(|decl| matches!(decl,
-            Decl::Function { name, .. } if name == &format!("{id}::complement::answer"))));
         assert!(
             resolve_module_dependencies(&library, None, super::super::CompileTarget::Jit)
                 .err()

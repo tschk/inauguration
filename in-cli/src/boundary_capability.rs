@@ -71,7 +71,7 @@ mod tests {
         assert!(cap.can_lower);
         assert!(cap.can_typecheck);
         assert!(cap.can_boundary);
-        assert!(cap.can_jit);
+        assert!(!cap.can_jit);
     }
 
     #[test]
@@ -79,7 +79,7 @@ mod tests {
         let entry = language_support_for_parser(ParserId::Icore.as_str()).expect("icore");
         let cap = boundary_capability_for(entry);
         assert!(cap.can_boundary);
-        assert!(cap.can_jit);
+        assert!(!cap.can_jit);
     }
 
     #[test]
