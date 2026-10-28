@@ -227,7 +227,7 @@ mod tests {
 
         for (profile, harden, lean, expected) in cases {
             assert_eq!(
-                EmitProfile::resolve(profile.clone(), harden, lean),
+                EmitProfile::resolve(profile, harden, lean),
                 expected,
                 "failed on ({:?}, {}, {})",
                 profile,
