@@ -1363,7 +1363,7 @@ mod tests {
                 "inauguration-package-manifest-{}-{}-{}",
                 std::process::id(),
                 unique,
-                TEMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(&path).expect("create temp dir");
             Self { path }

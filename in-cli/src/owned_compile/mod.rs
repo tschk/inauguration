@@ -212,12 +212,74 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     };
     let resolved = parser_registry::resolve_parser_id(primary_path, request.parser);
     let mut unary_methods = crate::boundary_ir::UnaryMethodBindings::new();
-    let primary_artifact = if is_multi
+    let mut pkg_entry = None;
+    let foreign_dir = primary_path
+        .file_name()
+        .filter(|name| *name == crate::foreign_stage::FOREIGN_STAGE_FILE)
+        .and_then(|_| primary_path.parent());
+    let primary_artifact = if let Some(dir) = foreign_dir {
+        let staged = crate::foreign_stage::load_manifest(dir).and_then(|manifest| {
+            let manifest = manifest.ok_or("foreign stage: manifest disappeared")?;
+            let semantics = if request.target == CompileTarget::Jit {
+                crate::integer_semantics::IntegerSemantics::Word64
+            } else {
+                crate::target::integer_semantics(request.target_triple.as_deref())
+            };
+            crate::foreign_stage::stage_sources_with_semantics(dir, &manifest, semantics)
+        });
+        match staged {
+            Ok(staged) => {
+                pkg_entry = Some(staged.manifest.project.entry);
+                // Include every staged input in the resolved cache fingerprint.
+                let mut inputs = source.clone();
+                for path in staged.staged_files {
+                    match fs::read_to_string(&path) {
+                        Ok(text) => {
+                            inputs.push_str(&path.to_string_lossy());
+                            inputs.push_str(&text);
+                        }
+                        Err(error) => {
+                            return finalize_report(
+                                OwnedCompileReport {
+                                    reason_code: Some("foreign-stage-failed".into()),
+                                    reason: Some(error.to_string()),
+                                    error: Some(error.to_string()),
+                                    ..report
+                                },
+                                started,
+                                &cwd,
+                                &frontend_hash,
+                            );
+                        }
+                    }
+                }
+                frontend_hash = compile_cache::source_frontend_hash(primary_path, &inputs);
+                Ok(Some(crate::boundary_ir::CompileArtifact {
+                    semantic: staged.module,
+                    boundary: None,
+                    unary_methods: staged.unary_methods,
+                }))
+            }
+            Err(error) => Err(parser_registry::ParserRegistryError::Msg(error)),
+        }
+    } else if is_multi
         && matches!(
             resolved,
             parser_registry::ResolvedBuildParser::CoreIr(parser_registry::ParserId::Rust)
-        ) {
+        )
+    {
         crate::compiler::rust_front::parse_rust_module_artifact(primary_path)
+            .map(Some)
+            .map_err(parser_registry::ParserRegistryError::Msg)
+    } else if matches!(
+        resolved,
+        parser_registry::ResolvedBuildParser::CoreIr(parser_registry::ParserId::Rust)
+    ) && let Some(project) = crate::cargo_linker::find_crate_dir(primary_path)
+    {
+        let target = (request.target == CompileTarget::Native)
+            .then_some(request.target_triple.as_deref())
+            .flatten();
+        crate::cargo_linker::parse_crate_root_artifact(primary_path, &project, target)
             .map(Some)
             .map_err(parser_registry::ParserRegistryError::Msg)
     } else {
@@ -268,7 +330,6 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
     };
 
     // Resolve multi-file imports for .in sources
-    let mut pkg_entry: Option<String> = None;
     if primary_path.extension().is_some_and(|e| e == "in") {
         let source_dir = primary_path.parent().map(PathBuf::from).unwrap_or_default();
         let mut import_resolver = crate::module_resolver::ModuleResolver::new();
@@ -287,6 +348,7 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         match import_resolver.resolve_imports(&source) {
             Ok(imported) => {
                 for imp in imported {
+                    module.regions.extend(imp.regions);
                     module.decls.extend(imp.decls);
                 }
                 // Re-inline constants after merging imported modules.
@@ -330,7 +392,15 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
                 .stack_size(64 * 1024 * 1024)
                 .spawn({
                     let project_dir = project_dir.clone();
-                    move || crate::cargo_linker::compile_cargo_dependency_artifacts(&project_dir)
+                    let target = (request.target == CompileTarget::Native)
+                        .then(|| request.target_triple.clone())
+                        .flatten();
+                    move || {
+                        crate::cargo_linker::compile_cargo_dependency_artifacts_for_target(
+                            &project_dir,
+                            target.as_deref(),
+                        )
+                    }
                 })
                 .ok()
                 .and_then(|h| h.join().ok())
@@ -369,26 +439,43 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
             }
             if !root_in_inputs {
                 let root_path = root.clone();
+                let root_project = project_dir.clone();
+                let target = (request.target == CompileTarget::Native)
+                    .then(|| request.target_triple.clone())
+                    .flatten();
                 let parsed = std::thread::Builder::new()
                     .name("in-crate-root".into())
                     .stack_size(32 * 1024 * 1024)
-                    .spawn(move || crate::compiler::rust_front::parse_rust_artifact(&root_path))
+                    .spawn(move || {
+                        crate::cargo_linker::parse_crate_root_artifact(
+                            &root_path,
+                            &root_project,
+                            target.as_deref(),
+                        )
+                    })
                     .and_then(|h| h.join().map_err(|_| std::io::Error::other("join")))
                     .ok();
                 match parsed {
-                    Some(Ok(crate_module)) => {
+                    Some(Ok(mut crate_module)) => {
                         let crate_name = crate::cargo_linker::crate_package_name(&project_dir)
                             .or_else(|| {
                                 project_dir
                                     .file_stem()
                                     .map(|s| s.to_string_lossy().into_owned())
                             })
-                            .unwrap_or_default();
-                        if let Err(error) = merge_retained_dependency_artifacts(
-                            &mut module,
-                            &mut unary_methods,
-                            vec![(crate_name, crate_module)],
-                        ) {
+                            .unwrap_or_default()
+                            .replace('-', "_");
+                        if let Err(error) = crate::core_bindings::qualify_module_artifact(
+                            &mut crate_module,
+                            &crate_name,
+                        )
+                        .and_then(|()| {
+                            merge_retained_dependency_artifacts(
+                                &mut module,
+                                &mut unary_methods,
+                                vec![(crate_name, crate_module)],
+                            )
+                        }) {
                             report.reason_code = Some("dependency-resolution-failed".into());
                             report.reason = Some(error.clone());
                             report.error = Some(error);

@@ -73,7 +73,7 @@ fn emit_failure_return(emitter: &mut CodeEmitter, ctx: &mut LowerCtx<'_>) -> Res
     Ok(())
 }
 
-fn patch_absolute_reference(
+pub(crate) fn patch_absolute_reference(
     code: &mut [u8],
     reference: AbsoluteReference,
     base: u64,
@@ -132,6 +132,8 @@ pub struct X86_64CompileResult {
     /// emitter turns these into import records; the loader patches the
     /// disp32 at `code + site + 1` to the provider's virtual address.
     pub extern_calls: Vec<(String, u32)>,
+    /// Explicit trap bodies retained for unsupported compile-only definitions.
+    pub degradations: Vec<super::lower::LoweringDegradation>,
 }
 
 impl X86_64CompileResult {
@@ -156,6 +158,13 @@ struct FunctionInfo {
     ret: Typ,
     body: Vec<Stmt>,
     may_throw: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuntimeAbi {
+    Jit,
+    Linux,
+    Freestanding,
 }
 
 struct LowerCtx<'a> {
@@ -185,8 +194,8 @@ struct LowerCtx<'a> {
     globals: HashMap<String, u64>,
     /// Sites in the emitted code that reference a global variable.
     pending_globals: Vec<PendingGlobal>,
-    /// JIT ABI: R15 supplies a writable error page and stdlib imports resolve in process.
-    runtime_error_slot: bool,
+    /// JIT and Linux startup supply R15; only JIT may embed process-local calls.
+    runtime: RuntimeAbi,
     /// Error handling: offset for error flag byte (Throw/Try)
     error_flag_offset: u32,
     /// Error handling: offset for error value (Throw/Try)
@@ -244,7 +253,7 @@ impl<'a> LowerCtx<'a> {
             fn_name: fn_name.to_string(),
             globals,
             pending_globals: Vec::new(),
-            runtime_error_slot: false,
+            runtime: RuntimeAbi::Freestanding,
             error_flag_offset: 0,
             error_value_offset: 0,
             ret_typ: Typ::Int,
@@ -373,13 +382,22 @@ impl<'a> LowerCtx<'a> {
 
 /// Lower a Core IR module for the JIT ABI, whose invocation supplies R15.
 pub fn lower_module(module: &UnifiedModule, entry: &str) -> Result<X86_64CompileResult, String> {
+    lower_jit_module(module, entry, false)
+}
+
+pub(crate) fn lower_jit_module(
+    module: &UnifiedModule,
+    entry: &str,
+    compile_only: bool,
+) -> Result<X86_64CompileResult, String> {
     let result = lower_module_impl(
         module,
         entry,
         0x101100,
         0x200000,
         X86StringLayout::Instring,
-        true,
+        RuntimeAbi::Jit,
+        compile_only && !crate::config::env_config().strict_lowering,
     )?;
     result.require_resolved_imports()?;
     Ok(result)
@@ -421,7 +439,32 @@ pub fn lower_module_with_bases_layout(
     data_base: u64,
     layout: X86StringLayout,
 ) -> Result<X86_64CompileResult, String> {
-    lower_module_impl(module, entry, code_base, data_base, layout, false)
+    lower_module_impl(
+        module,
+        entry,
+        code_base,
+        data_base,
+        layout,
+        RuntimeAbi::Freestanding,
+        false,
+    )
+}
+
+/// Linux startup provides an error slot, but runtime calls must stay relocatable.
+pub(crate) fn lower_linux_module(
+    module: &UnifiedModule,
+    entry: &str,
+    code_base: u64,
+) -> Result<X86_64CompileResult, String> {
+    lower_module_impl(
+        module,
+        entry,
+        code_base,
+        0,
+        X86StringLayout::Instring,
+        RuntimeAbi::Linux,
+        false,
+    )
 }
 
 fn lower_module_impl(
@@ -430,7 +473,8 @@ fn lower_module_impl(
     code_base: u64,
     data_base: u64,
     layout: X86StringLayout,
-    runtime_error_slot: bool,
+    runtime: RuntimeAbi,
+    compile_only: bool,
 ) -> Result<X86_64CompileResult, String> {
     crate::core_ir_verifier::check_execution_contracts(module)?;
     let semantics = if x86_64::is_32bit() {
@@ -466,6 +510,8 @@ fn lower_module_impl(
     let mut all_pending_calls: Vec<PendingCall> = Vec::new();
     let mut all_pending_globals: Vec<PendingGlobal> = Vec::new();
     let mut extern_calls: Vec<(String, u32)> = Vec::new();
+    let mut degradations = Vec::new();
+    let mut call_edges: HashMap<String, Vec<String>> = HashMap::new();
 
     // Sort functions so the entry function is always first (so the trampoline
     // can jump to a known offset 0 in the compiled code section).
@@ -492,6 +538,7 @@ fn lower_module_impl(
         let offset = emitter.len();
         function_offsets.insert(name.clone(), offset);
         let is_interrupt = crate::core_ir::is_interrupt_fn(&func.name);
+        let calls_start = all_pending_calls.len();
         let pending = lower_function(
             &mut emitter,
             func,
@@ -501,10 +548,45 @@ fn lower_module_impl(
             &global_types,
             &mut all_pending_calls,
             is_interrupt,
-            runtime_error_slot,
+            runtime,
             layout,
-        )?;
-        all_pending_globals.extend(pending);
+            &module.noalias_params(),
+        );
+        match pending {
+            Ok(pending) => {
+                all_pending_globals.extend(pending);
+                call_edges.insert(
+                    name.clone(),
+                    all_pending_calls[calls_start..]
+                        .iter()
+                        .map(|call| call.target.clone())
+                        .collect(),
+                );
+            }
+            Err(reason) if compile_only && name != entry => {
+                // Discard the entire partial function, including its relocations.
+                // Compile-only reports retain a real trap, never a return-zero body.
+                emitter.bytes.truncate(offset as usize);
+                all_pending_calls.truncate(calls_start);
+                emitter.emit_insns(&[0x0f, 0x0b]);
+                degradations.push(super::lower::LoweringDegradation::skipped_function(
+                    name, &reason,
+                ));
+            }
+            Err(reason) => return Err(reason),
+        }
+    }
+    let mut reachable = std::collections::HashSet::new();
+    let mut queue = vec![entry.to_string()];
+    while let Some(name) = queue.pop() {
+        if reachable.insert(name.clone())
+            && let Some(calls) = call_edges.get(&name)
+        {
+            queue.extend(calls.iter().cloned());
+        }
+    }
+    for degradation in &mut degradations {
+        degradation.reachable = reachable.contains(&degradation.function);
     }
 
     // Resolve calls — collect string refs, resolve function addresses and calls
@@ -644,6 +726,7 @@ fn lower_module_impl(
         data_relocations,
         externs,
         extern_calls,
+        degradations,
     })
 }
 
@@ -1064,8 +1147,9 @@ fn lower_function(
     global_types: &HashMap<String, Typ>,
     pending_calls: &mut Vec<PendingCall>,
     is_interrupt: bool,
-    runtime_error_slot: bool,
+    runtime: RuntimeAbi,
     string_layout: X86StringLayout,
+    noalias: &[String],
 ) -> Result<Vec<PendingGlobal>, String> {
     super::lower::ensure_unit_sequence_layout(&func.ret)?;
     record_array_fields(structs, &func.ret)?;
@@ -1104,7 +1188,7 @@ fn lower_function(
     }
     ctx.string_layout = string_layout;
     ctx.is_interrupt = is_interrupt;
-    ctx.runtime_error_slot = runtime_error_slot;
+    ctx.runtime = runtime;
     ctx.ret_typ = func.ret.clone();
     // Pre-allocate locals for let bindings
     alloc_declared_locals(&mut ctx, &func.body)?;
@@ -1195,6 +1279,37 @@ fn lower_function(
                     emitter.emit_insns(&x86_64::str64(param_regs[i], *offset as u16));
                 }
             }
+        }
+    }
+
+    let slots: Vec<_> = noalias
+        .iter()
+        .filter_map(|name| {
+            if !func.params.iter().any(|(param, _)| param == name) {
+                return None;
+            }
+            ctx.receiver_pointers
+                .get(name)
+                .copied()
+                .or_else(|| match ctx.locals.get(name) {
+                    Some(StackSlot::Scalar(offset)) => Some(*offset),
+                    _ => None,
+                })
+        })
+        .collect();
+    for (index, left) in slots.iter().enumerate() {
+        for right in &slots[index + 1..] {
+            emitter.emit_insns(&x86_64::ldr64(RAX, *left as u16));
+            emitter.emit_insns(&x86_64::ldr64(RCX, *right as u16));
+            emitter.emit_insns(&x86_64::cmp_rmi8(RAX, 0));
+            let null = emitter.len();
+            emitter.emit_insns(&x86_64::jcc_near(0x04, 0));
+            emitter.emit_insns(&x86_64::cmp_rr(RAX, RCX));
+            let distinct = emitter.len();
+            emitter.emit_insns(&x86_64::jcc_near(0x05, 0));
+            emitter.emit_insns(&[0x0F, 0x0B]); // ud2
+            emitter.patch_u32(null + 2, emitter.len() - null - 6);
+            emitter.patch_u32(distinct + 2, emitter.len() - distinct - 6);
         }
     }
 
@@ -2250,7 +2365,7 @@ fn store_local_error_type(
 }
 
 fn error_slot_offset(ctx: &LowerCtx<'_>, name: &str) -> Result<i32, String> {
-    if !ctx.runtime_error_slot || x86_64::is_32bit() || ctx.is_interrupt {
+    if ctx.runtime == RuntimeAbi::Freestanding || x86_64::is_32bit() || ctx.is_interrupt {
         return Err(format!(
             "x86_64-lower: `{}` uses throw/try/propagate without a runtime-provided writable error slot",
             ctx.fn_name
@@ -2690,7 +2805,7 @@ fn lower_binary_expr(
     // shortcut: allocating String concat needs the hosted ABI; add a target runtime before freestanding support.
     if string_concat
         && (x86_64::is_32bit()
-            || !ctx.runtime_error_slot
+            || ctx.runtime != RuntimeAbi::Jit
             || ctx.string_layout != X86StringLayout::Instring
             || ctx.is_interrupt)
     {
@@ -3109,7 +3224,7 @@ fn lower_builtin_call(
             if scalar_expr_type(&args[0], ctx).map(|typ| typ.canonical()) != Some(Typ::Int) {
                 return Err("x86_64-lower: vector allocation capacity must be an integer".into());
             }
-            if !ctx.runtime_error_slot || x86_64::is_32bit() || ctx.is_interrupt {
+            if ctx.runtime != RuntimeAbi::Jit || x86_64::is_32bit() || ctx.is_interrupt {
                 return Err(
                     "x86_64-lower: vector allocation requires the 64-bit JIT runtime".into(),
                 );
@@ -3158,9 +3273,11 @@ fn lower_builtin_call(
             }
             let len = match &args[0] {
                 Expr::ArrayLit(items) => {
-                    for item in items {
-                        lower_expr_into(emitter, ctx, item, target_reg, pending_calls)?;
-                    }
+                    let record = scalar_expr_type(&args[0], ctx)
+                        .map(|typ| record_array_fields(ctx.structs, &typ))
+                        .transpose()?
+                        .flatten();
+                    materialize_array_literal(emitter, ctx, items, pending_calls, record.as_ref())?;
                     items.len() as i64
                 }
                 expr if matches!(
@@ -3427,17 +3544,22 @@ fn lower_builtin_call(
             }
             Ok(true)
         }
-        "read-cr3" => {
-            emitter.emit_width(&[0x0F, 0x20, 0xD8], &[0x48, 0x0F, 0x20, 0xD8]); // mov eax/rax, cr3
+        "read-cr3" | "cr3-read" => {
+            emitter.emit_width(&[0x0F, 0x20, 0xD8], &[0x0F, 0x20, 0xD8]); // mov eax/rax, cr3
             if target_reg != RAX {
                 emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
             }
             Ok(true)
         }
-        "write-cr3" => {
+        "write-cr3" | "cr3-write" => {
             if args.len() >= 1 {
-                lower_expr_into(emitter, ctx, &args[0], RDI, pending_calls)?;
-                emitter.emit_bytes(&[0x0F, 0x22, 0xC7]); // mov cr3, edi/rdi
+                lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+                emitter.emit_bytes(&[0x0F, 0x22, 0xD8]); // mov cr3, eax/rax
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `{target_name}` requires 1 argument in `{}`",
+                    ctx.fn_name
+                ));
             }
             Ok(true)
         }
@@ -3460,6 +3582,124 @@ fn lower_builtin_call(
             } else {
                 return Err(format!(
                     "x86_64-lower: `lidt` requires 1 argument in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "lgdt" => {
+            if args.len() >= 1 {
+                lower_expr_into(emitter, ctx, &args[0], RDI, pending_calls)?;
+                emitter.emit_bytes(&[0x0F, 0x01, 0x17]); // lgdt [rdi]
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `lgdt` requires 1 argument in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "ltr" => {
+            if args.len() >= 1 {
+                lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+                emitter.emit_bytes(&[0x0F, 0x00, 0xD8]); // ltr ax
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `ltr` requires 1 argument in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "rdmsr" => {
+            if args.len() >= 1 {
+                lower_expr_into(emitter, ctx, &args[0], RCX, pending_calls)?;
+                emitter.emit_bytes(&[0x0F, 0x32]); // rdmsr -> edx:eax
+                if !x86_64::is_32bit() {
+                    emitter.emit_bytes(&[0x48, 0xC1, 0xE2, 0x20]); // shl rdx, 32
+                    emitter.emit_bytes(&[0x48, 0x09, 0xD0]); // or rax, rdx
+                }
+                if target_reg != RAX {
+                    emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
+                }
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `rdmsr` requires 1 argument in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "wrmsr64" => {
+            if args.len() >= 2 {
+                lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[1], RAX, pending_calls)?;
+                if x86_64::is_32bit() {
+                    emitter.emit_insns(&x86_64::xor_rr(RDX, RDX));
+                } else {
+                    emitter.emit_bytes(&[0x48, 0x89, 0xC2]); // mov rdx, rax
+                    emitter.emit_bytes(&[0x48, 0xC1, 0xEA, 0x20]); // shr rdx, 32
+                }
+                emitter.emit_insns(&x86_64::pop_r(RCX));
+                emitter.emit_bytes(&[0x0F, 0x30]); // wrmsr
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `wrmsr64` requires 2 arguments in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "wrmsr" => {
+            if args.len() >= 3 {
+                lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[1], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[2], RDX, pending_calls)?;
+                emitter.emit_insns(&x86_64::pop_r(RAX));
+                emitter.emit_insns(&x86_64::pop_r(RCX));
+                emitter.emit_bytes(&[0x0F, 0x30]); // wrmsr
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `wrmsr` requires 3 arguments in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "mem-fill64" => {
+            if args.len() >= 3 {
+                lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[1], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[2], RCX, pending_calls)?;
+                emitter.emit_insns(&x86_64::pop_r(RAX));
+                emitter.emit_insns(&x86_64::pop_r(RDI));
+                emitter.emit_width(&[0xFC, 0xF3, 0xAB], &[0xFC, 0xF3, 0x48, 0xAB]); // cld; rep stosd/stosq
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `mem-fill64` requires 3 arguments in `{}`",
+                    ctx.fn_name
+                ));
+            }
+            Ok(true)
+        }
+        "mem-copy64" => {
+            if args.len() >= 3 {
+                lower_expr_into(emitter, ctx, &args[0], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[1], RAX, pending_calls)?;
+                emitter.emit_insns(&x86_64::push_r(RAX));
+                lower_expr_into(emitter, ctx, &args[2], RCX, pending_calls)?;
+                emitter.emit_insns(&x86_64::pop_r(RSI));
+                emitter.emit_insns(&x86_64::pop_r(RDI));
+                emitter.emit_width(&[0xFC, 0xF3, 0xA5], &[0xFC, 0xF3, 0x48, 0xA5]); // cld; rep movsd/movsq
+            } else {
+                return Err(format!(
+                    "x86_64-lower: `mem-copy64` requires 3 arguments in `{}`",
                     ctx.fn_name
                 ));
             }
@@ -3786,7 +4026,7 @@ fn lower_call_expr(
         if ctx.functions.contains_key(&target_name) {
             return Err("x86_64-lower: private print operation cannot be declared".into());
         }
-        if !ctx.runtime_error_slot || x86_64::is_32bit() {
+        if ctx.runtime != RuntimeAbi::Jit || x86_64::is_32bit() {
             return Err("x86_64-lower: private print requires hosted 64-bit wrappers".into());
         }
         crate::native_emit::stdlib_wrappers::validate_intrinsic_call(
@@ -3861,7 +4101,7 @@ fn lower_call_expr(
         {
             return Err("x86_64-lower: vector mutation requires matching scalar elements".into());
         }
-        if !ctx.runtime_error_slot || x86_64::is_32bit() || ctx.is_interrupt {
+        if ctx.runtime != RuntimeAbi::Jit || x86_64::is_32bit() || ctx.is_interrupt {
             return Err("x86_64-lower: vector mutation requires the 64-bit JIT runtime".into());
         }
         let (root, path) = crate::native_emit::lower::field_path(vector)
@@ -3937,7 +4177,7 @@ fn lower_call_expr(
         return Ok(());
     }
 
-    if ctx.runtime_error_slot {
+    if ctx.runtime == RuntimeAbi::Jit {
         let base = target_name
             .rsplit("::")
             .next()
@@ -3968,7 +4208,8 @@ fn lower_call_expr(
             .functions
             .get(&target_name)
             .is_none_or(|function| function.body.is_empty())
-            && let Some(wrapper) = jit_stdlib_wrapper(&base)
+            && let Some(wrapper) =
+                jit_stdlib_wrapper(&target_name).or_else(|| jit_stdlib_wrapper(&base))
             && let Some(ptr) = crate::native_emit::native_link::resolve_native_fn(wrapper)
         {
             if x86_64::is_32bit() || args.len() > 6 {
@@ -4531,7 +4772,7 @@ fn lower_unary_expr(
     lower_expr_into(emitter, ctx, expr, RAX, pending_calls)?;
     match op {
         "vector-clone" => {
-            if !ctx.runtime_error_slot || x86_64::is_32bit() || ctx.is_interrupt {
+            if ctx.runtime != RuntimeAbi::Jit || x86_64::is_32bit() || ctx.is_interrupt {
                 return Err("x86_64-lower: vector clone requires the 64-bit JIT runtime".into());
             }
             emitter.emit_insns(&x86_64::mov_r_m(RDX, RAX, 0));
@@ -4847,7 +5088,7 @@ fn lower_array_copy(
         emitter.emit_insns(&x86_64::jcc_near(0x03, 0));
         emitter.patch_u32(null + 2, emitter.len() - null - 6);
         emitter.patch_u32(unaligned + 2, emitter.len() - unaligned - 6);
-        if ctx.runtime_error_slot
+        if ctx.runtime != RuntimeAbi::Freestanding
             || !matches!(
                 ctx.ret_typ.canonical(),
                 Typ::String | Typ::Array(_) | Typ::Vector(_) | Typ::Named(_)
@@ -4871,7 +5112,7 @@ fn lower_array_copy(
         }
         emitter.patch_u32(enough + 2, emitter.len() - enough - 6);
     }
-    if ctx.runtime_error_slot {
+    if ctx.runtime == RuntimeAbi::Jit {
         emitter.emit_insns(&x86_64::mov_rr(RDI, 15));
         emitter.emit_insns(&x86_64::ldr64(RSI, source_slot as u16));
         emitter.emit_insns(&x86_64::add_rmi8(RSI, 16));
@@ -4921,7 +5162,7 @@ fn lower_array_allocation(
     if x86_64::is_32bit() || ctx.is_interrupt {
         return Err("x86_64-lower: escaping arrays require the 64-bit hosted ABI".into());
     }
-    if ctx.runtime_error_slot {
+    if ctx.runtime == RuntimeAbi::Jit {
         emitter.emit_insns(&x86_64::mov_rr(RDI, 15));
         emitter.emit_insns(&x86_64::load_i64(RSI, count as i64));
         emitter.emit_insns(&x86_64::load_i64(
@@ -4941,7 +5182,7 @@ fn lower_array_allocation(
     emitter.emit_insns(&x86_64::and_rr(x86_64::REG_SP, 10));
     emitter.emit_insns(&x86_64::sub_rsp_i8(16));
     emitter.emit_insns(&x86_64::mov_m_r(x86_64::REG_SP, 0, 11));
-    if ctx.runtime_error_slot {
+    if ctx.runtime == RuntimeAbi::Jit {
         emitter.emit_insns(&[0xFF, 0xD0]);
     } else {
         let site = emitter.len();
@@ -5020,8 +5261,7 @@ fn materialize_array_literal(
     Ok(offsets)
 }
 
-/// A vector literal keeps its legacy lowering. Only a known fixed-array
-/// destination selects record payload storage; inference alone is ambiguous.
+/// A known sequence destination selects its element storage representation.
 fn lower_typed_sequence_value(
     emitter: &mut CodeEmitter,
     ctx: &mut LowerCtx<'_>,
@@ -5046,6 +5286,16 @@ fn lower_typed_sequence_value(
                 lower_typed_sequence_value(emitter, ctx, value, typ, target, pending_calls)
             },
         );
+    }
+    if matches!(typ.canonical(), Typ::Vector(_))
+        && let Expr::ArrayLit(items) = expr
+    {
+        let offsets = materialize_array_literal(emitter, ctx, items, pending_calls, None)?;
+        lower_heap_array(emitter, ctx, &offsets, pending_calls)?;
+        if target != RAX {
+            emitter.emit_insns(&x86_64::mov_rr(target, RAX));
+        }
+        return Ok(());
     }
     if let (Some(record), Expr::ArrayLit(items)) = (&record, expr) {
         let offsets = materialize_array_literal(emitter, ctx, items, pending_calls, Some(record))?;
@@ -5291,6 +5541,12 @@ where
             let empty = ctx.empty_struct_bases.clone();
             let lowered = (|| {
                 for stmt in body {
+                    if let Stmt::Declare(name, _) = stmt {
+                        ctx.locals.remove(name);
+                        ctx.receiver_pointers.remove(name);
+                        ctx.empty_struct_bases.remove(name);
+                        alloc_declared_locals(ctx, std::slice::from_ref(stmt))?;
+                    }
                     if let Stmt::Let(name, typ, value) = stmt {
                         let resolved = typ
                             .clone()
@@ -5399,7 +5655,12 @@ fn lower_expr_into(
                 return Err("x86_64-lower: unit array elements require a zero-width layout".into());
             }
 
-            let offsets = materialize_array_literal(emitter, ctx, items, pending_calls, None)?;
+            let record = scalar_expr_type(expr, ctx)
+                .map(|typ| record_array_fields(ctx.structs, &typ))
+                .transpose()?
+                .flatten();
+            let offsets =
+                materialize_array_literal(emitter, ctx, items, pending_calls, record.as_ref())?;
             lower_heap_array(emitter, ctx, &offsets, pending_calls)?;
             if target_reg != RAX {
                 emitter.emit_insns(&x86_64::mov_rr(target_reg, RAX));
@@ -5749,11 +6010,12 @@ fn main()->Int {return 42;}
         )
         .unwrap();
         for (layout, runtime) in [
-            (X86StringLayout::Cstring, true),
-            (X86StringLayout::Instring, false),
+            (X86StringLayout::Cstring, RuntimeAbi::Jit),
+            (X86StringLayout::Instring, RuntimeAbi::Freestanding),
+            (X86StringLayout::Instring, RuntimeAbi::Linux),
         ] {
             assert!(
-                lower_module_impl(&module, "concat", 0, 0, layout, runtime)
+                lower_module_impl(&module, "concat", 0, 0, layout, runtime, false)
                     .err()
                     .unwrap()
                     .contains("hosted 64-bit Instring")
@@ -5768,10 +6030,18 @@ fn main()->Int {return 42;}
         let _guard = WidthGuard(x86_64::is_32bit());
         x86_64::set_32bit(true);
         assert!(
-            lower_module_impl(&module, "concat", 0, 0, X86StringLayout::Instring, true)
-                .err()
-                .unwrap()
-                .contains("hosted 64-bit Instring")
+            lower_module_impl(
+                &module,
+                "concat",
+                0,
+                0,
+                X86StringLayout::Instring,
+                RuntimeAbi::Jit,
+                false,
+            )
+            .err()
+            .unwrap()
+            .contains("hosted 64-bit Instring")
         );
     }
 
@@ -6187,6 +6457,7 @@ fn main() -> void { return }
     fn lowers_vec_for_loop() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".into(),
                 params: vec![("values".into(), Typ::Array(Box::new(Typ::Int)))],
@@ -7036,9 +7307,16 @@ fn main()->Int{let rows:[Row]=[];if read(rows,0)==1{return 42;}return 0;}"#,
                 let _profile = antidecomp::ProfileGuard::new(profile);
                 let mut module = crate::in_lang_parse::parse_in_source(source).unwrap();
                 crate::core_opt::optimize_with_profile(&mut module.decls, Some("main"), profile);
-                let result =
-                    lower_module_impl(&module, "main", 0, 0, X86StringLayout::Instring, true)
-                        .unwrap();
+                let result = lower_module_impl(
+                    &module,
+                    "main",
+                    0,
+                    0,
+                    X86StringLayout::Instring,
+                    RuntimeAbi::Jit,
+                    false,
+                )
+                .unwrap();
                 let offsets: Vec<_> = result
                     .exports
                     .iter()
@@ -7551,6 +7829,83 @@ mod ieee_bit_cast_tests {
             assert_eq!(
                 &bytes[numeric..numeric + numeric_start.len()],
                 numeric_start.as_slice()
+            );
+        }
+    }
+
+    #[test]
+    fn bare_metal_cpu_control_and_msr_intrinsics_encode_expected_x86_64_opcodes() {
+        let _restore = Restore(x86_64::is_32bit());
+        x86_64::set_32bit(false);
+        let module = UnifiedModule::new(vec![Decl::Function {
+            name: "cpu_probe".into(),
+            params: vec![("addr".into(), Typ::Int)],
+            ret: Typ::Int,
+            type_params: vec![],
+            body: vec![
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("lgdt".into())),
+                    args: vec![Expr::Ident("addr".into())],
+                }),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("ltr".into())),
+                    args: vec![Expr::IntLit(0x28)],
+                }),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("cr3-write".into())),
+                    args: vec![Expr::Ident("addr".into())],
+                }),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("wrmsr".into())),
+                    args: vec![
+                        Expr::IntLit(0xC0000081),
+                        Expr::IntLit(0),
+                        Expr::IntLit(0x00130008),
+                    ],
+                }),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("wrmsr64".into())),
+                    args: vec![Expr::IntLit(0xC0000082), Expr::Ident("addr".into())],
+                }),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("mem-fill64".into())),
+                    args: vec![Expr::Ident("addr".into()), Expr::IntLit(0), Expr::IntLit(8)],
+                }),
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident("mem-copy64".into())),
+                    args: vec![
+                        Expr::Ident("addr".into()),
+                        Expr::Ident("addr".into()),
+                        Expr::IntLit(8),
+                    ],
+                }),
+                Stmt::Return(Some(Expr::Binary {
+                    op: "+".into(),
+                    lhs: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Ident("cr3-read".into())),
+                        args: vec![],
+                    }),
+                    rhs: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Ident("rdmsr".into())),
+                        args: vec![Expr::IntLit(0xC0000080)],
+                    }),
+                })),
+            ],
+        }]);
+        let lowered = lower_native_module(&module, "cpu_probe").expect("cpu_probe lowers");
+        for expected in [
+            &[0x0F, 0x01, 0x17][..],       // lgdt [rdi]
+            &[0x0F, 0x00, 0xD8][..],       // ltr ax
+            &[0x0F, 0x22, 0xD8][..],       // mov cr3, rax
+            &[0x0F, 0x30][..],             // wrmsr
+            &[0xFC, 0xF3, 0x48, 0xAB][..], // cld; rep stosq
+            &[0xFC, 0xF3, 0x48, 0xA5][..], // cld; rep movsq
+            &[0x0F, 0x20, 0xD8][..],       // mov rax, cr3
+            &[0x0F, 0x32][..],             // rdmsr
+        ] {
+            assert!(
+                lowered.code.windows(expected.len()).any(|w| w == expected),
+                "missing expected opcode sequence {expected:02X?}"
             );
         }
     }

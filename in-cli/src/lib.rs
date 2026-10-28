@@ -52,6 +52,7 @@ pub mod daemon_server;
 pub mod dep_resolver;
 pub mod dynamic_module;
 pub mod external_guard;
+pub mod foreign_stage;
 pub mod graph_report;
 pub mod hotreload;
 pub mod hybrid_sil;
@@ -76,6 +77,7 @@ pub mod package_manifest;
 pub mod package_ref;
 pub mod package_runtime;
 pub mod parser_registry;
+pub mod region_facts;
 pub mod target;
 pub mod typecheck;
 

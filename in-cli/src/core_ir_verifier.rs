@@ -220,8 +220,17 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("sti", IntrinsicRet::Void),
     ("pause", IntrinsicRet::Void),
     ("lidt", IntrinsicRet::Void),
+    ("lgdt", IntrinsicRet::Void),
+    ("ltr", IntrinsicRet::Void),
     ("invlpg", IntrinsicRet::Void),
     ("read-cr2", IntrinsicRet::Int),
+    ("read-cr3", IntrinsicRet::Int),
+    ("cr3-read", IntrinsicRet::Int),
+    ("write-cr3", IntrinsicRet::Void),
+    ("cr3-write", IntrinsicRet::Void),
+    ("rdmsr", IntrinsicRet::Int),
+    ("wrmsr", IntrinsicRet::Void),
+    ("wrmsr64", IntrinsicRet::Void),
     ("invoke", IntrinsicRet::Int),
     ("invoke1", IntrinsicRet::Int),
     ("invoke2", IntrinsicRet::Int),
@@ -425,6 +434,10 @@ pub(crate) fn intrinsic_param_types(name: &str) -> Option<&'static [Typ]> {
         "store8" | "store16" | "store32" | "store64" => &[Typ::Int, Typ::Int],
         "inb" | "inw" | "inl" => &[Typ::Int],
         "outb" | "outw" | "outl" => &[Typ::Int, Typ::Int],
+        "read-cr3" | "cr3-read" => &[],
+        "write-cr3" | "cr3-write" | "lgdt" | "ltr" | "rdmsr" => &[Typ::Int],
+        "wrmsr64" => &[Typ::Int, Typ::Int],
+        "wrmsr" | "mem-fill64" | "mem-copy64" => &[Typ::Int, Typ::Int, Typ::Int],
         "str-concat" | "str-eq" | "str-contains" | "str-starts-with" | "str-ends-with"
         | "str-index-of" | "path-join" | "write-file" | "env-set" | "str-table-has" => {
             &[Typ::String, Typ::String]
@@ -1380,7 +1393,7 @@ fn check_stmt(
             check_expr_in_loop(fn_name, index, facts, env, call_edges, loop_depth)?;
             check_expr_in_loop(fn_name, value, facts, env, call_edges, loop_depth)?;
             require_type(fn_name, "array index", &Typ::Int, index, facts, env)?;
-            match expr_type(base, facts, env) {
+            match expr_type(base, facts, env).map(|typ| typ.canonical()) {
                 Some(Typ::Array(item) | Typ::Vector(item)) => {
                     if let Some(value_typ) = expr_type(value, facts, env)
                         && *item != value_typ
@@ -2026,7 +2039,7 @@ fn check_expr_with_array_borrow(
             check_expr_with_array_borrow(fn_name, base, facts, env, call_edges, true, loop_depth)?;
             check_expr_in_loop(fn_name, index, facts, env, call_edges, loop_depth)?;
             require_type(fn_name, "array index", &Typ::Int, index, facts, env)?;
-            if let Some(base_typ) = expr_type(base, facts, env)
+            if let Some(base_typ) = expr_type(base, facts, env).map(|typ| typ.canonical())
                 && !matches!(base_typ, Typ::Array(_) | Typ::Vector(_))
                 && base_typ != Typ::Int
             {
@@ -2383,7 +2396,9 @@ fn expr_type(expr: &Expr, facts: &ModuleFacts<'_>, env: &HashMap<String, Typ>) -
             Some(Typ::Array(Box::new(item_typ)))
         }
         Expr::Index { base, .. } => {
-            if let Some(Typ::Array(item) | Typ::Vector(item)) = expr_type(base, facts, env) {
+            if let Some(Typ::Array(item) | Typ::Vector(item)) =
+                expr_type(base, facts, env).map(|typ| typ.canonical())
+            {
                 Some(*item)
             } else if expr_type(base, facts, env) == Some(Typ::Int) {
                 // Indexing an Int pointer returns Int

@@ -19,7 +19,7 @@ const indexRoute: RouteArtifact = {
   clientEntries: [],
 };
 
-export async function serveIndex(request: Request): Promise<Response> {
+async function serveIndex(request: Request): Promise<Response> {
   const ctx: RenderContext = {
     request,
     route: indexRoute,
@@ -77,4 +77,4 @@ if (import.meta.main) {
   console.log(`inauguration docs-site → http://localhost:${server.port}`);
 }
 
-export { server, fetch, renderer };
+export { server, fetch, renderer, serveIndex };
