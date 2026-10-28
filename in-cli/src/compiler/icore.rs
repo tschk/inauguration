@@ -1086,4 +1086,70 @@ mod tests {
                 .any(|d| matches!(d, Decl::Function { name, .. } if name == "person_age"))
         );
     }
+
+    struct TempDirGuard(std::path::PathBuf);
+
+    impl TempDirGuard {
+        fn new(prefix: &str) -> Self {
+            let mut path = std::env::temp_dir();
+            path.push(format!("{}_{}", prefix, std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            TempDirGuard(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_parse_icore_file() {
+        let guard = TempDirGuard::new("test_icore");
+        let path = guard.path().join("test.icore");
+        let content = r#"{
+            "icoreVersion": 1,
+            "decls": [
+                {
+                    "kind": "function",
+                    "name": "main",
+                    "params": [],
+                    "return": "Void",
+                    "body": []
+                }
+            ]
+        }"#;
+        std::fs::write(&path, content).unwrap();
+        let module = super::parse_icore_file(&path).unwrap();
+        assert_eq!(module.decls.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_icore_file_not_found() {
+        let guard = TempDirGuard::new("test_icore_not_found");
+        let path = guard.path().join("non_existent.icore");
+        let result = super::parse_icore_file(&path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("No such file or directory")
+                || err_msg.contains("The system cannot find the file specified")
+                || err_msg.contains("not found")
+        );
+    }
+
+    #[test]
+    fn test_parse_icore_file_invalid_json() {
+        let guard = TempDirGuard::new("test_icore_invalid");
+        let path = guard.path().join("invalid.icore");
+        std::fs::write(&path, "not json").unwrap();
+        let result = super::parse_icore_file(&path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("icore JSON:"));
+    }
 }
