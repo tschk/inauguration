@@ -125,6 +125,10 @@ pub(crate) fn cmd_build(
 
 fn resolve_source_path(path: &Path) -> Result<PathBuf> {
     if path.is_dir() {
+        let foreign = path.join(inauguration::foreign_stage::FOREIGN_STAGE_FILE);
+        if foreign.is_file() {
+            return Ok(foreign);
+        }
         let cargo_toml = path.join("Cargo.toml");
         if cargo_toml.exists() {
             return resolve_cargo_root(&cargo_toml);
@@ -275,12 +279,14 @@ fn run_pipeline_for_path(
         }
         if verbose {
             println!("Compiled {} in {:.3}ms", source_path.display(), elapsed_ms);
-            println!("  target: analysis (jit path)");
+            println!("  target: jit");
             println!(
                 "  functions: {} parsed, {} typed",
                 report.parsed_function_count, report.typed_function_count
             );
-            println!("  note: use --out <path> to compile to a native binary via cargo");
+            if let Some(code) = report.eval_exit_code {
+                println!("  exit: {code}");
+            }
         }
         return Ok(());
     }

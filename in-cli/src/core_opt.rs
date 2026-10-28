@@ -1253,6 +1253,28 @@ fn remove_dead_functions(decls: &mut Vec<Decl>, entry: Option<&str>) {
         Decl::Function { name, .. } => called.contains(name),
         _ => true,
     });
+    remove_unused_constants(decls);
+}
+
+/// Constants have no runtime storage obligation. Keep actual value/callee
+/// references and observable initializers; static globals remain roots.
+pub(crate) fn remove_unused_constants(decls: &mut Vec<Decl>) {
+    loop {
+        let mut used = HashSet::new();
+        retained_declaration_calls(decls, &mut used);
+        let mut values = Vec::new();
+        detect_ptr_refs(decls, &mut values);
+        used.extend(values);
+        let before = decls.len();
+        decls.retain(|decl| {
+            !matches!(decl, Decl::Global {
+                name, mutable: false, constant_value: true, init, ..
+            } if !used.contains(name) && init.as_deref().is_none_or(|value| !expr_has_effects(value)))
+        });
+        if decls.len() == before {
+            break;
+        }
+    }
 }
 
 fn retained_declaration_calls(declarations: &[Decl], roots: &mut HashSet<String>) {
@@ -4325,6 +4347,53 @@ mod tests {
         assert_eq!(decls.len(), 1);
         if let Decl::Function { name, .. } = &decls[0] {
             assert_eq!(name, "custom_entry");
+        }
+    }
+
+    #[test]
+    fn optimize_with_profile_applies_specified_profile() {
+        let mut decls = vec![
+            make_fn_with_params(
+                "inline_me",
+                vec![],
+                Typ::Int,
+                vec![
+                    Stmt::Let("a".into(), Some(Typ::Int), Expr::IntLit(10)),
+                    Stmt::Return(Some(ident("a"))),
+                ],
+            ),
+            make_fn_with_params(
+                "custom_entry",
+                vec![],
+                Typ::Int,
+                vec![Stmt::Return(Some(call("inline_me", vec![])))],
+            ),
+            make_fn("unused", vec![Stmt::Return(None)]),
+        ];
+        optimize_with_profile(&mut decls, Some("custom_entry"), EmitProfile::Default);
+        assert_eq!(decls.len(), 1);
+        let Decl::Function { name, body, .. } = &decls[0] else {
+            panic!("expected entry function");
+        };
+        assert_eq!(name, "custom_entry");
+        assert_eq!(body, &vec![Stmt::Return(Some(Expr::IntLit(10)))]);
+    }
+
+    #[test]
+    fn optimize_with_profile_runs_different_profiles_and_keeps_entry() {
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            let mut decls = vec![
+                make_fn("custom_main", vec![Stmt::Return(Some(Expr::IntLit(42)))]),
+                make_fn("dead_code", vec![Stmt::Return(Some(Expr::IntLit(0)))]),
+            ];
+            optimize_with_profile(&mut decls, Some("custom_main"), profile);
+            assert_eq!(decls.len(), 1, "Failed for profile {profile:?}");
+            if let Decl::Function { name, body, .. } = &decls[0] {
+                assert_eq!(name, "custom_main");
+                assert!(!body.is_empty());
+            } else {
+                panic!("Expected Function declaration");
+            }
         }
     }
 

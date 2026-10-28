@@ -60,8 +60,7 @@ pub fn compile_native(
         let exit = if request.linkage == NativeLinkage::Executable
             && matches!(
                 target_triple,
-                "x86_64-unknown-linux-gnu"
-                    | "aarch64-unknown-linux-gnu"
+                "aarch64-unknown-linux-gnu"
                     | "armv7-unknown-linux-gnueabihf"
                     | "x86_64-pc-windows-msvc"
             ) {
@@ -98,6 +97,8 @@ pub fn compile_native(
             && target_triple == "x86_64-unknown-linux-gnu"
             && path_extension_is(out_path, "AppDir")
         {
+            let exit = pure_entry_exit_code(&native_module, entry)
+                .ok_or("AppDir emission requires a pure scalar exit entry")?;
             emit_linux_appdir(exit, out_path)?;
             return Ok(NativeCompileResult {
                 artifact_path: out_path.display().to_string(),
@@ -116,7 +117,7 @@ pub fn compile_native(
             linkage: request.linkage,
             entry,
             exit_code: exit,
-            module,
+            module: &native_module,
             module_id,
             base: request.base,
         };
@@ -143,7 +144,7 @@ pub fn compile_native(
             return Ok(NativeCompileResult {
                 artifact_path: out_path.display().to_string(),
                 eval_exit_code: if request.linkage == NativeLinkage::Executable {
-                    Some(exit)
+                    eval_exit
                 } else {
                     None
                 },
@@ -386,20 +387,21 @@ pub fn native_entry_module(module: &UnifiedModule, entry: &str) -> UnifiedModule
         }
         reachable = next;
     }
-    UnifiedModule::new(
-        module
-            .decls
-            .iter()
-            .filter(|decl| match decl {
-                Decl::Function { name, .. } => {
-                    reachable.contains(name)
-                        || reachable.iter().any(|r| r.ends_with(&format!("::{name}")))
-                }
-                _ => true,
-            })
-            .cloned()
-            .collect(),
-    )
+    let mut retained = module.clone();
+    retained.decls = module
+        .decls
+        .iter()
+        .filter(|decl| match decl {
+            Decl::Function { name, .. } => {
+                reachable.contains(name)
+                    || reachable.iter().any(|r| r.ends_with(&format!("::{name}")))
+            }
+            _ => true,
+        })
+        .cloned()
+        .collect();
+    crate::core_opt::remove_unused_constants(&mut retained.decls);
+    retained
 }
 
 pub fn emit_macos_app_bundle(
@@ -499,6 +501,7 @@ mod tests {
     fn reference_entry_uses_zero_exit_code_without_jit_execution() {
         let module = UnifiedModule {
             identity: Default::default(),
+            regions: vec![],
             decls: vec![Decl::Function {
                 name: "main".to_string(),
                 params: vec![],

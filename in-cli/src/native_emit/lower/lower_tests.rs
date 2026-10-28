@@ -25,6 +25,7 @@ fn temp_executable(name: &str) -> std::path::PathBuf {
 fn answer_module() -> UnifiedModule {
     UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "answer".into(),
             params: vec![],
@@ -88,6 +89,7 @@ fn assert_exit_or_disasm(
 fn return_binary_module(op: &str, lhs: i64, rhs: i64) -> UnifiedModule {
     UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -165,6 +167,7 @@ fn lowers_answer_literal_module_to_bytes() {
 fn lowers_borrowed_path_parameter() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![("path".into(), Typ::Named("Path".into()))],
@@ -260,6 +263,7 @@ fn native_abi_manifest_carries_module_identity() {
 fn lowers_expression_statement_for_side_effects() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![
             Decl::Function {
                 name: "side".into(),
@@ -425,6 +429,7 @@ fn lowers_string_contains_to_native_wrapper_call() {
 fn lowers_bool_literals_as_scalar_values() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -441,6 +446,7 @@ fn lowers_bool_literals_as_scalar_values() {
 fn lowers_unary_scalar_expressions() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![
             Decl::Function {
                 name: "neg".into(),
@@ -558,6 +564,7 @@ fn main() -> Int {
 fn lowers_string_scalar_expressions() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![
             Decl::Function {
                 name: "same".into(),
@@ -865,6 +872,7 @@ fn main() -> Int {
 fn lowers_local_reassignment() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -885,6 +893,7 @@ fn lowers_local_reassignment() {
 fn lowers_runtime_if_conditions() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![("flag".into(), Typ::Int)],
@@ -909,6 +918,7 @@ fn lowers_runtime_if_conditions() {
 fn lowers_runtime_while_loop_conditions() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -944,6 +954,7 @@ fn lowers_runtime_while_loop_conditions() {
 fn lowers_vec_iterator_contract() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![
             Decl::Function {
                 name: "values".into(),
@@ -993,6 +1004,7 @@ fn lowers_vec_iterator_contract() {
 fn jit_executes_vec_for() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![("values".into(), Typ::Named("Vec".into()))],
@@ -1373,6 +1385,7 @@ fn main() -> Result<i64, i64> {
 fn lowers_numeric_match_with_default_arm() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![("tag".into(), Typ::Int)],
@@ -1419,6 +1432,7 @@ fn answer_executable_exits_with_return_value() {
 fn scalar_subset_executable_exits_with_return_value() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![
             Decl::Function {
                 name: "side".into(),
@@ -1580,6 +1594,7 @@ fn main() -> Int {
 fn string_scalar_executable_exits_with_comparison_value() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![
             Decl::Function {
                 name: "same".into(),
@@ -1933,6 +1948,7 @@ fn main() -> i64 {
 fn rejects_array_literal_return_type_mismatch() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -1953,6 +1969,7 @@ fn rejects_array_literal_return_type_mismatch() {
 fn rejects_nested_array_params_with_stable_diagnostic() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![(
@@ -1974,6 +1991,7 @@ fn rejects_nested_array_params_with_stable_diagnostic() {
 fn rejects_aggregate_array_locals_with_stable_diagnostic() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![
             Decl::Struct {
                 name: "Point".into(),
@@ -2023,6 +2041,7 @@ fn code_contains_insns(code: &[u8], insns: &[u32]) -> bool {
 fn build_inrt_call_module(target: &str, args: Vec<Expr>, ret: Typ) -> UnifiedModule {
     UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -2166,6 +2185,7 @@ fn rejects_inrt_call_with_wrong_arity() {
 fn lowers_inrt_call_with_ident_arg() {
     let m = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![("s".into(), Typ::String)],
@@ -2203,6 +2223,7 @@ fn all_inrt_builtins_can_be_called() {
 fn lowers_throw_expression() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -2226,6 +2247,7 @@ fn lowers_throw_expression() {
 fn lowers_try_catch_body_executes() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -2249,6 +2271,7 @@ fn lowers_try_catch_body_executes() {
 fn lowers_try_catch_with_throw_emits_handler_code() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -2274,6 +2297,7 @@ fn lowers_try_catch_with_throw_emits_handler_code() {
 fn return_float_binary_module(op: &str, lhs: f64, rhs: f64) -> UnifiedModule {
     UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -2292,6 +2316,7 @@ fn return_float_binary_module(op: &str, lhs: f64, rhs: f64) -> UnifiedModule {
 fn lowers_float_literal_as_bit_pattern() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -2348,6 +2373,7 @@ fn lowers_float_div_instruction() {
 fn lowers_option_unwrap_or_none_to_default_inline() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -2372,6 +2398,7 @@ fn lowers_option_unwrap_or_none_to_default_inline() {
 fn jit_executes_string_concat() {
     let module = UnifiedModule {
         identity: Default::default(),
+        regions: vec![],
         decls: vec![Decl::Function {
             name: "main".into(),
             params: vec![],
@@ -2858,6 +2885,7 @@ fn declared_identifier_spellings_resolve_exact_storage() {
         for parameter in [false, true] {
             let module = UnifiedModule {
                 identity: Default::default(),
+                regions: vec![],
                 decls: vec![Decl::Function {
                     name: "main".into(),
                     params: if parameter {
