@@ -520,10 +520,10 @@ pub fn merge_dependency_artifacts(
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 
     struct TempDirGuard {
         path: PathBuf,
@@ -539,7 +539,7 @@ mod tests {
                 "inauguration-cargo-linker-{}-{}-{}",
                 std::process::id(),
                 unique,
-                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+                std::sync::atomic::AtomicUsize::new(0).fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(&path).expect("create temp dir");
             Self { path }
@@ -611,7 +611,7 @@ libc = { path = "dummy-dep" }
         let dir = std::env::temp_dir().join(format!(
             "in-crate-walk-{}-{}",
             std::process::id(),
-            TEMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+            std::sync::atomic::AtomicUsize::new(0).fetch_add(1, Ordering::SeqCst)
         ));
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
