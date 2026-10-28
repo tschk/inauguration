@@ -185,16 +185,45 @@ mod tests {
 
     #[test]
     fn resolve_flags() {
+        let default = EmitProfile::Default;
+        let harden = EmitProfile::Harden;
+        let lean = EmitProfile::Lean;
+
+        // Default profile
         assert_eq!(
-            EmitProfile::resolve(EmitProfile::Default, true, false).unwrap(),
-            EmitProfile::Harden
+            EmitProfile::resolve(default, false, false).unwrap(),
+            default
+        );
+        assert_eq!(EmitProfile::resolve(default, true, false).unwrap(), harden);
+        assert_eq!(EmitProfile::resolve(default, false, true).unwrap(), lean);
+        assert_eq!(
+            EmitProfile::resolve(default, true, true).unwrap_err(),
+            "cannot combine --harden and --lean"
+        );
+
+        // Harden profile
+        assert_eq!(EmitProfile::resolve(harden, false, false).unwrap(), harden);
+        assert_eq!(EmitProfile::resolve(harden, true, false).unwrap(), harden);
+        assert_eq!(
+            EmitProfile::resolve(harden, false, true).unwrap_err(),
+            "--lean conflicts with --profile harden"
         );
         assert_eq!(
-            EmitProfile::resolve(EmitProfile::Lean, false, false).unwrap(),
-            EmitProfile::Lean
+            EmitProfile::resolve(harden, true, true).unwrap_err(),
+            "cannot combine --harden and --lean"
         );
-        assert!(EmitProfile::resolve(EmitProfile::Default, true, true).is_err());
-        assert!(EmitProfile::resolve(EmitProfile::Lean, true, false).is_err());
+
+        // Lean profile
+        assert_eq!(EmitProfile::resolve(lean, false, false).unwrap(), lean);
+        assert_eq!(
+            EmitProfile::resolve(lean, true, false).unwrap_err(),
+            "--harden conflicts with --profile lean"
+        );
+        assert_eq!(EmitProfile::resolve(lean, false, true).unwrap(), lean);
+        assert_eq!(
+            EmitProfile::resolve(lean, true, true).unwrap_err(),
+            "cannot combine --harden and --lean"
+        );
     }
 
     #[test]
