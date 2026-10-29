@@ -41,6 +41,59 @@ fn default_request(
 }
 
 #[test]
+fn rust_ordinary_compilation_selects_runtime_not_documentation_items() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("ordinary-source-mode.rs");
+    let source = r#"
+        #[cfg(any(test, doc, doctest))] mod missing;
+        #[cfg(any(test, doc, doctest))] type Word = Missing;
+        #[cfg(not(any(test, doc, doctest)))] type Word = u8;
+        #[cfg(doc)] fn selected() -> Word { 7 }
+        #[cfg(doctest)] fn selected() -> Word { 13 }
+        #[cfg(not(any(doc, doctest)))] fn selected() -> Word { 42 }
+        fn main() -> i64 { selected() as i64 }
+    "#;
+    fs::write(&path, source).unwrap();
+    for target in [CompileTarget::Jit, CompileTarget::Native] {
+        let out = temp_path("ordinary-source-mode-native");
+        let report = compile_owned(&default_request(
+            path.clone(),
+            target,
+            Some("main"),
+            Some(out.clone()),
+        ));
+        assert!(
+            report.success && report.degradations.is_empty(),
+            "{report:?}"
+        );
+        if target == CompileTarget::Jit {
+            assert_eq!(report.eval_result, Some(EvalValue::Int(42)));
+        } else {
+            assert_eq!(
+                std::process::Command::new(&out).status().unwrap().code(),
+                Some(42)
+            );
+            fs::remove_file(out).unwrap();
+        }
+    }
+    fs::write(
+        &path,
+        "#[cfg(docsrs)]fn selected()->i64{7}#[cfg(not(docsrs))]fn selected()->i64{42}fn main()->i64{selected()}",
+    )
+    .unwrap();
+    let report = compile_owned(&default_request(
+        path.clone(),
+        CompileTarget::Jit,
+        Some("main"),
+        None,
+    ));
+    assert!(!report.success && !report.execution_started, "{report:?}");
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn rust_borrowed_record_parameters_preserve_caller_storage() {
     if !super::jit::host_supports_jit() {
         return;

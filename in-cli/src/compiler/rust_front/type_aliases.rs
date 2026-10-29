@@ -74,10 +74,12 @@ fn meta_arguments(list: &syn::MetaList) -> Option<Vec<syn::Meta>> {
         .map(|values| values.into_iter().collect())
 }
 fn cfg_predicate(meta: &syn::Meta) -> Presence {
-    // The Rust frontend compiles ordinary source, not a rustc test harness.
+    // The Rust frontend compiles ordinary source, not a test harness or rustdoc.
     // This is the source compilation mode, independent of this compiler's own
     // cfg(test), which is enabled when running its regression suite.
-    if matches!(meta, syn::Meta::Path(path) if path.is_ident("test")) {
+    if matches!(meta, syn::Meta::Path(path)
+        if path.is_ident("test") || path.is_ident("doc") || path.is_ident("doctest"))
+    {
         return Presence::Inactive;
     }
     if let syn::Meta::NameValue(value) = meta
