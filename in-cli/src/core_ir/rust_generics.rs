@@ -52,6 +52,48 @@ const TRAIT_BOUNDS: &str = "#rust-generic-source-trait-bounds:";
 pub(crate) struct TraitObligation {
     pub receiver: Typ,
     pub implementations: Vec<Typ>,
+    pub methods: Vec<TraitMethod>,
+}
+/// The source-selected targets travel with the bound, not a concrete method-name lookup.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TraitMethod {
+    pub name: String,
+    pub signature: super::rust_callables::Signature,
+    pub targets: Vec<(Typ, String)>,
+}
+impl TraitMethod {
+    pub(crate) fn visit_types(&self, visit: &mut impl FnMut(&Typ)) {
+        self.signature.visit_types(visit);
+        for (receiver, _) in &self.targets {
+            visit(receiver);
+        }
+    }
+    pub(crate) fn visit_types_mut(&mut self, visit: &mut impl FnMut(&mut Typ)) {
+        self.signature.visit_types_mut(visit);
+        for (receiver, _) in &mut self.targets {
+            visit(receiver);
+        }
+    }
+}
+const BOUND_METHOD: &str = "#rust-bound-method:";
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BoundMethod {
+    pub receiver: Typ,
+    pub method: TraitMethod,
+}
+pub(crate) fn bound_method(value: &BoundMethod) -> String {
+    format!(
+        "{BOUND_METHOD}{}",
+        serde_json::to_string(value).expect("type metadata serializes")
+    )
+}
+pub(crate) fn decode_bound_method(op: &str) -> Option<BoundMethod> {
+    serde_json::from_str(op.strip_prefix(BOUND_METHOD)?).ok()
+}
+pub(crate) fn is_bound_method(op: &str) -> bool {
+    op.starts_with(BOUND_METHOD)
 }
 pub(crate) fn trait_bounds(values: &[TraitObligation]) -> String {
     format!(

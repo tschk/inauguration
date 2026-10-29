@@ -1,6 +1,6 @@
 //! Bound satisfaction uses the same lexical trait/impl catalog as static dispatch.
 use super::*;
-use crate::core_ir::rust_generics::TraitObligation;
+use crate::core_ir::rust_generics::{TraitMethod, TraitObligation};
 
 pub(super) fn obligations(
     index: &Index,
@@ -15,6 +15,7 @@ pub(super) fn obligations(
     }
     let frame = frame.generics(&function.sig.generics);
     let mut obligations = Vec::new();
+    let mut seen = Vec::new();
     let mut add = |receiver: Typ,
                    bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>|
      -> Result<bool, Failure> {
@@ -32,12 +33,18 @@ pub(super) fn obligations(
             let Some((identity, false)) = trait_nominal(&bound.path, &frame)? else {
                 return Ok(false);
             };
+            if seen.contains(&(receiver.clone(), identity.clone())) {
+                continue;
+            }
             let Some(implementations) = implementations(index, &identity, &frame)? else {
                 return Ok(false);
             };
+            let methods = methods(index, &identity, &receiver, &frame)?;
+            seen.push((receiver.clone(), identity));
             obligations.push(TraitObligation {
                 receiver: receiver.clone(),
                 implementations,
+                methods,
             });
         }
         Ok(true)
@@ -71,6 +78,99 @@ pub(super) fn obligations(
         }
     }
     Ok((!obligations.is_empty()).then_some(obligations))
+}
+
+fn methods(
+    index: &Index,
+    identity: &Identity,
+    receiver: &Typ,
+    frame: &Frame,
+) -> Result<Vec<TraitMethod>, Failure> {
+    let Some((module, declaration)) = index.trait_sources.get(identity) else {
+        return Ok(vec![]);
+    };
+    let declaring = Frame {
+        catalog: frame.catalog.clone(),
+        module: module.clone(),
+        locals: vec![],
+    };
+    let scalar = |typ: &Typ| {
+        matches!(typ, Typ::Void | Typ::Bool)
+            || matches!(typ, Typ::Named(name) if crate::core_ir::rust_integer_type_name(name).is_some())
+            || crate::core_ir::rust_floats::kind(typ).is_some()
+    };
+    let mut methods = Vec::new();
+    for member in &declaration.items {
+        let syn::TraitItem::Fn(method) = member else {
+            continue;
+        };
+        // Borrowed receivers and aggregate/Self results additionally need
+        // parametric borrow/storage proofs; their bounds remain usable without
+        // pretending their methods have a scalar invocation contract.
+        let Some(argument) = method.sig.receiver() else {
+            continue;
+        };
+        if argument.reference.is_some() || argument.colon_token.is_some() {
+            continue;
+        }
+        let mut signature = method.sig.clone();
+        signature.inputs = signature
+            .inputs
+            .into_iter()
+            .filter(|input| !matches!(input, syn::FnArg::Receiver(_)))
+            .collect();
+        let signature = match source_signatures::declaration(&signature, &declaring) {
+            Ok(mut signature)
+                if signature.ordinary_rust_form()
+                    && signature.parameters.iter().all(&scalar)
+                    && scalar(&signature.result) =>
+            {
+                signature.parameters.insert(0, receiver.clone());
+                signature
+            }
+            Err(failure) if failure.is_invalid() => return Err(failure),
+            _ => continue,
+        };
+        let mut targets = Vec::new();
+        for record in &index.implementations {
+            let Some((_, path, _)) = &record.item.trait_ else {
+                continue;
+            };
+            let implementation = Frame {
+                catalog: frame.catalog.clone(),
+                module: record.module.clone(),
+                locals: vec![],
+            };
+            if !matches!(trait_nominal(path, &implementation)?, Some((owner, false)) if &owner == identity)
+            {
+                continue;
+            }
+            let syn::Type::Path(owner) = record.item.self_ty.as_ref() else {
+                continue;
+            };
+            let Some((owner, false)) = nominal(&owner.path, &implementation)? else {
+                continue;
+            };
+            let symbol = super::super::super::impl_method_symbol(&record.item, &method.sig.ident);
+            let symbol = record
+                .module
+                .iter()
+                .chain(std::iter::once(&symbol))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("::");
+            targets.push((
+                Typ::Named(format!("crate::{}", owner.join("::"))),
+                format!("crate::{symbol}"),
+            ));
+        }
+        methods.push(TraitMethod {
+            name: method.sig.ident.to_string(),
+            signature,
+            targets,
+        });
+    }
+    Ok(methods)
 }
 
 fn implementations(

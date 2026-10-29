@@ -98,6 +98,7 @@ pub(crate) fn qualify_module_decls(decls: &mut Vec<Decl>, module: &str) {
                 generic_type: None,
                 type_name: &type_name,
                 value_name: &value_name,
+                candidate_name: &value_name,
                 constructors: true,
             };
             declaration(decl, &names, &HashSet::new());
@@ -210,6 +211,7 @@ struct NominalNames<'a> {
     generic_type: Option<&'a dyn Fn(&str) -> Option<Typ>>,
     type_name: &'a dyn Fn(&str) -> Option<Typ>,
     value_name: &'a dyn Fn(&str) -> Option<String>,
+    candidate_name: &'a dyn Fn(&str) -> Option<String>,
     constructors: bool,
 }
 
@@ -220,10 +222,22 @@ pub(crate) fn rewrite_nominal_names(
     resolve_type: &impl Fn(&str) -> Option<String>,
     resolve_value: &impl Fn(&str) -> Option<String>,
 ) {
+    rewrite_nominal_names_with_candidates(decls, resolve_type, resolve_value, resolve_value);
+}
+
+/// Candidate symbols need qualification but do not form execution/proof edges
+/// until specialization selects one. Observers can distinguish those roles.
+pub(crate) fn rewrite_nominal_names_with_candidates(
+    decls: &mut [Decl],
+    resolve_type: &impl Fn(&str) -> Option<String>,
+    resolve_value: &impl Fn(&str) -> Option<String>,
+    resolve_candidate: &impl Fn(&str) -> Option<String>,
+) {
     let names = NominalNames {
         generic_type: None,
         type_name: &|name| resolve_type(name).map(Typ::Named),
         value_name: resolve_value,
+        candidate_name: resolve_candidate,
         constructors: true,
     };
     for decl in decls {
@@ -238,6 +252,7 @@ pub(crate) fn rewrite_named_types(decls: &mut [Decl], resolve_type: &impl Fn(&st
         generic_type: None,
         type_name: resolve_type,
         value_name: &|_| None,
+        candidate_name: &|_| None,
         constructors: true,
     };
     for decl in decls {
@@ -254,6 +269,7 @@ pub(crate) fn rewrite_type_annotations(
         generic_type: None,
         type_name: resolve_type,
         value_name: &|_| None,
+        candidate_name: &|_| None,
         constructors: false,
     };
     for decl in decls {
@@ -269,6 +285,7 @@ pub(crate) fn substitute_type_parameters(decl: &mut Decl, bindings: &HashMap<Str
         generic_type: Some(&generic_type),
         type_name: &|_| None,
         value_name: &|_| None,
+        candidate_name: &|_| None,
         constructors: true,
     };
     declaration(decl, &names, &HashSet::new());
@@ -442,8 +459,16 @@ fn expr(value: &mut Expr, names: &NominalNames<'_>, generics: &HashSet<String>) 
                     for implementation in &mut obligation.implementations {
                         typ(implementation, names, generics);
                     }
+                    for method in &mut obligation.methods {
+                        trait_method(method, names, generics);
+                    }
                 }
                 *op = crate::core_ir::rust_generics::trait_bounds(&obligations);
+            }
+            if let Some(mut call) = crate::core_ir::rust_generics::decode_bound_method(op) {
+                typ(&mut call.receiver, names, generics);
+                trait_method(&mut call.method, names, generics);
+                *op = crate::core_ir::rust_generics::bound_method(&call);
             }
             if let Some(mut proof) = crate::core_ir::rust_generics::decode_neg_implementation(op) {
                 typ(&mut proof.receiver, names, generics);
@@ -488,6 +513,19 @@ fn expr(value: &mut Expr, names: &NominalNames<'_>, generics: &HashSet<String>) 
         _ => {}
     }
     crate::core_ir::for_each_expr_child_mut(value, &mut |value| expr(value, names, generics));
+}
+
+fn trait_method(
+    method: &mut crate::core_ir::rust_generics::TraitMethod,
+    names: &NominalNames<'_>,
+    generics: &HashSet<String>,
+) {
+    method.visit_types_mut(&mut |child| typ(child, names, generics));
+    for (_, target) in &mut method.targets {
+        if let Some(qualified) = (names.candidate_name)(target) {
+            *target = qualified;
+        }
+    }
 }
 fn statements(body: &mut [Stmt], names: &NominalNames<'_>, generics: &HashSet<String>) {
     for stmt in body {
@@ -1103,6 +1141,7 @@ mod tests {
                 generic_type: None,
                 type_name: &|name| (name == "Pair").then(|| Typ::Named("dep::Pair".into())),
                 value_name: &|_| None,
+                candidate_name: &|_| None,
                 constructors: true,
             },
             &HashSet::new(),

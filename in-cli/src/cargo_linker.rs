@@ -710,7 +710,7 @@ mod tests {
         fs::write(temp.path.join("Cargo.toml"), "[package]\nname=\"caller\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[features]\ndefault=[\"selected\"]\nselected=[]\n[dependencies]\nleft-value={path=\"left\"}\nright={path=\"right\"}\n").unwrap();
         fs::write(
             temp.path.join("src/lib.rs"),
-            "pub type Result<T>=std::result::Result<T,()>;trait Mark{}struct Row{value:i64}impl Mark for Row{}fn keep<T:Mark>(row:T)->T{row}pub fn answer()->i64{let pair:(i64,i64)=(5,0);keep(Row{value:pair.0}).value}",
+            "pub type Result<T>=std::result::Result<T,()>;trait Mark{fn read(self)->i64;}struct Row{value:i64}impl Mark for Row{fn read(self)->i64{self.value}}fn keep<T:Mark>(row:T)->i64{row.read()}pub fn answer()->i64{let pair:(i64,i64)=(5,0);keep(Row{value:pair.0})}",
         )
         .unwrap();
         let path = temp.path.join("src/main.rs");

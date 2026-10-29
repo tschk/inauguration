@@ -282,10 +282,27 @@ pub(crate) fn metadata_present(decls: &[super::Decl], mode: MetadataKind) -> boo
                     values.iter().any(|value| {
                         typ(&value.receiver, mode)
                             || value.implementations.iter().any(|value| typ(value, mode))
+                            || value.methods.iter().any(|method| {
+                                let mut found = false;
+                                method.visit_types(&mut |value| found |= typ(value, mode));
+                                found
+                            })
                     })
                 }) =>
             {
                 return true;
+            }
+            Expr::Unary { op, .. } if super::rust_generics::is_bound_method(op) => {
+                if let Some(call) = super::rust_generics::decode_bound_method(op) {
+                    let mut found = typ(&call.receiver, mode);
+                    call.method
+                        .visit_types(&mut |value| found |= typ(value, mode));
+                    if found {
+                        return true;
+                    }
+                } else if mode == MetadataKind::TypeFailures {
+                    return true;
+                }
             }
             Expr::Unary { op, .. }
                 if super::rust_generics::decode_neg_bounds(op).is_some_and(|values| {

@@ -519,6 +519,7 @@ fn normalize_with_checks(module: &mut UnifiedModule, check_templates: bool) {
     // This also runs on rigid audit modules, after their source substitutions.
     // It never infers directly inside unconstrained generic template bodies.
     let checker = super::TypeChecker::new();
+    super::rust_trait_methods::bind_templates(module);
     // Raw source proof is captured before canonical ABI erasure. Dependencies
     // carry these private function markers through their existing artifact path.
     let neg_implementations = collect_neg_implementations(module);
@@ -874,6 +875,7 @@ fn instantiate(
     apply_alias_arguments(&mut instance, arguments);
     crate::core_bindings::substitute_type_parameters(&mut instance, &bindings);
     let discharged = !constrained || discharge_obligations(&instance, neg_implementations);
+    super::rust_trait_methods::resolve_instance(&mut instance, templates);
     strip_template_marker(&mut instance);
     if !discharged {
         // Keep the concrete body and origin-tagged operators for the existing

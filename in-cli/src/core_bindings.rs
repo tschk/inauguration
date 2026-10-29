@@ -2,8 +2,8 @@
 #[path = "core_bindings/namespace.rs"]
 mod namespace;
 pub(crate) use namespace::{
-    qualify_module_artifact, rewrite_named_types, rewrite_nominal_names, rewrite_type_annotations,
-    substitute_type_parameters,
+    qualify_module_artifact, rewrite_named_types, rewrite_nominal_names,
+    rewrite_nominal_names_with_candidates, rewrite_type_annotations, substitute_type_parameters,
 };
 
 use crate::core_ir::{Decl, Expr, LoopKind, MatchPattern, Stmt, Typ};

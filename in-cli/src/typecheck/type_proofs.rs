@@ -91,7 +91,7 @@ impl TypeChecker {
             let references = RefCell::new(HashSet::new());
             // Consume the normalized view in-place: no second declaration or
             // global initializer clone, no source AST mutation.
-            crate::core_bindings::rewrite_nominal_names(
+            crate::core_bindings::rewrite_nominal_names_with_candidates(
                 std::slice::from_mut(decl),
                 &|name| {
                     let proof = facts.type_proof(&Typ::Named(name.into()), &mut HashSet::new());
@@ -107,6 +107,7 @@ impl TypeChecker {
                     }
                     None
                 },
+                &|_| None,
             );
             if let Some(proof) = result.into_inner() {
                 proofs.insert(name.clone(), proof);

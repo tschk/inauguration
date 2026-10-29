@@ -4,6 +4,7 @@ mod rust_callables;
 mod rust_floats;
 mod rust_generics;
 pub(crate) mod rust_integers;
+mod rust_trait_methods;
 mod type_proofs;
 #[path = "typecheck/vector_inference.rs"]
 mod vector_inference;
@@ -105,6 +106,7 @@ enum ResolvePolicy {
     RustFloatValidate,
     RustFloatLower,
     RustGenericArguments,
+    RustTraitMethods,
     RustCallables { lower: bool, word64: bool },
 }
 impl ResolvePolicy {
@@ -133,6 +135,7 @@ pub(crate) struct Facts {
     generic_parameters: HashMap<String, Vec<String>>,
     callable_signatures: HashMap<String, crate::core_ir::rust_callables::Signature>,
     rigid_callables: HashMap<String, crate::core_ir::rust_callables::Signature>,
+    bound_trait_methods: Vec<crate::core_ir::rust_generics::TraitObligation>,
     callable_alias_origins: HashMap<String, Option<String>>,
     neg_implementations: Vec<(String, crate::core_ir::rust_generics::NegImplementation)>,
     structs: HashMap<String, Vec<(String, Typ)>>,
@@ -1802,6 +1805,20 @@ impl TypeChecker {
                 self.resolve_typed_expr(child, facts, env, policy, return_type);
             });
         }
+        if policy == ResolvePolicy::RustTraitMethods
+            && let Some(typ) = rust_trait_methods::bind_call(
+                expr,
+                resolved_arguments.as_deref(),
+                context.destination().then_some(expected).flatten(),
+                facts,
+            )
+        {
+            return ResolvedValue {
+                typ: Some(typ),
+                c_kind,
+                values: resolved_values,
+            };
+        }
         let resolved_call_type = resolved_arguments.as_ref().and_then(|types| {
             rust_floats::call_type_with_arguments(self, expr, expected, facts, env, types).map(Some)
         });
@@ -3187,6 +3204,7 @@ impl TypeChecker {
             generic_parameters,
             callable_signatures,
             rigid_callables: HashMap::new(),
+            bound_trait_methods: vec![],
             callable_alias_origins,
             neg_implementations,
             structs,
@@ -4332,6 +4350,9 @@ impl TypeChecker {
         facts: &Facts,
         env: &HashMap<String, Typ>,
     ) -> Option<Typ> {
+        if let Some(typ) = rust_trait_methods::callee_type(expr) {
+            return Some(typ);
+        }
         match expr {
             Expr::MatchValue { scrutinee, arms } => {
                 let typ = self.expr_type(scrutinee, facts, env)?;
