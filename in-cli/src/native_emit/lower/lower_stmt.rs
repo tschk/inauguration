@@ -2225,10 +2225,9 @@ pub(crate) fn lower_match(
                 emitter.emit_u32(aarch64::cmp_reg64(9, 1));
                 Some(emitter.emit_insn(aarch64::b_cond(1, 0)))
             } else {
-                if lower_expr::native_expr_type(scrutinee, ctx, functions)
-                    .map(|typ| typ.canonical())
-                    != Some(typ)
-                {
+                let scrutinee_typ = lower_expr::native_expr_type(scrutinee, ctx, functions)
+                    .map(|typ| typ.canonical());
+                if scrutinee_typ != Some(typ.canonical()) {
                     return Err(
                         "native-lower: scalar pattern requires a compatible scrutinee".into(),
                     );

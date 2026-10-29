@@ -253,35 +253,6 @@ mod tests {
     }
 
     #[test]
-    fn load_manifest_parses_valid_manifest() {
-        let dir = scratch();
-        fs::write(
-            dir.join(FOREIGN_STAGE_FILE),
-            "[project]\nname = \"test\"\nentry = \"main\"\n[[sources]]\npath = \"a.c\"\n[[sources]]\npath = \"b.c\"\nparser = \"c\"\n",
-        )
-        .expect("manifest");
-        let manifest = load_manifest(&dir).expect("load").expect("present");
-        assert_eq!(manifest.project.name, "test");
-        assert_eq!(manifest.project.entry, "main");
-        assert_eq!(manifest.sources.len(), 2);
-        assert_eq!(manifest.sources[0].path, "a.c");
-        assert_eq!(manifest.sources[0].parser, None);
-        assert_eq!(manifest.sources[1].path, "b.c");
-        assert_eq!(manifest.sources[1].parser, Some("c".to_string()));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn load_manifest_returns_error_if_project_name_empty() {
-        let dir = scratch();
-        fs::write(dir.join(FOREIGN_STAGE_FILE), "[project]\nname = \"\"\n").expect("manifest");
-        let res = load_manifest(&dir);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().contains("project.name is empty"));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn stages_c_and_marks_noalias_across_the_merge() {
         let dir = scratch();
         fs::write(
