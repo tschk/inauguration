@@ -94,6 +94,149 @@ fn rust_ordinary_compilation_selects_runtime_not_documentation_items() {
 }
 
 #[test]
+fn rust_item_macros_own_generated_layouts_and_preserve_contexts() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("item-macros.rs");
+    for source in [
+        r#"
+            macro_rules! keyword { (pub pub) => {}; (struct struct) => {}; }
+            macro_rules! record {
+                ($(#[$attr:meta])* $pub:ident $struct:ident $name:ident $body:tt) => {
+                    keyword!(pub $pub); keyword!(struct $struct);
+                    $(#[$attr])* $pub $struct $name $body
+                    impl $name {
+                        fn summary(&self) -> String {
+                            let label = "row";
+                            format!("{label }")
+                        }
+                    }
+                };
+            }
+            record! { #[repr(C)] pub struct Row { pub left: i64, pub right: i64 } }
+            fn read(row: &Row) -> i64 { row.left * 2 + row.right }
+            fn main() -> i64 { read(&Row { left: 17, right: 8 }) }
+        "#,
+        r#"
+            macro_rules! function {
+                ($name:ident $body:tt) => {
+                    fn $name() -> i64 { let local = 19; $body; local + 23 }
+                };
+            }
+            function!(answer { let local = 7; let _ = local; });
+            fn main() -> i64 { answer() }
+        "#,
+        r#"
+            fn local() -> i64 { 42 }
+            macro_rules! function {
+                () => { fn answer() -> i64 { let local = local(); { let local = 7; let _ = local; } local } };
+            }
+            function!();
+            fn main() -> i64 { answer() }
+        "#,
+        r#"
+            macro_rules! method {
+                ($args:tt, $body:tt) => {
+                    struct Row { field: i64 }
+                    impl Row { fn read$args -> i64 { $body } }
+                };
+            }
+            method!((&self), { self.field });
+            fn main() -> i64 { Row { field: 42 }.read() }
+        "#,
+        r#"
+            #[macro_use] mod definitions {
+                macro_rules! rows {
+                    ($($name:ident($($field:ident),*));*) => {
+                        $(struct $name { $($field: i64),* })*
+                    };
+                }
+            }
+            rows!(Empty(); Row(left, right); Last());
+            fn main() -> i64 { let row = Row { left: 19, right: 23 }; row.left + row.right }
+        "#,
+        r#"
+            macro_rules! inner {
+                (repr(C)) => { struct Wrong; };
+                ($attr:meta) => { #[$attr] struct Row { value: i64 } };
+            }
+            macro_rules! outer { ($attr:meta) => { inner!($attr); }; }
+            outer!(repr(C));
+            fn main() -> i64 { Row { value: 42 }.value }
+        "#,
+        r#"
+            macro_rules! compile_error { () => { struct Row { value: i64 } }; }
+            macro_rules! outer { () => { compile_error!(); }; }
+            outer!();
+            fn main() -> i64 { Row { value: 42 }.value }
+        "#,
+    ] {
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            let out = temp_path("item-macros-native");
+            let report = compile_owned(&default_request(
+                path.clone(),
+                target,
+                Some("main"),
+                Some(out.clone()),
+            ));
+            assert!(report.success, "{source}: {report:?}");
+            assert!(report.external_invocations.is_empty(), "{report:?}");
+            if target == CompileTarget::Jit {
+                assert_eq!(
+                    report.eval_result,
+                    Some(EvalValue::Int(42)),
+                    "{source}: {report:?}"
+                );
+            } else {
+                assert_eq!(
+                    std::process::Command::new(&out).status().unwrap().code(),
+                    Some(42),
+                    "{source}"
+                );
+                fs::remove_file(out).unwrap();
+            }
+        }
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn rust_item_macros_refuse_ambiguity_and_receiver_capture() {
+    let path = temp_path("invalid-item-macros.rs");
+    for source in [
+        "macro_rules! m { ($($x:ident)* last) => {}; } m!(last); fn main()->i64{42}",
+        "macro_rules! m { ($(($x:ident))* (last)) => {}; } m!((last)); fn main()->i64{42}",
+        "macro_rules! m { ($($($x:ident)*)*) => {}; } m!(); fn main()->i64{42}",
+        "macro_rules! m { ($body:tt) => {struct Row{value:i64}impl Row{fn read(&self)->i64{$body}}}; } m!({self.value}); fn main()->i64{42}",
+        "macro_rules! m { ($arg:tt) => {struct Row{value:i64}impl Row{fn read(&self)->i64{let _=format!(\"{}\",$arg);42}}}; } m!(self); fn main()->i64{42}",
+        "macro_rules! m { ($body:tt) => {struct Row{value:i64}impl Row{fn read(&self)->Vec<i64>{$body}}}; } m!({vec![self.value;1]}); fn main()->i64{42}",
+        "macro_rules! m { ($body:tt) => {struct Row{value:i64}impl Row{fn read(&self)->String{$body}}}; } m!({format!(\"{self}\")}); fn main()->i64{42}",
+        "fn local()->i64{42} macro_rules! m { () => {fn answer()->i64{let local=7;fn inner()->i64{local()}inner()}}; } m!(); fn main()->i64{answer()}",
+        "macro_rules! m { () => {compile_error!(\"invalid declaration\");}; } m!(); fn main()->i64{42}",
+    ] {
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            let out = temp_path("invalid-item-macros-native");
+            let report = compile_owned(&default_request(
+                path.clone(),
+                target,
+                Some("main"),
+                Some(out.clone()),
+            ));
+            assert!(
+                !report.success && !report.execution_started,
+                "{source}: {report:?}"
+            );
+            assert!(report.external_invocations.is_empty(), "{report:?}");
+            assert!(!out.exists(), "{report:?}");
+        }
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn rust_borrowed_record_parameters_preserve_caller_storage() {
     if !super::jit::host_supports_jit() {
         return;

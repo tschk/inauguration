@@ -21,6 +21,7 @@ mod enums;
 mod function_access;
 mod imports;
 pub(crate) mod integer_parse;
+mod item_macros;
 mod type_aliases;
 mod unary_methods;
 
@@ -88,6 +89,7 @@ fn parse_rust_source_unit(
     // Build one source catalog before lowering any module. Parsing external files
     // as independent roots loses crate/super imports, visibility and alias proofs.
     load_source_modules(&mut file.items, base_dir, base_dir, &mut HashSet::new(), 0)?;
+    item_macros::expand(&mut file)?;
     let catalog = if owns_crate_root {
         type_aliases::Catalog::new(&file)
     } else {

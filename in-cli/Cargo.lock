@@ -541,6 +541,7 @@ dependencies = [
  "libc",
  "libloading",
  "notify",
+ "proc-macro2",
  "quote",
  "serde",
  "serde_json",
