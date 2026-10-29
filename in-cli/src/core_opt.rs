@@ -281,11 +281,11 @@ pub fn map_expr_mut<F: FnMut(&mut Expr)>(e: &mut Expr, f: &mut F) {
     f(e);
 }
 
-pub(crate) fn map_stmt_exprs_mut(stmt: &mut Stmt, rewrite: &mut impl FnMut(&mut Expr)) {
+pub fn map_stmt_exprs_mut(stmt: &mut Stmt, rewrite: &mut impl FnMut(&mut Expr)) {
     map_stmt_mut(stmt, rewrite);
 }
 
-fn map_stmt_mut<F: FnMut(&mut Expr)>(s: &mut Stmt, f: &mut F) {
+pub fn map_stmt_mut<F: FnMut(&mut Expr)>(s: &mut Stmt, f: &mut F) {
     match s {
         Stmt::Declare(_, _) => {}
         Stmt::Let(_, _, e) => map_expr_mut(e, f),
