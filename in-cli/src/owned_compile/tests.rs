@@ -4979,6 +4979,14 @@ fn owned_rust_array_repeats_preserve_count() {
             "const COUNT: usize = 3; fn main() -> i64 { let mut sum = 0; for value in [7; COUNT] { sum = sum + value; } let COUNT = 0; return sum + COUNT; }",
             21,
         ),
+        (
+            "struct Row{value:i64}fn choose<T>(a:T,b:T)->T{a}fn step()->i64{2}fn read(row:Row)->i64{match row{Row{value}=>{return choose(value,[step();1][0]);}}}fn main()->i64{read(Row{value:42})}",
+            42,
+        ),
+        (
+            "struct Data{value:i64}struct Row{data:Data}fn choose<T>(data:&Data,unused:T)->i64{data.value}fn step()->i64{2}fn read(row:&Row)->i64{match row{Row{data}=>{return choose(data,[step();1][0]);}}}fn main()->i64{read(&Row{data:Data{value:42}})}",
+            42,
+        ),
     ] {
         let path = temp_path("rust-array-repeat.rs");
         fs::write(&path, source).unwrap();

@@ -357,12 +357,24 @@ impl Lower {
     fn pattern_body(&mut self, body: &mut Vec<Stmt>, pattern: &str, typ: Option<Typ>) {
         let constants = self.constants.clone();
         let types = self.types.clone();
+        let mut bindings = typ
+            .as_ref()
+            .and_then(|typ| {
+                crate::core_ir::MatchPattern::parse(pattern)
+                    .ok()?
+                    .typed_bindings(typ, &|name| self.facts.pattern_fields(name))
+                    .ok()
+            })
+            .map(|bindings| bindings.into_iter().collect::<HashMap<_, _>>())
+            .unwrap_or_default();
         let mut names = HashSet::new();
         crate::core_bindings::reserve_pattern(pattern, &mut names);
         for name in names {
             self.constants.remove(&name);
-            self.types
-                .insert(name, typ.clone().unwrap_or(Typ::Generic("_".into())));
+            // Destructured bindings own their field types, not the scrutinee
+            // type. Unproved patterns must also shadow any outer source facts.
+            let typ = bindings.remove(&name).unwrap_or(Typ::Generic("_".into()));
+            self.types.insert(name, typ);
         }
         self.body(body);
         self.constants = constants;
