@@ -930,6 +930,18 @@ pub(crate) fn lower_struct_ptr_arg(
     pending_calls: &mut Vec<PendingCall>,
     fn_name: &str,
 ) -> Result<u8, String> {
+    let typ = super::lower_expr::native_expr_type(arg, ctx, functions);
+    if (typ
+        .as_ref()
+        .and_then(crate::core_ir::rust_references::aggregate_referent)
+        .is_some()
+        || matches!(arg, Expr::Unary { op, .. } if op == crate::core_ir::rust_boxes::DEREF))
+        && matches!(typ.as_ref().map(crate::core_ir::rust_references::dereferenced), Some(Typ::Named(name)) if ctx.structs.contains_key(&name))
+    {
+        // Existing borrows and Box dereferences already address record storage.
+        lower_expr_into(emitter, ctx, arg, reg, functions, pending_calls, fn_name)?;
+        return Ok(reg + 1);
+    }
     if let Expr::Field { base, name } = arg
         && let Some((pointer, offset)) =
             super::lower_expr::borrowed_field_place(ctx, base, name, functions)?

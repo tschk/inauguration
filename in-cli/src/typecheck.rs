@@ -197,11 +197,14 @@ impl Facts {
 enum ValueContext<'a> {
     Expression(Option<&'a Typ>),
     Destination(Option<&'a Typ>),
+    // A receiver projection or explicit borrow uses storage without moving it.
+    Place,
 }
 impl<'a> ValueContext<'a> {
     fn expected(self) -> Option<&'a Typ> {
         match self {
             Self::Expression(value) | Self::Destination(value) => value,
+            Self::Place => None,
         }
     }
     fn destination(self) -> bool {
@@ -1090,6 +1093,31 @@ impl TypeChecker {
         )
         .c_kind
     }
+    fn borrowed_place(&self, expr: &Expr, facts: &Facts, env: &HashMap<String, Typ>) -> bool {
+        if self
+            .expr_type(expr, facts, env)
+            .as_ref()
+            .is_some_and(crate::core_ir::rust_references::has_reference_proof)
+        {
+            return true;
+        }
+        match expr {
+            Expr::Field { base, .. } | Expr::Index { base, .. } => {
+                self.borrowed_place(base, facts, env)
+            }
+            Expr::Unary { op, expr }
+                if matches!(
+                    op.as_str(),
+                    "*" | crate::core_ir::rust_boxes::DEREF
+                        | crate::core_ir::rust_references::VIEW_READ
+                ) =>
+            {
+                self.borrowed_place(expr, facts, env)
+            }
+            _ => false,
+        }
+    }
+
     fn resolve_typed_expr_context(
         &self,
         expr: &mut Expr,
@@ -1109,10 +1137,24 @@ impl TypeChecker {
             && self
                 .expr_type(inner, facts, env)
                 .as_ref()
-                .and_then(crate::core_ir::rust_references::scalar_read_type)
+                .and_then(crate::core_ir::rust_references::view_read_type)
                 .is_some()
         {
-            *op = crate::core_ir::rust_references::SCALAR_READ.into();
+            *op = crate::core_ir::rust_references::VIEW_READ.into();
+        }
+        if !matches!(context, ValueContext::Place)
+            && matches!(self.expr_type(expr, facts, env), Some(Typ::Named(name)) if crate::core_ir::rust_boxes::payload(&name).is_some())
+            && self.borrowed_place(expr, facts, env)
+        {
+            let failure = crate::core_ir::type_proofs::ResolutionFailure::Invalid(
+                "cannot move a Box through a borrowed reference".into(),
+            );
+            *expr = Expr::Ident(failure.symbol());
+            return ResolvedValue {
+                typ: Some(failure.typ()),
+                c_kind: None,
+                values: None,
+            };
         }
         if let Expr::Unary { op, expr: inner } = expr
             && op == "*"
@@ -1390,7 +1432,18 @@ impl TypeChecker {
                 }
             }
         } else if let Expr::Unary { op, expr } = expr {
-            let operand = if let Some(typ) = operand_context.as_ref() {
+            let operand = if crate::core_ir::rust_references::value_kind(op).is_some()
+                || matches!(
+                    op.as_str(),
+                    "*" | crate::core_ir::rust_boxes::DEREF
+                        | crate::core_ir::rust_boxes::SHARED
+                        | crate::core_ir::rust_boxes::MUTABLE
+                )
+                || (op == crate::core_ir::rust_references::VIEW_READ
+                    && matches!(context, ValueContext::Place))
+            {
+                ValueContext::Place
+            } else if let Some(typ) = operand_context.as_ref() {
                 ValueContext::Destination(Some(typ))
             } else if crate::core_ir::rust_arrays::value_length(op).is_some() {
                 ValueContext::Expression(expected)
@@ -1479,6 +1532,8 @@ impl TypeChecker {
         } else if let Expr::Call { callee, args } = expr {
             let inline_const = matches!(callee.as_ref(),Expr::Ident(name)if name==crate::core_ir::INLINE_CONST)
                 && args.len() == 1;
+            let borrow =
+                matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW);
             let option_payload = if matches!(callee.as_ref(),Expr::Ident(name)if crate::core_ir::rust_boxes::is_constructor(name))
             {
                 let explicit = match callee.as_ref() {
@@ -1600,7 +1655,9 @@ impl TypeChecker {
                         }
                     })
                     .or(destination);
-                let context = if inline_const {
+                let context = if borrow {
+                    ValueContext::Place
+                } else if inline_const {
                     // Compile-time payloads are not runtime transfer edges.
                     // Copy the resulting value outside the foldable boundary.
                     if policy == ResolvePolicy::RustFixedArrays {
@@ -1717,6 +1774,29 @@ impl TypeChecker {
                     .unwrap_or(Typ::Generic("_".into())),
             ))));
             resolved_values = Some(values);
+        } else if let Expr::Field { base, .. } = expr {
+            self.resolve_typed_expr_context(
+                base,
+                facts,
+                env,
+                policy,
+                ValueScope {
+                    return_type,
+                    context: ValueContext::Place,
+                },
+            );
+        } else if let Expr::Index { base, index } = expr {
+            self.resolve_typed_expr_context(
+                base,
+                facts,
+                env,
+                policy,
+                ValueScope {
+                    return_type,
+                    context: ValueContext::Place,
+                },
+            );
+            self.resolve_typed_expr(index, facts, env, policy, return_type);
         } else {
             crate::core_ir::for_each_expr_child_mut(expr, &mut |child| {
                 self.resolve_typed_expr(child, facts, env, policy, return_type);
@@ -3531,6 +3611,22 @@ impl TypeChecker {
             }
         }
         if let Expr::Call { callee, args } = expr {
+            if matches!(callee.as_ref(), Expr::Ident(name) if name == crate::core_ir::BORROW) {
+                // Place preparation is an identity operation, not a source call.
+                // Generic audits retain it until concrete storage is known.
+                if args.len() != 1 {
+                    errors.push(TypeError::ArityMismatch {
+                        caller: fn_name.into(),
+                        fn_name: crate::core_ir::BORROW.into(),
+                        expected: 1,
+                        got: args.len(),
+                    });
+                }
+                for arg in args {
+                    self.check_expr(fn_name, arg, facts, env, errors);
+                }
+                return;
+            }
             if matches!(callee.as_ref(),Expr::Ident(name) if name==crate::core_ir::INDEX_ASSIGN_VALUE_FIRST || (name=="index-assign-value-first" && !facts.functions.contains_key(name) && !env.contains_key(name)))
             {
                 let [base, index, value] = args.as_slice() else {
@@ -4397,10 +4493,8 @@ impl TypeChecker {
                     self.expr_type(expr, facts, env)?,
                 )
             }
-            Expr::Unary { op, expr } if op == crate::core_ir::rust_references::SCALAR_READ => {
-                crate::core_ir::rust_references::scalar_read_type(
-                    &self.expr_type(expr, facts, env)?,
-                )
+            Expr::Unary { op, expr } if op == crate::core_ir::rust_references::VIEW_READ => {
+                crate::core_ir::rust_references::view_read_type(&self.expr_type(expr, facts, env)?)
             }
             Expr::Unary { op, expr }
                 if matches!(
@@ -4412,7 +4506,7 @@ impl TypeChecker {
             {
                 let operand = self.expr_type(expr, facts, env)?;
                 if op == "*" {
-                    crate::core_ir::rust_references::scalar_read_type(&operand)
+                    crate::core_ir::rust_references::view_read_type(&operand)
                         .or_else(|| crate::core_ir::rust_boxes::pointee(&operand))
                         .or(Some(operand))
                 } else {

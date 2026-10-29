@@ -67,6 +67,13 @@ fn rust_borrowed_record_parameters_preserve_caller_storage() {
         "fn main()->i64{let value:Option<Box<Row>>=None;match value{Some(row)=>row.left,None=>42}}",
         "static mut CALLS:i64=0;fn make()->Box<Row>{unsafe{CALLS+=1;}Box::new(Row{left:19,right:22})}fn main()->i64{let row=*make();row.left+row.right+unsafe{CALLS}}",
         "fn main()->i64{let value=Box::<i64>::new(42);*value}",
+        "fn read(value:&Box<i64>)->i64{**value}fn main()->i64{let value=Box::new(42i64);read(&value)}",
+        "fn read(value:&&Box<i64>)->i64{***value}fn main()->i64{let value=Box::new(40i64);let reference=&value;read(&reference)+2}",
+        "fn read(value:&Box<Box<Row>>)->i64{(***value).left+(***value).right}fn main()->i64{let value=Box::new(Box::new(Row{left:19,right:23}));read(&value)}",
+        "fn take(value:Box<Box<Row>>)->Box<Row>{*value}fn main()->i64{let value=take(Box::new(Box::new(Row{left:19,right:23})));value.left+value.right}",
+        "fn read(value:&Box<Row>)->i64{(**value).left+(**value).right}fn main()->i64{let value=Box::new(Row{left:19,right:23});read(&value)}",
+        "fn apply(value:&mut Box<Row>){(**value).right+=(**value).left;}fn main()->i64{let mut value=Box::new(Row{left:19,right:23});apply(&mut value);value.right}",
+        "static mut CALLS:i64=0;fn reference(value:&Box<Row>)->&Box<Row>{unsafe{CALLS+=1;}value}fn main()->i64{let value=Box::new(Row{left:19,right:40});let result=(&**reference(&value)).right;result+unsafe{CALLS}+1}",
         "fn boxed<T>(value:T)->Box<T>{Box::new(value)}fn main()->i64{let mut value=boxed(Row{left:19,right:23});update(&mut value);value.right}",
         "use std::boxed::Box as Heap;fn main()->i64{let mut value=Heap::new(Row{left:19,right:23});update(&mut value);value.right}",
         "fn main()->i64{let mut value=Row{left:19,right:23};update(&mut value);value.right}",
@@ -10719,6 +10726,8 @@ fn rust_explicit_generic_calls_preserve_concrete_kinds_and_scopes() {
         "struct Any{value:i64}fn choose<T>(value:T)->T{value}fn main()->i64{let first=choose(Any{value:17});let second=choose::<Any>(Any{value:25});first.value+second.value}",
         "enum Cell{Number{value:i64},Empty}fn choose<T>(a:T,b:T)->T{a}fn step()->i64{2}fn read(cell:&Cell)->i64{match cell{Cell::Number{value}=>{return choose(*value,[step();1][0]);},Cell::Empty=>7,_=>9}}fn main()->i64{read(&Cell::Number{value:42})}",
         "fn choose<T>(a:T,b:T)->T{a}fn read(value:&u64)->u64{choose(*value,7u64)}fn main()->i64{let value=42u64;read(&value) as i64}",
+        "struct Row{left:i64,right:i64}fn choose<T>(a:&T,b:&T)->i64{42}fn main()->i64{let value=Box::new(Row{left:19,right:23});let reference=&value;choose(&*reference,&value)}",
+        "struct Row{left:i64,right:i64}fn relay<T>(value:&Box<T>)->&Box<T>{&*value}fn main()->i64{let value=Box::new(Row{left:19,right:23});let reference=relay(&value);reference.left+reference.right}",
     ] {
         let path = temp_path("rust-explicit-generic.rs");
         fs::write(&path, source).unwrap();
@@ -10767,6 +10776,14 @@ fn rust_explicit_generic_type_errors_cannot_disappear_in_cold_branches() {
         "fn choose<T>(value:&T)->T{*value}fn main()->i64{choose::<u8>(&42u8) as i64}",
         "type A=A;struct Row{value:A}fn choose<T>()->i64{42}fn main()->i64{choose::<Row>()}",
         "fn choose<T>(value:&T)->T{*value}fn main()->i64{if false{choose::<u8>(&42u8);}42}",
+        "fn steal<T>(value:&Box<T>)->Box<T>{*value}fn main()->i64{let value=Box::new(42i64);let stolen=steal(&value);*stolen}",
+        "fn steal<T>(value:&Box<T>)->Box<T>{*value}fn main()->i64{if false{let value=Box::new(42i64);let stolen=steal(&value);}42}",
+        "fn steal(value:&Box<i64>)->Box<i64>{*value}fn main()->i64{let value=Box::new(42i64);let stolen=steal(&value);*stolen}",
+        "fn steal(value:&mut Box<i64>)->Box<i64>{*value}fn main()->i64{let mut value=Box::new(42i64);let stolen=steal(&mut value);*stolen}",
+        "fn main()->i64{if false{let value=Box::new(42i64);let reference=&value;*reference;}42}",
+        "fn steal(value:&Box<Box<i64>>)->Box<i64>{**value}fn main()->i64{let value=Box::new(Box::new(42i64));let stolen=steal(&value);*stolen}",
+        "struct Holder{value:Box<i64>}fn steal(holder:&Holder)->Box<i64>{holder.value}fn main()->i64{let holder=Holder{value:Box::new(42i64)};let stolen=steal(&holder);*stolen}",
+        "fn relay<T>(value:&Box<T>)->&Box<T>{&*missing}fn main()->i64{let value=Box::new(42i64);let reference=relay(&value);**reference}",
         "fn choose<T>(value:T)->T{value}fn main()->i64{choose::<u8>(42u16) as i64}",
         "fn bad()->i64 where i64:Iterator{42}fn main()->i64{bad()}",
     ] {

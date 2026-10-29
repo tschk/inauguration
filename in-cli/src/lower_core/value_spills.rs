@@ -30,6 +30,7 @@ fn is_addressable(expr: &Expr) -> bool {
         Expr::Field { base, .. } | Expr::Index { base, .. } => is_addressable(base),
         Expr::Unary { op, expr }
             if crate::core_ir::rust_references::value_kind(op).is_some()
+                || op == crate::core_ir::rust_references::VIEW_READ
                 || op == crate::core_ir::rust_boxes::DEREF =>
         {
             is_addressable(expr)
@@ -58,7 +59,7 @@ fn expr_needs_spills(expr: &Expr, facts: &crate::typecheck::Facts) -> bool {
     if matches!(expr, Expr::Field { base, .. } if !is_addressable(base)) {
         return true;
     }
-    if matches!(expr, Expr::Unary { op, expr } if crate::core_ir::rust_references::value_kind(op).is_some() && !is_addressable(expr))
+    if matches!(expr, Expr::Unary { op, expr } if (crate::core_ir::rust_references::value_kind(op).is_some() || op == crate::core_ir::rust_references::VIEW_READ) && !is_addressable(expr))
     {
         return true;
     }
@@ -332,7 +333,8 @@ impl Lower {
                 **pointer = self.save((**pointer).clone(), out);
             }
             Expr::Unary { op, expr }
-                if crate::core_ir::rust_references::value_kind(op).is_some() =>
+                if crate::core_ir::rust_references::value_kind(op).is_some()
+                    || op == crate::core_ir::rust_references::VIEW_READ =>
             {
                 self.stage_receiver_place(expr, out);
             }
@@ -533,9 +535,19 @@ impl Lower {
         }
 
         if let Expr::Unary { op, expr: referent } = expr
-            && crate::core_ir::rust_references::value_kind(op).is_some()
+            && (crate::core_ir::rust_references::value_kind(op).is_some()
+                || op == crate::core_ir::rust_references::VIEW_READ)
         {
             self.stage_receiver_place(referent, out);
+            return;
+        }
+
+        if let Expr::Field { base, .. } = expr {
+            // A field projection borrows its receiver place. Capture effectful
+            // producers without moving a borrowed Box into an owned temporary.
+            if !is_addressable(base) || expr_needs_spills(base, &self.facts) {
+                self.stage_receiver_place(base, out);
+            }
             return;
         }
 

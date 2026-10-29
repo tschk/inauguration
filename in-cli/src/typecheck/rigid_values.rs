@@ -160,7 +160,9 @@ impl Check<'_> {
         match expr {
             Expr::Ident(name) => self.identifier(name, env, usage),
             Expr::Unary { op, expr: operand } => {
-                if op == "*" && matches!(usage, Use::Move) {
+                if matches!(op.as_str(), "*" | rust_references::VIEW_READ)
+                    && matches!(usage, Use::Move)
+                {
                     let operand_type = self.checker.expr_type(operand, self.facts, &env.types);
                     let referent = operand_type.as_ref().and_then(|typ| match typ {
                         Typ::Named(name) => {
