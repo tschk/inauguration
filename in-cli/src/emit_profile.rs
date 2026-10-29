@@ -185,16 +185,59 @@ mod tests {
 
     #[test]
     fn resolve_flags() {
+        // Default profile
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Default, false, false).unwrap(),
+            EmitProfile::Default
+        );
         assert_eq!(
             EmitProfile::resolve(EmitProfile::Default, true, false).unwrap(),
             EmitProfile::Harden
         );
         assert_eq!(
+            EmitProfile::resolve(EmitProfile::Default, false, true).unwrap(),
+            EmitProfile::Lean
+        );
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Default, true, true).unwrap_err(),
+            "cannot combine --harden and --lean"
+        );
+
+        // Harden profile
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Harden, false, false).unwrap(),
+            EmitProfile::Harden
+        );
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Harden, true, false).unwrap(),
+            EmitProfile::Harden
+        );
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Harden, false, true).unwrap_err(),
+            "--lean conflicts with --profile harden"
+        );
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Harden, true, true).unwrap_err(),
+            "cannot combine --harden and --lean"
+        );
+
+        // Lean profile
+        assert_eq!(
             EmitProfile::resolve(EmitProfile::Lean, false, false).unwrap(),
             EmitProfile::Lean
         );
-        assert!(EmitProfile::resolve(EmitProfile::Default, true, true).is_err());
-        assert!(EmitProfile::resolve(EmitProfile::Lean, true, false).is_err());
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Lean, true, false).unwrap_err(),
+            "--harden conflicts with --profile lean"
+        );
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Lean, false, true).unwrap(),
+            EmitProfile::Lean
+        );
+        assert_eq!(
+            EmitProfile::resolve(EmitProfile::Lean, true, true).unwrap_err(),
+            "cannot combine --harden and --lean"
+        );
     }
 
     #[test]
