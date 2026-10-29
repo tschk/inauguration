@@ -1109,6 +1109,16 @@ impl TypeChecker {
             && self
                 .expr_type(inner, facts, env)
                 .as_ref()
+                .and_then(crate::core_ir::rust_references::scalar_read_type)
+                .is_some()
+        {
+            *op = crate::core_ir::rust_references::SCALAR_READ.into();
+        }
+        if let Expr::Unary { op, expr: inner } = expr
+            && op == "*"
+            && self
+                .expr_type(inner, facts, env)
+                .as_ref()
                 .and_then(crate::core_ir::rust_boxes::pointee)
                 .is_some()
         {
@@ -4387,6 +4397,11 @@ impl TypeChecker {
                     self.expr_type(expr, facts, env)?,
                 )
             }
+            Expr::Unary { op, expr } if op == crate::core_ir::rust_references::SCALAR_READ => {
+                crate::core_ir::rust_references::scalar_read_type(
+                    &self.expr_type(expr, facts, env)?,
+                )
+            }
             Expr::Unary { op, expr }
                 if matches!(
                     op.as_str(),
@@ -4397,7 +4412,9 @@ impl TypeChecker {
             {
                 let operand = self.expr_type(expr, facts, env)?;
                 if op == "*" {
-                    crate::core_ir::rust_boxes::pointee(&operand).or(Some(operand))
+                    crate::core_ir::rust_references::scalar_read_type(&operand)
+                        .or_else(|| crate::core_ir::rust_boxes::pointee(&operand))
+                        .or(Some(operand))
                 } else {
                     crate::core_ir::rust_boxes::value_type(op, &operand)
                 }

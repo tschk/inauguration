@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 const TYPE_PREFIX: &str = "#rust-reference-type:";
 const ADDRESS_PREFIX: &str = "#rust-reference-address:";
 pub(crate) const NEGATE_VALUE: &str = "#rust-negate";
+pub(crate) const SCALAR_READ: &str = "#rust-reference-scalar-read";
 pub(crate) const SHARED_VALUE: &str = "#rust-reference-shared";
 pub(crate) const MUTABLE_VALUE: &str = "#rust-reference-mutable";
 pub(crate) const ITER_SHARED: &str = "#rust-iterate-shared";
@@ -67,6 +68,18 @@ pub(crate) fn aggregate_referent(value: &Typ) -> Option<Typ> {
 
 pub(crate) fn dereferenced(value: &Typ) -> Typ {
     aggregate_referent(value).unwrap_or_else(|| value.canonical())
+}
+
+/// Scalar views carry their value, not an address. Keep the source referent
+/// until erasure so a read cannot invent an integer width or consume a Box.
+pub(crate) fn scalar_read_type(value: &Typ) -> Option<Typ> {
+    let Typ::Named(name) = value else { return None };
+    let reference = decode(name)?;
+    matches!(
+        reference.runtime.canonical(),
+        Typ::Int | Typ::Bool | Typ::Float
+    )
+    .then_some(reference.referent)
 }
 
 pub(crate) fn value_kind(op: &str) -> Option<bool> {
@@ -242,6 +255,10 @@ pub(crate) fn erase_type(value: Typ) -> Typ {
 
 pub(crate) fn erase_value(value: &mut Expr) {
     if let Expr::Unary { op, expr } = value {
+        if op == SCALAR_READ {
+            *value = std::mem::replace(expr.as_mut(), Expr::UnitLit);
+            return;
+        }
         // A string literal already carries the borrowed string value. Its
         // source annotation does not take the address of a temporary slot.
         if op == SHARED_VALUE && matches!(expr.as_ref(), Expr::StringLit(_)) {

@@ -84,6 +84,12 @@ fn rust_borrowed_record_parameters_preserve_caller_storage() {
         "struct Outer{guard:i64,row:Row}fn apply<T>(row:&mut Row,unused:T){row.right=row.right+row.left;}fn relay(outer:&mut Outer){match outer{Outer{row,guard:_}=>apply(row,7u8)}}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:19,right:23}};relay(&mut outer);outer.row.right+outer.guard-7}",
         "struct Outer{guard:i64,row:Row}fn apply<T>(row:&mut Row,unused:T){row.right=row.right+row.left;}fn relay(outer:&mut Outer){match outer{Outer{row,guard:_}if row.left==19=>apply(row,7u8),_=>()}}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:19,right:23}};relay(&mut outer);outer.row.right+outer.guard-7}",
         "struct Outer{guard:i64,row:Row}struct Wrap<'a>{outer:&'a mut Outer}fn apply<T>(row:&mut Row,unused:T){row.right=row.right+row.left;}fn relay(wrapper:&mut Wrap){match wrapper{Wrap{outer:Outer{row,guard:_}}=>apply(row,7u8)}}fn main()->i64{let mut outer=Outer{guard:7,row:Row{left:19,right:23}};let mut wrapper=Wrap{outer:&mut outer};relay(&mut wrapper);outer.row.right+outer.guard-7}",
+        "fn read(value:&i64)->i64{*value}fn main()->i64{let row=Row{left:40,right:7};read(&row.left)+2}",
+        "fn read(value:&&i64)->i64{**value}fn main()->i64{let value=40i64;let reference=&value;read(&reference)+2}",
+        "fn read(value:&bool)->bool{*value}fn main()->i64{let value=true;if read(&value){42}else{7}}",
+        "fn read(value:&f64)->f64{*value}fn main()->i64{let value=40.5f64;if read(&value)+1.5f64==42.0f64{42}else{7}}",
+        "static mut CALLS:i64=0;fn reference(value:&i64)->&i64{unsafe{CALLS+=1;}value}fn main()->i64{let value=40i64;let result=*reference(&value);result+unsafe{CALLS}+1}",
+        "enum Cell{Number{value:i64},Empty}fn read(cell:&Cell)->i64{match cell{Cell::Number{value}=>*value,Cell::Empty=>7,_=>9}}fn main()->i64{read(&Cell::Number{value:42})}",
     ] {
         let source = format!(
             "#[derive(Clone,Copy)]struct Row{{left:i64,right:i64}}fn update(value:&mut Row){{value.right+=value.left;}}{body}"
@@ -10336,6 +10342,7 @@ fn rust_integer_source_errors_refuse_all_profiles_without_artifacts() {
         "fn main()->i64{if false{let value:i8=u64::BITS;}42}",
         "fn main()->i64{let value=u64::MAX;if false{value();}42}",
         "fn main()->i64{if false{({u64::MAX})();}42}",
+        "fn choose<T>(a:T,b:T)->T{a}fn main()->i64{let value=42u64;let result=choose(*&value,7i64);42}",
     ] {
         let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
         assert!(
@@ -10710,6 +10717,8 @@ fn rust_explicit_generic_calls_preserve_concrete_kinds_and_scopes() {
         "fn choose<T>(value:T)->T{value}fn main()->i64{let pick=choose::<i64>;pick(42)}",
         "fn choose<T>(value:T)->T{value}fn main()->i64{let pick=choose::<u8>;let next=pick;next(42u8) as i64}",
         "struct Any{value:i64}fn choose<T>(value:T)->T{value}fn main()->i64{let first=choose(Any{value:17});let second=choose::<Any>(Any{value:25});first.value+second.value}",
+        "enum Cell{Number{value:i64},Empty}fn choose<T>(a:T,b:T)->T{a}fn step()->i64{2}fn read(cell:&Cell)->i64{match cell{Cell::Number{value}=>{return choose(*value,[step();1][0]);},Cell::Empty=>7,_=>9}}fn main()->i64{read(&Cell::Number{value:42})}",
+        "fn choose<T>(a:T,b:T)->T{a}fn read(value:&u64)->u64{choose(*value,7u64)}fn main()->i64{let value=42u64;read(&value) as i64}",
     ] {
         let path = temp_path("rust-explicit-generic.rs");
         fs::write(&path, source).unwrap();
