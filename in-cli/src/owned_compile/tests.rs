@@ -320,9 +320,9 @@ fn rust_owned_u64_parsing_preserves_values_errors_and_mapping_effects() {
             "static mut COUNT:i64=0;fn mapped()->i64{{unsafe{{COUNT+=1;}}91}}fn read(text:&str,radix:u32)->Result<u64,i64>{{if radix==10{{text.parse::<u64>().map_err(|_|mapped())}}else{{Ok(u64::from_str_radix(text,radix).map_err(|_|mapped())?+0u64)}}}}fn main()->Result<i64,i64>{{{main}}}"
         );
         let path = temp_path("owned-u64-parse.rs");
+        let out = temp_path("owned-u64-parse-native");
         fs::write(&path, &source).unwrap();
         for target in [CompileTarget::Jit, CompileTarget::Native] {
-            let out = temp_path("owned-u64-parse-native");
             let request = default_request(path.clone(), target, Some("main"), Some(out.clone()));
             let report = compile_owned(&request);
             assert!(report.success, "{text:?}/{radix}: {report:?}");
@@ -339,10 +339,12 @@ fn rust_owned_u64_parsing_preserves_values_errors_and_mapping_effects() {
                     Some(42),
                     "{text:?}/{radix}"
                 );
-                fs::remove_file(out).unwrap();
             }
         }
         fs::remove_file(path).unwrap();
+        if out.exists() {
+            fs::remove_file(out).unwrap();
+        }
     }
     for source in [
         "fn main()->Result<u64,i64>{u64::from_str_radix(42,16).map_err(|_|91)}",
