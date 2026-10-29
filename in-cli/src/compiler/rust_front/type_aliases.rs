@@ -957,81 +957,83 @@ fn scope_binding(
     if matches!(typ, Some(Binding::Duplicate)) {
         return Ok((typ, value));
     }
-    for import in scope.imports.get(name).into_iter().flatten() {
-        let Binding::Visible(binding, visibility) = import else {
-            return Err(unsupported("import presence or namespace is unresolved"));
-        };
-        let Binding::Import(path, absolute) = binding.as_ref() else {
-            return Err(unsupported("import namespace is not proven by source"));
-        };
-        // A same-named import can name the external crate prelude, which this catalog does not own.
-        if !absolute
-            && path.first().is_some_and(|root| root == name)
-            && !scope.bindings.contains_key(name)
-        {
-            return Err(unsupported(
-                "import root identity is outside the owned source catalog",
-            ));
-        }
-        let key = (declared.module.clone(), depth, name.to_string());
-        if !active.insert(key.clone()) {
-            // `mod answer; use answer::answer;` binds a module and a value.
-            // Probing the value import's prefix must use the existing module,
-            // not recursively probe that same import as a competing type.
-            if matches!(&typ, Some(Binding::Visible(binding, _)) if matches!(binding.as_ref(), Binding::Module(_)))
+    if let Some(imports) = scope.imports.get(name) {
+        for import in imports {
+            let Binding::Visible(binding, visibility) = import else {
+                return Err(unsupported("import presence or namespace is unresolved"));
+            };
+            let Binding::Import(path, absolute) = binding.as_ref() else {
+                return Err(unsupported("import namespace is not proven by source"));
+            };
+            // A same-named import can name the external crate prelude, which this catalog does not own.
+            if !absolute
+                && path.first().is_some_and(|root| root == name)
+                && !scope.bindings.contains_key(name)
             {
-                continue;
-            }
-            return Err(Failure::Invalid(format!("cyclic type alias `{name}`")));
-        }
-        let target = resolve_parts(
-            path,
-            *absolute,
-            false,
-            declared,
-            &declared.module,
-            active,
-            LookupContext {
-                arguments: None,
-                caller_active: None,
-                declaration: true,
-                alias_target: true,
-                source_qualified: false,
-                ordinary_value_owner: false,
-                constant_value,
-                trait_position: false,
-                nominal_arguments: 0,
-                unsupported_nominal_arguments: false,
-            },
-        );
-        active.remove(&key);
-        let (target, extent) = target?.visibility();
-        if !extent.includes(&visibility_extent(visibility, &declared.module)?) {
-            return Err(Failure::Invalid(format!(
-                "source import `{name}` widens target visibility"
-            )));
-        }
-        if matches!(target, Resolved::Value | Resolved::Constant(_)) {
-            value = Some(import.clone());
-        } else if matches!(target, Resolved::Missing) {
-            if typ.is_none() {
-                // Preserve the existing ordinary std/core import fallback. An alias RHS
-                // still rejects a missing target after the normal import resolver runs.
-                typ = Some(import.clone());
-            } else {
-                return Err(unsupported(format!(
-                    "import namespace is unresolved for `{name}`"
-                )));
-            }
-        } else if typ.is_some() {
-            if matches!(typ, Some(Binding::Conditional)) {
                 return Err(unsupported(
-                    "source type binding depends on unresolved cfg predicates",
+                    "import root identity is outside the owned source catalog",
                 ));
             }
-            typ = Some(Binding::Duplicate);
-        } else {
-            typ = Some(import.clone());
+            let key = (declared.module.clone(), depth, name.to_string());
+            if !active.insert(key.clone()) {
+                // `mod answer; use answer::answer;` binds a module and a value.
+                // Probing the value import's prefix must use the existing module,
+                // not recursively probe that same import as a competing type.
+                if matches!(&typ, Some(Binding::Visible(binding, _)) if matches!(binding.as_ref(), Binding::Module(_)))
+                {
+                    continue;
+                }
+                return Err(Failure::Invalid(format!("cyclic type alias `{name}`")));
+            }
+            let target = resolve_parts(
+                path,
+                *absolute,
+                false,
+                declared,
+                &declared.module,
+                active,
+                LookupContext {
+                    arguments: None,
+                    caller_active: None,
+                    declaration: true,
+                    alias_target: true,
+                    source_qualified: false,
+                    ordinary_value_owner: false,
+                    constant_value,
+                    trait_position: false,
+                    nominal_arguments: 0,
+                    unsupported_nominal_arguments: false,
+                },
+            );
+            active.remove(&key);
+            let (target, extent) = target?.visibility();
+            if !extent.includes(&visibility_extent(visibility, &declared.module)?) {
+                return Err(Failure::Invalid(format!(
+                    "source import `{name}` widens target visibility"
+                )));
+            }
+            if matches!(target, Resolved::Value | Resolved::Constant(_)) {
+                value = Some(import.clone());
+            } else if matches!(target, Resolved::Missing) {
+                if typ.is_none() {
+                    // Preserve the existing ordinary std/core import fallback. An alias RHS
+                    // still rejects a missing target after the normal import resolver runs.
+                    typ = Some(import.clone());
+                } else {
+                    return Err(unsupported(format!(
+                        "import namespace is unresolved for `{name}`"
+                    )));
+                }
+            } else if typ.is_some() {
+                if matches!(typ, Some(Binding::Conditional)) {
+                    return Err(unsupported(
+                        "source type binding depends on unresolved cfg predicates",
+                    ));
+                }
+                typ = Some(Binding::Duplicate);
+            } else {
+                typ = Some(import.clone());
+            }
         }
     }
     Ok((typ, value))
