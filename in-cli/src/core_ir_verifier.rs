@@ -2619,7 +2619,18 @@ mod tests {
             if name.starts_with("invoke") {
                 continue;
             }
-            let arity = intrinsic_param_types(name).map_or(0, <[Typ]>::len);
+            // Expected arities are stated here, independent of the verifier's
+            // own signature tables, so a missing signature cannot make an
+            // invalid call look valid. A new intrinsic must be added here.
+            let arity = match name {
+                "hlt" | "cli" | "sti" | "pause" | "read-cr2" | "read-cr3" | "cr3-read" => 0,
+                "inb" | "inw" | "inl" | "load8" | "load16" | "load32" | "load64" | "lidt"
+                | "lgdt" | "ltr" | "invlpg" | "write-cr3" | "cr3-write" | "rdmsr" => 1,
+                "outb" | "outw" | "outl" | "store8" | "store16" | "store32" | "store64"
+                | "wrmsr64" => 2,
+                "wrmsr" | "mem-fill64" | "mem-copy64" => 3,
+                _ => panic!("give `{name}` an expected arity in this test"),
+            };
             let args = vec!["p"; arity].join(", ");
             let source = format!("fn main(p: Int)->Int{{ {name}({args}); return 0; }}");
             let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
