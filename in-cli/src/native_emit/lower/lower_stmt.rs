@@ -2267,6 +2267,9 @@ pub(crate) fn lower_match(
                 if lower_expr::native_expr_type(scrutinee, ctx, functions)
                     .map(|typ| typ.canonical())
                     != Some(Typ::String)
+                    && lower_expr::native_expr_type(scrutinee, ctx, functions)
+                        .map(|typ| typ.canonical())
+                        != Some(Typ::Named("str".into()))
                 {
                     return Err("native-lower: string pattern requires a String scrutinee".into());
                 }

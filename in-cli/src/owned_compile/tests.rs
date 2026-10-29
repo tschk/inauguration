@@ -12002,7 +12002,9 @@ fn rust_retained_neg_result_casts_preserve_operand_effects_once() {
         fs::write(&path, source).unwrap();
         for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
             for target in [CompileTarget::Jit, CompileTarget::Native] {
-                let artifact = temp_path("retained-neg-result-native");
+                let artifact = temp_path(&format!(
+                    "retained-neg-result-native-{name}-{profile:?}-{target:?}"
+                ));
                 let mut request = default_request(path.clone(), target, Some("main"), None);
                 request.profile = profile;
                 if target == CompileTarget::Native {
