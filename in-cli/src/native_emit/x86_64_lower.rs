@@ -2334,7 +2334,8 @@ fn lower_match(
                 emitter.emit_insns(&x86_64::jcc_near(5, 0));
                 Some(site)
             } else {
-                if scalar_expr_type(scrutinee, ctx) != Some(Typ::String) {
+                let typ = scalar_expr_type(scrutinee, ctx);
+                if typ != Some(Typ::String) && typ != Some(Typ::Named("str".to_string())) {
                     return Err("x86_64-lower: string pattern requires a String scrutinee".into());
                 }
                 None
