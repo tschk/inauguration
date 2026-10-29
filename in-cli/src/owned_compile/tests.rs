@@ -498,8 +498,23 @@ fn linux_native_executables_execute_bodies_and_error_paths() {
                     "{source} {profile:?} {target_triple:?}: {report:?}"
                 );
                 assert_eq!(&fs::read(&out).unwrap()[..4], b"\x7fELF");
+                let mut attempts = 0;
+                let status_code = loop {
+                    match std::process::Command::new(&out).status() {
+                        Ok(s) => break s.code(),
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                                && attempts < 50 =>
+                        {
+                            attempts += 1;
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("Command execution failed: {}", e),
+                    }
+                };
+
                 assert_eq!(
-                    std::process::Command::new(&out).status().unwrap().code(),
+                    status_code,
                     Some(status),
                     "{source} {profile:?} {target_triple:?}"
                 );
