@@ -1090,7 +1090,7 @@ fn desugar_closures_in_expr(
             rewrite_captures_in_body(body, &captures_set);
             let mut caps_fields = Vec::with_capacity(captures.len());
             let mut init_fields = Vec::with_capacity(captures.len());
-            for c in captures.into_iter() {
+            for c in captures {
                 caps_fields.push((c.clone(), Typ::Named("Any".into())));
                 init_fields.push((c.clone(), Expr::Ident(c)));
             }
