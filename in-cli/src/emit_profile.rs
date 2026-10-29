@@ -185,16 +185,56 @@ mod tests {
 
     #[test]
     fn resolve_flags() {
-        assert_eq!(
-            EmitProfile::resolve(EmitProfile::Default, true, false).unwrap(),
-            EmitProfile::Harden
-        );
-        assert_eq!(
-            EmitProfile::resolve(EmitProfile::Lean, false, false).unwrap(),
-            EmitProfile::Lean
-        );
-        assert!(EmitProfile::resolve(EmitProfile::Default, true, true).is_err());
-        assert!(EmitProfile::resolve(EmitProfile::Lean, true, false).is_err());
+        let cases = vec![
+            (EmitProfile::Default, false, false, Ok(EmitProfile::Default)),
+            (EmitProfile::Default, true, false, Ok(EmitProfile::Harden)),
+            (EmitProfile::Default, false, true, Ok(EmitProfile::Lean)),
+            (
+                EmitProfile::Default,
+                true,
+                true,
+                Err("cannot combine --harden and --lean".to_string()),
+            ),
+            (EmitProfile::Harden, false, false, Ok(EmitProfile::Harden)),
+            (EmitProfile::Harden, true, false, Ok(EmitProfile::Harden)),
+            (
+                EmitProfile::Harden,
+                false,
+                true,
+                Err("--lean conflicts with --profile harden".to_string()),
+            ),
+            (
+                EmitProfile::Harden,
+                true,
+                true,
+                Err("cannot combine --harden and --lean".to_string()),
+            ),
+            (EmitProfile::Lean, false, false, Ok(EmitProfile::Lean)),
+            (
+                EmitProfile::Lean,
+                true,
+                false,
+                Err("--harden conflicts with --profile lean".to_string()),
+            ),
+            (EmitProfile::Lean, false, true, Ok(EmitProfile::Lean)),
+            (
+                EmitProfile::Lean,
+                true,
+                true,
+                Err("cannot combine --harden and --lean".to_string()),
+            ),
+        ];
+
+        for (profile, harden, lean, expected) in cases {
+            assert_eq!(
+                EmitProfile::resolve(profile, harden, lean),
+                expected,
+                "failed on ({:?}, {}, {})",
+                profile,
+                harden,
+                lean
+            );
+        }
     }
 
     #[test]
