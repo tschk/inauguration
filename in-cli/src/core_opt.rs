@@ -217,7 +217,7 @@ pub(crate) fn expr_has_effects(e: &Expr) -> bool {
     has
 }
 
-pub(crate) fn map_expr_mut<F: FnMut(&mut Expr)>(e: &mut Expr, f: &mut F) {
+pub fn map_expr_mut<F: FnMut(&mut Expr)>(e: &mut Expr, f: &mut F) {
     match e {
         Expr::MatchValue { scrutinee, arms } => {
             map_expr_mut(scrutinee, f);
