@@ -1092,7 +1092,12 @@ fn lower_file_items_at_visited(
                                 sig: method.sig.clone(),
                                 block: Box::new(block.clone()),
                             };
-                            decls.push(lower_fn(f));
+                            let mut declaration = lower_fn(f);
+                            if let Decl::Function { name, .. } = &mut declaration {
+                                // A default body belongs to its trait, never the free-function namespace.
+                                *name = format!("{}::{name}", tr.ident);
+                            }
+                            decls.push(declaration);
                         }
                     }
                 }

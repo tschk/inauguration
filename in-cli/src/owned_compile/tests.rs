@@ -12133,6 +12133,10 @@ fn rust_ieee_trait_static_calls_preserve_owned_scope_and_dispatch_priority() {
         return;
     }
     for source in [
+        r#"fn value()->i64{42}trait First{fn value()->i64{7}}trait Second{fn value()->i64{9}}fn main()->i64{value()}"#,
+        r#"fn main()->i64{42}trait Decoy{fn main()->i64{7}}"#,
+        r#"mod left{pub fn value()->i64{17}pub trait Make{fn value()->i64{7}}}mod right{pub fn value()->i64{25}pub trait Make{fn value()->i64{9}}}fn main()->i64{left::value()+right::value()}"#,
+        r#"mod source{pub fn value()->i64{42}pub trait Make{fn value()->i64{7}}}use source::value;fn main()->i64{value()}"#,
         r#"mod defs{pub trait Make{fn value()->f32;}pub struct Row;impl Make for Row{fn value()->f32{42.0}}}type Make=u8;fn main()->i64{{use defs::Make;if defs::Row::value()==42.0f32{42}else{7}}}"#,
         r#"mod m{pub trait Make{fn value()->i64;}pub struct Hidden;impl Make for Hidden{fn value()->i64{42}}pub type Alias=Hidden;}use m::Make;fn main()->i64{m::Alias::value()}"#,
         r#"#[derive(Default)]struct Item;trait Make{fn default()->i64;}impl Make for Item{fn default()->i64{7}}impl Item{fn default()->i64{42}}fn main()->i64{Item::default()}"#,
