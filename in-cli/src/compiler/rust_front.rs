@@ -952,6 +952,9 @@ fn lower_file_items_at_visited(
                 let callables = callable_bounds::obligations(file, &function).map(|values| {
                     values.map(|values| crate::core_ir::rust_generics::callable_bounds(&values))
                 });
+                let traits = type_aliases::generic_trait_bounds(&function).map(|values| {
+                    values.map(|values| crate::core_ir::rust_generics::trait_bounds(&values))
+                });
                 let mut declaration = lower_fn(function);
                 if let (Some(arity), Decl::Function { body, .. }) =
                     (explicit_arity, &mut declaration)
@@ -964,7 +967,7 @@ fn lower_file_items_at_visited(
                         }),
                     );
                 }
-                for obligations in [obligations, callables] {
+                for obligations in [obligations, callables, traits] {
                     match obligations {
                         Ok(Some(obligations)) => {
                             if let Decl::Function { body, .. } = &mut declaration {
@@ -1594,6 +1597,7 @@ fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str, file: &syn::File, ro
                     if (op == crate::core_ir::rust_generics::CONSTRAINTS
                         || crate::core_ir::rust_generics::is_neg_bounds(op)
                         || crate::core_ir::rust_generics::is_callable_bounds(op)
+                        || crate::core_ir::rust_generics::is_trait_bounds(op)
                         || crate::core_ir::rust_generics::decode_explicit_arity(op).is_some()
                         || crate::core_ir::rust_callables::is_declaration(op))
                         && matches!(expr.as_ref(), Expr::UnitLit)

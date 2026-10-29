@@ -44,6 +44,27 @@ pub(crate) fn decode_explicit_arity(op: &str) -> Option<usize> {
 const NEG_BOUNDS: &str = "#rust-generic-neg-bounds:";
 const NEG_IMPLEMENTATION: &str = "#rust-neg-implementation:";
 const CALLABLE_BOUNDS: &str = "#rust-generic-callable-bounds:";
+const TRAIT_BOUNDS: &str = "#rust-generic-source-trait-bounds:";
+/// A closed source query proves these exact receivers implement the bound.
+/// Missing receivers remain unproved, not negative evidence about other crates.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TraitObligation {
+    pub receiver: Typ,
+    pub implementations: Vec<Typ>,
+}
+pub(crate) fn trait_bounds(values: &[TraitObligation]) -> String {
+    format!(
+        "{TRAIT_BOUNDS}{}",
+        serde_json::to_string(values).expect("type metadata serializes")
+    )
+}
+pub(crate) fn decode_trait_bounds(op: &str) -> Option<Vec<TraitObligation>> {
+    serde_json::from_str(op.strip_prefix(TRAIT_BOUNDS)?).ok()
+}
+pub(crate) fn is_trait_bounds(op: &str) -> bool {
+    op.starts_with(TRAIT_BOUNDS)
+}
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CallableObligation {

@@ -3,6 +3,8 @@
 use super::*;
 use syn::visit::Visit;
 
+mod bounds;
+
 type Identity = Vec<String>;
 #[derive(Clone)]
 struct Implementation {
@@ -52,6 +54,14 @@ fn may_derive(meta: &syn::Meta) -> bool {
     false
 }
 impl Index {
+    pub(super) fn generic_bounds(
+        &self,
+        function: &syn::ItemFn,
+        frame: &Frame,
+    ) -> Result<Option<Vec<crate::core_ir::rust_generics::TraitObligation>>, Failure> {
+        bounds::obligations(self, function, frame)
+    }
+
     pub(super) fn collect(&mut self, items: &[syn::Item], module: &[String], conditional: bool) {
         for item in items {
             let presence = item_presence(item);
@@ -452,16 +462,45 @@ impl Index {
             )
         };
         for (required, actual) in required.sig.inputs.iter().zip(&method.sig.inputs) {
-            let (syn::FnArg::Typed(required), syn::FnArg::Typed(actual)) = (required, actual)
-            else {
-                return Err(unsupported(
-                    "trait receiver method signature is not a static function",
-                ));
-            };
-            if resolve(&required.ty, &declaring)? != resolve(&actual.ty, &implementation)? {
-                return Err(Failure::Invalid(
-                    "trait implementation associated function parameter type differs".into(),
-                ));
+            match (required, actual) {
+                (syn::FnArg::Typed(required), syn::FnArg::Typed(actual)) => {
+                    if resolve(&required.ty, &declaring)? != resolve(&actual.ty, &implementation)? {
+                        return Err(Failure::Invalid(
+                            "trait implementation associated function parameter type differs"
+                                .into(),
+                        ));
+                    }
+                }
+                (syn::FnArg::Receiver(required), syn::FnArg::Receiver(actual)) => {
+                    for receiver in [required, actual] {
+                        if receiver.colon_token.is_some()
+                            || receiver
+                                .reference
+                                .as_ref()
+                                .is_some_and(|(_, lifetime)| lifetime.is_some())
+                        {
+                            return Err(unsupported(
+                                "trait receiver requires explicit type or lifetime obligations",
+                            ));
+                        }
+                    }
+                    let form = |receiver: &syn::Receiver| {
+                        (
+                            receiver.reference.is_some(),
+                            receiver.reference.is_some() && receiver.mutability.is_some(),
+                        )
+                    };
+                    if form(required) != form(actual) {
+                        return Err(Failure::Invalid(
+                            "trait implementation receiver borrow differs".into(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(Failure::Invalid(
+                        "trait implementation receiver position differs".into(),
+                    ));
+                }
             }
         }
         let output = |value: &syn::ReturnType, scope: &Frame| -> Result<Typ, Failure> {

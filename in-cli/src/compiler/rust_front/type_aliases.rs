@@ -1993,6 +1993,18 @@ pub(super) fn trait_path_failure(path: &syn::Path) -> Option<Failure> {
         .filter(Failure::is_invalid)
 }
 
+pub(super) fn generic_trait_bounds(
+    function: &syn::ItemFn,
+) -> Result<Option<Vec<crate::core_ir::rust_generics::TraitObligation>>, Failure> {
+    let Some(frame) = current() else {
+        return Ok(None);
+    };
+    match frame.catalog.trait_statics.generic_bounds(function, &frame) {
+        Err(failure) if !failure.is_invalid() => Ok(None),
+        result => result,
+    }
+}
+
 /// Ordinary call/value paths may belong to lazily loaded modules outside this catalog.
 /// Alias RHS and import target recursion intentionally retain their strict contexts.
 pub(super) fn resolve_value_owner(path: &syn::Path) -> Result<Option<Typ>, Failure> {

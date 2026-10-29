@@ -436,6 +436,15 @@ fn expr(value: &mut Expr, names: &NominalNames<'_>, generics: &HashSet<String>) 
                 }
                 *op = crate::core_ir::rust_generics::neg_bounds(&obligations);
             }
+            if let Some(mut obligations) = crate::core_ir::rust_generics::decode_trait_bounds(op) {
+                for obligation in &mut obligations {
+                    typ(&mut obligation.receiver, names, generics);
+                    for implementation in &mut obligation.implementations {
+                        typ(implementation, names, generics);
+                    }
+                }
+                *op = crate::core_ir::rust_generics::trait_bounds(&obligations);
+            }
             if let Some(mut proof) = crate::core_ir::rust_generics::decode_neg_implementation(op) {
                 typ(&mut proof.receiver, names, generics);
                 typ(&mut proof.output, names, generics);

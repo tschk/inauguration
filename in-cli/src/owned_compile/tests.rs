@@ -94,6 +94,106 @@ fn rust_ordinary_compilation_selects_runtime_not_documentation_items() {
 }
 
 #[test]
+fn rust_source_trait_bounds_require_exact_owned_implementations() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("source-trait-bounds.rs");
+    for source in [
+        "trait Mark{}struct Row{value:i64}impl Mark for Row{}fn choose<T:Mark>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Mark{}struct Row{value:i64}impl Mark for Row{}fn choose<T>(row:T)->T where T:Mark{row}fn main()->i64{choose::<Row>(Row{value:42}).value}",
+        "trait Mark{}trait Other{}struct Row{value:i64}impl Mark for Row{}impl Other for Row{}fn choose<T:Mark+Other>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Mark{}struct Row{value:i64}impl Mark for Row{}fn choose(row:impl Mark)->i64{42}fn main()->i64{choose(Row{value:7})}",
+        "trait Mark{}struct Row{value:i64}impl Mark for Row{}fn choose<T:Mark>(row:&T)->&T{row}fn main()->i64{let row=Row{value:42};choose(&row).value}",
+        "trait Mark{}struct Row{value:i64}impl Mark for Row{}fn choose(row:&impl Mark)->i64{42}fn main()->i64{let row=Row{value:7};choose(&row)}",
+        "trait Mark{}struct Row{value:i64}impl Mark for Row{}type Alias=Row;fn choose<T:Mark>(row:T)->T{row}fn main()->i64{choose::<Alias>(Row{value:42}).value}",
+        "mod defs{pub trait Mark{}pub struct Row{pub value:i64}impl Mark for Row{}pub fn choose<T:Mark>(row:T)->T{row}}use defs::choose as select;fn main()->i64{select(defs::Row{value:42}).value}",
+        "mod defs{pub trait Mark{}pub struct Row{pub value:i64}impl Mark for Row{}}use defs::Mark as Bound;fn choose<T:Bound>(row:T)->T{row}fn main()->i64{choose(defs::Row{value:42}).value}",
+        "trait Make{fn make()->f32;}struct Row{value:i64}impl Make for Row{fn make()->f32{7.0}}fn choose<T:Make>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Read{fn read(&self)->f32;}struct Row{value:i64}impl Read for Row{fn read(&self)->f32{7.0}}fn choose<T:Read>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Write{fn write(&mut self,value:i64);}struct Row{value:i64}impl Write for Row{fn write(&mut self,value:i64){self.value=value;}}fn choose<T:Write>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Consume{fn consume(self)->i64;}struct Row{value:i64}impl Consume for Row{fn consume(mut self)->i64{self.value}}fn choose<T:Consume>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+    ] {
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            let out = temp_path("source-trait-bounds-out");
+            let report = compile_owned(&default_request(
+                path.clone(),
+                target,
+                Some("main"),
+                Some(out.clone()),
+            ));
+            assert!(
+                report.success && report.degradations.is_empty(),
+                "{source}: {report:?}"
+            );
+            assert!(report.external_invocations.is_empty());
+            if target == CompileTarget::Jit {
+                assert_eq!(report.eval_result, Some(EvalValue::Int(42)), "{source}");
+            } else {
+                assert_eq!(
+                    std::process::Command::new(&out).status().unwrap().code(),
+                    Some(42),
+                    "{source}"
+                );
+                fs::remove_file(out).unwrap();
+            }
+        }
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn rust_source_trait_bounds_cannot_erase_unproved_contracts() {
+    if !super::jit::host_supports_jit() {
+        return;
+    }
+    let path = temp_path("source-trait-bounds-refusal.rs");
+    for source in [
+        "trait Mark{}struct Row{value:i64}fn choose<T:Mark>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Mark{}struct Row{value:i64}fn choose(row:&impl Mark)->i64{42}fn main()->i64{let row=Row{value:7};choose(&row)}",
+        "trait Mark{}struct Row{value:i64}impl Mark for Row{}fn choose<T:Mark>(row:T)->i64{42}fn main()->i64{let row=Row{value:7};choose(&row)}",
+        "trait Mark{}struct Row{value:i64}impl Mark for Row{}impl Mark for Row{}fn choose<T:Mark>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Mark{}struct Row{value:i64}#[cfg(feature=\"maybe\")]impl Mark for Row{}fn choose<T:Mark>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Mark{}struct Row{value:i64}#[cfg(any())]impl Mark for Row{}fn choose<T:Mark>(row:T)->i64{42}fn main()->i64{let unused=choose(Row{value:7});42}",
+        "mod left{pub trait Mark{}}mod right{pub trait Mark{}}struct Row{value:i64}impl right::Mark for Row{}fn choose<T:left::Mark>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Mark{}struct Row{value:i64}impl Mark for Row{}fn choose<T:Mark>(row:T)->T{Row{value:42}}fn main()->i64{choose(Row{value:7}).value}",
+        "trait Mark{}struct Row{value:i64}impl Mark for Row{}fn choose<T:Mark>(row:T)->T{let a=row;row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Make{fn make()->bool;}struct Row{value:i64}impl Make for Row{fn make()->i64{42}}fn choose<T:Make>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Make{fn make()->i64;}struct Row{value:i64}impl Make for Row{}fn choose<T:Make>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Read{fn read(&self)->i64;}struct Row{value:i64}impl Read for Row{fn read(&mut self)->i64{42}}fn choose<T:Read>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Read{fn read(&self)->i64;}struct Row{value:i64}impl Read for Row{fn read(self)->i64{42}}fn choose<T:Read>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Read{fn read(&self)->f32;}struct Row{value:i64}impl Read for Row{fn read(&self)->f64{42.0}}fn choose<T:Read>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Read{fn read(&self,value:&str)->i64;}struct Row{value:i64}impl Read for Row{fn read(&self,value:&'static str)->i64{42}}fn choose<T:Read>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Read{fn read(&self)->i64;}struct Row{value:i64}impl Read for Row{fn read(&self)->i64{42}}impl Row{fn read(&self)->i64{7}}fn choose<T:Read>(row:T)->i64{row.read()}fn main()->i64{choose(Row{value:42})}",
+        "trait Mark{}mod left{pub struct Row{pub value:i64}}mod right{pub struct Row{pub value:i64}}impl Mark for left::Row{}fn choose<T:Mark>(row:T)->T{row}fn main()->i64{choose(right::Row{value:42}).value}",
+        "trait Mark:Missing{}struct Row{value:i64}impl Mark for Row{}fn choose<T:Mark>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "trait Mark{}struct Row{value:i64}impl<T> Mark for T{}fn choose<T:Mark>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+        "type Mark=i64;struct Row{value:i64}fn choose<T:Mark>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
+    ] {
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            let out = temp_path("source-trait-bounds-refusal-out");
+            let report = compile_owned(&default_request(
+                path.clone(),
+                target,
+                Some("main"),
+                Some(out.clone()),
+            ));
+            assert!(
+                !report.success && !report.execution_started,
+                "{source}: {report:?}"
+            );
+            assert_eq!(report.eval_result, None);
+            assert_eq!(report.artifact_path, None);
+            assert!(report.external_invocations.is_empty());
+            assert!(!out.exists());
+        }
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn rust_item_macros_own_generated_layouts_and_preserve_contexts() {
     if !super::jit::host_supports_jit() {
         return;

@@ -710,11 +710,11 @@ mod tests {
         fs::write(temp.path.join("Cargo.toml"), "[package]\nname=\"caller\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[features]\ndefault=[\"selected\"]\nselected=[]\n[dependencies]\nleft-value={path=\"left\"}\nright={path=\"right\"}\n").unwrap();
         fs::write(
             temp.path.join("src/lib.rs"),
-            "pub type Result<T>=std::result::Result<T,()>;pub fn answer()->i64{let pair:(i64,i64)=(5,0);pair.0}",
+            "pub type Result<T>=std::result::Result<T,()>;trait Mark{}struct Row{value:i64}impl Mark for Row{}fn keep<T:Mark>(row:T)->T{row}pub fn answer()->i64{let pair:(i64,i64)=(5,0);keep(Row{value:pair.0}).value}",
         )
         .unwrap();
         let path = temp.path.join("src/main.rs");
-        fs::write(&path, "type Result<T>=std::result::Result<T,()>;#[cfg(all(feature=\"selected\",unix))]fn answer()->i64{left_value::answer()+right::answer()+caller::answer()}#[cfg(not(all(feature=\"selected\",unix)))]fn answer()->i64{7}fn main()->i64{answer()}").unwrap();
+        fs::write(&path, "type Result<T>=std::result::Result<T,()>;struct Row{value:i64}#[cfg(all(feature=\"selected\",unix))]fn answer()->i64{left_value::answer()+right::answer()+caller::answer()}#[cfg(not(all(feature=\"selected\",unix)))]fn answer()->i64{7}fn main()->i64{answer()}").unwrap();
         for (directory, package, value, increment) in
             [("left", "left-value", 7, 10), ("right", "right", 4, 16)]
         {

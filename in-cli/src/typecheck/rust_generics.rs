@@ -923,7 +923,7 @@ fn is_source_template(declaration: &Decl) -> bool {
 fn strip_template_marker(declaration: &mut Decl) {
     if let Decl::Function { body, .. } = declaration {
         body.retain(|stmt| !matches!(stmt, crate::core_ir::Stmt::Expr(Expr::Unary { op, expr })
-            if (matches!(op.as_str(), rust_generics::TEMPLATE | rust_generics::CONSTRAINTS) || rust_generics::is_neg_bounds(op) || rust_generics::is_callable_bounds(op) || rust_generics::decode_explicit_arity(op).is_some()) && matches!(expr.as_ref(), Expr::UnitLit)
+            if (matches!(op.as_str(), rust_generics::TEMPLATE | rust_generics::CONSTRAINTS) || rust_generics::is_neg_bounds(op) || rust_generics::is_callable_bounds(op) || rust_generics::is_trait_bounds(op) || rust_generics::decode_explicit_arity(op).is_some()) && matches!(expr.as_ref(), Expr::UnitLit)
                 || op == rust_generics::ALIAS && matches!(expr.as_ref(), Expr::Ident(_))));
     }
 }
@@ -1182,6 +1182,7 @@ fn preserve_argument_proofs(module: &mut UnifiedModule) {
                 arguments |= rust_generics::decode_arguments(op).is_some()
                     || rust_generics::is_neg_bounds(op)
                     || rust_generics::is_callable_bounds(op)
+                    || rust_generics::is_trait_bounds(op)
                     || rust_generics::is_neg_implementation(op);
             }
         });
@@ -1210,7 +1211,7 @@ fn preserve_argument_proofs(module: &mut UnifiedModule) {
 fn has_constraints(declaration: &Decl) -> bool {
     matches!(declaration, Decl::Function { body, .. } if body.iter().any(|statement|
         matches!(statement, crate::core_ir::Stmt::Expr(Expr::Unary { op, expr })
-            if (op == rust_generics::CONSTRAINTS || rust_generics::is_neg_bounds(op) || rust_generics::is_callable_bounds(op)) && matches!(expr.as_ref(), Expr::UnitLit))))
+            if (op == rust_generics::CONSTRAINTS || rust_generics::is_neg_bounds(op) || rust_generics::is_callable_bounds(op) || rust_generics::is_trait_bounds(op)) && matches!(expr.as_ref(), Expr::UnitLit))))
 }
 fn collect_neg_implementations(module: &UnifiedModule) -> Vec<rust_generics::NegImplementation> {
     module
@@ -1248,6 +1249,39 @@ fn discharge_obligations(
         }
         if op == rust_generics::CONSTRAINTS {
             return false;
+        }
+        if rust_generics::is_trait_bounds(op) {
+            let Some(obligations) = rust_generics::decode_trait_bounds(op) else {
+                return false;
+            };
+            if obligations.is_empty() {
+                return false;
+            }
+            seen = true;
+            for obligation in obligations {
+                if obligation
+                    .implementations
+                    .iter()
+                    .filter(|implementation| {
+                        // A local catalog anchors receivers at crate::. Merged
+                        // dependency artifacts have already qualified that root.
+                        let local = match implementation {
+                            Typ::Named(name) => name
+                                .strip_prefix("crate::")
+                                .map(|name| Typ::Named(name.into())),
+                            _ => None,
+                        };
+                        crate::core_ir::rust_references::same_source_type(
+                            local.as_ref().unwrap_or(implementation),
+                            &obligation.receiver,
+                        )
+                    })
+                    .count()
+                    != 1
+                {
+                    return false;
+                }
+            }
         }
         if rust_generics::is_callable_bounds(op) {
             let Some(obligations) = rust_generics::decode_callable_bounds(op) else {
