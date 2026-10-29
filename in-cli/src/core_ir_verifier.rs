@@ -231,6 +231,8 @@ const INTRINSICS: &[(&str, IntrinsicRet)] = &[
     ("rdmsr", IntrinsicRet::Int),
     ("wrmsr", IntrinsicRet::Void),
     ("wrmsr64", IntrinsicRet::Void),
+    ("mem-fill64", IntrinsicRet::Void),
+    ("mem-copy64", IntrinsicRet::Void),
     ("invoke", IntrinsicRet::Int),
     ("invoke1", IntrinsicRet::Int),
     ("invoke2", IntrinsicRet::Int),
@@ -2595,6 +2597,48 @@ fn canonical_type(typ: &Typ) -> Typ {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Boot emit type-checks and lowers x86 bare-metal intrinsics without this
+    /// verifier, while SCI and static-lib emit run it. Every intrinsic the type
+    /// checker accepts must therefore also be in `INTRINSICS`, or it compiles
+    /// into a boot image but fails as an SCI component.
+    #[test]
+    fn every_typechecked_x86_intrinsic_is_a_verifier_intrinsic() {
+        let typecheck = include_str!("typecheck.rs");
+        let marker = "// x86 bare-metal intrinsics";
+        let group =
+            &typecheck[typecheck.find(marker).expect("x86 intrinsic group") + marker.len()..];
+        let group = &group[..group.find("\n    )").expect("end of x86 intrinsic group")];
+        let names: Vec<&str> = group.split('"').skip(1).step_by(2).collect();
+        assert!(names.len() > 30, "x86 intrinsic group not found: {names:?}");
+        for name in names {
+            assert!(
+                intrinsic_ret(name).is_some(),
+                "`{name}` missing from INTRINSICS"
+            );
+            // Indirect-call intrinsics take a callable; the rest take Int words.
+            if name.starts_with("invoke") {
+                continue;
+            }
+            // Expected arities are stated here, independent of the verifier's
+            // own signature tables, so a missing signature cannot make an
+            // invalid call look valid. A new intrinsic must be added here.
+            let arity = match name {
+                "hlt" | "cli" | "sti" | "pause" | "read-cr2" | "read-cr3" | "cr3-read" => 0,
+                "inb" | "inw" | "inl" | "load8" | "load16" | "load32" | "load64" | "lidt"
+                | "lgdt" | "ltr" | "invlpg" | "write-cr3" | "cr3-write" | "rdmsr" => 1,
+                "outb" | "outw" | "outl" | "store8" | "store16" | "store32" | "store64"
+                | "wrmsr64" => 2,
+                "wrmsr" | "mem-fill64" | "mem-copy64" => 3,
+                _ => panic!("give `{name}` an expected arity in this test"),
+            };
+            let args = vec!["p"; arity].join(", ");
+            let source = format!("fn main(p: Int)->Int{{ {name}({args}); return 0; }}");
+            let module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+            let report = verify_for_entry(&module, "main");
+            assert!(report.ok, "`{source}` rejected: {:?}", report.reason_code);
+        }
+    }
+
     #[test]
     fn private_unreachable_is_a_reserved_zero_argument_terminator() {
         let module = crate::in_lang_parse::parse_in_source(
