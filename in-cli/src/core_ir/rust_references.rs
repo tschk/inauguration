@@ -241,7 +241,13 @@ pub(crate) fn erase_type(value: Typ) -> Typ {
 }
 
 pub(crate) fn erase_value(value: &mut Expr) {
-    if let Expr::Unary { op, .. } = value {
+    if let Expr::Unary { op, expr } = value {
+        // A string literal already carries the borrowed string value. Its
+        // source annotation does not take the address of a temporary slot.
+        if op == SHARED_VALUE && matches!(expr.as_ref(), Expr::StringLit(_)) {
+            *value = std::mem::replace(expr.as_mut(), Expr::UnitLit);
+            return;
+        }
         match op.as_str() {
             NEGATE_VALUE => *op = "-".into(),
             SHARED_VALUE => *op = SHARED_ADDRESS.into(),

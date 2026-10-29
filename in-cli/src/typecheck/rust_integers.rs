@@ -980,7 +980,9 @@ impl Pass<'_> {
                 Typ::Bool | Typ::Float | Typ::String | Typ::Array(_) | Typ::Vector(_) | Typ::Void,
             ) => true,
             Some(Typ::Named(name)) => {
-                core_ir::rust_floats::is_proof(&name) || self.facts.structs.contains_key(&name)
+                core_ir::rust_floats::is_proof(&name)
+                    || core_ir::rust_references::decode(&name).is_some()
+                    || self.facts.structs.contains_key(&name)
             }
             _ => false,
         }

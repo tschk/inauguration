@@ -312,7 +312,8 @@ fn expression_constraints(
                 let Some((_, expected)) = schema.iter_mut().find(|(name, _)| name == field) else {
                     continue;
                 };
-                let unknown = matches!(expected, Typ::Named(name) if name == "Any" || name == "_");
+                let unknown = matches!(expected, Typ::Generic(name) if name == "_")
+                    || matches!(expected, Typ::Named(name) if name == "Any" || name == "_");
                 let stronger_float = *expected == crate::core_ir::rust_floats::weak_type()
                     && crate::core_ir::rust_floats::kind(&actual).is_some();
                 if (unknown || stronger_float) && *expected != actual {

@@ -17,7 +17,7 @@ pub(super) fn infer_call(
     let Expr::Call { callee, .. } = expr else {
         return None;
     };
-    if let Some(failure) = explicit_result_failure(callee, expected, facts, env) {
+    if let Some(failure) = explicit_call_failure(callee, arguments, expected, facts, env) {
         return Some(Err(failure));
     }
     let Expr::Ident(target) = callee.as_ref() else {
@@ -85,6 +85,9 @@ pub(super) fn infer_call(
         unreachable!()
     };
     for ((_, declared), actual) in params.iter().zip(arguments) {
+        if !owned_type(declared, 0) {
+            return None;
+        }
         if let Some(actual) = actual {
             if !source_argument_agrees(declared, actual) {
                 return Some(Err(source_conflict(
@@ -98,15 +101,15 @@ pub(super) fn infer_call(
     Some(Ok((types, ret)))
 }
 
-// Explicit arguments remain authoritative. Check the result destination before
-// specialization/erasure, without replacing them with inferred arguments.
-fn explicit_result_failure(
+// Explicit arguments remain authoritative. Check source arguments and the
+// result destination before erasure, without replacing explicit substitutions.
+fn explicit_call_failure(
     callee: &Expr,
+    actuals: &[Option<Typ>],
     expected: Option<&Typ>,
     facts: &super::Facts,
     env: &HashMap<String, Typ>,
 ) -> Option<ResolutionFailure> {
-    let expected = expected.filter(|typ| owned_type(typ, 0))?;
     let Expr::Unary { op, expr } = callee else {
         return None;
     };
@@ -121,28 +124,45 @@ fn explicit_result_failure(
     if parameters.len() != arguments.len() || arguments.iter().any(|typ| !owned_type(typ, 0)) {
         return None;
     }
-    let (_, result) = facts.function_signature(target)?;
+    let (signature, result) = facts.function_signature(target)?;
     let bindings = parameters.iter().cloned().zip(arguments).collect();
     let mut projected = Decl::Function {
-        name: "#explicit-result".into(),
-        params: vec![],
+        name: "#explicit-call".into(),
+        params: signature.to_vec(),
         ret: result.clone(),
         body: vec![],
         // Substitute this projected signature outside its former generic binder.
         type_params: vec![],
     };
     crate::core_bindings::substitute_type_parameters(&mut projected, &bindings);
-    let Decl::Function { ret, .. } = projected else {
+    let Decl::Function { params, ret, .. } = projected else {
         unreachable!()
     };
-    if !owned_type(&ret, 0) || source_argument_agrees(expected, &ret) {
-        return None;
+    let mut failure = None;
+    let names = HashSet::new();
+    let mut bindings = HashMap::new();
+    for ((_, declared), actual) in params.iter().zip(actuals) {
+        if let Some(actual) = actual {
+            failure = crate::core_ir::type_proofs::prefer_failure(
+                failure,
+                unify_source(declared, actual, &names, &mut bindings, 0).err(),
+            );
+        }
     }
-    Some(source_conflict(
-        &ret,
-        expected,
-        "explicit Rust generic call result conflicts with its destination type".into(),
-    ))
+    if let Some(expected) = expected.filter(|typ| owned_type(typ, 0))
+        && owned_type(&ret, 0)
+        && !source_argument_agrees(expected, &ret)
+    {
+        failure = crate::core_ir::type_proofs::prefer_failure(
+            failure,
+            Some(source_conflict(
+                &ret,
+                expected,
+                "explicit Rust generic call result conflicts with its destination type".into(),
+            )),
+        );
+    }
+    failure
 }
 
 // Only authoritative source operator edges use this check. Ordinary calls keep
@@ -324,6 +344,14 @@ fn unify_source(
             unify_source(left, right, names, bindings, depth + 1)
         }
         (Typ::Named(left), Typ::Named(right)) => {
+            // A leaf proof is not a nominal identity. Keep walking aggregate
+            // siblings so an unsupported leaf cannot hide a definite error.
+            if let Some(failure) = crate::core_ir::type_proofs::prefer_failure(
+                crate::core_ir::type_proofs::decode(left),
+                crate::core_ir::type_proofs::decode(right),
+            ) {
+                return Err(failure);
+            }
             if crate::core_ir::rust_callables::is_encoded(left)
                 || crate::core_ir::rust_callables::is_encoded(right)
             {
@@ -395,6 +423,23 @@ fn unify_source(
                 crate::core_ir::rust_references::decode(left),
                 crate::core_ir::rust_references::decode(right),
             ) {
+                if let Typ::Array(element) = &left.referent {
+                    let coerced = match &right.referent {
+                        Typ::Vector(element) => Some(element.as_ref().clone()),
+                        Typ::Named(name) => {
+                            crate::core_ir::rust_arrays::decode(name).map(|array| array.element)
+                        }
+                        _ => None,
+                    };
+                    if let Some(coerced) = coerced {
+                        // Rust can borrow either sequence as a slice. Check
+                        // element identity before deferring its unowned view ABI.
+                        unify_source(element, &coerced, names, bindings, depth + 1)?;
+                        return Err(ResolutionFailure::Unsupported(
+                            "generic slice coercion requires source-owned sequence views".into(),
+                        ));
+                    }
+                }
                 // A possible borrow coercion cannot hide a definite referent
                 // contradiction in another owned generic occurrence.
                 unify_source(&left.referent, &right.referent, names, bindings, depth + 1)?;
@@ -577,6 +622,7 @@ fn normalize_with_checks(module: &mut UnifiedModule, check_templates: bool) {
             let result = instantiate(
                 target,
                 &arguments,
+                rust_generics::is_inferred(op),
                 templates,
                 duplicates,
                 instances,
@@ -716,6 +762,7 @@ fn remove_unused_templates(module: &mut UnifiedModule) {
 fn instantiate(
     target: &str,
     arguments: &[Typ],
+    inferred: bool,
     templates: &HashMap<String, Decl>,
     duplicates: &HashSet<String>,
     instances: &mut HashMap<(String, String), String>,
@@ -739,9 +786,33 @@ fn instantiate(
             "generic source function `{target}` is not owned"
         )));
     };
-    let Decl::Function { type_params, .. } = template else {
+    let Decl::Function {
+        type_params, body, ..
+    } = template
+    else {
         unreachable!()
     };
+    if !inferred
+        && let Some(arity) = body.iter().find_map(|statement| match statement {
+            crate::core_ir::Stmt::Expr(Expr::Unary { op, expr })
+                if matches!(expr.as_ref(), Expr::UnitLit) =>
+            {
+                rust_generics::decode_explicit_arity(op)
+            }
+            _ => None,
+        })
+    {
+        return Err(if arguments.len() > arity {
+            ResolutionFailure::Invalid(format!(
+                "generic function `{target}` has only {arity} explicit type parameters"
+            ))
+        } else {
+            ResolutionFailure::Unsupported(
+                "explicit generic arguments with anonymous parameters require partial inference"
+                    .into(),
+            )
+        });
+    }
     if !type_params.is_empty() && arguments.is_empty() {
         return Err(ResolutionFailure::Unsupported(
             "empty explicit arguments require generic argument inference".into(),
@@ -802,7 +873,7 @@ fn instantiate(
     type_params.clear();
     apply_alias_arguments(&mut instance, arguments);
     crate::core_bindings::substitute_type_parameters(&mut instance, &bindings);
-    let discharged = !constrained || discharge_neg_obligations(&instance, neg_implementations);
+    let discharged = !constrained || discharge_obligations(&instance, neg_implementations);
     strip_template_marker(&mut instance);
     if !discharged {
         // Keep the concrete body and origin-tagged operators for the existing
@@ -852,7 +923,7 @@ fn is_source_template(declaration: &Decl) -> bool {
 fn strip_template_marker(declaration: &mut Decl) {
     if let Decl::Function { body, .. } = declaration {
         body.retain(|stmt| !matches!(stmt, crate::core_ir::Stmt::Expr(Expr::Unary { op, expr })
-            if (matches!(op.as_str(), rust_generics::TEMPLATE | rust_generics::CONSTRAINTS) || rust_generics::is_neg_bounds(op)) && matches!(expr.as_ref(), Expr::UnitLit)
+            if (matches!(op.as_str(), rust_generics::TEMPLATE | rust_generics::CONSTRAINTS) || rust_generics::is_neg_bounds(op) || rust_generics::is_callable_bounds(op) || rust_generics::decode_explicit_arity(op).is_some()) && matches!(expr.as_ref(), Expr::UnitLit)
                 || op == rust_generics::ALIAS && matches!(expr.as_ref(), Expr::Ident(_))));
     }
 }
@@ -875,15 +946,28 @@ fn validate_template(
         return Some((*failure).clone());
     }
     let Decl::Function {
-        name, type_params, ..
+        name,
+        type_params,
+        body,
+        ..
     } = template
     else {
         return None;
     };
-    if has_constraints(template) {
+    if has_constraints(template)
+        && body.iter().any(|statement| {
+            matches!(statement,
+                crate::core_ir::Stmt::Expr(Expr::Unary { op, expr })
+                    if (op == rust_generics::CONSTRAINTS || rust_generics::is_neg_bounds(op))
+                        && matches!(expr.as_ref(), Expr::UnitLit)
+                        || op == rust_generics::ALIAS && matches!(expr.as_ref(), Expr::Ident(_)))
+        })
+    {
         // Known source failures were handled above. Unproved obligations are
         // retained on concrete instances (or the still-reachable template), not
         // substituted for the original call before operator resolution.
+        // Forwarding aliases have no independent source body: requested_templates
+        // also reaches their canonical target, whose definition is audited below.
         return None;
     }
     let mut rigid = template.clone();
@@ -911,8 +995,48 @@ fn validate_template(
     };
     *audit_name = format!("#rust-generic-audit:{name}");
     type_params.clear();
-    strip_template_marker(&mut rigid);
     crate::core_bindings::substitute_type_parameters(&mut rigid, &bindings);
+    let mut callable_bounds = HashMap::new();
+    if let Decl::Function { body, .. } = &rigid {
+        for statement in body {
+            if let crate::core_ir::Stmt::Expr(Expr::Unary { op, expr }) = statement
+                && matches!(expr.as_ref(), Expr::UnitLit)
+                && let Some(obligations) = rust_generics::decode_callable_bounds(op)
+            {
+                for obligation in obligations {
+                    let Typ::Named(receiver) = obligation.receiver else {
+                        return Some(constraint_failure());
+                    };
+                    // The rigid audit owns scalar and symbolic callable slots,
+                    // not source aggregate descriptors or their coercions. An
+                    // unproved representation is Unsupported, not a source
+                    // type contradiction against an unrelated runtime carrier.
+                    if obligation
+                        .signature
+                        .parameters
+                        .iter()
+                        .chain(std::iter::once(&obligation.signature.result))
+                        .any(|typ| {
+                            !rust_generics::is_rigid_type(typ)
+                                && !matches!(typ, Typ::Named(name) if crate::core_ir::rust_integer_type_name(name).is_some())
+                        })
+                    {
+                        return Some(ResolutionFailure::Unsupported(
+                            "generic callable audit requires owned source argument and result storage"
+                                .into(),
+                        ));
+                    }
+                    if let Some(previous) =
+                        callable_bounds.insert(receiver, obligation.signature.clone())
+                        && previous != obligation.signature
+                    {
+                        return Some(constraint_failure());
+                    }
+                }
+            }
+        }
+    }
+    strip_template_marker(&mut rigid);
     let mut audit = UnifiedModule::new(vec![rigid]);
     let needed = requested_templates(&audit, templates);
     audit.decls.extend(
@@ -946,6 +1070,7 @@ fn validate_template(
     for (name, fields) in additions.structs {
         previous_structs.push((name.clone(), facts.structs.insert(name, fields)));
     }
+    let previous_callables = std::mem::replace(&mut facts.rigid_callables, callable_bounds);
     let mut errors = Vec::new();
     let mut ownership = None;
     for declaration in &audit.decls {
@@ -959,6 +1084,7 @@ fn validate_template(
             globals,
         ));
     }
+    facts.rigid_callables = previous_callables;
     for (name, signature) in previous {
         if let Some(signature) = signature {
             facts.functions.insert(name, signature);
@@ -1055,6 +1181,7 @@ fn preserve_argument_proofs(module: &mut UnifiedModule) {
             if let Expr::Unary { op, .. } = value {
                 arguments |= rust_generics::decode_arguments(op).is_some()
                     || rust_generics::is_neg_bounds(op)
+                    || rust_generics::is_callable_bounds(op)
                     || rust_generics::is_neg_implementation(op);
             }
         });
@@ -1083,7 +1210,7 @@ fn preserve_argument_proofs(module: &mut UnifiedModule) {
 fn has_constraints(declaration: &Decl) -> bool {
     matches!(declaration, Decl::Function { body, .. } if body.iter().any(|statement|
         matches!(statement, crate::core_ir::Stmt::Expr(Expr::Unary { op, expr })
-            if (op == rust_generics::CONSTRAINTS || rust_generics::is_neg_bounds(op)) && matches!(expr.as_ref(), Expr::UnitLit))))
+            if (op == rust_generics::CONSTRAINTS || rust_generics::is_neg_bounds(op) || rust_generics::is_callable_bounds(op)) && matches!(expr.as_ref(), Expr::UnitLit))))
 }
 fn collect_neg_implementations(module: &UnifiedModule) -> Vec<rust_generics::NegImplementation> {
     module
@@ -1104,7 +1231,7 @@ fn collect_neg_implementations(module: &UnifiedModule) -> Vec<rust_generics::Neg
         })
         .collect()
 }
-fn discharge_neg_obligations(
+fn discharge_obligations(
     instance: &Decl,
     implementations: &[rust_generics::NegImplementation],
 ) -> bool {
@@ -1121,6 +1248,34 @@ fn discharge_neg_obligations(
         }
         if op == rust_generics::CONSTRAINTS {
             return false;
+        }
+        if rust_generics::is_callable_bounds(op) {
+            let Some(obligations) = rust_generics::decode_callable_bounds(op) else {
+                return false;
+            };
+            if obligations.is_empty() {
+                return false;
+            }
+            seen = true;
+            for obligation in obligations {
+                let mut receiver = obligation.receiver;
+                while let Typ::Named(name) = &receiver
+                    && let Some(reference) = crate::core_ir::rust_references::decode(name)
+                {
+                    receiver = reference.referent;
+                }
+                let Some(actual) = crate::core_ir::rust_callables::signature_of(&receiver) else {
+                    return false;
+                };
+                if !actual.ordinary_rust_form()
+                    || !crate::core_ir::rust_references::same_source_type(
+                        &crate::core_ir::rust_callables::typ(actual),
+                        &crate::core_ir::rust_callables::typ(obligation.signature),
+                    )
+                {
+                    return false;
+                }
+            }
         }
         if !rust_generics::is_neg_bounds(op) {
             continue;
@@ -1209,7 +1364,7 @@ fn apply_alias_arguments(declaration: &mut Decl, arguments: &[Typ]) {
             && matches!(callee.as_ref(), Expr::Ident(name) if name == &target)
         {
             **callee = Expr::Unary {
-                op: rust_generics::arguments(arguments),
+                op: rust_generics::inferred_arguments(arguments),
                 expr: Box::new(std::mem::replace(callee.as_mut(), Expr::UnitLit)),
             };
         }
@@ -1451,6 +1606,140 @@ mod implicit_argument_tests {
         }
     }
     #[test]
+    fn sequence_borrow_coercions_do_not_invent_source_type_contradictions() {
+        for (values, borrow, other, invalid) in [
+            ("Vec<i64>=vec![17i64,40i64]", "&mut values", "42i64", false),
+            ("[i64;2]=[17i64,40i64]", "&mut values", "42i64", false),
+            (
+                "Vec<i64>=vec![17i64,40i64]",
+                "&mut values[1..]",
+                "42i64",
+                false,
+            ),
+            (
+                "[i64;2]=[17i64,40i64]",
+                "&mut values[(..1)]",
+                "42i64",
+                false,
+            ),
+            ("Vec<i64>=vec![17i64,40i64]", "&mut values", "42u64", true),
+            ("[i64;2]=[17i64,40i64]", "&mut values", "42u64", true),
+            (
+                "Vec<i64>=vec![17i64,40i64]",
+                "&mut produce(1u64,2i64)[1..]",
+                "42i64",
+                true,
+            ),
+        ] {
+            let source = format!(
+                "fn produce<T>(a:T,b:T)->Vec<i64>{{vec![17i64,40i64]}}fn choose<T>(values:&mut[T],other:T)->i64{{42}}fn main()->i64{{let mut values:{values};choose({borrow},{other})}}"
+            );
+            let module = source_module(&source).unwrap();
+            let module =
+                super::super::normalize_module(crate::parser_registry::ParserId::Rust, &module);
+            let proofs = super::super::TypeChecker::new().typed_proof_nodes(&module.decls);
+            assert_eq!(
+                proofs.values().any(ResolutionFailure::is_invalid),
+                invalid,
+                "slice storage may be unproved, but element widths must agree: {source}: {proofs:?}"
+            );
+        }
+    }
+    #[test]
+    fn unowned_borrow_storage_preserves_independent_source_contradictions() {
+        for (borrowed, initializer) in [
+            ("Vec<i64>", "vec![17i64,40i64]"),
+            ("(i64,i64)", "(17i64,40i64)"),
+        ] {
+            for (other, invalid) in [("42i64", false), ("42u64", true)] {
+                let source = format!(
+                    "fn choose<T,F>(values:&mut {borrowed},a:T,b:T,callback:F)->i64{{42}}fn plus(value:i64)->i64{{value+2}}fn main()->i64{{let mut values:{borrowed}={initializer};choose(&mut values,17i64,{other},plus)}}"
+                );
+                let module = source_module(&source).unwrap();
+                let module =
+                    super::super::normalize_module(crate::parser_registry::ParserId::Rust, &module);
+                let proofs = super::super::TypeChecker::new().typed_proof_nodes(&module.decls);
+                assert!(!proofs.is_empty(), "borrow storage is not owned: {source}");
+                assert_eq!(
+                    proofs.values().any(ResolutionFailure::is_invalid),
+                    invalid,
+                    "unowned storage cannot invent or hide source contradictions: {source}: {proofs:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn string_literals_preserve_borrowed_source_types_in_generic_calls() {
+        for (source, invalid) in [
+            (
+                r#"fn choose<T>(name:&str,value:T)->T{value}fn main()->i64{choose("signal",42i64)}"#,
+                false,
+            ),
+            (
+                r#"fn choose<T>(name:&str,value:T)->T{value}fn main()->i64{let name="signal";choose(name,42i64)}"#,
+                false,
+            ),
+            (
+                r#"fn choose<T>(value:T)->T{value}fn main()->i64{let value=choose::<String>("signal");42}"#,
+                true,
+            ),
+            (
+                r#"fn choose<T>(a:T,b:T)->T{b}fn bad(owned:String)->i64{let value=choose(owned,"borrowed");42}fn main()->i64{42}"#,
+                true,
+            ),
+        ] {
+            let module = source_module(source).unwrap();
+            let module =
+                super::super::normalize_module(crate::parser_registry::ParserId::Rust, &module);
+            let proofs = super::super::TypeChecker::new().typed_proof_nodes(&module.decls);
+            if invalid {
+                assert!(
+                    proofs.values().any(ResolutionFailure::is_invalid),
+                    "an owned String is not a borrowed str: {source}: {proofs:?}"
+                );
+            } else {
+                assert!(
+                    proofs.is_empty(),
+                    "literal borrow must agree: {source}: {proofs:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn unresolved_closure_arguments_do_not_invent_or_hide_generic_contradictions() {
+        for (call, invalid) in [
+            ("choose(row,17i64,25i64)", false),
+            ("choose::<i64>(row,17i64,25i64)", false),
+            ("choose(row,17i64,25u64)", true),
+            ("choose::<i64>(row,17i64,25u64)", true),
+        ] {
+            for body in [
+                format!("let callback=|row|{call};42"),
+                format!(
+                    "let rows:Vec<Row>=vec![];rows.iter().for_each(|row|{{let callback=||{call};}});42"
+                ),
+            ] {
+                let source = format!(
+                    "struct Row{{value:i64}}fn choose<T>(row:&Row,a:T,b:T)->T{{b}}fn main()->i64{{{body}}}"
+                );
+                let mut module = source_module(&source).unwrap();
+                // Owned compilation also normalizes modules after closure lifting.
+                for _ in 0..2 {
+                    module = super::super::normalize_module(
+                        crate::parser_registry::ParserId::Rust,
+                        &module,
+                    );
+                    let proofs = super::super::TypeChecker::new().typed_proof_nodes(&module.decls);
+                    assert_eq!(
+                        proofs.values().any(ResolutionFailure::is_invalid),
+                        invalid,
+                        "an unresolved closure parameter is not a contradictory nominal identity: {source}: {proofs:?}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
     fn implicit_calls_reuse_source_specialization_and_explicit_contract_checks() {
         for source in [
             "fn first<T>(a:T,b:T)->T{a}fn left()->f32{42.0f32}fn right()->f32{7.0f32}fn main()->i64{if first(left(),right())==42.0f32{42}else{7}}",
@@ -1635,15 +1924,15 @@ mod reachable_template_proof_tests {
             receiver: Typ::Named("Row".into()),
             output: Typ::Named("#rust-integer-usize".into()),
         };
-        assert!(discharge_neg_obligations(
+        assert!(discharge_obligations(
             &obligation("#rust-integer-usize"),
             std::slice::from_ref(&proof)
         ));
-        assert!(!discharge_neg_obligations(
+        assert!(!discharge_obligations(
             &obligation("#rust-integer-u64"),
             std::slice::from_ref(&proof)
         ));
-        assert!(!discharge_neg_obligations(
+        assert!(!discharge_obligations(
             &obligation("#rust-integer-usize"),
             &[proof.clone(), proof]
         ));

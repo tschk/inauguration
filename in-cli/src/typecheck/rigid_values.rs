@@ -26,6 +26,7 @@ struct Check<'a> {
     checker: TypeChecker,
     facts: &'a Facts,
     next: usize,
+    parameter_bindings: usize,
     uses: HashMap<usize, Uses>,
     failure: Option<ResolutionFailure>,
     in_loop: bool,
@@ -265,7 +266,36 @@ impl Check<'_> {
                 {
                     self.uncertain("inferred generic call has no universally validated instance");
                 }
-                self.expression(callee, env, Use::Move);
+                if let Expr::Ident(name) = callee.as_ref()
+                    && env
+                        .types
+                        .get(name)
+                        .is_some_and(|typ| self.facts.rigid_callable(typ).is_some())
+                {
+                    // FnMut borrows end with the invocation; they neither move
+                    // the receiver nor establish Copy for subsequent uses.
+                    if env
+                        .types
+                        .get(name)
+                        .is_some_and(rust_generics::is_rigid_type)
+                        && env
+                            .bindings
+                            .get(name)
+                            .is_none_or(|id| *id >= self.parameter_bindings)
+                    {
+                        self.uncertain("local callable place mutability is unresolved");
+                    }
+                    if env
+                        .bindings
+                        .get(name)
+                        .and_then(|id| self.uses.get(id))
+                        .is_some_and(|uses| uses.moves > 0 || uses.borrows > 0)
+                    {
+                        self.uncertain("calling a moved or escaping borrowed callable");
+                    }
+                } else {
+                    self.expression(callee, env, Use::Move);
+                }
                 for arg in args {
                     self.expression(
                         arg,
@@ -352,13 +382,29 @@ impl Check<'_> {
                     self.body(then_body, &mut env.clone());
                     self.body(else_body, &mut env.clone());
                 }
-                Stmt::Loop { cond, body, .. } => {
+                Stmt::Loop { kind, cond, body } => {
                     let previous = self.in_loop;
-                    self.in_loop = true;
+                    let mut inner = env.clone();
+                    if let crate::core_ir::LoopKind::For { binding } = kind {
+                        // A for iterator is evaluated once; its element binding
+                        // must retain affine facts inside the repeated body.
+                        if let Some(element) = cond
+                            .as_ref()
+                            .and_then(|value| self.checker.expr_type(value, self.facts, &env.types))
+                            .and_then(super::for_element_type)
+                        {
+                            self.bind(&mut inner, binding, element);
+                        } else {
+                            self.uncertain("iterator element ownership is unresolved");
+                        }
+                    } else {
+                        self.in_loop = true;
+                    }
                     if let Some(cond) = cond {
                         self.expression(cond, env, Use::Move);
                     }
-                    self.body(body, &mut env.clone());
+                    self.in_loop = true;
+                    self.body(body, &mut inner);
                     self.in_loop = previous;
                 }
                 Stmt::Match { scrutinee, arms } => {
@@ -399,6 +445,7 @@ pub(super) fn check(
         checker: TypeChecker::new(),
         facts,
         next: 0,
+        parameter_bindings: 0,
         uses: HashMap::new(),
         failure: None,
         in_loop: false,
@@ -410,6 +457,7 @@ pub(super) fn check(
     {
         checker.bind(&mut env, name, typ.clone());
     }
+    checker.parameter_bindings = checker.next;
     checker.body(body, &mut env);
     checker.failure
 }

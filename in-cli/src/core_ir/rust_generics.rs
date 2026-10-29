@@ -1,6 +1,7 @@
 //! Transient explicit Rust type arguments, resolved before executable lowering.
 use super::Typ;
 const PREFIX: &str = "#rust-generic-arguments:";
+const INFERRED_PREFIX: &str = "#rust-inferred-generic-arguments:";
 
 pub(crate) fn arguments(types: &[Typ]) -> String {
     format!(
@@ -10,16 +11,57 @@ pub(crate) fn arguments(types: &[Typ]) -> String {
 }
 
 pub(crate) fn decode_arguments(op: &str) -> Option<Vec<Typ>> {
-    serde_json::from_str(op.strip_prefix(PREFIX)?).ok()
+    serde_json::from_str(
+        op.strip_prefix(PREFIX)
+            .or_else(|| op.strip_prefix(INFERRED_PREFIX))?,
+    )
+    .ok()
+}
+
+pub(crate) fn inferred_arguments(types: &[Typ]) -> String {
+    format!(
+        "{INFERRED_PREFIX}{}",
+        serde_json::to_string(types).expect("type metadata serializes")
+    )
+}
+
+pub(crate) fn is_inferred(op: &str) -> bool {
+    op.starts_with(INFERRED_PREFIX)
 }
 
 pub(crate) const TEMPLATE: &str = "#rust-generic-template";
 pub(crate) const CONSTRAINTS: &str = "#rust-generic-constraints";
 pub(crate) const ALIAS: &str = "#rust-generic-alias";
+const EXPLICIT_ARITY: &str = "#rust-explicit-generic-arity:";
+pub(crate) fn explicit_arity(count: usize) -> String {
+    format!("{EXPLICIT_ARITY}{count}")
+}
+pub(crate) fn decode_explicit_arity(op: &str) -> Option<usize> {
+    op.strip_prefix(EXPLICIT_ARITY)?.parse().ok()
+}
 // Source-owned, transient proofs. These retain exact Types until the merged
 // generic phase; no runtime ABI or public Core IR schema changes are involved.
 const NEG_BOUNDS: &str = "#rust-generic-neg-bounds:";
 const NEG_IMPLEMENTATION: &str = "#rust-neg-implementation:";
+const CALLABLE_BOUNDS: &str = "#rust-generic-callable-bounds:";
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CallableObligation {
+    pub receiver: Typ,
+    pub signature: super::rust_callables::Signature,
+}
+pub(crate) fn callable_bounds(values: &[CallableObligation]) -> String {
+    format!(
+        "{CALLABLE_BOUNDS}{}",
+        serde_json::to_string(values).expect("type metadata serializes")
+    )
+}
+pub(crate) fn decode_callable_bounds(op: &str) -> Option<Vec<CallableObligation>> {
+    serde_json::from_str(op.strip_prefix(CALLABLE_BOUNDS)?).ok()
+}
+pub(crate) fn is_callable_bounds(op: &str) -> bool {
+    op.starts_with(CALLABLE_BOUNDS)
+}
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct NegObligation {
     pub receiver: Typ,

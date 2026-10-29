@@ -411,7 +411,21 @@ fn expr(value: &mut Expr, names: &NominalNames<'_>, generics: &HashSet<String>) 
                 for argument in &mut arguments {
                     typ(argument, names, generics);
                 }
-                *op = crate::core_ir::rust_generics::arguments(&arguments);
+                *op = if crate::core_ir::rust_generics::is_inferred(op) {
+                    crate::core_ir::rust_generics::inferred_arguments(&arguments)
+                } else {
+                    crate::core_ir::rust_generics::arguments(&arguments)
+                };
+            }
+            if let Some(mut obligations) = crate::core_ir::rust_generics::decode_callable_bounds(op)
+            {
+                for obligation in &mut obligations {
+                    typ(&mut obligation.receiver, names, generics);
+                    obligation
+                        .signature
+                        .visit_types_mut(&mut |child| typ(child, names, generics));
+                }
+                *op = crate::core_ir::rust_generics::callable_bounds(&obligations);
             }
             if let Some(mut obligations) = crate::core_ir::rust_generics::decode_neg_bounds(op) {
                 for obligation in &mut obligations {

@@ -266,6 +266,7 @@ struct Scope {
     glob: bool,
     glob_sources: Vec<(Vec<String>, bool, Presence, syn::Visibility)>,
     conditional: bool,
+    no_implicit_prelude: bool,
 }
 impl Scope {
     fn glob_sources(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
@@ -477,11 +478,13 @@ impl Catalog {
             module: Vec<String>,
             modules: &mut HashMap<Vec<String>, Rc<Scope>>,
             conditional: bool,
+            no_implicit_prelude: bool,
             trait_statics: &mut trait_statics::Index,
         ) {
             trait_statics.collect(items, &module, conditional);
             let mut scope = Scope::items(items.iter(), Some(&module));
             scope.conditional = conditional;
+            scope.no_implicit_prelude = no_implicit_prelude;
             modules.insert(module.clone(), Rc::new(scope));
             for source_item in items {
                 let presence = item_presence(source_item);
@@ -496,6 +499,11 @@ impl Catalog {
                         child,
                         modules,
                         conditional || presence == Presence::Conditional,
+                        no_implicit_prelude
+                            || item
+                                .attrs
+                                .iter()
+                                .any(|attr| attr.path().is_ident("no_implicit_prelude")),
                         trait_statics,
                     );
                 }
@@ -508,6 +516,9 @@ impl Catalog {
             vec![],
             &mut modules,
             presence.and(attrs_presence(&file.attrs)) != Presence::Active,
+            file.attrs
+                .iter()
+                .any(|attr| attr.path().is_ident("no_implicit_prelude")),
             &mut trait_statics,
         );
         Rc::new(Self {
@@ -536,6 +547,12 @@ impl Frame {
             .modules
             .get(&self.module)
             .is_some_and(|scope| !scope.conditional)
+    }
+    pub(super) fn implicit_prelude(&self) -> bool {
+        self.catalog
+            .modules
+            .get(&self.module)
+            .is_some_and(|scope| !scope.no_implicit_prelude)
     }
     pub(super) fn module(&self, name: &str) -> Self {
         let mut module = self.module.clone();

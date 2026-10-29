@@ -15,6 +15,7 @@ use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use syn::parse::Parser;
 
+mod callable_bounds;
 mod collections;
 mod enums;
 mod function_access;
@@ -940,27 +941,48 @@ fn lower_file_items_at_visited(
                 decls.push(declaration);
             }
             syn::Item::Fn(f) => {
-                let obligations = unary_methods::generic_neg_obligations(file, f);
-                let mut declaration = lower_fn(f.clone());
-                match obligations {
-                    Ok(Some(obligations)) => {
-                        if let Decl::Function { body, .. } = &mut declaration {
-                            for statement in body {
-                                if let Stmt::Expr(Expr::Unary { op, expr }) = statement
-                                    && op == crate::core_ir::rust_generics::CONSTRAINTS
-                                    && matches!(expr.as_ref(), Expr::UnitLit)
-                                {
-                                    *op = crate::core_ir::rust_generics::neg_bounds(&obligations);
+                let mut function = f.clone();
+                let explicit_arity = callable_bounds::desugar_arguments(&mut function);
+                let obligations =
+                    unary_methods::generic_neg_obligations(file, &function).map(|values| {
+                        values.map(|values| crate::core_ir::rust_generics::neg_bounds(&values))
+                    });
+                let callables = callable_bounds::obligations(file, &function).map(|values| {
+                    values.map(|values| crate::core_ir::rust_generics::callable_bounds(&values))
+                });
+                let mut declaration = lower_fn(function);
+                if let (Some(arity), Decl::Function { body, .. }) =
+                    (explicit_arity, &mut declaration)
+                {
+                    body.insert(
+                        0,
+                        Stmt::Expr(Expr::Unary {
+                            op: crate::core_ir::rust_generics::explicit_arity(arity),
+                            expr: Box::new(Expr::UnitLit),
+                        }),
+                    );
+                }
+                for obligations in [obligations, callables] {
+                    match obligations {
+                        Ok(Some(obligations)) => {
+                            if let Decl::Function { body, .. } = &mut declaration {
+                                for statement in body {
+                                    if let Stmt::Expr(Expr::Unary { op, expr }) = statement
+                                        && op == crate::core_ir::rust_generics::CONSTRAINTS
+                                        && matches!(expr.as_ref(), Expr::UnitLit)
+                                    {
+                                        *op = obligations.clone();
+                                    }
                                 }
                             }
                         }
-                    }
-                    Err(proof) => {
-                        if let Decl::Function { body, .. } = &mut declaration {
-                            body.insert(0, Stmt::Expr(Expr::Ident(proof.symbol())));
+                        Err(proof) => {
+                            if let Decl::Function { body, .. } = &mut declaration {
+                                body.insert(0, Stmt::Expr(Expr::Ident(proof.symbol())));
+                            }
                         }
+                        Ok(None) => {}
                     }
-                    Ok(None) => {}
                 }
                 decls.push(declaration);
             }
@@ -1564,6 +1586,8 @@ fn alias_fn(decls: &mut Vec<Decl>, full: &str, short: &str, file: &syn::File, ro
                 Stmt::Expr(Expr::Unary { op, expr })
                     if (op == crate::core_ir::rust_generics::CONSTRAINTS
                         || crate::core_ir::rust_generics::is_neg_bounds(op)
+                        || crate::core_ir::rust_generics::is_callable_bounds(op)
+                        || crate::core_ir::rust_generics::decode_explicit_arity(op).is_some()
                         || crate::core_ir::rust_callables::is_declaration(op))
                         && matches!(expr.as_ref(), Expr::UnitLit)
             )).cloned().collect::<Vec<_>>();
@@ -3094,11 +3118,17 @@ fn map_type(ty: &syn::Type) -> Typ {
             };
             if matches!(&typ, Typ::Vector(_)) {
                 // shortcut: vector borrows need an address ABI before header mutations can be shared.
-                Typ::Named("#unsupported-borrowed-vector".into())
+                crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                    "borrowed Rust vectors require shared header storage".into(),
+                )
+                .typ()
             } else if matches!(&typ, Typ::Named(name) if crate::core_ir::tuples::fields(name).is_some())
             {
                 // shortcut: tuple borrows need reference types and an address ABI before native execution.
-                Typ::Named("#unsupported-borrowed-tuple".into())
+                crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                    "borrowed Rust tuples require shared aggregate storage".into(),
+                )
+                .typ()
             } else {
                 let runtime = crate::core_ir::rust_references::erase_type(typ.clone());
                 crate::core_ir::rust_references::typ(
@@ -4470,7 +4500,12 @@ fn lower_expr_with_types_inner(
                 )
             }
             syn::Lit::Bool(b) => Expr::BoolLit(b.value),
-            syn::Lit::Str(s) => Expr::StringLit(s.value()),
+            // Rust literals are borrowed str values, not owned String values.
+            // Preserve that source identity until reference ABI erasure.
+            syn::Lit::Str(s) => Expr::Unary {
+                op: crate::core_ir::rust_references::SHARED_VALUE.into(),
+                expr: Box::new(Expr::StringLit(s.value())),
+            },
             _ => Expr::Ident(l.lit.to_token_stream().to_string()),
         },
         syn::Expr::Path(p) => {
@@ -4841,10 +4876,34 @@ fn lower_expr_with_types_inner(
                 _ => ef.member.to_token_stream().to_string(),
             },
         },
-        syn::Expr::Index(index) => Expr::Index {
-            base: Box::new(lower_expr_with_types(&index.expr, local_types)),
-            index: Box::new(lower_expr_with_types(&index.index, local_types)),
-        },
+        syn::Expr::Index(index) => {
+            let base = lower_expr_with_types(&index.expr, local_types);
+            let index_value = lower_expr_with_types(&index.index, local_types);
+            if matches!(&index_value, Expr::Call { callee, .. }
+                if matches!(callee.as_ref(), Expr::Ident(name)
+                    if matches!(name.as_str(), "range-exclusive" | "range-inclusive" | "range-from" | "range-to" | "range-to-inclusive" | "range-full")))
+            {
+                // Range indexing produces a borrowed view, not one element.
+                // Its offset/length and aliasing need an owned slice ABI before
+                // either type inference or native scalar indexing can use it.
+                Expr::Block {
+                    // Retain source obligations in both operands even though
+                    // the view itself cannot yet be executed.
+                    body: vec![Stmt::Expr(base), Stmt::Expr(index_value)],
+                    result: Some(Box::new(Expr::Ident(
+                        crate::core_ir::type_proofs::ResolutionFailure::Unsupported(
+                            "Rust range indexing requires source-owned slice views".into(),
+                        )
+                        .symbol(),
+                    ))),
+                }
+            } else {
+                Expr::Index {
+                    base: Box::new(base),
+                    index: Box::new(index_value),
+                }
+            }
+        }
         syn::Expr::Cast(cast) => {
             let target_type = map_type(&cast.ty);
             if let Some(failure) = crate::core_ir::type_proofs::failure_in_type(&target_type) {

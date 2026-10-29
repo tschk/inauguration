@@ -9704,6 +9704,109 @@ fn rust_retained_neg_dispatch_executes_generic_owned_shared_mutable_and_field_pr
     }
 }
 
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn rust_callable_bounds_execute_exact_function_items_and_anonymous_parameters() {
+    for source in [
+        "fn apply<F:FnMut(i64)->i64>(value:i64,mut f:F)->i64{f(value)}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(40i64,plus)}",
+        "fn apply(value:i64,mut f:impl FnMut(i64)->i64)->i64{f(value)}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(40i64,plus)}",
+        "use std::ops::FnMut as Callback;fn apply<F>(value:i64,mut f:F)->i64 where F:Callback(i64)->i64{f(value)}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(40i64,plus)}",
+        "mod nested{pub fn apply(value:i64,mut f:impl FnMut(i64)->i64)->i64{f(value)}}use nested::apply as run;fn plus(value:i64)->i64{value+2}fn main()->i64{run(40i64,plus)}",
+        "fn apply<T>(value:T,mut f:impl FnMut(T)->i64)->i64{f(value)}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(40i64,plus)}",
+        "struct __in_impl_trait_0{value:i64}fn apply(mut f:impl FnMut(i64)->i64)->__in_impl_trait_0{__in_impl_trait_0{value:f(40i64)}}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus).value}",
+        "fn apply<F:FnMut(i64)->i64>(value:i64,f:&mut F)->i64{f(value)}fn plus(value:i64)->i64{value+2}fn main()->i64{let mut f=plus;apply(40i64,&mut f)}",
+        "fn apply<F:FnMut(i64)->i64>(mut f:F)->i64{f(17i64)+f(21i64)}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus)}",
+        "fn apply<F:FnMut(i64)->i64>(mut f:F)->i64{let mut sum=0i64;for value in [17i64,21i64]{sum+=f(value);}sum}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus)}",
+        "fn apply(mut f:impl FnMut(i64,i64)->i64,mut g:impl FnMut()->i64)->i64{f(17i64,g())}fn plus(a:i64,b:i64)->i64{a+b+2}fn seed()->i64{23}fn main()->i64{apply(plus,seed)}",
+        "fn tagged<T>(name:&str,value:T,other:T)->T{if name==\"signal\"{value}else{other}}fn apply<F:FnMut(i64)->i64>(mut f:F)->i64{f(40i64)}fn plus(value:i64)->i64{value+2}fn main()->i64{tagged(\"signal\",apply(plus),7i64)}",
+    ] {
+        let path = temp_path("callable-bound.rs");
+        fs::write(&path, source).unwrap();
+        for profile in [EmitProfile::Default, EmitProfile::Lean, EmitProfile::Harden] {
+            for target in [CompileTarget::Jit, CompileTarget::Native] {
+                let out = temp_path("callable-bound-native");
+                let mut request =
+                    default_request(path.clone(), target, Some("main"), Some(out.clone()));
+                request.profile = profile;
+                let report = compile_owned(&request);
+                assert!(
+                    report.success && report.degradations.is_empty(),
+                    "{source} {target:?} {profile:?}: {report:?}"
+                );
+                if target == CompileTarget::Jit {
+                    assert_eq!(
+                        report.eval_result,
+                        Some(EvalValue::Int(42)),
+                        "{source}: {report:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        std::process::Command::new(&out).status().unwrap().code(),
+                        Some(42),
+                        "{source}"
+                    );
+                    fs::remove_file(out).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn rust_callable_bounds_refuse_unproved_signatures_traits_and_explicit_anonymous_slots() {
+    for source in [
+        "fn apply<F:FnMut(u64)->i64>(mut f:F)->i64{42}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus)}",
+        "fn apply<F:FnMut(i64)->u64>(mut f:F)->i64{42}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus)}",
+        "fn apply<F:FnMut(i64)->i64+Unknown>(mut f:F)->i64{42}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus)}",
+        "trait FnMut{}fn apply<F:FnMut(i64)->i64>(mut f:F)->i64{42}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus)}",
+        "fn apply(mut f:impl FnMut(i64)->i64)->i64{42}fn plus(value:i64)->i64{value+2}fn main()->i64{apply::<fn(i64)->i64>(plus)}",
+        "mod nested{pub fn apply(mut f:impl FnMut(i64)->i64)->i64{42}}use nested::apply as run;fn plus(value:i64)->i64{value+2}fn main()->i64{run::<fn(i64)->i64>(plus)}",
+        "fn apply<F:FnMut(i64)->i64>(mut f:F)->i64{42}unsafe fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus)}",
+        "fn apply<F:FnMut(i64)->i64>(mut f:F)->i64{42}extern \"C\" fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus)}",
+        "#![no_implicit_prelude] mod nested{pub fn apply(mut f:impl FnMut(i64)->i64)->i64{42}}fn plus(value:i64)->i64{value+2}fn main()->i64{nested::apply(plus)}",
+        "trait FnMut{}mod nested{use super::FnMut;pub fn apply(mut f:impl FnMut(i64)->i64)->i64{42}}fn plus(value:i64)->i64{value+2}fn main()->i64{nested::apply(plus)}",
+        "fn apply(mut f:impl FnMut(i64)->i64)->i64{42}fn main()->i64{let unused=apply::<fn(i64)->i64>;42}",
+        "type A=A;fn apply<F:FnMut(A)->i64>(mut f:F)->i64{42}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus)}",
+        "fn apply<T>(value:T,mut f:impl FnMut(i64)->i64)->T{40i64}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(42i64,plus)}",
+        "fn apply<F:FnMut(i64)->i64>(mut f:F)->F{plus}fn plus(value:i64)->i64{value+2}fn main()->i64{let f=apply(plus);f(40i64)}",
+        "fn apply<T>(value:T,mut f:impl FnMut(T)->i64)->i64{f(40i64)}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(42i64,plus)}",
+        "fn apply<F:FnMut(i64)->i64>(mut f:F)->i64{let first=f;let second=f;42}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus)}",
+        "mod nested{pub fn apply<T>(value:T,mut f:impl FnMut(i64)->i64)->T{40i64}}use nested::apply as run;fn plus(value:i64)->i64{value+2}fn main()->i64{run(42i64,plus)}",
+        "fn apply<T>(values:Vec<T>,mut f:impl FnMut(i64)->i64)->i64{for value in values{let first=value;let second=value;}42}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(vec![1i64],plus)}",
+        "fn apply<F:FnMut(i64)->i64>(f:F)->i64{f(40i64)}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus)}",
+        "fn apply<F:FnMut(i64)->i64>(mut f:F)->i64{let g=f;g(40i64)}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(plus)}",
+        "fn apply<F:FnMut(i64)->i64>(name:String,mut f:F)->i64{42}fn plus(value:i64)->i64{value+2}fn main()->i64{apply(\"borrowed\",plus)}",
+    ] {
+        let path = temp_path("callable-bound-unproved.rs");
+        fs::write(&path, source).unwrap();
+        for target in [CompileTarget::Jit, CompileTarget::Native] {
+            let out = temp_path("callable-bound-unproved-native");
+            let report = compile_owned(&default_request(
+                path.clone(),
+                target,
+                Some("main"),
+                Some(out.clone()),
+            ));
+            assert!(
+                !report.success
+                    && !report.execution_started
+                    && report.artifact_path.is_none()
+                    && !out.exists(),
+                "{source}: {report:?}"
+            );
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
 #[test]
 fn retained_neg_bounds_do_not_discharge_unrelated_or_wrong_source_obligations() {
     if !native_backend::native_subset_host_available() {
@@ -10227,7 +10330,10 @@ fn rust_integer_source_errors_refuse_all_profiles_without_artifacts() {
         "fn main()->i64{if false{({u64::MAX})();}42}",
     ] {
         let parsed = crate::compiler::rust_front::parse_rust_source(source).unwrap();
-        assert!(crate::native_emit::c_backend::emit_c_module(&parsed).is_err());
+        assert!(
+            crate::native_emit::c_backend::emit_c_module(&parsed).is_err(),
+            "{source}"
+        );
         let path = temp_path("integer-source-invalid.rs");
         fs::write(&path, source).unwrap();
         for target in [CompileTarget::Jit, CompileTarget::Native] {
@@ -10595,6 +10701,7 @@ fn rust_explicit_generic_calls_preserve_concrete_kinds_and_scopes() {
         "mod values{pub fn choose<T>(value:T)->T{value}}use values::choose;fn main()->i64{choose::<u16>(42u16) as i64}",
         "fn choose<T>(value:T)->T{value}fn main()->i64{let pick=choose::<i64>;pick(42)}",
         "fn choose<T>(value:T)->T{value}fn main()->i64{let pick=choose::<u8>;let next=pick;next(42u8) as i64}",
+        "struct Any{value:i64}fn choose<T>(value:T)->T{value}fn main()->i64{let first=choose(Any{value:17});let second=choose::<Any>(Any{value:25});first.value+second.value}",
     ] {
         let path = temp_path("rust-explicit-generic.rs");
         fs::write(&path, source).unwrap();

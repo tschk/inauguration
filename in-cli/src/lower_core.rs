@@ -1091,7 +1091,8 @@ fn desugar_closures_in_expr(
             let mut caps_fields = Vec::with_capacity(captures.len());
             let mut init_fields = Vec::with_capacity(captures.len());
             for c in captures.into_iter() {
-                caps_fields.push((c.clone(), Typ::Named("Any".into())));
+                // A capture awaits inference; it is not the source type `Any`.
+                caps_fields.push((c.clone(), Typ::Generic("_".into())));
                 init_fields.push((c.clone(), Expr::Ident(c)));
             }
             let mut fn_params = vec![("self".to_string(), Typ::Named(caps_name.clone()))];

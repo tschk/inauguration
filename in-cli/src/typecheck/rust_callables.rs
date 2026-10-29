@@ -10,6 +10,20 @@ use std::collections::HashMap;
 pub(super) fn signature(typ: &Typ) -> Option<Signature> {
     rust_callables::signature_of(typ)
 }
+// A borrowed function item keeps its immutable, zero-sized source identity.
+// Do not extend this to mutable fn-pointer slots without a shared-place ABI,
+// or use invocation evidence as an item-to-pointer argument coercion.
+fn invocation_signature(typ: &Typ) -> Option<Signature> {
+    if let Typ::Named(name) = typ
+        && let Some(reference) = crate::core_ir::rust_references::decode(name)
+    {
+        let Typ::Named(referent) = reference.referent else {
+            return None;
+        };
+        return rust_callables::decode_item(&referent).map(|item| item.signature);
+    }
+    signature(typ)
+}
 fn encoded(typ: &Typ) -> bool {
     matches!(typ, Typ::Named(name) if rust_callables::is_encoded(name))
 }
@@ -22,7 +36,7 @@ pub(super) fn callee_signature(
         return None;
     };
     if let Some(typ) = env.get(name) {
-        return signature(typ);
+        return invocation_signature(typ);
     }
     if facts
         .generic_parameters
@@ -543,7 +557,7 @@ pub(super) fn finish(
         let direct = matches!(callee.as_ref(), Expr::Ident(name)
             if !env.contains_key(name) && facts.callable_signatures.contains_key(name));
         let resolved_signature = match callee_type {
-            Some(value) => value.as_ref().and_then(signature),
+            Some(value) => value.as_ref().and_then(invocation_signature),
             None => callee_signature(callee, facts, env),
         };
         let local = !direct

@@ -132,6 +132,7 @@ pub(crate) struct Facts {
     functions: HashMap<String, (Vec<(String, Typ)>, Typ)>,
     generic_parameters: HashMap<String, Vec<String>>,
     callable_signatures: HashMap<String, crate::core_ir::rust_callables::Signature>,
+    rigid_callables: HashMap<String, crate::core_ir::rust_callables::Signature>,
     callable_alias_origins: HashMap<String, Option<String>>,
     neg_implementations: Vec<(String, crate::core_ir::rust_generics::NegImplementation)>,
     structs: HashMap<String, Vec<(String, Typ)>>,
@@ -153,6 +154,18 @@ impl Facts {
 
     pub(crate) fn pattern_fields(&self, name: &str) -> Option<&[(String, Typ)]> {
         self.structs.get(name).map(Vec::as_slice)
+    }
+
+    // Audit-only bounds permit invocation without making the opaque receiver
+    // a Copy function pointer or equating it with a particular function item.
+    fn rigid_callable(&self, typ: &Typ) -> Option<crate::core_ir::rust_callables::Signature> {
+        let Typ::Named(name) = typ else { return None };
+        if let Some(reference) = crate::core_ir::rust_references::decode(name) {
+            return reference
+                .mutable
+                .then(|| self.rigid_callable(&reference.referent))?;
+        }
+        self.rigid_callables.get(name).cloned()
     }
 
     fn closure_target(&self, captures: &str) -> Option<&str> {
@@ -1815,7 +1828,7 @@ impl TypeChecker {
                 Some(Ok((arguments, result))) => {
                     if let Expr::Call { callee, .. } = expr {
                         **callee = Expr::Unary {
-                            op: crate::core_ir::rust_generics::arguments(&arguments),
+                            op: crate::core_ir::rust_generics::inferred_arguments(&arguments),
                             expr: Box::new(std::mem::replace(callee.as_mut(), Expr::UnitLit)),
                         };
                     }
@@ -2889,11 +2902,9 @@ impl TypeChecker {
                         }
                         let element = cond
                             .as_ref()
-                            .and_then(|value| self.expr_type(value, facts, env));
-                        let element = match element {
-                            Some(Typ::Array(element) | Typ::Vector(element)) => *element,
-                            _ => Typ::Generic("_".into()),
-                        };
+                            .and_then(|value| self.expr_type(value, facts, env))
+                            .and_then(for_element_type)
+                            .unwrap_or_else(|| Typ::Generic("_".into()));
                         inner.insert(binding.clone(), element);
                     }
                     self.resolve_typed_body(body, facts, &mut inner, return_type, policy);
@@ -3085,6 +3096,7 @@ impl TypeChecker {
             functions,
             generic_parameters,
             callable_signatures,
+            rigid_callables: HashMap::new(),
             callable_alias_origins,
             neg_implementations,
             structs,
@@ -3369,10 +3381,25 @@ impl TypeChecker {
                 let mut env_else = env.clone();
                 self.check_stmts(fn_name, fn_ret, else_body, facts, &mut env_else, errors);
             }
-            Stmt::Loop { cond, body, .. } => {
+            Stmt::Loop { kind, cond, body } => {
+                let mut env_body = env.clone();
                 if let Some(cond) = cond {
                     self.check_expr(fn_name, cond, facts, env, errors);
-                    if let Some(cond_typ) = self.expr_type(cond, facts, env)
+                    if let crate::core_ir::LoopKind::For { binding } = kind {
+                        let element = self
+                            .expr_type(cond, facts, env)
+                            .and_then(|typ| {
+                                let element = for_element_type(typ.clone());
+                                if element.is_none() && is_concrete(&typ) {
+                                    errors.push(TypeError::NotArray {
+                                        expr: format!("for iterator in `{fn_name}`"),
+                                    });
+                                }
+                                element
+                            })
+                            .unwrap_or_else(|| Typ::Generic("_".into()));
+                        env_body.insert(binding.clone(), element);
+                    } else if let Some(cond_typ) = self.expr_type(cond, facts, env)
                         && cond_typ != Typ::Bool
                         && is_concrete(&cond_typ)
                     {
@@ -3383,7 +3410,6 @@ impl TypeChecker {
                         });
                     }
                 }
-                let mut env_body = env.clone();
                 self.check_stmts(fn_name, fn_ret, body, facts, &mut env_body, errors);
             }
             Stmt::Match {
@@ -4046,6 +4072,33 @@ impl TypeChecker {
             }
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident(callee_name) = callee.as_ref() {
+                    if let Some(signature) = env
+                        .get(callee_name)
+                        .and_then(|typ| facts.rigid_callable(typ))
+                    {
+                        if signature.parameters.len() != args.len() {
+                            errors.push(TypeError::ArityMismatch {
+                                caller: fn_name.into(),
+                                fn_name: callee_name.clone(),
+                                expected: signature.parameters.len(),
+                                got: args.len(),
+                            });
+                        }
+                        for (index, arg) in args.iter().enumerate() {
+                            self.check_expr(fn_name, arg, facts, env, errors);
+                            if let Some(expected) = signature.parameters.get(index)
+                                && let Some(actual) = self.expr_type(arg, facts, env)
+                                && !is_compatible(expected, &actual)
+                            {
+                                errors.push(TypeError::TypeMismatch {
+                                    context: format!("bounded callable argument in `{fn_name}`"),
+                                    expected: expected.clone(),
+                                    got: actual,
+                                });
+                            }
+                        }
+                        return;
+                    }
                     if let Some(actual) = env.get(callee_name)
                         && crate::core_ir_verifier::invoke_param_types(callee_name).is_some()
                     {
@@ -4562,7 +4615,10 @@ impl TypeChecker {
                         return self.expr_type(value, facts, env);
                     }
                     if let Some(local) = env.get(name) {
-                        return rust_callables::signature(local).map(|signature| signature.result);
+                        return facts
+                            .rigid_callable(local)
+                            .or_else(|| rust_callables::signature(local))
+                            .map(|signature| signature.result);
                     }
                     if let Some(signature) = facts.callable_signatures.get(name)
                         && rust_callables::signature(&signature.result).is_some()
@@ -4636,6 +4692,25 @@ impl TypeChecker {
             | MatchPattern::WildPat
             | MatchPattern::RestPat => {}
         }
+    }
+}
+
+fn for_element_type(typ: Typ) -> Option<Typ> {
+    match typ {
+        Typ::Array(element) | Typ::Vector(element) => Some(*element),
+        Typ::Named(name) => {
+            if let Some(reference) = crate::core_ir::rust_references::decode(&name) {
+                let op = if reference.mutable {
+                    crate::core_ir::rust_references::ITER_MUTABLE
+                } else {
+                    crate::core_ir::rust_references::ITER_SHARED
+                };
+                return crate::core_ir::rust_references::iteration_type(op, Typ::Named(name))
+                    .and_then(for_element_type);
+            }
+            crate::core_ir::rust_arrays::decode(&name).map(|array| array.element)
+        }
+        _ => None,
     }
 }
 
