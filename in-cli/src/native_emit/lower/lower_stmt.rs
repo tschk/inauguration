@@ -2265,8 +2265,7 @@ pub(crate) fn lower_match(
                 Some((emitter.emit_insn(aarch64::b_cond(1, 0)), 1))
             } else {
                 if lower_expr::native_expr_type(scrutinee, ctx, functions)
-                    .map(|typ| typ.canonical())
-                    != Some(Typ::String)
+                    .map_or(true, |typ| typ.canonical() != Typ::String)
                 {
                     return Err("native-lower: string pattern requires a String scrutinee".into());
                 }
