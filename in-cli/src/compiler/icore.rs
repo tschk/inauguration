@@ -1086,4 +1086,73 @@ mod tests {
                 .any(|d| matches!(d, Decl::Function { name, .. } if name == "person_age"))
         );
     }
+    #[test]
+    fn parses_icore_file_successfully() {
+        struct TempDirGuard {
+            path: std::path::PathBuf,
+        }
+        impl TempDirGuard {
+            fn new() -> Self {
+                let unique = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos();
+                let path = std::env::temp_dir().join(format!(
+                    "icore-test-{}-{}",
+                    std::process::id(),
+                    unique
+                ));
+                std::fs::create_dir_all(&path).unwrap();
+                Self { path }
+            }
+        }
+        impl Drop for TempDirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.path);
+            }
+        }
+
+        let temp = TempDirGuard::new();
+        let file_path = temp.path.join("test.icore");
+        let j = r#"{
+        "icoreVersion": 2,
+        "decls": [
+            {
+                "kind": "function",
+                "name": "main",
+                "params": [],
+                "return": "Int",
+                "body": [
+                    {
+                        "kind": "return",
+                        "expr": { "kind": "int", "value": 7 }
+                    }
+                ]
+            }
+        ]
+    }"#;
+        std::fs::write(&file_path, j).unwrap();
+        let module = super::parse_icore_file(&file_path).unwrap();
+        let body = module
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                crate::core_ir::Decl::Function { name, body, .. } if name == "main" => Some(body),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            body,
+            &vec![crate::core_ir::Stmt::Return(Some(
+                crate::core_ir::Expr::IntLit(7)
+            ))]
+        );
+    }
+
+    #[test]
+    fn parse_icore_file_returns_error_for_invalid_file() {
+        let err =
+            super::parse_icore_file(std::path::Path::new("does_not_exist.icore")).unwrap_err();
+        assert!(err.contains("does_not_exist.icore"));
+    }
 }
