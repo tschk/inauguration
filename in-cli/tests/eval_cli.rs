@@ -6,6 +6,82 @@
 use std::process::Command;
 
 #[test]
+fn self_host_gate_rejects_ir_only_success() {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("in-self-host-gate-{}-{stamp}", std::process::id()));
+    for directory in ["in-cli/src", "apps/in-sample", "apps/icore-sample"] {
+        std::fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    std::fs::write(
+        root.join("in-cli/Cargo.toml"),
+        "[package]\nname=\"self-host-gate-fixture\"\nversion=\"0.0.0\"\nedition=\"2024\"\n",
+    )
+    .unwrap();
+    for name in ["hello.in", "agent-native.in", "try_catch.in"] {
+        std::fs::write(
+            root.join("apps/in-sample").join(name),
+            "fn main() -> Int { return 0; }",
+        )
+        .unwrap();
+    }
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../apps/icore-sample/min.icore"),
+        root.join("apps/icore-sample/min.icore"),
+    )
+    .unwrap();
+    let main = root.join("in-cli/src/main.rs");
+    let unsupported = "struct Row;trait Other{type Output;}impl Other for Row{type Output=i64;}trait Factory{type Output;fn make()->Self::Output;}impl Factory for Row{type Output=<Self as Other>::Output;fn make()->Self::Output{42}}fn main()->i64{<Row as Factory>::make()}";
+    std::fs::write(&main, unsupported).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_in"))
+        .current_dir(&root)
+        .args([
+            "compile",
+            "--path",
+            "in-cli/src/main.rs",
+            "--target",
+            "jit",
+            "--out",
+            "/dev/null",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["success"], true, "{report}");
+    assert_eq!(report["reason_code"], "jit-ir-only", "{report}");
+    assert_eq!(report["backend_level"], "owned-core-ir-only", "{report}");
+    assert_eq!(report["execution_started"], false, "{report}");
+
+    for (source, expected) in [
+        ("fn main()->i64{0}", "test ok: self-host compile"),
+        (unsupported, "test failed: self-host compile"),
+    ] {
+        std::fs::write(&main, source).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_in"))
+            .current_dir(&root)
+            .env("IN_BIN", env!("CARGO_BIN_EXE_in"))
+            .args(["test", "--serial"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{output:?}");
+        if source == unsupported {
+            assert!(!output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("source-type-proof:"),
+                "{output:?}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn eval_preserves_zero_unit_prints_and_missing_values() {
     let socket =
         std::env::temp_dir().join(format!("in-eval-test-{}-absent.sock", std::process::id()));

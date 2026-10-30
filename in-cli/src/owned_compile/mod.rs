@@ -117,13 +117,16 @@ pub struct OwnedCompileReport {
     pub external_invocations: Vec<String>,
     pub reason_code: Option<String>,
     pub reason: Option<String>,
+    /// Includes compile-only IR analysis that emits no machine code. In that
+    /// case `backend_level` is `owned-core-ir-only` and `reason_code` is
+    /// `jit-ir-only`; success alone does not prove code generation.
     pub success: bool,
     pub artifact_path: Option<String>,
     pub executable_path: Option<String>,
     pub abi_path: Option<String>,
-    /// Functions the lowerer replaced with a runtime trap. Empty means the
-    /// artifact contains no substituted code. Check this rather than `success`
-    /// when a build must be fully compiled.
+    /// Functions the lowerer replaced with a runtime trap. Empty is omitted
+    /// from JSON; absent and empty both mean no trap substitutions, not that
+    /// machine code exists. Check the backend and reason code as well.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub degradations: Vec<LoweringDegradation>,
     pub parsed_function_count: usize,
