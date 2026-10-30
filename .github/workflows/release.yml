@@ -46,7 +46,9 @@ jobs:
         run: ./scripts/run-conformance.sh
       - name: Self-host check (experimental)
         continue-on-error: true
-        run: in build --path in-cli/src/main.rs --module-id InCli --verbose
+        run: |
+          IN=./in-cli/target/release/in
+          "$IN" build --path in-cli/src/main.rs --module-id InCli --verbose
       - name: Check diff whitespace
         run: git diff --check
 
