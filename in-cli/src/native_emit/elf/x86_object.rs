@@ -217,6 +217,7 @@ pub fn write_x86_data_object(
         ".symtab",
         ".strtab",
         ".shstrtab",
+        ".note.GNU-stack",
     ];
     let mut shstrings = vec![0];
     let mut section_name_offsets = Vec::new();
@@ -231,8 +232,9 @@ pub fn write_x86_data_object(
         symtab,
         strings,
         shstrings,
+        Vec::new(),
     ];
-    let alignments: [u64; 7] = [16, 8, pointer_width, pointer_width, pointer_width, 1, 1];
+    let alignments: [u64; 8] = [16, 8, pointer_width, pointer_width, pointer_width, 1, 1, 1];
     let mut output = vec![0; if is_64 { 64 } else { 52 }];
     let mut offsets = Vec::new();
     for (section, alignment) in sections.iter().zip(alignments) {
@@ -247,13 +249,13 @@ pub fn write_x86_data_object(
     }
     let shoff = output.len() as u64;
     let final_size = shoff
-        .checked_add(if is_64 { 8 * 64 } else { 8 * 40 })
+        .checked_add(if is_64 { 9 * 64 } else { 9 * 40 })
         .ok_or("x86 ELF size overflow")?;
     if !is_64 {
         u32::try_from(final_size).map_err(|_| "x86 ELF32 file exceeds 32-bit offsets")?;
     }
     output.resize(output.len() + if is_64 { 64 } else { 40 }, 0);
-    for index in 0..7 {
+    for index in 0..8 {
         let (typ, flags, link, info, entsize) = match index {
             0 => (1, 6, 0, 0, 0),
             1 => (1, 3, 0, 0, 0),
@@ -265,6 +267,7 @@ pub fn write_x86_data_object(
                 if is_64 { 24 } else { 8 },
             ),
             4 => (2, 0, 6, 3, if is_64 { 24 } else { 16 }),
+            7 => (1, 0, 0, 0, 0), // non-allocating, non-executable GNU stack note
             _ => (3, 0, 0, 0, 0),
         };
         if is_64 {
@@ -327,7 +330,7 @@ pub fn write_x86_data_object(
         0,
         0,
         if is_64 { 64 } else { 40 },
-        8,
+        9,
         7,
     ] {
         header.extend_from_slice(&value.to_le_bytes());
@@ -413,6 +416,12 @@ mod tests {
             assert_eq!(u32_at(&bytes, shoff + 2 * stride + 8), 3); // .data WA
             let names = section(&bytes, is_64, 7);
             assert!(names.windows(6).any(|name| name == b".data\0"));
+            let stack = shoff + 8 * stride;
+            let name = u32_at(&bytes, stack) as usize;
+            assert_eq!(&names[name..name + 16], b".note.GNU-stack\0");
+            assert_eq!(u32_at(&bytes, stack + 4), 1); // SHT_PROGBITS
+            assert_eq!(u32_at(&bytes, stack + 8), 0); // no SHF_EXECINSTR
+            assert!(section(&bytes, is_64, 8).is_empty());
             let text_relocs = section(&bytes, is_64, 3);
             let data_relocs = section(&bytes, is_64, 4);
             let symbols = section(&bytes, is_64, 5);
