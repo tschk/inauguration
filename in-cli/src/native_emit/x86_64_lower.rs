@@ -3176,6 +3176,30 @@ fn lower_builtin_call(
     {
         return Ok(false);
     }
+    if target_name == crate::inrt::INRT_STR_CONCAT {
+        if x86_64::is_32bit()
+            || ctx.string_layout != X86StringLayout::Instring
+            || ctx.runtime == RuntimeAbi::Freestanding
+            || ctx.is_interrupt
+        {
+            return Err(
+                "x86_64-lower: string concat requires a 64-bit hosted instring runtime".into(),
+            );
+        }
+        crate::native_emit::stdlib_wrappers::validate_intrinsic_call(
+            target_name,
+            ctx.functions
+                .get(target_name)
+                .map(|function| (function.params.as_slice(), &function.ret)),
+            args.iter().map(|argument| scalar_expr_type(argument, ctx)),
+        )
+        .map_err(|error| {
+            format!(
+                "x86_64-lower: incompatible string concat {}",
+                error.category()
+            )
+        })?;
+    }
     if matches!(
         target_name,
         "str-len" | "str_len" | "__inrt_str_len" | "array-len" | "array_len"

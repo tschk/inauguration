@@ -92,6 +92,58 @@ fn native_executables_are_ready_while_other_threads_fork() {
     });
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn linux_native_string_concat_preserves_bytes_effects_and_catches() {
+    for (source, expected) in [
+        (
+            include_str!("../../../../conformance/errors/string-catch.in"),
+            2,
+        ),
+        (
+            "var trace:Int=0;fn left()->String{trace=trace*10+1;return \"λ\0\";}fn right()->String{trace=trace*10+2;return \"雪\";}fn main()->Int{let value=__inrt_str_concat(__inrt_str_concat(left(),right()),\"!\");if value==\"λ\0雪!\" && trace==12{return 42;}return 7;}",
+            42,
+        ),
+        (
+            "fn main()->Int{let a=__inrt_str_concat(\"\",\"abc\");let b=__inrt_str_concat(\"abc\",\"\");let c=__inrt_str_concat(\"\",\"\");if a==\"abc\" && b==\"abc\" && c==\"\"{return 42;}return 7;}",
+            42,
+        ),
+    ] {
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        for profile in [
+            crate::emit_profile::EmitProfile::Default,
+            crate::emit_profile::EmitProfile::Lean,
+            crate::emit_profile::EmitProfile::Harden,
+        ] {
+            let _profile = crate::native_emit::antidecomp::ProfileGuard::new(profile);
+            let path = temp_executable("string-concat");
+            compile_native_executable_for_host(&module, "main", &path).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let status = std::process::Command::new(&path).status();
+            std::fs::remove_file(path).unwrap();
+            assert_eq!(
+                status.unwrap().code(),
+                Some(expected),
+                "{profile:?}: {source}"
+            );
+        }
+    }
+    for source in [
+        "fn main()->Int{let value=__inrt_str_concat(\"a\");return 42;}",
+        "fn main()->Int{let value=__inrt_str_concat(\"a\",7);return 42;}",
+    ] {
+        let module = crate::in_lang_parse::parse_in_source(source).unwrap();
+        let path = temp_executable("bad-string-concat");
+        let error = compile_native_executable_for_host(&module, "main", &path).unwrap_err();
+        assert!(!path.exists());
+        assert!(
+            error.contains("incompatible string concat arguments"),
+            "{error}"
+        );
+    }
+}
+
 /// Run a native executable on macOS AArch64: ad-hoc codesign, direct exec (no shell).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn run_native_exe(path: &std::path::Path) -> std::process::Output {

@@ -35,6 +35,7 @@ pub(crate) fn lower_x86_executable(module: &UnifiedModule, entry: &str) -> Resul
     for symbol in &lowered.externs {
         let code = match symbol.as_str() {
             "malloc" => linux_malloc(),
+            crate::inrt::INRT_STR_CONCAT => linux_str_concat(),
             // SysV memcpy returns its original destination and clears DF.
             "memcpy" => vec![0x48, 0x89, 0xf8, 0x48, 0x89, 0xd1, 0xfc, 0xf3, 0xa4, 0xc3],
             "abort" => vec![
@@ -163,4 +164,58 @@ fn linux_malloc() -> Vec<u8> {
         0x0f, 0x05, 0x48, 0x3d, 0x01, 0xf0, 0xff, 0xff, 0x72, 2, 0x31, 0xc0, 0xc3,
     ]);
     code
+}
+
+fn linux_str_concat() -> Vec<u8> {
+    use crate::native_emit::x86_64::{self as x, CodeEmitter};
+    let mut e = CodeEmitter::new();
+    // Preserve the inputs and their byte lengths across mmap's syscall ABI.
+    e.emit_insns(&x::push_r(7)); // left
+    e.emit_insns(&x::push_r(6)); // right
+    e.emit_insns(&x::mov_r_m(8, 7, 0));
+    e.emit_insns(&x::mov_r_m(9, 6, 0));
+    e.emit_insns(&x::push_r(8));
+    e.emit_insns(&x::push_r(9));
+    e.emit_insns(&x::mov_rr(6, 8));
+    e.emit_insns(&x::add_rr(6, 9));
+    let sum_overflow = e.len();
+    e.emit_insns(&x::jcc_near(2, 0)); // carry
+    e.emit_insns(&x::add_rmi8(6, 8)); // instring header
+    let header_overflow = e.len();
+    e.emit_insns(&x::jcc_near(2, 0));
+    e.emit_insns(&x::mov_rr(7, 6)); // malloc(size)
+    e.emit_insns(&x::sub_rsp_i8(8)); // align the stack for the helper call
+    let allocate = e.len();
+    e.emit_insns(&x::call_rel32(0));
+    e.emit_insns(&x::add_rmi8(x::RSP, 8));
+    e.emit_insns(&x::test_rr(0, 0));
+    let allocation_failed = e.len();
+    e.emit_insns(&x::jcc_near(4, 0));
+    e.emit_insns(&x::mov_r_m(8, 4, 8)); // len(left)
+    e.emit_insns(&x::mov_r_m(9, 4, 0)); // len(right)
+    e.emit_insns(&x::mov_rr(1, 8));
+    e.emit_insns(&x::add_rr(1, 9));
+    e.emit_insns(&x::mov_m_r(0, 0, 1)); // header
+    e.emit_insns(&x::mov_rr(7, 0));
+    e.emit_insns(&x::add_rmi8(7, 8)); // destination payload
+    e.emit_insns(&x::mov_r_m(6, 4, 24));
+    e.emit_insns(&x::add_rmi8(6, 8)); // left payload
+    e.emit_insns(&x::mov_rr(1, 8));
+    e.emit_insns(&[0xfc, 0xf3, 0xa4]); // cld; rep movsb
+    e.emit_insns(&x::mov_r_m(6, 4, 16));
+    e.emit_insns(&x::add_rmi8(6, 8)); // right payload, no word padding
+    e.emit_insns(&x::mov_rr(1, 9));
+    e.emit_insns(&[0xf3, 0xa4]);
+    e.emit_insns(&x::add_rmi8(x::RSP, 32));
+    e.emit_insns(&[0xc3]);
+    for branch in [sum_overflow, header_overflow, allocation_failed] {
+        e.patch_u32(branch + 2, e.len() - branch - 6);
+    }
+    // Allocation failure must not return an invalid String to generated code.
+    e.emit_insns(&x::load_i64(7, i64::from(crate::inrt::INRT_TRAP_EXIT_CODE)));
+    e.emit_insns(&x::load_i64(0, 231)); // exit_group
+    e.emit_insns(&[0x0f, 0x05, 0x0f, 0x0b]);
+    e.patch_u32(allocate + 1, e.len() - allocate - 5);
+    e.emit_insns(&linux_malloc());
+    e.bytes
 }

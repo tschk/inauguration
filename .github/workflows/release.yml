@@ -43,9 +43,6 @@ jobs:
         run: echo "$PWD/target/release" >> "$GITHUB_PATH"
         working-directory: in-cli
       - name: Run conformance suite
-        # Linux x86_64 JIT backend is incomplete for arrays, floats, classes, and
-        # exceptions; do not block the release on these known failures.
-        continue-on-error: ${{ runner.os == 'Linux' }}
         run: ./scripts/run-conformance.sh
       - name: Self-host check (experimental)
         continue-on-error: true
