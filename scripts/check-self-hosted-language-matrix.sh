@@ -199,9 +199,9 @@ echo "JIT execution:"
 echo "  passed: $JIT_PASSED"
 echo "  failed: $JIT_FAILED"
 
-if [[ $JIT_FAILED -gt 0 ]]; then
+if [[ $FAILED -gt 0 || $JIT_FAILED -gt 0 ]]; then
   echo ""
-  echo "Some language fronts failed the JIT execution gate."
+  echo "Some language fronts failed the self-hosted language matrix."
   exit 1
 fi
 

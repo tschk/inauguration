@@ -91,6 +91,8 @@ jobs:
         run: echo "$PWD/in-cli/target/release" >> "$GITHUB_PATH"
       - name: Run conformance suite
         run: ./scripts/run-conformance.sh
+      - name: Compare JIT and native execution
+        run: bash scripts/check-backend-differential.sh
 
   self-host:
     name: Self-host
@@ -107,11 +109,13 @@ jobs:
         working-directory: in-cli
       - name: Add to PATH
         run: echo "$PWD/in-cli/target/release" >> "$GITHUB_PATH"
+      - name: Check language matrix exit status
+        run: bash scripts/test-self-hosted-language-matrix.sh
+      - name: Run self-hosted language matrix
+        run: bash scripts/check-self-hosted-language-matrix.sh
       - name: Self-host compile
         run: |
           IN=./in-cli/target/release/in
           "$IN" build --path in-cli/src/main.rs --module-id InCli --verbose
       - name: Check diff whitespace
         run: git diff --check
-
-
