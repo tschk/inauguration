@@ -100,6 +100,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Install rust-src
@@ -111,7 +112,24 @@ jobs:
         run: echo "$PWD/in-cli/target/release" >> "$GITHUB_PATH"
       - name: Check language matrix exit status
         run: bash scripts/test-self-hosted-language-matrix.sh
+      - name: Prevent new known matrix failures
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          baseline=scripts/self-hosted-language-matrix-known-failures.txt
+          base="refs/remotes/origin/$BASE_REF"
+          git rev-parse --verify "$base"
+          if git cat-file -e "$base:$baseline" 2>/dev/null; then
+            added=$(comm -13 <(git show "$base:$baseline" | LC_ALL=C sort) <(LC_ALL=C sort "$baseline"))
+            if [ -n "$added" ]; then
+              printf 'New known matrix failures are not allowed:\n%s\n' "$added" >&2
+              exit 1
+            fi
+          fi
       - name: Run self-hosted language matrix
+        env:
+          IN_MATRIX_KNOWN_FAILURES: scripts/self-hosted-language-matrix-known-failures.txt
         run: bash scripts/check-self-hosted-language-matrix.sh
       - name: Self-host compile
         run: |

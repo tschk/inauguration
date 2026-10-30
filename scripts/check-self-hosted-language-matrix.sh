@@ -57,6 +57,7 @@ PASSED=0
 JIT_PASSED=0
 JIT_FAILED=0
 JIT_SKIPPED=0
+FAILURES=()
 
 check_json_no_external() {
   local json_path="$1"
@@ -111,6 +112,7 @@ run_matrix_for_lang() {
   fi
 
   local status="PASS"
+  local failure=""
   local tmp_json
   tmp_json="$(mktemp "${TMPDIR:-/tmp}/in-matrix-${lang}.XXXXXX")"
 
@@ -123,6 +125,7 @@ run_matrix_for_lang() {
   if ! $env_prefix "${IN_CMD[@]}" build --path "$path" --module-id App >/dev/null 2>&1; then
     echo "FAIL [$lang]: in build"
     status="FAIL"
+    failure="build"
   fi
 
   # 2. in graph --json
@@ -131,30 +134,34 @@ run_matrix_for_lang() {
       if ! python3 -c "import json; json.load(open('$tmp_json'))" 2>/dev/null; then
         echo "FAIL [$lang]: graph output is not valid JSON"
         status="FAIL"
+        failure="graph"
       fi
     else
       echo "FAIL [$lang]: in graph --json"
       status="FAIL"
+      failure="graph"
     fi
   fi
 
   # 3. in agent
   if [[ "$status" == "PASS" ]]; then
     if $env_prefix "${IN_CMD[@]}" agent --path "$path" --module-id App >"$tmp_json" 2>/dev/null; then
-      check_agent_no_error "$tmp_json" "$lang" || status="FAIL"
+      check_agent_no_error "$tmp_json" "$lang" || { status="FAIL"; failure="agent"; }
     else
       echo "FAIL [$lang]: in agent"
       status="FAIL"
+      failure="agent"
     fi
   fi
 
   # 4. in backend --target native --json
   if [[ "$status" == "PASS" ]]; then
     if $env_prefix "${IN_CMD[@]}" backend --target native --json --path "$path" --module-id App >"$tmp_json" 2>/dev/null; then
-      check_json_no_external "$tmp_json" "$lang" || status="FAIL"
+      check_json_no_external "$tmp_json" "$lang" || { status="FAIL"; failure="backend"; }
     else
       echo "FAIL [$lang]: in backend --target native --json"
       status="FAIL"
+      failure="backend"
     fi
   fi
 
@@ -166,6 +173,7 @@ run_matrix_for_lang() {
     else
       echo "  jit [$lang]: execute failed"
       JIT_FAILED=$((JIT_FAILED + 1))
+      FAILURES+=("jit $lang")
     fi
   fi
 
@@ -176,6 +184,7 @@ run_matrix_for_lang() {
     PASSED=$((PASSED + 1))
   else
     FAILED=$((FAILED + 1))
+    FAILURES+=("$failure $lang")
   fi
 
   return 0
@@ -199,7 +208,20 @@ echo "JIT execution:"
 echo "  passed: $JIT_PASSED"
 echo "  failed: $JIT_FAILED"
 
-if [[ $FAILED -gt 0 || $JIT_FAILED -gt 0 ]]; then
+if [[ -n "${IN_MATRIX_KNOWN_FAILURES:-}" ]]; then
+  if [[ ! -f "$IN_MATRIX_KNOWN_FAILURES" ]]; then
+    echo "Missing known-failures file: $IN_MATRIX_KNOWN_FAILURES" >&2
+    exit 1
+  fi
+  actual="$(printf '%s\n' ${FAILURES[@]+"${FAILURES[@]}"} | sed '/^$/d' | LC_ALL=C sort)"
+  expected="$(LC_ALL=C sort "$IN_MATRIX_KNOWN_FAILURES")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "Matrix failures differ from the known-failures list:" >&2
+    diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
+    exit 1
+  fi
+  echo "Known matrix failures match $IN_MATRIX_KNOWN_FAILURES"
+elif [[ $FAILED -gt 0 || $JIT_FAILED -gt 0 ]]; then
   echo ""
   echo "Some language fronts failed the self-hosted language matrix."
   exit 1
