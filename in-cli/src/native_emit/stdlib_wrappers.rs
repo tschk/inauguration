@@ -349,14 +349,14 @@ mod inline_length_tests {
     fn selected_length_contract_preserves_sequence_element_types() {
         let array = Typ::Array(Box::new(Typ::Int));
         let vector = Typ::Vector(Box::new(Typ::Bool));
-        for typ in [array.clone(), vector] {
+        for typ in [&array, &vector] {
             let params = vec![("items".into(), typ.clone())];
             assert_eq!(
                 validate_length_call(
                     "array-len",
                     Some((&params, &Typ::Int)),
                     &[Expr::Ident("items".into())],
-                    [Some(typ)].into_iter()
+                    [Some(typ.clone())].into_iter()
                 ),
                 Ok(())
             );
