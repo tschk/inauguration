@@ -332,7 +332,7 @@ parser = \"c\"
         use crate::owned_compile::{CompileTarget, EvalValue, OwnedCompileRequest, compile_owned};
         let dir = scratch();
         fs::write(dir.join("extra.c"), "int unused(void){return 7;}").unwrap();
-        fs::write(dir.join("answer.rs"), "struct Value{value:i64}impl std::ops::Neg for Value{type Output=i64;fn neg(self)->i64{self.value+22}}pub fn answer()->i64{-Value{value:20}}fn main()->i64{7}").unwrap();
+        fs::write(dir.join("answer.rs"), "struct Value{value:i64}impl std::ops::Neg for Value{type Output=i64;fn neg(self)->i64{self.value+22}}fn helper()->i64{20}pub fn answer()->i64{-Value{value:helper()}}fn main()->i64{7}").unwrap();
         let path = dir.join(FOREIGN_STAGE_FILE);
         fs::write(&path, "[project]\nname=\"stage-test\"\nentry=\"answer\"\n[[sources]]\npath=\"extra.c\"\n[[sources]]\npath=\"answer.rs\"\n").unwrap();
         let request = OwnedCompileRequest {

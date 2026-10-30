@@ -584,3 +584,37 @@ fn c_projection_rejects_invalid_complement_operands_before_writing_source() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn build_uses_foreign_manifest_entry() {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("in-foreign-entry-{}-{stamp}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("entry.rs"),
+        "pub fn answer()->i64{42} fn main()->i64{7}",
+    )
+    .unwrap();
+    let manifest = root.join("inauguration.foreign.toml");
+    std::fs::write(
+        &manifest,
+        "[project]\nname=\"entry-test\"\nentry=\"answer\"\n[[sources]]\npath=\"entry.rs\"\n",
+    )
+    .unwrap();
+    let binary = root.join("result");
+    let build = Command::new(env!("CARGO_BIN_EXE_in"))
+        .arg("build")
+        .arg("--path")
+        .arg(&manifest)
+        .arg("--out")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(build.status.success(), "{build:?}");
+    assert_eq!(Command::new(&binary).status().unwrap().code(), Some(42));
+    std::fs::remove_dir_all(root).unwrap();
+}
