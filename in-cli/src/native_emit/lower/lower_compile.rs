@@ -86,7 +86,7 @@ pub fn compile_native_artifact_with_report(
         && linkage == NativeLinkage::Executable
     {
         let bytes = crate::native_emit::elf::lower_x86_executable(module, entry)?;
-        std::fs::write(out_path, bytes)
+        crate::native_emit::write_executable_file(out_path, &bytes)
             .map_err(|error| format!("write native ELF `{}`: {error}", out_path.display()))?;
         return Ok(NativeArtifactOutcome {
             abi_path: None,

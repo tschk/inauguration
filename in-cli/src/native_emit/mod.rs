@@ -56,6 +56,29 @@ pub use thumb_lower::{THUMB_TRIPLE, ThumbCompileResult, lower_module as lower_th
 pub use uf2::{UF2_FAMILY_RP2350_ARM_S, Uf2Options, encode_uf2, write_uf2};
 pub use wasm::{WASM32_UNKNOWN_TRIPLE, WasmModule, write_scalar_i32_module};
 
+pub(crate) fn write_executable_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::fs::{File, Permissions};
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut writer = File::create(path)?;
+        writer.write_all(bytes)?;
+        writer.set_permissions(Permissions::from_mode(0o755))?;
+        // A concurrent fork can inherit this writer despite CLOEXEC. The flock
+        // follows its open file description until every inherited copy closes.
+        // Do not unlock before dropping the writer: the read lock must wait.
+        // https://github.com/rust-lang/rust/issues/114554
+        writer.lock()?;
+        drop(writer);
+        File::open(path)?.lock_shared()?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    std::fs::write(path, bytes)
+}
+
 /// Section-relative targets retained for relocatable native objects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeSection {

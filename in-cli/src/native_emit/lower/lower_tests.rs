@@ -36,6 +36,62 @@ fn answer_module() -> UnifiedModule {
     }
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn native_executables_are_ready_while_other_threads_fork() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+    use std::sync::{Arc, Barrier};
+
+    let mut module = answer_module();
+    // Keep the writer open long enough to overlap forks on both fast CI hosts
+    // and emulators, without adding a scheduling hook to the compiler.
+    module.decls.push(Decl::Global {
+        name: "payload".into(),
+        typ: Typ::String,
+        init: Some(Box::new(Expr::StringLit("x".repeat(4 * 1024 * 1024)))),
+        mutable: true,
+        constant_value: false,
+    });
+    let start = Arc::new(Barrier::new(3));
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            let start = start.clone();
+            scope.spawn(move || {
+                start.wait();
+                for _ in 0..128 {
+                    let mut command = Command::new("/bin/true");
+                    // SAFETY: nanosleep is async-signal-safe. Delay only the
+                    // unrelated child before exec closes inherited descriptors.
+                    unsafe {
+                        command.pre_exec(|| {
+                            libc::nanosleep(
+                                &libc::timespec {
+                                    tv_sec: 0,
+                                    tv_nsec: 10_000_000,
+                                },
+                                std::ptr::null_mut(),
+                            );
+                            Ok(())
+                        });
+                    }
+                    assert!(command.status().unwrap().success());
+                }
+            });
+        }
+        start.wait();
+        for _ in 0..32 {
+            let path = temp_executable("fork-race");
+            compile_native_executable_for_host(&module, "answer", &path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let status = Command::new(&path).status();
+            std::fs::remove_file(path).unwrap();
+            assert_eq!(status.unwrap().code(), Some(42));
+        }
+    });
+}
+
 /// Run a native executable on macOS AArch64: ad-hoc codesign, direct exec (no shell).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn run_native_exe(path: &std::path::Path) -> std::process::Output {

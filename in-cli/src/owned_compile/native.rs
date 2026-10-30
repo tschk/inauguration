@@ -128,8 +128,12 @@ pub fn compile_native(
             )
         })?;
         if let Some(artifact) = artifact {
-            fs::write(out_path, artifact.bytes)
-                .map_err(|err| format!("native object write `{}`: {err}", out_path.display()))?;
+            if request.linkage == NativeLinkage::Executable {
+                native_emit::write_executable_file(out_path, &artifact.bytes)
+            } else {
+                fs::write(out_path, artifact.bytes)
+            }
+            .map_err(|err| format!("native object write `{}`: {err}", out_path.display()))?;
             set_native_artifact_permissions(out_path, request.linkage)?;
             let abi_path = if let Some(manifest) = artifact.abi_manifest {
                 let abi_path = out_path.with_extension("abi.json");
@@ -444,7 +448,7 @@ pub fn emit_linux_appdir(exit: u8, out_path: &Path) -> Result<(), String> {
     };
     let mut bytes = Vec::new();
     native_emit::write_elf_executable(&exe, &mut bytes);
-    fs::write(&app_run, bytes)
+    native_emit::write_executable_file(&app_run, &bytes)
         .map_err(|err| format!("write AppRun `{}`: {err}", app_run.display()))?;
     set_native_artifact_permissions(&app_run, NativeLinkage::Executable)?;
     fs::write(
