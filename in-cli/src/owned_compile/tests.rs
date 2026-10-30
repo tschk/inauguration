@@ -125,6 +125,15 @@ fn rust_source_trait_bounds_require_exact_owned_implementations() {
         "trait Read{fn read(self,value:u8)->i64;}struct Row{value:i64}impl Read for Row{fn read(self,value:u8)->i64{self.value+value as i64}}fn choose<T:Read>(row:T)->i64{row.read(7)}fn main()->i64{choose(Row{value:35})}",
         "trait Read{fn read(self,value:bool)->bool;}struct Row{value:i64}impl Read for Row{fn read(self,value:bool)->bool{value}}fn choose<T:Read>(row:T)->i64{if row.read(true){42}else{7}}fn main()->i64{choose(Row{value:35})}",
         "trait Read{fn read(self,value:f32)->f32;}struct Row{value:i64}impl Read for Row{fn read(self,value:f32)->f32{self.value as f32+value}}fn choose<T:Read>(row:T)->i64{(row.read(4.0)*2.0) as i64}fn main()->i64{choose(Row{value:17})}",
+        "trait Read{fn read(&self)->i64;}struct Row{value:i64}impl Read for Row{fn read(&self)->i64{self.value}}impl Row{fn read(&self)->i64{7}}fn choose<T:Read>(row:T)->i64{row.read()}fn main()->i64{choose(Row{value:42})}",
+        "trait Read{fn read(&self)->i64;}struct Row{value:i64}impl Read for Row{fn read(&self)->i64{self.value}}impl Row{fn read(&self)->i64{7}}fn choose<T:Read>(row:&T)->i64{row.read()+row.read()}fn main()->i64{let row=Row{value:21};choose(&row)}",
+        "trait Read{fn read(&self)->i64;}struct Row{value:i64}impl Read for Row{fn read(&self)->i64{self.value}}fn choose<T:Read>(row:T)->i64{row.read()+row.read()}fn main()->i64{choose(Row{value:21})}",
+        "trait Read{fn read(&self,value:f32)->f32;}struct Row{value:i64}impl Read for Row{fn read(&self,value:f32)->f32{self.value as f32+value}}fn choose<T:Read>(row:&T)->i64{(row.read(4.0)*2.0) as i64}fn main()->i64{let row=Row{value:17};choose(&row)}",
+        "trait Read{fn read(&self)->i64;}struct Row{left:i64,right:i64}impl Read for Row{fn read(&self)->i64{let mut total=self.left;for i in 0..2{total+=self.right;}total}}fn choose<T:Read>(row:&T)->i64{row.read()+row.read()}fn main()->i64{let row=Row{left:3,right:9};choose(&row)}",
+        "trait Take{fn read(self)->i64;}trait Peek{fn read(&self)->i64;}struct Row{value:i64}impl Take for Row{fn read(self)->i64{self.value}}impl Peek for Row{fn read(&self)->i64{self.value+2}}fn take<T:Peek+Take>(row:T)->i64{row.read()}fn peek<T:Take+Peek>(row:&T)->i64{row.read()}fn main()->i64{let row=Row{value:21};take(Row{value:19})+peek(&row)}",
+        "trait Take{fn read(self)->i64;}trait Peek{fn read(&self)->i64;}trait Other{fn read(&self)->i64;}struct Row{value:i64}impl Take for Row{fn read(self)->i64{self.value}}impl Peek for Row{fn read(&self)->i64{7}}impl Other for Row{fn read(&self)->i64{11}}fn choose<T:Peek+Other+Take>(row:T)->i64{row.read()}fn main()->i64{choose(Row{value:42})}",
+        "trait Take{fn read(self)->i64;}trait Peek{fn read(&self)->Row;}struct Row{value:i64}impl Take for Row{fn read(self)->i64{self.value}}impl Peek for Row{fn read(&self)->Row{Row{value:7}}}fn choose<T:Peek+Take>(row:T)->i64{row.read()}fn main()->i64{choose(Row{value:42})}",
+        "trait Take{fn read(self)->Row;}trait Peek{fn read(&self)->i64;}struct Row{value:i64}impl Take for Row{fn read(self)->Row{self}}impl Peek for Row{fn read(&self)->i64{self.value}}fn choose<T:Take+Peek>(row:&T)->i64{row.read()}fn main()->i64{let row=Row{value:42};choose(&row)}",
     ] {
         fs::write(&path, source).unwrap();
         for target in [CompileTarget::Jit, CompileTarget::Native] {
@@ -177,7 +186,6 @@ fn rust_source_trait_bounds_cannot_erase_unproved_contracts() {
         "trait Read{fn read(&self)->i64;}struct Row{value:i64}impl Read for Row{fn read(self)->i64{42}}fn choose<T:Read>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
         "trait Read{fn read(&self)->f32;}struct Row{value:i64}impl Read for Row{fn read(&self)->f64{42.0}}fn choose<T:Read>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
         "trait Read{fn read(&self,value:&str)->i64;}struct Row{value:i64}impl Read for Row{fn read(&self,value:&'static str)->i64{42}}fn choose<T:Read>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
-        "trait Read{fn read(&self)->i64;}struct Row{value:i64}impl Read for Row{fn read(&self)->i64{42}}impl Row{fn read(&self)->i64{7}}fn choose<T:Read>(row:T)->i64{row.read()}fn main()->i64{choose(Row{value:42})}",
         "trait Mark{}mod left{pub struct Row{pub value:i64}}mod right{pub struct Row{pub value:i64}}impl Mark for left::Row{}fn choose<T:Mark>(row:T)->T{row}fn main()->i64{choose(right::Row{value:42}).value}",
         "trait Mark:Missing{}struct Row{value:i64}impl Mark for Row{}fn choose<T:Mark>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
         "trait Mark{}struct Row{value:i64}impl<T> Mark for T{}fn choose<T:Mark>(row:T)->T{row}fn main()->i64{choose(Row{value:42}).value}",
@@ -193,6 +201,13 @@ fn rust_source_trait_bounds_cannot_erase_unproved_contracts() {
         "trait Read{fn read(self,value:i64)->i64;}struct Row{value:i64}impl Read for Row{fn read(self,value:i64)->i64{self.value+value}}fn choose<T:Read>(row:T)->i64{let unused=row.read(41u64);42}fn main()->i64{choose(Row{value:1})}",
         "trait Read{fn read(self,value:u8)->i64;}struct Row{value:i64}impl Read for Row{fn read(self,value:u8)->i64{self.value+value as i64}}fn choose<T:Read>(row:T)->i64{row.read(256)}fn main()->i64{choose(Row{value:1})}",
         "trait Read{fn read(self)->i64;}struct Row{value:i64}impl Read for Row{fn read(self)->i64{self.value}}fn choose<T:Read>(row:T)->bool{row.read()}fn main()->i64{if choose(Row{value:42}){42}else{7}}",
+        "trait Read{fn read(self)->i64;}struct Row{value:i64}impl Read for Row{fn read(self)->i64{self.value}}fn choose<T:Read>(row:&T)->i64{row.read()}fn main()->i64{let row=Row{value:42};choose(&row)}",
+        "trait Read{fn read(&'static self)->i64;}struct Row{value:i64}impl Read for Row{fn read(&'static self)->i64{self.value}}fn choose<T:Read>(row:&T)->i64{row.read()}fn main()->i64{let row=Row{value:42};choose(&row)}",
+        "trait Take{fn read(self)->i64;}trait Other{fn read(self)->Row;}struct Row{value:i64}impl Take for Row{fn read(self)->i64{self.value}}impl Other for Row{fn read(self)->Row{self}}fn choose<T:Take+Other>(row:T)->i64{row.read()}fn main()->i64{choose(Row{value:42})}",
+        "trait Take{fn read(self)->Row;}trait Peek{fn read(&self)->i64;}struct Row{value:i64}impl Take for Row{fn read(self)->Row{self}}impl Peek for Row{fn read(&self)->i64{self.value}}fn choose<T:Take+Peek>(row:T)->i64{row.read()}fn main()->i64{choose(Row{value:42})}",
+        "trait Peek{fn read(&self)->i64;}trait Other{fn read(&self)->Row;}struct Row{value:i64}impl Peek for Row{fn read(&self)->i64{self.value}}impl Other for Row{fn read(&self)->Row{Row{value:7}}}fn choose<T:Peek+Other>(row:&T)->i64{row.read()}fn main()->i64{let row=Row{value:42};choose(&row)}",
+        "trait Take{fn read(self,value:i64)->i64;}trait Peek{fn read(&self)->i64;}struct Row{value:i64}impl Take for Row{fn read(self,value:i64)->i64{self.value+value}}impl Peek for Row{fn read(&self)->i64{self.value}}fn choose<T:Take+Peek>(row:T)->i64{row.read()}fn main()->i64{choose(Row{value:42})}",
+        "trait Write{fn read(&mut self)->i64;}trait Peek{fn read(&self)->i64;}struct Row{value:i64}impl Write for Row{fn read(&mut self)->i64{7}}impl Peek for Row{fn read(&self)->i64{self.value}}fn choose<T:Write+Peek>(row:&mut T)->i64{row.read()}fn main()->i64{let mut row=Row{value:42};choose(&mut row)}",
     ] {
         fs::write(&path, source).unwrap();
         for target in [CompileTarget::Jit, CompileTarget::Native] {

@@ -59,18 +59,30 @@ pub(crate) struct TraitObligation {
 #[serde(deny_unknown_fields)]
 pub(crate) struct TraitMethod {
     pub name: String,
-    pub signature: super::rust_callables::Signature,
+    /// Lookup must retain methods whose receiver or invocation is not yet owned.
+    pub receiver: Option<Typ>,
+    pub signature: Option<super::rust_callables::Signature>,
     pub targets: Vec<(Typ, String)>,
 }
 impl TraitMethod {
     pub(crate) fn visit_types(&self, visit: &mut impl FnMut(&Typ)) {
-        self.signature.visit_types(visit);
+        if let Some(receiver) = &self.receiver {
+            visit(receiver);
+        }
+        if let Some(signature) = &self.signature {
+            signature.visit_types(visit);
+        }
         for (receiver, _) in &self.targets {
             visit(receiver);
         }
     }
     pub(crate) fn visit_types_mut(&mut self, visit: &mut impl FnMut(&mut Typ)) {
-        self.signature.visit_types_mut(visit);
+        if let Some(receiver) = &mut self.receiver {
+            visit(receiver);
+        }
+        if let Some(signature) = &mut self.signature {
+            signature.visit_types_mut(visit);
+        }
         for (receiver, _) in &mut self.targets {
             visit(receiver);
         }

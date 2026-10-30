@@ -104,32 +104,46 @@ fn methods(
         let syn::TraitItem::Fn(method) = member else {
             continue;
         };
-        // Borrowed receivers and aggregate/Self results additionally need
-        // parametric borrow/storage proofs; their bounds remain usable without
-        // pretending their methods have a scalar invocation contract.
         let Some(argument) = method.sig.receiver() else {
             continue;
         };
-        if argument.reference.is_some() || argument.colon_token.is_some() {
-            continue;
-        }
+        // Lookup precedes invocation proofs: an unsupported method can still
+        // win receiver priority or make a same-priority call ambiguous.
+        let receiver = argument.colon_token.is_none().then(|| {
+            if argument.reference.is_some() {
+                let op = if argument.mutability.is_some() {
+                    crate::core_ir::rust_references::MUTABLE_VALUE
+                } else {
+                    crate::core_ir::rust_references::SHARED_VALUE
+                };
+                crate::core_ir::rust_references::value_type(op, receiver.clone())
+                    .expect("reference operator supplies a receiver type")
+            } else {
+                receiver.clone()
+            }
+        });
         let mut signature = method.sig.clone();
         signature.inputs = signature
             .inputs
             .into_iter()
             .filter(|input| !matches!(input, syn::FnArg::Receiver(_)))
             .collect();
-        let signature = match source_signatures::declaration(&signature, &declaring) {
-            Ok(mut signature)
-                if signature.ordinary_rust_form()
+        let signature = match (
+            &receiver,
+            source_signatures::declaration(&signature, &declaring),
+        ) {
+            (Some(receiver), Ok(mut signature))
+                if !argument.reference.as_ref().is_some_and(|(_, lifetime)| {
+                    argument.mutability.is_some() || lifetime.is_some()
+                }) && signature.ordinary_rust_form()
                     && signature.parameters.iter().all(&scalar)
                     && scalar(&signature.result) =>
             {
                 signature.parameters.insert(0, receiver.clone());
-                signature
+                Some(signature)
             }
-            Err(failure) if failure.is_invalid() => return Err(failure),
-            _ => continue,
+            (_, Err(failure)) if failure.is_invalid() => return Err(failure),
+            _ => None,
         };
         let mut targets = Vec::new();
         for record in &index.implementations {
@@ -166,6 +180,7 @@ fn methods(
         }
         methods.push(TraitMethod {
             name: method.sig.ident.to_string(),
+            receiver,
             signature,
             targets,
         });
