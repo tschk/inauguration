@@ -1948,20 +1948,20 @@ impl Pass<'_> {
                     }
                     kind = self.projection_kind(place);
                 }
-                if (self.unresolved_width || !self.active_projections.is_empty())
+                let old = std::mem::replace(&mut self.unresolved_width, false);
+                let paths = std::mem::take(&mut self.active_projections);
+                if (old || !paths.is_empty())
                     && let Some(place) = source_place(expr)
                 {
-                    if self.unresolved_width {
+                    if old {
                         self.defer_place(place.clone());
                     }
-                    for path in self.active_projections.clone() {
+                    for path in &paths {
                         let mut selected = place.clone();
-                        selected.path.extend(path);
+                        selected.path.extend(path.clone());
                         self.defer_place(selected);
                     }
                 }
-                let old = std::mem::replace(&mut self.unresolved_width, false);
-                let paths = std::mem::take(&mut self.active_projections);
                 core_ir::for_each_expr_child_mut(expr, &mut |child| {
                     self.expression(child, None, env, ret);
                 });

@@ -991,7 +991,11 @@ mod tests {
                     ),
                 ] {
                     let source = format!("fn main(value: String) -> Int {{ {body} return 9; }}");
-                    let mut module = crate::in_lang_parse::parse_in_source(&source).unwrap();
+                    let mut module = crate::typecheck::normalize_module(
+                        crate::parser_registry::ParserId::In,
+                        &crate::in_lang_parse::parse_in_source(&source).unwrap(),
+                    );
+                    crate::lower_core::desugar_module(&mut module);
                     let args = [storage.as_ptr() as i64];
                     assert_eq!(
                         invoke_module(&module, profile, &args),
@@ -1012,10 +1016,11 @@ mod tests {
             }
             let mut storage = 3u64.to_ne_bytes().to_vec();
             storage.extend_from_slice(b"abc");
-            let mut module = crate::in_lang_parse::parse_in_source("fn main(value: String) -> Int { match value { \"abc\" { return 42; } _ { return 7; } } return 9; }").unwrap();
-            if let crate::core_ir::Decl::Function { params, .. } = &mut module.decls[0] {
-                params[0].1 = crate::core_ir::Typ::Named("str".into());
-            }
+            let mut module = crate::typecheck::normalize_module(
+                crate::parser_registry::ParserId::In,
+                &crate::in_lang_parse::parse_in_source("fn main(value: String) -> Int { match value { \"abc\" { return 42; } _ { return 7; } } return 9; }").unwrap()
+            );
+            crate::lower_core::desugar_module(&mut module);
             assert_eq!(
                 invoke_module(&module, profile, &[storage.as_ptr() as i64]),
                 Some(42)
@@ -1024,15 +1029,21 @@ mod tests {
                 "match value { \"\" { return 1; } _ { return 7; } }",
                 "try { throw value; } catch \"\" { return 1; } catch _ { return 7; }",
             ] {
-                let module = crate::in_lang_parse::parse_in_source(&format!(
-                    "fn main(value: String) -> Int {{ {body} return 9; }}"
-                ))
-                .unwrap();
+                let mut module = crate::typecheck::normalize_module(
+                    crate::parser_registry::ParserId::In,
+                    &crate::in_lang_parse::parse_in_source(&format!(
+                        "fn main(value: String) -> Int {{ {body} return 9; }}"
+                    ))
+                    .unwrap(),
+                );
+                crate::lower_core::desugar_module(&mut module);
                 assert_eq!(invoke_module(&module, profile, &[0]), Some(7));
             }
-            let module = crate::in_lang_parse::parse_in_source("fn main() -> Int { try { throw 0; } catch \"text\" { return 1; } catch 0 { return 42; } return 7; }").unwrap();
+            let mut module = crate::typecheck::normalize_module(crate::parser_registry::ParserId::In, &crate::in_lang_parse::parse_in_source("fn main() -> Int { try { throw 0; } catch \"text\" { return 1; } catch 0 { return 42; } return 7; }").unwrap());
+            crate::lower_core::desugar_module(&mut module);
             assert_eq!(invoke_module(&module, profile, &[]), Some(42));
-            let module = crate::in_lang_parse::parse_in_source("fn main() -> Int { try { throw 123; } catch caught { match caught { \"text\" { return 1; } _ { return 42; } } } return 7; }").unwrap();
+            let mut module = crate::typecheck::normalize_module(crate::parser_registry::ParserId::In, &crate::in_lang_parse::parse_in_source("fn main() -> Int { try { throw 123; } catch caught { match caught { \"text\" { return 1; } _ { return 42; } } } return 7; }").unwrap());
+            crate::lower_core::desugar_module(&mut module);
             assert_eq!(invoke_module(&module, profile, &[]), Some(42));
         }
     }
