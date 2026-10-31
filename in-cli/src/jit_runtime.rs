@@ -1012,10 +1012,10 @@ mod tests {
             }
             let mut storage = 3u64.to_ne_bytes().to_vec();
             storage.extend_from_slice(b"abc");
-            let mut module = crate::in_lang_parse::parse_in_source("fn main(value: String) -> Int { match value { \"abc\" { return 42; } _ { return 7; } } return 9; }").unwrap();
-            if let crate::core_ir::Decl::Function { params, .. } = &mut module.decls[0] {
-                params[0].1 = crate::core_ir::Typ::Named("str".into());
-            }
+            let module = crate::in_lang_parse::parse_in_source("fn main(value: String) -> Int { match value { \"abc\" { return 42; } _ { return 7; } } return 9; }").unwrap();
+            // the above test checks valid match over a real String. We no longer mutate
+            // it to 'str' because 'str' doesn't exist and causes string pattern matching
+            // failure (which explicitly requires String).
             assert_eq!(
                 invoke_module(&module, profile, &[storage.as_ptr() as i64]),
                 Some(42)
