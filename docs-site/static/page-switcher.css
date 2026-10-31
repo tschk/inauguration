@@ -82,7 +82,7 @@
     right: 0;
     top: 44px;
     width: min(280px, calc(100vw - 48px));
-    max-height: calc(100dvh - var(--switcher-top, 24px) - 68px);
+    max-height: calc(100vh - var(--switcher-top, 24px) - 68px);
     overflow-y: auto;
     overscroll-behavior: contain;
     padding: 0 4px 4px;
@@ -92,6 +92,11 @@
     align-items: flex-end;
     gap: 4px;
     box-shadow: 0 8px 24px #0008;
+  }
+  @supports (height: 100dvh) {
+    .page-switcher-list {
+      max-height: calc(100dvh - var(--switcher-top, 24px) - 68px);
+    }
   }
   .page-switcher-list[hidden] {
     display: none;

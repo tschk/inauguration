@@ -130,13 +130,22 @@ for (const source of document.querySelectorAll(
     (event) => {
       if (!touching) return;
       event.preventDefault();
-      const target = active;
       touching = false;
       cancelAnimationFrame(frame);
-      if (target) {
+      const point = event.changedTouches[0];
+      touchY = point.clientY;
+      selectNearest();
+      const target = active;
+      const rect = list.getBoundingClientRect();
+      const inside =
+        point.clientX >= rect.left &&
+        point.clientX <= rect.right &&
+        point.clientY >= rect.top &&
+        point.clientY <= rect.bottom;
+      if (target && inside) {
         close();
         target.click();
-      } else if (closeOnTap) close();
+      } else if (enteredList || closeOnTap) close();
     },
     { passive: false },
   );
