@@ -239,7 +239,13 @@ Static data retains eight-byte cells, with pointer addresses in the low word
 and zero in the high word. Relocation rejects out-of-range addresses rather than
 truncating them. `scripts/check-i386-boot-data.py --compiler <source-built-in>`
 boots scalar mutation and pointer-relocation cases in QEMU for both targets
-across default, lean and harden profiles.
+across default, lean and harden profiles. These are 18 writable-data regression
+cases and six no-global control boots. Guest success uses QEMU exit status 5,
+distinct from loader errors at status 1 and unexpected guest returns at status 3.
+The gate also rejects corrupt and missing images and checks wrong guest returns
+in all six target/profile combinations. With an older compiler,
+`--expect-writable-refusal` checks that all 18 data cases refuse without emitting
+an image while the six no-global controls still boot.
 
 ### Extern and capabilities
 
