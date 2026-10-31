@@ -5,6 +5,8 @@ Release notes for **inauguration** — the `in` CLI, the crates.io crate `inaugu
 **Install**
 
 ```bash
+brew install tschk/tap/inauguration
+# or, from crates.io:
 cargo install inauguration
 # or, from a checkout:
 ./install.sh
@@ -16,9 +18,44 @@ This page is written for humans and coding agents. Each version lists *why it ma
 
 ---
 
+## 0.9.322 — 2026-10-30
+
+[Published GitHub release v0.9.322](https://github.com/tschk/inauguration/releases/tag/v0.9.322)
+provides macOS ARM64 and Linux x86_64 binaries with SHA-256 sidecars.
+The Homebrew formula `tschk/tap/inauguration` builds this tagged source with
+`--locked`. Its Linux source install, formula test, and installed version check
+passed. macOS source installation remains unverified.
+
+The tagged source passed all 119 conformance cases on both release platforms.
+Packaging checks verified the archive checksum, contents, version, and a fresh
+native executable that exited 42. These checks do not prove self-hosting or
+complete language support.
+
+### Known limitations
+
+- The compiler cannot compile its complete Rust source and dependencies.
+  Self-hosting stops at the unresolved `ToTokens` trait constraint in
+  `compact_rust_tokens<syn::Path>`. An entry-less `jit-ir-only` success report
+  does not prove native compilation.
+- `compile --json` can report `success: false` while exiting with status 0,
+  including an explicit-main compile failure. Automation must check `success`,
+  the fresh requested artifact, and the executable itself when execution matters.
+- The published `x86_64-unknown-linux-gnu` binary has mandatory glibc 2.34
+  symbol-version requirements. It cannot load on glibc below 2.34. This floor
+  does not guarantee compatibility with every newer Linux distribution.
+  Missing weak `GLIBC_2.39` versions for optional `pidfd_spawnp` and
+  `pidfd_getpid` imports produce benign warnings on glibc 2.36.
+
+The binary's glibc floor does not describe Homebrew source builds, which use
+the installation environment's toolchain and libraries. See the
+[release notes](https://github.com/tschk/inauguration/releases/tag/v0.9.322)
+for the complete verification record and included compiler fixes.
+
+---
+
 ## 0.9.8 — 2026-09-16
 
-**Current crates.io and GitHub release.** Tag `v0.9.8`.
+Published as tag `v0.9.8`. The notes below describe that historical release.
 
 This is the first public ship after a long stretch of compiler work on `master` that never made it into 0.9.6 (July). Treat 0.9.8 as the real 0.9-line feature drop.
 
