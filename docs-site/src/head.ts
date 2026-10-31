@@ -27,6 +27,7 @@ export const headHtml = `<meta charset="utf-8">
 .site-header, .site-header > div:first-child, .header-links { display: flex; gap: 12px; }
 .site-header, .header-links { flex-wrap: wrap; }
 .site-header img { width: 32px; height: 32px; }
+.in-docs-page a { color: #60a5fa; }
 .site-header a { color: #a1a1aa; }
 </style></noscript>
 <style>

@@ -31,6 +31,7 @@ for (const source of document.querySelectorAll(
   const mobile = matchMedia("(max-width: 767px)");
   let active = null;
   let touching = false;
+  let touchId = null;
   let frame = 0;
   let touchY = 0;
   let enteredList = false;
@@ -73,7 +74,7 @@ for (const source of document.querySelectorAll(
     }
   });
   document.addEventListener("pointerdown", (event) => {
-    if (!switcher.contains(event.target)) close();
+    if (!touching && !switcher.contains(event.target)) close();
   });
   document.addEventListener("focusin", (event) => {
     if (!switcher.contains(event.target)) close();
@@ -108,11 +109,13 @@ for (const source of document.querySelectorAll(
     (event) => {
       if (!mobile.matches) return;
       event.preventDefault();
+      if (touching) return;
       closeOnTap = !list.hidden;
       enteredList = false;
       open();
       touching = true;
-      touchY = event.touches[0].clientY;
+      touchId = event.changedTouches[0].identifier;
+      touchY = event.changedTouches[0].clientY;
       selectNearest();
     },
     { passive: false },
@@ -121,8 +124,12 @@ for (const source of document.querySelectorAll(
     "touchmove",
     (event) => {
       if (!touching) return;
+      const point = Array.from(event.touches).find(
+        (touch) => touch.identifier === touchId,
+      );
+      if (!point) return;
       event.preventDefault();
-      touchY = event.touches[0].clientY;
+      touchY = point.clientY;
     },
     { passive: false },
   );
@@ -130,10 +137,13 @@ for (const source of document.querySelectorAll(
     "touchend",
     (event) => {
       if (!touching) return;
+      const point = Array.from(event.changedTouches).find(
+        (touch) => touch.identifier === touchId,
+      );
+      if (!point) return;
       event.preventDefault();
       touching = false;
       cancelAnimationFrame(frame);
-      const point = event.changedTouches[0];
       touchY = point.clientY;
       selectNearest();
       const target = active;

@@ -8,6 +8,7 @@
     "start": "bun run src/server.ts",
     "build": "bun run src/build.ts",
     "test": "bun test",
+    "test:navigation": "bun scripts/test-mobile-navigation.mjs",
     "typecheck": "bunx tsc --noEmit",
     "format": "bunx prettier --check src test package.json tsconfig.json",
     "lint": "bunx oxlint src test"
@@ -30,6 +31,7 @@
     "@types/bun": "1.3.14",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
+    "playwright": "1.64.1",
     "typescript": "^5.9.0"
   }
 }
