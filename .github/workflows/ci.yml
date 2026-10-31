@@ -34,6 +34,10 @@ jobs:
         working-directory: in-cli
       - name: Link and execute native ELF objects
         run: PATH="$PWD/in-cli/target/debug:$PATH" bash scripts/check-native-linkable-objects.sh
+      - name: Install boot test tools
+        run: sudo apt-get update && sudo apt-get install -y nasm qemu-system-x86
+      - name: Execute i386 and i686 writable boot data
+        run: python3 scripts/check-i386-boot-data.py --compiler in-cli/target/debug/in
 
   protocol-models:
     name: Protocol models
@@ -113,5 +117,4 @@ jobs:
           "$IN" build --path in-cli/src/main.rs --module-id InCli --verbose
       - name: Check diff whitespace
         run: git diff --check
-
 
