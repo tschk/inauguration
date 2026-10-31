@@ -125,3 +125,61 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+
+  verify-published:
+    name: Verify published compiler (${{ matrix.asset_suffix }})
+    needs: publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            asset_suffix: macos-aarch64
+          - os: ubuntu-latest
+            asset_suffix: linux-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+    steps:
+      - name: Download and verify published compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          archive="in-$ASSET_SUFFIX.tar.gz"
+          if ! gh release view "$RELEASE_TAG" --json tagName,isDraft,assets |
+            jq -e --arg tag "$RELEASE_TAG" --arg archive "$archive" '
+              .tagName == $tag and .isDraft == false and
+              any(.assets[]; .name == $archive) and
+              any(.assets[]; .name == ($archive + ".sha256"))' > /dev/null; then
+            echo "::error::Release $RELEASE_TAG is unavailable, mismatched, draft, or missing $archive and its checksum."
+            exit 1
+          fi
+          mkdir "$work/dist"
+          gh release download "$RELEASE_TAG" --dir "$work/dist" \
+            --pattern "$archive" --pattern "$archive.sha256"
+          cd "$work"
+          test -s "dist/$archive"
+          test -s "dist/$archive.sha256"
+          # Published checksum files contain dist/<archive>, not just <archive>.
+          shasum -a 256 -c "dist/$archive.sha256"
+          test "$(tar -tzf "dist/$archive")" = in
+          tar -xzf "dist/$archive"
+          test "$(./in --version)" = "in ${RELEASE_TAG#v}"
+          printf '%s\n' 'fn answer(a: Int, b: Int)->Int{return a*2+b;} fn main()->Int{return answer(17,8);}' > answer.in
+          executable="$(pwd -P)/answer"
+          ./in compile --path answer.in --target native --entry main --out "$executable" --json | tee compile.json
+          jq -e --arg executable "$executable" '
+            .success == true and .artifact_path == $executable and
+            .executable_path == $executable' compile.json > /dev/null
+          test -x answer
+          if ./answer; then status=0; else status=$?; fi
+          test "$status" -eq 42
