@@ -32,6 +32,8 @@ for (const source of document.querySelectorAll(
   let touching = false;
   let frame = 0;
   let touchY = 0;
+  let enteredList = false;
+  let closeOnTap = false;
   function close(restore = false) {
     touching = false;
     cancelAnimationFrame(frame);
@@ -78,6 +80,11 @@ for (const source of document.querySelectorAll(
   mobile.addEventListener("change", () => close());
   function selectNearest() {
     const rect = list.getBoundingClientRect();
+    if (touchY >= rect.top) enteredList = true;
+    if (!enteredList) {
+      if (touching) frame = requestAnimationFrame(selectNearest);
+      return;
+    }
     if (touchY > rect.bottom - 36) list.scrollTop += 6;
     else if (touchY < rect.top + 36) list.scrollTop -= 6;
     const visible = links.filter((link) => {
@@ -100,6 +107,8 @@ for (const source of document.querySelectorAll(
     (event) => {
       if (!mobile.matches) return;
       event.preventDefault();
+      closeOnTap = !list.hidden;
+      enteredList = false;
       open();
       touching = true;
       touchY = event.touches[0].clientY;
@@ -122,8 +131,12 @@ for (const source of document.querySelectorAll(
       if (!touching) return;
       event.preventDefault();
       const target = active;
-      close();
-      target?.click();
+      touching = false;
+      cancelAnimationFrame(frame);
+      if (target) {
+        close();
+        target.click();
+      } else if (closeOnTap) close();
     },
     { passive: false },
   );
