@@ -27,6 +27,7 @@ for (const source of document.querySelectorAll(
   switcher.append(toggle, list);
   source.after(switcher);
   source.classList.add("switcher-source");
+  source.parentElement.classList.add("switcher-header");
   const mobile = matchMedia("(max-width: 767px)");
   let active = null;
   let touching = false;

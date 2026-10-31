@@ -21,6 +21,14 @@ export const headHtml = `<meta charset="utf-8">
 <script src="/static/page-switcher.js" defer></script>
 <script src="/static/vendor/unocss.js"></script>
 <script>window.addEventListener("load",function(){document.querySelectorAll("[data-crepus-root]").forEach(function(n){n.classList.add("ready")})})</script>
+<noscript><style>
+[data-crepus-root] { opacity: 1 !important; }
+.in-docs-page { padding: 24px; }
+.site-header, .site-header > div:first-child, .header-links { display: flex; gap: 12px; }
+.site-header, .header-links { flex-wrap: wrap; }
+.site-header img { width: 32px; height: 32px; }
+.site-header a { color: #a1a1aa; }
+</style></noscript>
 <style>
 html { scroll-behavior: smooth; }
 html, body { margin: 0; }
