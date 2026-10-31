@@ -38,6 +38,8 @@ test("homepage is moonshine landing HTML with tschk GitHub links", () => {
   );
   expect(homepage).toContain("html, body { margin: 0; }");
   expect(homepage).toContain("/static/vendor/unocss.js");
+  expect(homepage).toContain('href="/static/page-switcher.css"');
+  expect(homepage).toContain('src="/static/page-switcher.js" defer');
   expect(homepage).toContain("DOCUMENTATION DIRECTORY");
   expect(homepage).not.toContain(
     "THE STACK: INLANG + CREPUSCULARITYUltrafast compiler pipeline",
@@ -78,7 +80,7 @@ test("changelog is generated docs HTML and linked from the homepage", async () =
   expect(homepage).toContain("Changelog");
 });
 
-test("static assets are real files, not homepage HTML", () => {
+test("static assets are real files, not homepage HTML", async () => {
   expect(favicon).toContain("<svg");
   expect(favicon).not.toContain("<!DOCTYPE html>");
   expect(favicon).not.toBe(homepage);
@@ -86,6 +88,11 @@ test("static assets are real files, not homepage HTML", () => {
   expect(splash).not.toBe(homepage);
   expect(unocss.startsWith("<!DOCTYPE html>")).toBe(false);
   expect(unocss).not.toBe(homepage);
+  for (const asset of ["page-switcher.css", "page-switcher.js"]) {
+    const content = await readFile(join(outDir, "static", asset), "utf8");
+    expect(content.length).toBeGreaterThan(0);
+    expect(content.startsWith("<!DOCTYPE html>")).toBe(false);
+  }
 });
 
 test("unknown paths are not SPA-rewritten to the homepage", async () => {

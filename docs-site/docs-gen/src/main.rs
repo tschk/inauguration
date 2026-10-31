@@ -351,6 +351,7 @@ fn render_shell(
     let m = esc(&theme.muted);
     let b = esc(&theme.border);
     let brand = esc(&brand_href(web_key));
+    let assets = "../".repeat(web_key.matches('/').count() + 1);
 
     format!(
         "<!DOCTYPE html>
@@ -359,6 +360,8 @@ fn render_shell(
 <meta charset=\"utf-8\">
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
 <title>{ttl} — {site}</title>
+<link rel=\"stylesheet\" href=\"{assets}static/page-switcher.css\">
+<script src=\"{assets}static/page-switcher.js\" defer></script>
 <style>
   *{{box-sizing:border-box}}
   body{{margin:0;min-height:100vh;background:{s};color:{t};font-family:\"JetBrains Mono\",ui-monospace,monospace;-webkit-font-smoothing:antialiased;line-height:1.6}}
@@ -516,10 +519,14 @@ mod tests {
         assert!(hello_html.contains("Hello"));
         assert!(hello_html.contains("World"));
         assert!(hello_html.contains("test site"));
+        assert!(hello_html.contains("href=\"../static/page-switcher.css\""));
+        assert!(hello_html.contains("src=\"../static/page-switcher.js\""));
 
         let test_html = fs::read_to_string(out_dir.join("sub").join("test.html"))?;
         assert!(test_html.contains("Test"));
         assert!(test_html.contains("Testing 123"));
+        assert!(test_html.contains("href=\"../../static/page-switcher.css\""));
+        assert!(test_html.contains("src=\"../../static/page-switcher.js\""));
 
         let search_index = fs::read_to_string(out_dir.join("docs-search-index.json"))?;
         let idx: Vec<serde_json::Value> = serde_json::from_str(&search_index).unwrap();

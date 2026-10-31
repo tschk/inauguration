@@ -2,7 +2,7 @@ div min-h-screen bg-zinc-950 text-zinc-300 p-6 sm:p-12 text-sm leading-relaxed i
 	div max-w-4xl mx-auto flex flex-col gap-10
 		
 		# Header
-		div flex items-center justify-between border-b border-zinc-800 pb-6 crepus-entrance crepus-e1
+		div site-header flex items-center justify-between border-b border-zinc-800 pb-6 crepus-entrance crepus-e1
 			div flex items-center gap-3
 				img src="./static/favicon.svg" alt="" w-8 h-8 rounded bg-zinc-900 border border-zinc-800 p-1
 				div
@@ -10,7 +10,7 @@ div min-h-screen bg-zinc-950 text-zinc-300 p-6 sm:p-12 text-sm leading-relaxed i
 						"inauguration"
 					div text-xs text-zinc-500 mt-0.5
 						"ultrafast hybrid compile · hot reload · JIT"
-			nav flex gap-4 text-xs
+			nav header-links flex gap-4 text-xs
 				a href="./docs/in-language.html" no-underline text-zinc-400 hover:text-white transition-colors
 					"Docs"
 				a href="./docs/changelog.html" no-underline text-zinc-400 hover:text-white transition-colors
