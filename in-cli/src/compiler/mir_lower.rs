@@ -742,11 +742,6 @@ pub fn lower_boot_image(
             crate::native_emit::x86_64_lower::X86StringLayout::Cstring,
         )?;
         result.require_resolved_imports()?;
-        if is_32bit && (!result.data.is_empty() || !result.global_relocs.is_empty()) {
-            return Err(
-                "native-lower: 32-bit x86 boot images do not yet relocate writable globals".into(),
-            );
-        }
         // References and payload pointers are already fixed to data_base by
         // the lowerer. The boot packager must load this data at that address.
         (result.code, result.exports, result.data)
@@ -829,13 +824,23 @@ mod tests {
     }
 
     #[test]
-    fn x86_boot_preserves_32bit_writable_data_refusal() {
+    fn x86_boot_32bit_relocates_writable_scalars_and_pointers() {
         let module = crate::in_lang_parse::parse_in_source(
-            "var count:Int=3;\nfn main()->Int{return count;}",
+            "var count:Int=3;\nvar text:String=\"hello\";\nfn main()->Int{count=count+39;return count;}",
         )
         .unwrap();
-        let error = lower_boot_image(&module, "main", Some("i686-unknown-none")).unwrap_err();
-        assert!(error.contains("32-bit x86 boot images"), "{error}");
+        for triple in ["i386-unknown-none", "i686-unknown-none"] {
+            let (_, code, _, data) = lower_boot_image(&module, "main", Some(triple)).unwrap();
+            assert_eq!(i64::from_le_bytes(data[..8].try_into().unwrap()), 3);
+            // Word32 code uses moffs32, not moffs64 or RIP-relative addressing.
+            assert!(code.windows(5).any(|bytes| bytes == [0xa1, 0, 0, 0x20, 0]));
+            assert!(code.windows(5).any(|bytes| bytes == [0xa3, 0, 0, 0x20, 0]));
+            // Static storage retains eight-byte cells, with a bounded 32-bit
+            // address in the low word and zero in the unused high word.
+            let pointer = u64::from_le_bytes(data[8..16].try_into().unwrap());
+            let offset = usize::try_from(pointer.checked_sub(0x200000).unwrap()).unwrap();
+            assert_eq!(&data[offset..offset + 6], b"hello\0");
+        }
     }
 
     #[test]
