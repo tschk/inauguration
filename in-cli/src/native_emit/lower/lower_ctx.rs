@@ -651,6 +651,9 @@ fn alloc_nested_struct_slots_inner(
                     store_params,
                 )?;
                 // Flatten: nested struct fields go into parent's slot map with <field>.<subfield> keys
+                if let Some(&min_offset) = inner_slots.values().min() {
+                    slots.insert(field.clone(), min_offset);
+                }
                 for (sub_field, sub_offset) in inner_slots {
                     slots.insert(format!("{field}.{sub_field}"), sub_offset);
                 }
@@ -715,6 +718,9 @@ pub(crate) fn alloc_local_struct_fields(
                     ctx,
                     _fn_name,
                 )?;
+                if let Some(&min_offset) = inner_slots.values().min() {
+                    slots.insert(field.clone(), min_offset);
+                }
                 for (sub_field, sub_offset) in inner_slots {
                     slots.insert(format!("{field}.{sub_field}"), sub_offset);
                 }
