@@ -1954,10 +1954,16 @@ impl Pass<'_> {
                     if self.unresolved_width {
                         self.defer_place(place.clone());
                     }
-                    for path in self.active_projections.clone() {
-                        let mut selected = place.clone();
-                        selected.path.extend(path);
-                        self.defer_place(selected);
+                    if !self.active_projections.is_empty() {
+                        let mut selected_places = Vec::with_capacity(self.active_projections.len());
+                        for path in &self.active_projections {
+                            let mut selected = place.clone();
+                            selected.path.extend(path.clone());
+                            selected_places.push(selected);
+                        }
+                        for selected in selected_places {
+                            self.defer_place(selected);
+                        }
                     }
                 }
                 let old = std::mem::replace(&mut self.unresolved_width, false);
