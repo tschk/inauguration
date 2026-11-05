@@ -185,16 +185,70 @@ mod tests {
 
     #[test]
     fn resolve_flags() {
-        assert_eq!(
-            EmitProfile::resolve(EmitProfile::Default, true, false).unwrap(),
-            EmitProfile::Harden
-        );
-        assert_eq!(
-            EmitProfile::resolve(EmitProfile::Lean, false, false).unwrap(),
-            EmitProfile::Lean
-        );
-        assert!(EmitProfile::resolve(EmitProfile::Default, true, true).is_err());
-        assert!(EmitProfile::resolve(EmitProfile::Lean, true, false).is_err());
+        let cases = [
+            (EmitProfile::Default, false, false, Ok(EmitProfile::Default)),
+            (EmitProfile::Default, true, false, Ok(EmitProfile::Harden)),
+            (EmitProfile::Default, false, true, Ok(EmitProfile::Lean)),
+            (
+                EmitProfile::Default,
+                true,
+                true,
+                Err("cannot combine --harden and --lean"),
+            ),
+            (EmitProfile::Harden, false, false, Ok(EmitProfile::Harden)),
+            (EmitProfile::Harden, true, false, Ok(EmitProfile::Harden)),
+            (
+                EmitProfile::Harden,
+                false,
+                true,
+                Err("--lean conflicts with --profile harden"),
+            ),
+            (
+                EmitProfile::Harden,
+                true,
+                true,
+                Err("cannot combine --harden and --lean"),
+            ),
+            (EmitProfile::Lean, false, false, Ok(EmitProfile::Lean)),
+            (
+                EmitProfile::Lean,
+                true,
+                false,
+                Err("--harden conflicts with --profile lean"),
+            ),
+            (EmitProfile::Lean, false, true, Ok(EmitProfile::Lean)),
+            (
+                EmitProfile::Lean,
+                true,
+                true,
+                Err("cannot combine --harden and --lean"),
+            ),
+        ];
+        for (profile, harden, lean, expected) in cases {
+            let result = EmitProfile::resolve(profile, harden, lean);
+            match expected {
+                Ok(expected_profile) => {
+                    assert_eq!(
+                        result.unwrap(),
+                        expected_profile,
+                        "failed for profile={:?}, harden={}, lean={}",
+                        profile,
+                        harden,
+                        lean
+                    );
+                }
+                Err(expected_err) => {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        expected_err,
+                        "failed for profile={:?}, harden={}, lean={}",
+                        profile,
+                        harden,
+                        lean
+                    );
+                }
+            }
+        }
     }
 
     #[test]
