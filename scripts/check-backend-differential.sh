@@ -47,7 +47,7 @@ classify() {
   # JIT through the user-facing command. A nonzero program status is reported as
   # an error, so read the status out of the message instead of the exit code.
   local jit_status=0
-  "${IN_CMD[@]}" execute "$fixture" --module-id Differential >"$jit_out" 2>"$jit_err" || jit_status=$?
+  "${IN_CMD[@]}" execute "$fixture" --module-id Differential --verbose >"$jit_out" 2>"$jit_err" || jit_status=$?
   local jit_code=0
   if [[ $jit_status -ne 0 ]]; then
     jit_code="$(sed -n 's/.*program exited with status \([0-9]*\).*/\1/p' "$jit_err" | head -1)"
@@ -85,10 +85,15 @@ print(proc.returncode)
     return
   fi
 
-  if [[ "$jit_code" == "$native_status" ]] && cmp -s "$jit_out" "$tmp_dir/native.out"; then
+  if [[ "$jit_code" != "$native_status" ]] || ! cmp -s "$jit_out" "$tmp_dir/native.out"; then
+    echo "disagree"
+  elif grep -q '^\[jit\] Execution completed with result: \(String\|Float\|Int\)(' "$jit_err"; then
+    # Process status cannot carry String, Float or a full-width Int return.
+    echo "result-unobservable"
+  elif grep -q '^\[jit\] Execution completed with result: Bool(' "$jit_err"; then
     echo "agree"
   else
-    echo "disagree"
+    echo "result-unobservable"
   fi
 }
 
@@ -103,13 +108,19 @@ for fixture in $(grep -rl '@expect result:' conformance --include='*.in' | sort)
 done
 
 echo "backend differential: $fixtures fixtures compared (JIT vs native artifact)"
-for category in agree native-refused native-crash disagree jit-error; do
+for category in agree native-refused native-crash disagree jit-error result-unobservable; do
   count=$(grep -c "^$category " "$actual" || true)
   echo "  $(printf '%-14s' "$category") $count"
 done
 agreed=$(grep -c '^agree ' "$actual" || true)
 refused=$(grep -c '^native-refused ' "$actual" || true)
-echo "backend differential: $agreed/$fixtures agree; $refused native refusals were not compared"
+unobservable=$(grep -c '^result-unobservable ' "$actual" || true)
+echo "backend differential: $agreed/$fixtures agree; $refused native refusals and $unobservable unobservable results were not compared"
+
+if (( refused > 0 || unobservable > 0 )); then
+  echo 'backend differential incomplete: refused or unobservable results cannot pass or update the baseline' >&2
+  exit 1
+fi
 
 if [[ ! -f "$BASELINE" ]]; then
   echo "error: missing baseline $BASELINE" >&2
