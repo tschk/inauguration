@@ -1031,6 +1031,72 @@ mod tests {
         );
     }
 
+    struct TempDirGuard(std::path::PathBuf);
+    impl TempDirGuard {
+        fn new(prefix: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("{}-{}", prefix, std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn parses_icore_file_valid() {
+        let dir_guard = TempDirGuard::new("icore-test");
+        let path = dir_guard.path().join("test.icore");
+        let j = r#"{
+            "icoreVersion": 2,
+            "decls": [
+                {
+                    "kind": "function",
+                    "name": "main",
+                    "params": [],
+                    "return": "Void",
+                    "body": []
+                }
+            ]
+        }"#;
+        std::fs::write(&path, j).unwrap();
+
+        let m = super::parse_icore_file(&path).expect("parse_icore_file should succeed");
+        assert!(
+            m.decls
+                .iter()
+                .any(|d| matches!(d, super::Decl::Function { name, .. } if name == "main"))
+        );
+    }
+
+    #[test]
+    fn parses_icore_file_invalid_path() {
+        let path =
+            std::path::Path::new("/nonexistent/file/path/that/definitely/does/not/exist.icore");
+        let err = super::parse_icore_file(path)
+            .expect_err("parse_icore_file should fail for non-existent file");
+        assert!(
+            err.contains("No such file or directory")
+                || err.contains("system cannot find the path")
+        );
+    }
+
+    #[test]
+    fn parses_icore_file_invalid_json() {
+        let dir_guard = TempDirGuard::new("icore-test-err");
+        let path = dir_guard.path().join("bad.icore");
+        std::fs::write(&path, "this is not json").unwrap();
+
+        let err =
+            super::parse_icore_file(&path).expect_err("parse_icore_file should fail for bad JSON");
+        assert!(err.contains("icore JSON:"));
+    }
+
     #[test]
     fn parses_v3_boundary_without_main() {
         let j = r#"{
