@@ -1086,4 +1086,46 @@ mod tests {
                 .any(|d| matches!(d, Decl::Function { name, .. } if name == "person_age"))
         );
     }
+
+    #[test]
+    fn parses_valid_icore_file() {
+        use std::fs;
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_path = dir.path().join("test.icore");
+        let valid_json = r#"{
+            "icoreVersion": 1,
+            "decls": [
+                {
+                    "kind": "function",
+                    "name": "main",
+                    "params": [],
+                    "return": "Void",
+                    "body": []
+                }
+            ]
+        }"#;
+        fs::write(&file_path, valid_json).unwrap();
+        let module = super::parse_icore_file(&file_path).unwrap();
+        assert_eq!(module.decls.len(), 1);
+        assert!(
+            matches!(&module.decls[0], crate::core_ir::Decl::Function { name, .. } if name == "main")
+        );
+    }
+    #[test]
+    fn parses_icore_file_errors_on_missing_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_path = dir.path().join("missing.icore");
+        let err = super::parse_icore_file(&file_path).unwrap_err();
+        assert!(err.contains("missing.icore") || err.contains("No such file or directory"));
+    }
+
+    #[test]
+    fn parses_icore_file_errors_on_invalid_json() {
+        use std::fs;
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_path = dir.path().join("invalid.icore");
+        fs::write(&file_path, "{ invalid }").unwrap();
+        let err = super::parse_icore_file(&file_path).unwrap_err();
+        assert!(err.contains("icore JSON"));
+    }
 }
