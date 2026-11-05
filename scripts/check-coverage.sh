@@ -38,8 +38,22 @@ assert data["degradations"] == [], data
 assert data["unresolved_calls"] == 0, data
 PY
 
-echo 'coverage ok: unlowered function is named with a code and marked reachable'
 "${IN_CMD[@]}" coverage --path "$tmp_dir/degraded.in" --json > "$tmp_dir/degraded.json"
+if [[ "$(uname -s):$(uname -m)" == Linux:x86_64 ]]; then
+  echo 'coverage ok: rejected Linux native artifact has no coverage counts'
+  python3 - "$tmp_dir/degraded.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data["status"] == "rejected", data
+assert data["reason_code"] == "coverage-lowering-failed", data
+assert data["functions_analyzed"] == 0, data
+PY
+  if "${IN_CMD[@]}" build --path "$tmp_dir/degraded.in" --out "$tmp_dir/degraded" >"$tmp_dir/build.out" 2>&1; then
+    echo 'expected Linux native build to reject the same source' >&2
+    exit 1
+  fi
+else
+echo 'coverage ok: unlowered function is named with a code and marked reachable'
 python3 - "$tmp_dir/degraded.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
@@ -62,6 +76,7 @@ if [ "$status" -ne 70 ]; then
   exit 1
 fi
 grep -q 'IN3001' "$tmp_dir/run.err"
+fi
 
 echo 'coverage ok: a source that cannot be parsed reports no counts'
 printf 'fn main() -> Int { return 1;\n' > "$tmp_dir/broken.in"

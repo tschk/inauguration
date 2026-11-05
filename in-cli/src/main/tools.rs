@@ -1,7 +1,7 @@
 use crate::util::resolve_invocation_path;
 use crate::{InError, Result};
 use inauguration::agent_mode;
-use inauguration::coverage::{CoverageBlocker, CoverageReport, CoverageStatus};
+use inauguration::coverage::{CoverageBackend, CoverageBlocker, CoverageReport, CoverageStatus};
 use inauguration::native_emit::lower::{DEGRADATION_SKIPPED_FUNCTION, DEGRADATION_UNRESOLVED_CALL};
 use inauguration::parser_registry::ParserCli;
 use std::fs;
@@ -36,7 +36,17 @@ pub(crate) fn cmd_coverage(
     json: bool,
 ) -> Result<()> {
     let source_path = resolve_invocation_path(invocation_cwd, path);
-    let report = inauguration::coverage::coverage_for_path(&source_path, parser, entry);
+    let backend = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        CoverageBackend::LinuxX86_64
+    } else if cfg!(all(
+        any(target_os = "linux", target_os = "macos"),
+        target_arch = "aarch64"
+    )) {
+        CoverageBackend::Aarch64
+    } else {
+        CoverageBackend::Unsupported
+    };
+    let report = inauguration::coverage::coverage_for_path(&source_path, parser, entry, backend);
 
     if json {
         let raw = serde_json::to_string_pretty(&report)

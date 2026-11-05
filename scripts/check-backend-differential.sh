@@ -107,6 +107,9 @@ for category in agree native-refused native-crash disagree jit-error; do
   count=$(grep -c "^$category " "$actual" || true)
   echo "  $(printf '%-14s' "$category") $count"
 done
+agreed=$(grep -c '^agree ' "$actual" || true)
+refused=$(grep -c '^native-refused ' "$actual" || true)
+echo "backend differential: $agreed/$fixtures agree; $refused native refusals were not compared"
 
 if [[ ! -f "$BASELINE" ]]; then
   echo "error: missing baseline $BASELINE" >&2

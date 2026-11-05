@@ -1,19 +1,15 @@
 //! Static coverage: what compiles to native code, and what blocks the rest.
 //!
-//! The native lowerer traps on constructs it cannot compile instead of
-//! fabricating a value, so a caller can always ask "did everything compile?"
-//! This module answers that per source file, naming every site that did not
-//! compile and grouping the reasons, in the shape of `scriptc coverage`.
+//! Coverage follows the selected native artifact backend. Some backends emit
+//! traps for unsupported functions; others reject the entire artifact.
 //!
-//! Granularity is per function: the lowerer degrades whole functions, so that is
-//! the truthful unit. Counts are only rendered when analysis got far enough to
-//! mean something — a file that failed to parse or verify reports the failure
-//! instead of a percentage.
+//! Counts are only rendered when artifact lowering succeeds. A backend that
+//! rejects the module reports the failure instead of a partial percentage.
 
 use crate::core_ir::UnifiedModule;
 use crate::native_emit::lower::{
     DEGRADATION_SKIPPED_FUNCTION, DEGRADATION_UNRESOLVED_CALL, LoweredModule, LoweringDegradation,
-    NativeLinkage, host_supports_native_subset, lower_module_with_jobs,
+    NativeLinkage, lower_module_with_jobs,
 };
 use crate::owned_compile::resolve_jit_entry;
 use crate::parser_registry::{self, ParserCli};
@@ -21,6 +17,14 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const COVERAGE_SCHEMA_VERSION: u32 = 1;
+
+/// Native artifact backend whose coverage is being measured.
+#[derive(Debug, Clone, Copy)]
+pub enum CoverageBackend {
+    Aarch64,
+    LinuxX86_64,
+    Unsupported,
+}
 
 /// How far a file got through the pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,7 +117,12 @@ impl CoverageReport {
 ///
 /// Mirrors the owned build's pre-lowering pipeline (parse, desugar, family
 /// typecheck, profile optimize) so the numbers match what a build would produce.
-pub fn coverage_for_path(path: &Path, parser: ParserCli, entry: Option<&str>) -> CoverageReport {
+pub fn coverage_for_path(
+    path: &Path,
+    parser: ParserCli,
+    entry: Option<&str>,
+    backend: CoverageBackend,
+) -> CoverageReport {
     let resolved = parser_registry::resolve_parser_id(path, parser);
     let mut unary_methods = crate::boundary_ir::UnaryMethodBindings::new();
     let mut module = match parser_registry::parse_artifact_with_resolved(resolved, path) {
@@ -147,7 +156,7 @@ pub fn coverage_for_path(path: &Path, parser: ParserCli, entry: Option<&str>) ->
         }
     };
 
-    if !host_supports_native_subset() {
+    if matches!(backend, CoverageBackend::Unsupported) {
         let mut report = CoverageReport::rejected(
             path,
             "coverage-host-unsupported",
@@ -199,6 +208,28 @@ pub fn coverage_for_path(path: &Path, parser: ParserCli, entry: Option<&str>) ->
             "coverage-no-functions",
             format!("no functions reachable from entry `{effective_entry}`"),
         );
+    }
+
+    if matches!(backend, CoverageBackend::LinuxX86_64) {
+        if let Err(err) = crate::native_emit::elf::lower_x86_executable(&module, &effective_entry) {
+            return CoverageReport::rejected(path, "coverage-lowering-failed", err);
+        }
+        return CoverageReport {
+            schema_version: COVERAGE_SCHEMA_VERSION,
+            path: path.display().to_string(),
+            parser_id,
+            entry: effective_entry,
+            status: CoverageStatus::FullyLowered,
+            functions_in_source,
+            functions_analyzed,
+            functions_lowered: functions_analyzed,
+            functions_not_lowered: 0,
+            unresolved_calls: 0,
+            degradations: Vec::new(),
+            blockers: Vec::new(),
+            reason_code: None,
+            reason: None,
+        };
     }
 
     let lowered: LoweredModule =
@@ -279,6 +310,7 @@ fn count_functions(module: &UnifiedModule) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native_emit::lower::host_supports_native_subset;
     use std::fs;
 
     fn temp_source(name: &str, source: &str) -> std::path::PathBuf {
@@ -303,7 +335,7 @@ mod tests {
             "clean.in",
             "fn add(a: Int, b: Int) -> Int { return a + b; }\n\nfn main() -> Int { return add(1, 2); }\n",
         );
-        let report = coverage_for_path(&path, ParserCli::Auto, None);
+        let report = coverage_for_path(&path, ParserCli::Auto, None, CoverageBackend::Aarch64);
         fs::remove_file(&path).unwrap();
 
         assert_eq!(report.status, CoverageStatus::FullyLowered, "{report:?}");
@@ -322,7 +354,7 @@ mod tests {
             "numeric.m",
             "int main(void) { _Bool value = 1; return (value << 5) + 10; }\n",
         );
-        let report = coverage_for_path(&path, ParserCli::Auto, None);
+        let report = coverage_for_path(&path, ParserCli::Auto, None, CoverageBackend::Aarch64);
         fs::remove_file(&path).unwrap();
 
         assert_eq!(report.status, CoverageStatus::FullyLowered, "{report:?}");
@@ -353,7 +385,7 @@ fn main() -> Int {
 }
 "#,
         );
-        let report = coverage_for_path(&path, ParserCli::Auto, None);
+        let report = coverage_for_path(&path, ParserCli::Auto, None, CoverageBackend::Aarch64);
         fs::remove_file(&path).unwrap();
 
         assert_eq!(report.status, CoverageStatus::Degraded, "{report:?}");
@@ -365,9 +397,28 @@ fn main() -> Int {
     }
 
     #[test]
+    fn linux_coverage_rejects_artifacts_that_linux_cannot_emit() {
+        let path = temp_source(
+            "linux-nested.in",
+            "fn bad() -> Int { let v: [[Int]] = [[1]]; let i = 0; while i < 1 { return v[i][i]; } return 1; } fn main() -> Int { return bad(); }",
+        );
+        let report = coverage_for_path(&path, ParserCli::Auto, None, CoverageBackend::LinuxX86_64);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(report.status, CoverageStatus::Rejected, "{report:?}");
+        assert_eq!(report.lowered_fraction(), None);
+        assert!(
+            report
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("nested indexing")
+        );
+    }
+
+    #[test]
     fn unparseable_source_is_rejected_without_counts() {
         let path = temp_source("broken.in", "fn main() -> Int { return 1;\n");
-        let report = coverage_for_path(&path, ParserCli::Auto, None);
+        let report = coverage_for_path(&path, ParserCli::Auto, None, CoverageBackend::Aarch64);
         fs::remove_file(&path).unwrap();
 
         assert_eq!(report.status, CoverageStatus::Rejected, "{report:?}");
@@ -383,7 +434,7 @@ fn main() -> Int {
             return;
         }
         let path = temp_source("unresolved.in", "fn main() -> Int { return missing(1); }\n");
-        let report = coverage_for_path(&path, ParserCli::Auto, None);
+        let report = coverage_for_path(&path, ParserCli::Auto, None, CoverageBackend::Aarch64);
         fs::remove_file(&path).unwrap();
 
         assert_eq!(report.status, CoverageStatus::Degraded, "{report:?}");
