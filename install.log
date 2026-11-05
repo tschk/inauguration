@@ -1,0 +1,9 @@
+[0;36mBuilding `in` from local checkout (/app)…[0m
+  Installing inauguration v0.9.322 (/app/in-cli)
+    Updating crates.io index
+   Compiling inauguration v0.9.322 (/app/in-cli)
+    Finished `release` profile [optimized] target(s) in 2m 36s
+  Installing /tmp/tmp.9qxzRESlve/bin/in
+   Installed package `inauguration v0.9.322 (/app/in-cli)` (executable `in`)
+warning: be sure to add `/tmp/tmp.9qxzRESlve/bin` to your PATH to be able to run the installed binaries
+[0;32m✓ Built and installed /home/jules/.local/bin/in[0m
