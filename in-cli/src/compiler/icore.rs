@@ -608,6 +608,75 @@ fn validate_module(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDirGuard {
+        path: PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "icore_test_{}_{}",
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ));
+            let _ = fs::create_dir_all(&path);
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn test_parse_icore_file() {
+        let temp = TempDirGuard::new();
+
+        let j = r#"{
+            "icoreVersion": 2,
+            "decls": [
+                {
+                    "kind": "function",
+                    "name": "main",
+                    "params": [],
+                    "return": "Int",
+                    "body": [
+                        {
+                            "kind": "return",
+                            "expr": { "kind": "int", "value": 7 }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let file_path = temp.path.join("test.icore");
+        fs::write(&file_path, j).expect("failed to write test file");
+
+        let m = super::parse_icore_file(&file_path).expect("ok");
+        assert!(
+            m.decls.iter().any(
+                |d| matches!(d, crate::core_ir::Decl::Function { name, .. } if name == "main")
+            )
+        );
+
+        let missing_path = temp.path.join("missing.icore");
+        let err = super::parse_icore_file(&missing_path).expect_err("should fail for missing file");
+        assert!(
+            err.contains("No such file or directory")
+                || err.contains("The system cannot find the file specified"),
+            "err: {err}"
+        );
+    }
+
     #[test]
     fn explicit_float_literals_preserve_binary64_values_and_signed_zero() {
         for (value, expected) in [
