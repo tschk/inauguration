@@ -68,6 +68,30 @@ div min-h-screen bg-zinc-950 text-zinc-300 p-6 sm:p-12 text-sm leading-relaxed i
 					br
 					"$ in self-update"
 
+		section border-t border-zinc-800 pt-8
+			div text-zinc-100 font-semibold tracking-wider mb-4
+				"INSTALL v0.9.322"
+			p text-zinc-400 leading-relaxed mb-4
+				"The published release provides macOS ARM64 and Linux x86_64 binaries. Homebrew builds the tagged source with --locked."
+			pre p-4 m-0 font-mono text-xs leading-relaxed text-zinc-400 overflow-x-auto border border-zinc-800 rounded bg-zinc-900
+				"brew install tschk/tap/inauguration"
+				br
+				"in --version"
+			p text-zinc-400 leading-relaxed mt-4
+				"Linux Homebrew source installation and formula tests passed. macOS source installation remains unverified. All 119 conformance cases passed on both release platforms; this is not a self-hosting compiler release."
+			ul text-zinc-400 leading-relaxed
+				li
+					"Self-hosting stops at the unresolved ToTokens constraint in compact_rust_tokens<syn::Path>. An entry-less jit-ir-only success report does not prove native compilation."
+				li
+					"compile --json can report success: false while exiting 0. Check JSON success and the fresh requested artifact; run the executable when execution matters."
+				li
+					"The published Linux x86_64 GNU binary requires glibc 2.34 symbols. It cannot load below glibc 2.34; that floor is not a guarantee of broad Linux compatibility and does not describe Homebrew source builds."
+			div flex gap-4 mt-4
+				a href="https://github.com/tschk/inauguration/releases/tag/v0.9.322" no-underline text-blue-400
+					"Release notes and binary checksums"
+				a href="./docs/changelog.html" no-underline text-blue-400
+					"Changelog and limitations"
+
 		# Tech Specs / Core Design Section (Density from crepuscularity docs)
 		section border-t border-zinc-800 pt-8 crepus-entrance crepus-e3
 			div text-zinc-100 font-semibold tracking-wider mb-6
