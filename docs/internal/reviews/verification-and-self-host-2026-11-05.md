@@ -1,5 +1,44 @@
 # Verification and self-host observations
 
+## Ecosystem imports do not execute through the tested backends
+
+The ecosystem sample installs packages and reports their imports as resolved,
+but it cannot call those packages through the Linux x86-64 JIT or standalone
+native executable. Package and agent checks establish that metadata and
+declarations exist. They do not establish that an imported function runs.
+This distinction matters for the project's claim of using libraries across
+ecosystems. Language parser support is not evidence of executable imports.
+
+On 2026-11-05, after installing all four sample dependencies, `in execute
+--verbose` rejected `hono-greet` as an unresolved function. The sample calls
+hyphenated names, but adapter metadata declares underscore names such as
+`hono_greet`. Replacing all four calls with the declared names got past that
+check, but JIT lowering then rejected all four as unresolved runtime imports.
+A native build with an Int entry calling `hono_greet` also rejected that import.
+The sample's original String entry is rejected earlier by the native entry
+contract, so it cannot establish native package behavior on its own.
+
+Installed adapter metadata produces bodyless extern declarations. The separate
+`package_runtime` module can collect adapter commands and invoke an allowed
+program, but no production caller connects it to JIT or native execution.
+The adapter protocol currently accepts no arguments. This is an execution gap,
+not evidence that arbitrary ecosystem libraries work as native functions. The
+orchestration integration test now requires a local npm function to accept two
+different arguments and return the corresponding values. It fails today at
+the first call because the synthesized declaration accepts zero arguments.
+
+Two responses are available, and the project owner must choose between them:
+
+1. Implement the execution path. Symbol resolution and adapter invocation in
+   both backends is a large, cross-backend change. A typed argument and result
+   protocol is a separate medium-to-large change: the adapter currently models
+   neither parameter types nor argument passing. End-to-end tests cover the
+   contract, but the native process boundary and protocol still need design.
+   These are rough scope estimates, not time estimates.
+2. Correct the public claim to distinguish metadata and parser support from
+   executable ecosystem imports until an execution path exists. This is a
+   documentation change; it does not add runtime capability.
+
 ## Verification results need observable evidence
 
 Two verification tools reported on a different result from the one their users
@@ -24,31 +63,6 @@ agreement, 72 unobservable results, and 16 native refusals. The check failed as
 intended. A typed native result channel is still needed to compare full return
 values. After adding it, rerun the refused fixtures because each first refusal
 can conceal another limitation.
-
-## Ecosystem imports do not execute through the tested backends
-
-The ecosystem sample installs packages and reports their imports as resolved,
-but it cannot call those packages through the Linux x86-64 JIT or standalone
-native executable. The package and agent checks establish that metadata and
-declarations exist. They do not establish that an imported function runs.
-
-On 2026-11-05, after installing all four sample dependencies, `in execute
---verbose` rejected `hono-greet` as an unresolved function. The sample calls
-hyphenated names, but the adapter metadata declares underscore names such as
-`hono_greet`. Replacing all four calls with the declared names got past that
-check, but JIT lowering then rejected all four as unresolved runtime imports.
-A native build with an Int entry calling `hono_greet` also rejected that import.
-The sample's original String entry is rejected earlier by the native entry
-contract, so it cannot establish native package behavior on its own.
-
-Installed adapter metadata produces bodyless extern declarations. The separate
-`package_runtime` module can collect adapter commands and invoke an allowed
-program, but no production caller connects that mechanism to JIT or native
-execution. The adapter protocol itself currently accepts no arguments. This is
-an execution gap, not evidence that arbitrary ecosystem libraries work as
-native functions. The integration script reports the execution failure and its
-cause, but still skips that assertion; a passing script is not an end-to-end
-ecosystem execution test.
 
 ## Self-host compile memory
 
