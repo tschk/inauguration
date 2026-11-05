@@ -53,7 +53,7 @@ run Space or independently inspect the two reported pinned artifacts.
 The SCI loader resolves every import before entry, even when a call is only on
 an allocation-failure path. The compiler must make its implicit allocator and
 failure requirements explicit, while the target must provide any required
-allocation service. The current generated calls and failure behavior are
+allocation service. The previous generated calls and failure behavior are
 documented in `docs/native-backend.md`. A fixed-size array can avoid allocation
 only if its lifetime and aliases permit stack storage; no such proof was made
 for this component.
@@ -72,8 +72,10 @@ to their adapter commands. Fixing either path does not fix the other.
 
 The compiler should require an explicit target runtime declaration when an SCI
 contains generated heap allocation calls. The declaration supplies the target's
-allocator and allocation-failure handler symbol names. It must not silently
-default to `malloc`, `abort`, a trap instruction, or a hosted runtime. If a
+allocator and runtime-failure handler symbol names and contract version.
+Generated service names must be explicitly namespaced and versioned, never
+`malloc` or `abort`; their exact spelling remains to be agreed. It must not
+silently default to libc symbols, a trap instruction, or a hosted runtime. If a
 required declaration is absent or invalid, compilation should fail before
 writing an SCI and name each missing service. An image with no generated heap
 allocation should not require either service.
@@ -85,9 +87,10 @@ For x86-64, the proposed service ABI uses the existing SysV integer calling
 convention. The allocator receives the required byte count in `RDI` and returns
 an eight-byte-aligned writable pointer or null in `RAX`. Storage must remain
 valid for every use of the array, including after the creating function returns.
-The allocation-failure handler takes no arguments and must not return. Its
-behavior must be appropriate to the target's isolation model. This proposal
-does not yet define reclamation, configuration syntax or an error payload.
+The failure handler takes no arguments and must not return. Its behavior must
+be appropriate to the target's isolation model. Allocations count against an
+instance's bounded quota and are reclaimed at component teardown. No per-array
+free is assumed. Configuration syntax and an error payload remain unspecified.
 
 The emitter should use the declared target symbols in SCI imports, including in
 every retained export, and report their requirements. It should separately
@@ -96,14 +99,23 @@ Checking the declaration at compile time does not prove that a provider will be
 installed, reachable or authorized at load time. The loader must still check
 the SCI import table against the deployed providers and their capabilities.
 SCI v2 records names and call sites, not service signatures or provenance, and
-its `call rel32` binding also requires a reachable provider address.
+its `call rel32` binding also requires a reachable provider address. A
+namespaced, versioned name does not itself prove provider signature,
+provenance or authority.
 
 Space would declare the symbols and ABI it supports, provide an allocator and
 failure handler for the component's actual execution domain, and arrange for
-the loader to resolve and authorize them. Its existing heap and fault handlers
-must be assessed against that contract; their names or compatibility cannot be
-assumed. Space also needs a test that loads and runs the emitted image and a
-failure-path test that confirms allocation failure does not halt the nanokernel.
+the loader to resolve and authorize them against a versioned binding. Its
+provider must use bounded per-instance memory authority, not an unrestricted
+kernel allocator. Its existing heap and fault handlers must be assessed against
+that contract; their names or compatibility cannot be assumed. Space also needs
+a test that loads and runs the emitted image and a failure-path test that
+confirms allocation failure does not halt the nanokernel.
+The no-argument failure handler reports a generic component runtime failure;
+it cannot distinguish allocation failure from an invalid array-copy source.
+Failure must terminate only the affected instance, revoke its authority and
+reclaim resources as supported. A path without that containment must refuse
+execution. Committed external effects are not assumed to roll back.
 
 Proven non-escaping stack allocation can remove the heap requirement for
 eligible arrays, but must preserve mutation, aliasing and lifetime semantics.

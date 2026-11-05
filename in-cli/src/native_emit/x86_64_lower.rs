@@ -165,6 +165,7 @@ enum RuntimeAbi {
     Jit,
     Linux,
     Freestanding,
+    Sci,
 }
 
 struct LowerCtx<'a> {
@@ -454,6 +455,23 @@ pub fn lower_module_with_bases_layout(
         data_base,
         layout,
         RuntimeAbi::Freestanding,
+        false,
+    )
+}
+
+pub(crate) fn lower_sci_module(
+    module: &UnifiedModule,
+    entry: &str,
+    code_base: u64,
+    data_base: u64,
+) -> Result<X86_64CompileResult, String> {
+    lower_module_impl(
+        module,
+        entry,
+        code_base,
+        data_base,
+        X86StringLayout::Cstring,
+        RuntimeAbi::Sci,
         false,
     )
 }
@@ -2429,7 +2447,10 @@ fn store_local_error_type(
 }
 
 fn error_slot_offset(ctx: &LowerCtx<'_>, name: &str) -> Result<i32, String> {
-    if ctx.runtime == RuntimeAbi::Freestanding || x86_64::is_32bit() || ctx.is_interrupt {
+    if matches!(ctx.runtime, RuntimeAbi::Freestanding | RuntimeAbi::Sci)
+        || x86_64::is_32bit()
+        || ctx.is_interrupt
+    {
         return Err(format!(
             "x86_64-lower: `{}` uses throw/try/propagate without a runtime-provided writable error slot",
             ctx.fn_name
@@ -3179,7 +3200,7 @@ fn lower_builtin_call(
     if target_name == crate::inrt::INRT_STR_CONCAT {
         if x86_64::is_32bit()
             || ctx.string_layout != X86StringLayout::Instring
-            || ctx.runtime == RuntimeAbi::Freestanding
+            || matches!(ctx.runtime, RuntimeAbi::Freestanding | RuntimeAbi::Sci)
             || ctx.is_interrupt
         {
             return Err(
@@ -5439,7 +5460,7 @@ fn lower_array_copy(
         emitter.emit_insns(&x86_64::jcc_near(0x03, 0));
         emitter.patch_u32(null + 2, emitter.len() - null - 6);
         emitter.patch_u32(unaligned + 2, emitter.len() - unaligned - 6);
-        if ctx.runtime != RuntimeAbi::Freestanding
+        if !matches!(ctx.runtime, RuntimeAbi::Freestanding | RuntimeAbi::Sci)
             || !matches!(
                 ctx.ret_typ.canonical(),
                 Typ::String | Typ::Array(_) | Typ::Vector(_) | Typ::Named(_)
@@ -5512,6 +5533,12 @@ fn lower_array_allocation(
 ) -> Result<(), String> {
     if x86_64::is_32bit() || ctx.is_interrupt {
         return Err("x86_64-lower: escaping arrays require the 64-bit hosted ABI".into());
+    }
+    if ctx.runtime == RuntimeAbi::Sci {
+        return Err(format!(
+            "SCI array allocation in `{}` requires a target allocator and failure handler declaration; target runtime declarations are not yet supported",
+            ctx.fn_name
+        ));
     }
     if ctx.runtime == RuntimeAbi::Jit {
         emitter.emit_insns(&x86_64::mov_rr(RDI, 15));

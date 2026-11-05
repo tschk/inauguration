@@ -48,23 +48,18 @@ The target registry also carries checked-in In target equivalents for the Rust t
 
 The object backends include `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`, and `wasm32-unknown-unknown`. x86_64 ELF objects contain real function bodies, writable `.data`, external call relocations, and section-relative references to globals, strings and function addresses. The freestanding `i386-unknown-none`, `i686-unknown-none` and `x86_64-unknown-none` object paths preserve these sections and export every function. Hosted x86_64 objects export the requested entry while keeping sibling bodies local. The linker chooses final section addresses independently of `--base`; Harden preserves library export and external names. `scripts/check-freestanding-object-data.py` verifies i386 and x86_64 linking and execution in QEMU across all profiles, including separate code/data placement. `aarch64-unknown-linux-gnu` and `aarch64-unknown-none` emit ELF64 AArch64 objects containing real function bodies, including parameters, internal calls, and every exported function at its actual code offset. External calls and writable globals are rejected until ELF relocations support them. The emitted AArch64 bodies are tested on the host; Linux runtime execution remains unverified. ARMv7 objects and WebAssembly modules still cover const-evaluable scalar entry functions.
 
-### Current x86-64 SCI array imports
+### x86-64 SCI array runtime
 
-SCI emission retains all defined functions and records external calls as
-imports, including calls in functions that the entry does not reach. For heap
-array allocation, current x86-64 lowering emits `malloc` with the byte count
-in the first argument register. The provider must return writable storage
-aligned for eight-byte words, or null on failure. The generated array stores
-its length and capacity in the first two words and retains its storage beyond
-the allocating function's return. The current lowering does not release it.
+SCI emission retains all defined functions, including functions that the entry
+does not reach. It rejects generated heap array allocation because target
+allocator and failure-handler declarations are not yet supported. Explicit
+source-authored external calls remain SCI imports.
 
-On a null allocation, generated code calls `abort` and executes `UD2` if that
-call returns. An invalid source for a freestanding aggregate array copy can also
-call `abort`; nonempty array copies can import `memcpy`. These symbols are not
-supplied by the SCI emitter. An SCI loader must resolve every recorded import
-before entry, including failure paths. The compiler currently does not require
-a target to declare these runtime services before emission. See the proposed
-target contract in `internal/reviews/verification-and-self-host-2026-11-05.md`.
+Older compiler versions emitted `malloc` and `abort` for generated allocation
+and could also emit `memcpy` for array copies. The proposed replacement uses
+explicitly namespaced, versioned services rather than libc names. Symbol names
+alone do not prove a provider's signature, provenance, or authority. See the
+[proposed target contract](internal/reviews/verification-and-self-host-2026-11-05.md).
 
 `in compile --target native --target-triple aarch64-apple-darwin --linkage static-lib --entry answer --out target/libanswer.a` emits an `ar` archive containing a Mach-O ARM64 object member with an exported `_answer` symbol. The archive contains real Core IR function bodies, a linker index, and external call relocations. Integer parameters, multiple exports, and libc calls are verified by linking and running C callers. Writable-global references and degraded exports are rejected until the object writer can represent them.
 

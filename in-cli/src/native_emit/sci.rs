@@ -21,9 +21,7 @@
 //! value address = first byte), matching what freestanding `.in` code walks.
 
 use crate::core_ir::{Decl, UnifiedModule};
-use crate::native_emit::x86_64_lower::{
-    X86_64CompileResult, X86StringLayout, lower_module_with_bases_layout,
-};
+use crate::native_emit::x86_64_lower::{X86_64CompileResult, lower_sci_module};
 use std::collections::HashMap;
 
 pub const SCI_MAGIC: u64 = 0x5343490000000002;
@@ -39,23 +37,11 @@ pub const SCI_IMPORT_ENTRY_SIZE: usize = 16;
 pub fn emit_sci_binary(module: &UnifiedModule, entry: &str, base: u64) -> Result<Vec<u8>, String> {
     let code_base = base + SCI_MANIFEST_SIZE as u64;
     // First pass: determine code size so the data section can be placed after it.
-    let temp = lower_module_with_bases_layout(
-        module,
-        entry,
-        code_base,
-        code_base,
-        X86StringLayout::Cstring,
-    )?;
+    let temp = lower_sci_module(module, entry, code_base, code_base)?;
     let code_size = temp.code.len();
     let data_base = align_up(code_base + code_size as u64, 8);
     // Second pass: patch globals using the real data section base.
-    let result = lower_module_with_bases_layout(
-        module,
-        entry,
-        code_base,
-        data_base,
-        X86StringLayout::Cstring,
-    )?;
+    let result = lower_sci_module(module, entry, code_base, data_base)?;
     let pad = (data_base - (code_base + result.code.len() as u64)) as usize;
     build_image(&result, base, required_capabilities_mask(module), pad)
 }
@@ -289,5 +275,41 @@ mod tests {
         assert_eq!(u64_at(&image, data + 8), 42);
         assert_eq!(cstr_at(&image, pointer - base), "λ");
         assert_eq!(&image[data + 16..data + 19], "λ\0".as_bytes());
+    }
+
+    #[test]
+    fn sci_rejects_undeclared_generated_array_runtime() {
+        let module = crate::in_lang_parse::parse_in_source(
+            "fn make()->[Int]{return [20,22];}\nfn main()->Int{return 42;}",
+        )
+        .unwrap();
+        let error = emit_sci_binary(&module, "main", 0x40000000).unwrap_err();
+        assert!(error.contains("allocator"), "{error}");
+        assert!(error.contains("failure handler"), "{error}");
+    }
+
+    #[test]
+    fn sci_preserves_explicit_libc_named_imports() {
+        for name in ["malloc", "abort"] {
+            let mut module = binding_module();
+            if let Decl::Function { body, .. } = &mut module.decls[0] {
+                if let Stmt::Return(Some(Expr::Call { callee, .. })) = &mut body[1] {
+                    *callee = Box::new(Expr::Ident(name.into()));
+                } else {
+                    panic!("expected call");
+                }
+            } else {
+                panic!("expected function");
+            }
+            if let Decl::Function { name: external, .. } = &mut module.decls[1] {
+                *external = name.into();
+            } else {
+                panic!("expected declaration");
+            }
+            let image = emit_sci_binary(&module, "host", 0x40000000).unwrap();
+            let imports = u64_at(&image, 56) as usize;
+            assert_eq!(u64_at(&image, 48), 1);
+            assert_eq!(cstr_at(&image, u64_at(&image, imports)), name);
+        }
     }
 }

@@ -8612,6 +8612,41 @@ fn owned_declared_word_io_names_preserve_function_overrides() {
 }
 
 #[test]
+fn sci_generated_services_fail_before_writing_output() {
+    let source = temp_path("sci-array.in");
+    fs::write(&source, "fn main()->[Int]{return [1,2];}").unwrap();
+    for existing in [false, true] {
+        let artifact = temp_path("array.sci");
+        if existing {
+            fs::write(&artifact, b"sentinel").unwrap();
+        }
+        let mut request = default_request(
+            source.clone(),
+            CompileTarget::Native,
+            Some("main"),
+            Some(artifact.clone()),
+        );
+        request.target_triple = Some("x86_64-unknown-none".into());
+        request.emit = Some(OwnedEmit::Sci { base: 0x100000 });
+        let report = compile_owned(&request);
+        assert!(!report.success, "{report:?}");
+        assert_eq!(report.reason_code.as_deref(), Some("sci-lowering-failed"));
+        let error = report.error.as_deref().unwrap();
+        assert!(
+            error.contains("allocator") && error.contains("failure handler"),
+            "{error}"
+        );
+        if existing {
+            assert_eq!(fs::read(&artifact).unwrap(), b"sentinel");
+            fs::remove_file(artifact).unwrap();
+        } else {
+            assert!(!artifact.exists());
+        }
+    }
+    fs::remove_file(source).unwrap();
+}
+
+#[test]
 fn sci_components_preserve_canonical_metadata_and_clear_stale_sidecars() {
     let original = r#"component Services {
  target "x86_64-unknown-none"
