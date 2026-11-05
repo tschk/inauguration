@@ -1064,12 +1064,14 @@ impl Pass<'_> {
                     root: name.clone(),
                     path: vec![],
                 });
-                for path in self.active_projections.clone() {
+                let paths = std::mem::take(&mut self.active_projections);
+                for path in &paths {
                     self.defer_place(SourcePlace {
                         root: name.clone(),
-                        path,
+                        path: path.clone(),
                     });
                 }
+                self.active_projections = paths;
                 if self.unresolved_width
                     && matches!(env.get(name),Some(Typ::Vector(item)) if matches!(item.as_ref(),Typ::Int | Typ::Generic(_)))
                 {
