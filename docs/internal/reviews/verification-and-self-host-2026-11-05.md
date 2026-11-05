@@ -135,8 +135,8 @@ could reasonably expect.
   the low eight bits of an Int. For example, Int 263 and Int 7 have the same
   low byte. Matching output and status cannot prove those values agree.
 
-The differential uses an opt-in descriptor 3 channel to compare full Int and
-Bool results from the JIT and the executed Linux x86-64 ELF. It compares stdout
+The differential uses an opt-in descriptor 3 channel to compare full Int, Bool
+and Void results from the JIT and the executed Linux x86-64 ELF. It compares stdout
 and process termination separately. Missing or malformed records and native
 refusals make the check incomplete and prevent a baseline update. The oracle
 controls include equal exit statuses with differing full-width integers.
@@ -144,14 +144,13 @@ controls include equal exit statuses with differing full-width integers.
 An earlier run found one observable agreement, 72 unobservable results, and 16
 native refusals. With the channel, a run of the same 89 fixtures found 72
 agreements and 17 native refusals, with no disagreements or invalid records.
-Fourteen refusals are String or Float entries unsupported by the channel; two
-report unresolved `print` and `str_concat` imports. The additional refusal is
-`conformance/classes/class-methods.in`: its Void entry builds without the
-channel but the channel accepts only Int and Bool. The earlier check classified
-its result as unobservable. This is an instrumentation limitation, not a
-regression in ordinary native emission. These are first failures, so later
-limitations may still be hidden. The check remains failing; the baseline has not
-been updated.
+The additional refusal was `conformance/classes/class-methods.in`: its Void
+entry built without the channel but was previously unobservable. Adding a
+distinct Void result makes that case a real comparison. A subsequent run found
+73 agreements and 16 refusals, with no disagreements or invalid records.
+Fourteen first refusals are String or Float entries unsupported by the channel;
+two report unresolved `print` and `str_concat` imports. Later limitations may
+still be hidden. The check remains failing; the baseline has not been updated.
 
 ## Self-host compile memory
 

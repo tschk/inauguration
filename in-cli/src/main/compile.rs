@@ -572,6 +572,7 @@ pub(crate) fn compile_and_run_jit_report(
     module_id: &str,
     parser: ParserCli,
     debug: bool,
+    result_channel: bool,
 ) -> std::result::Result<
     (
         inauguration::owned_compile::OwnedCompileReport,
@@ -580,7 +581,7 @@ pub(crate) fn compile_and_run_jit_report(
     JitCompileFailure,
 > {
     use inauguration::native_emit::NativeLinkage;
-    use inauguration::owned_compile::{CompileTarget, EvalValue, OwnedCompileRequest};
+    use inauguration::owned_compile::{CompileTarget, EvalValue, OwnedCompileRequest, OwnedEmit};
     let request = OwnedCompileRequest {
         path: source_path.to_path_buf(),
         module_id: module_id.to_string(),
@@ -593,7 +594,7 @@ pub(crate) fn compile_and_run_jit_report(
         jobs: 1,
         debug,
         profile: inauguration::emit_profile::EmitProfile::Default,
-        emit: None,
+        emit: result_channel.then_some(OwnedEmit::ResultChannel),
         base: None,
     };
     let report = inauguration::owned_compile::compile_owned(&request);
@@ -615,7 +616,7 @@ pub(crate) fn compile_and_run_jit_report(
         Some(EvalValue::Bool(value)) => JitExecution::Bool(value),
         Some(EvalValue::Float(value)) => JitExecution::Float(FloatValFmt(value)),
         Some(EvalValue::Str(value)) => JitExecution::String(value),
-        None => JitExecution::Int(0),
+        Some(EvalValue::Void) | None => JitExecution::Int(0),
     };
     Ok((report, execution))
 }
@@ -648,9 +649,14 @@ pub(crate) fn cmd_execute(
         ));
     }
 
-    let (report, result) =
-        compile_and_run_jit_report(&source_path, module_id, ParserCli::Auto, debug)
-            .map_err(|failure| failure.error)?;
+    let (report, result) = compile_and_run_jit_report(
+        &source_path,
+        module_id,
+        ParserCli::Auto,
+        debug,
+        result_channel,
+    )
+    .map_err(|failure| failure.error)?;
 
     if !report.execution_started {
         return Err(InError::Message(
@@ -664,9 +670,10 @@ pub(crate) fn cmd_execute(
         let (tag, value) = match report.eval_result.as_ref() {
             Some(EvalValue::Int(value)) => (1u8, *value),
             Some(EvalValue::Bool(value)) => (2u8, i64::from(*value)),
+            Some(EvalValue::Void) => (3u8, 0),
             _ => {
                 return Err(InError::Message(
-                    "result channel requires an Int or Bool result".into(),
+                    "result channel requires an Int, Bool or Void result".into(),
                 ));
             }
         };

@@ -124,7 +124,7 @@ pub(crate) fn cmd_eval(
     for plan in eval_plans(parser_id, code) {
         std::fs::write(&path, &plan.wrapped)
             .map_err(|e| InError::Message(format!("write eval temp: {e}")))?;
-        match compile_and_run_jit_report(&source_path, &module_id, ParserCli::Auto, debug) {
+        match compile_and_run_jit_report(&source_path, &module_id, ParserCli::Auto, debug, false) {
             Ok((report, run)) => {
                 if !report.execution_started {
                     last_err = Some(InError::Message(
@@ -203,11 +203,14 @@ fn cmd_eval_daemon(
                 .map_err(|error| InError::Message(format!("flush eval output: {error}")))?;
         }
         if response.success {
-            let value = response.eval_result.or_else(|| {
-                response
-                    .result
-                    .map(inauguration::owned_compile::EvalValue::Int)
-            });
+            let value = response
+                .eval_result
+                .or_else(|| {
+                    response
+                        .result
+                        .map(inauguration::owned_compile::EvalValue::Int)
+                })
+                .filter(|value| !matches!(value, inauguration::owned_compile::EvalValue::Void));
             match response.execution_started {
                 Some(true) => {}
                 Some(false) => {
@@ -232,6 +235,7 @@ fn cmd_eval_daemon(
                     inauguration::owned_compile::EvalValue::Bool(value) => value.to_string(),
                     inauguration::owned_compile::EvalValue::Float(value) => value.to_string(),
                     inauguration::owned_compile::EvalValue::Str(value) => value,
+                    inauguration::owned_compile::EvalValue::Void => unreachable!(),
                 };
                 if verbose {
                     eprintln!("> {}", text);

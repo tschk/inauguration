@@ -7,6 +7,54 @@ use std::process::Command;
 
 #[test]
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn result_channel_captures_void() {
+    let root = std::env::temp_dir().join(format!("in-result-types-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("main.in");
+    let native = root.join("native");
+    let frame = root.join("result");
+    let in_bin = env!("CARGO_BIN_EXE_in");
+    for (program, tag, bits) in [
+        ("fn main()->void{return;}", 3u8, 0u64),
+        ("fn main()->void{let value = 7;return;}", 3u8, 0u64),
+    ] {
+        std::fs::write(&source, program).unwrap();
+        let build = Command::new(in_bin)
+            .args(["build", "--path"])
+            .arg(&source)
+            .arg("--out")
+            .arg(&native)
+            .arg("--result-channel")
+            .output()
+            .unwrap();
+        assert!(build.status.success(), "{program}: {build:?}");
+        let mut expected = b"INR1".to_vec();
+        expected.push(tag);
+        expected.extend_from_slice(&bits.to_le_bytes());
+        for args in [
+            vec![
+                in_bin,
+                "execute",
+                source.to_str().unwrap(),
+                "--result-channel",
+            ],
+            vec![native.to_str().unwrap()],
+        ] {
+            let output = Command::new("sh")
+                .args(["-c", "exec \"$@\" 3>\"$FRAME\"", "sh"])
+                .args(args)
+                .env("FRAME", &frame)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{program}: {output:?}");
+            assert_eq!(std::fs::read(&frame).unwrap(), expected, "{program}");
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn result_channel_captures_executed_native_and_jit_values() {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

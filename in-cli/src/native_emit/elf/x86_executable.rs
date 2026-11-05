@@ -29,17 +29,17 @@ fn lower_executable(
             } if name == entry && params.is_empty() => match ret.canonical() {
                 Typ::Int => Some(1u8),
                 Typ::Bool => Some(2u8),
-                Typ::Void if !result_channel => Some(0u8),
+                Typ::Void => Some(if result_channel { 3u8 } else { 0u8 }),
                 _ => None,
             },
             _ => None,
         })
         .ok_or(if result_channel {
-            "native ELF result channel requires a no-argument Int or Bool entry"
+            "native ELF result channel requires a no-argument Int, Bool or Void entry"
         } else {
             "native ELF requires a no-argument Int, Bool or Void entry"
         })?;
-    let returns_status = result_tag != 0;
+    let returns_status = matches!(result_tag, 1 | 2);
     struct WidthGuard(bool);
     impl Drop for WidthGuard {
         fn drop(&mut self) {
@@ -102,6 +102,9 @@ fn lower_executable(
             .extend_from_slice(&[0x49, 0x83, 0x3f, 0, 0x0f, 0x85]);
         let error_jump = lowered.code.len();
         lowered.code.extend_from_slice(&0i32.to_le_bytes());
+        if result_tag == 3 {
+            lowered.code.extend_from_slice(&[0x31, 0xc0]); // xor eax,eax
+        }
         lowered.code.extend_from_slice(&[
             0x48, 0x83, 0xec, 24, // sub rsp,24
             0x48, 0x89, 0x44, 0x24, 16, // mov [rsp+16],rax

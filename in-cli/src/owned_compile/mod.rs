@@ -65,6 +65,7 @@ pub enum EvalValue {
     Bool(bool),
     Float(f64),
     Str(String),
+    Void,
 }
 
 impl EvalValue {
@@ -73,7 +74,7 @@ impl EvalValue {
         match self {
             EvalValue::Int(value) => Some(*value),
             EvalValue::Bool(value) => Some(i64::from(*value)),
-            EvalValue::Float(_) | EvalValue::Str(_) => None,
+            EvalValue::Float(_) | EvalValue::Str(_) | EvalValue::Void => None,
         }
     }
 }

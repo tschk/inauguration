@@ -18,6 +18,7 @@ enum EntryResultKind {
     Bool,
     Float,
     String,
+    Void,
     None,
 }
 
@@ -279,6 +280,7 @@ pub(super) fn compile_jit_with_execution_state(
                     crate::core_ir::Typ::Bool => EntryResultKind::Bool,
                     crate::core_ir::Typ::Float => EntryResultKind::Float,
                     crate::core_ir::Typ::String => EntryResultKind::String,
+                    crate::core_ir::Typ::Void => EntryResultKind::Void,
                     _ => EntryResultKind::None,
                 })
             }
@@ -417,9 +419,14 @@ pub(super) fn compile_jit_with_execution_state(
                 // The decoded string is the value; the pointer is not an exit status.
                 (Some(0), Some(EvalValue::Str(string)))
             }
+            EntryResultKind::Void
+                if matches!(request.emit, Some(super::OwnedEmit::ResultChannel)) =>
+            {
+                (Some(0), Some(EvalValue::Void))
+            }
+            EntryResultKind::Void => (Some(0), None),
             EntryResultKind::None => {
-                // The entry returns something an exit status cannot carry (Void,
-                // an aggregate). Run it for its effects, report no result.
+                // Unsupported result shapes remain distinct from Void.
                 (Some(0), None)
             }
         }

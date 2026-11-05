@@ -90,8 +90,9 @@ def read_frame(path, backend):
     data = pathlib.Path(path).read_bytes()
     if not data:
         return None, backend + '-frame-missing'
-    if (len(data) != 13 or data[:4] != b'INR1' or data[4] not in (1, 2)
-            or (data[4] == 2 and int.from_bytes(data[5:], 'little', signed=True) not in (0, 1))):
+    if (len(data) != 13 or data[:4] != b'INR1' or data[4] not in (1, 2, 3)
+            or (data[4] == 2 and int.from_bytes(data[5:], 'little', signed=True) not in (0, 1))
+            or (data[4] == 3 and data[5:] != bytes(8))):
         return None, backend + '-frame-malformed'
     return data, None
 
@@ -100,8 +101,8 @@ if not error:
     native, error = read_frame(sys.argv[2], 'native')
 if error:
     print(error)
-elif (jit != native or int.from_bytes(native[5:], 'little', signed=True) & 255 != int(sys.argv[3])
-      or int(sys.argv[6]) != (1 if int.from_bytes(jit[5:], 'little', signed=True) & 255 else 0)
+elif (jit != native or (int.from_bytes(native[5:], 'little', signed=True) & 255 if native[4] in (1, 2) else 0) != int(sys.argv[3])
+      or int(sys.argv[6]) != (1 if jit[4] in (1, 2) and int.from_bytes(jit[5:], 'little', signed=True) & 255 else 0)
       or pathlib.Path(sys.argv[4]).read_bytes() != pathlib.Path(sys.argv[5]).read_bytes()):
     print('disagree')
 else:

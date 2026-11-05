@@ -65,14 +65,15 @@ alone do not prove a provider's signature, provenance, or authority. See the
 
 On Linux x86-64, `in execute --result-channel` writes the JIT entry result to
 file descriptor 3. `in build --result-channel --out <path>` emits an executable
-that writes its entry result to descriptor 3 after it runs. Both accept Int and
-Bool results; the instrumented native executable refuses other return types.
+that writes its entry result to descriptor 3 after it runs. Both accept Int,
+Bool and Void results; the instrumented native executable refuses other types.
 Without the flag, execution and emitted executables do not use the channel.
 
-Each record contains `INR1`, a one-byte type tag (1 for Int, 2 for Bool), and
-an eight-byte little-endian value. Bool values are 0 or 1. A failed execution or
-write must not be treated as a result. The differential checker also compares
-stdout and checks process termination; it rejects missing or malformed records.
+Each record contains `INR1`, a one-byte type tag (1 for Int, 2 for Bool, 3 for
+Void), and an eight-byte little-endian value. Bool values are 0 or 1; Void has
+a zero payload. A failed execution or write must not be treated as a result.
+The differential checker also compares stdout and checks process termination;
+it rejects missing or malformed records.
 
 `in compile --target native --target-triple aarch64-apple-darwin --linkage static-lib --entry answer --out target/libanswer.a` emits an `ar` archive containing a Mach-O ARM64 object member with an exported `_answer` symbol. The archive contains real Core IR function bodies, a linker index, and external call relocations. Integer parameters, multiple exports, and libc calls are verified by linking and running C callers. Writable-global references and degraded exports are rejected until the object writer can represent them.
 
