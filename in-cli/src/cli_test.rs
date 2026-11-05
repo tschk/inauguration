@@ -182,6 +182,11 @@ fn external_parity_test_step_names() -> [&'static str; 1] {
 }
 
 fn in_lang_test_groups(root: &Path) -> Vec<TestGroup> {
+    // Keep self-hosting blocking like CI. Entry-less compile can succeed with IR only.
+    let mut self_host = in_build_command(root, "in-cli/src/main.rs", "auto");
+    self_host
+        .args
+        .extend(["--module-id", "InCli", "--verbose"].map(String::from));
     vec![
         TestGroup {
             name: ".in lang compile (hello.in)",
@@ -205,7 +210,7 @@ fn in_lang_test_groups(root: &Path) -> Vec<TestGroup> {
         },
         TestGroup {
             name: "self-host compile",
-            commands: vec![in_compile_jit_command(root, "in-cli/src/main.rs")],
+            commands: vec![self_host],
         },
         TestGroup {
             name: "owned polyglot compile",
