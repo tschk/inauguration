@@ -294,7 +294,7 @@ mod tests {
             let mut module = binding_module();
             if let Decl::Function { body, .. } = &mut module.decls[0] {
                 if let Stmt::Return(Some(Expr::Call { callee, .. })) = &mut body[1] {
-                    *callee = Box::new(Expr::Ident(name.into()));
+                    **callee = Expr::Ident(name.into());
                 } else {
                     panic!("expected call");
                 }
