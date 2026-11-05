@@ -1,0 +1,9 @@
+build crystal
+build fsharp
+build hare
+build lua
+build nim
+build odin
+build scala
+build vb
+jit vb

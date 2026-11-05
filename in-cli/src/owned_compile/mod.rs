@@ -841,6 +841,10 @@ pub fn compile_owned(request: &OwnedCompileRequest) -> OwnedCompileReport {
         return finalize_report(report, started, &cwd, &frontend_hash);
     }
 
+    let request = &OwnedCompileRequest {
+        entry: effective_entry,
+        ..request.clone()
+    };
     match request.target {
         CompileTarget::Native => match compile_native(&module, &request.module_id, request) {
             Ok(native_result) => {
