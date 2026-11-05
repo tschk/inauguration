@@ -1,6 +1,6 @@
 use crate::util::{run_cmd, run_cmd_silent};
 use crate::{InError, Result};
-use inauguration::owned_compile::{CompileTarget, OwnedCompileRequest, compile_owned};
+use inauguration::owned_compile::{CompileTarget, OwnedCompileRequest, OwnedEmit, compile_owned};
 use inauguration::parser_registry::ParserCli;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,13 @@ pub(crate) fn cmd_build(
     swiftpm: bool,
     allow_external_toolchain: bool,
     parser: ParserCli,
+    result_channel: bool,
 ) -> Result<()> {
+    if result_channel && (out.is_none() || dual_harden_out.is_some() || swiftpm) {
+        return Err(InError::Message(
+            "--result-channel requires one native output".into(),
+        ));
+    }
     let start = Instant::now();
     let resolved = if Path::new(path).is_absolute() {
         PathBuf::from(path)
@@ -39,20 +45,39 @@ pub(crate) fn cmd_build(
         ));
     }
     let result = if let Some(harden_out) = dual_harden_out {
-        run_pipeline_for_path(&resolved, out, release, profile, module_id, verbose, parser)
-            .and_then(|_| {
-                run_pipeline_for_path(
-                    &resolved,
-                    Some(harden_out),
-                    release,
-                    inauguration::emit_profile::EmitProfile::Harden,
-                    module_id,
-                    verbose,
-                    parser,
-                )
-            })
+        run_pipeline_for_path(
+            &resolved,
+            out,
+            release,
+            profile,
+            module_id,
+            verbose,
+            parser,
+            result_channel,
+        )
+        .and_then(|_| {
+            run_pipeline_for_path(
+                &resolved,
+                Some(harden_out),
+                release,
+                inauguration::emit_profile::EmitProfile::Harden,
+                module_id,
+                verbose,
+                parser,
+                result_channel,
+            )
+        })
     } else {
-        run_pipeline_for_path(&resolved, out, release, profile, module_id, verbose, parser)
+        run_pipeline_for_path(
+            &resolved,
+            out,
+            release,
+            profile,
+            module_id,
+            verbose,
+            parser,
+            result_channel,
+        )
     };
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
     let wall = format!("{elapsed_ms:.3}ms");
@@ -190,6 +215,7 @@ fn run_pipeline_for_path(
     module_id: &str,
     verbose: bool,
     parser: ParserCli,
+    result_channel: bool,
 ) -> Result<()> {
     let source_path = resolve_source_path(path)?;
     let is_rust = source_path.extension().is_some_and(|e| e == "rs");
@@ -228,7 +254,7 @@ fn run_pipeline_for_path(
             jobs: 1,
             debug: false,
             profile,
-            emit: None,
+            emit: result_channel.then_some(OwnedEmit::ResultChannel),
             base: None,
         };
         let report = compile_owned(&request);

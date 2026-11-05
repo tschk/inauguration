@@ -55,6 +55,33 @@ pub fn compile_native(
         .out
         .as_ref()
         .ok_or_else(|| "native compile requires --out executable path".to_string())?;
+    if matches!(request.emit, Some(super::OwnedEmit::ResultChannel)) {
+        if !cfg!(all(target_os = "linux", target_arch = "x86_64"))
+            || request.linkage != NativeLinkage::Executable
+            || request
+                .target_triple
+                .as_deref()
+                .is_some_and(|triple| triple != "x86_64-unknown-linux-gnu")
+        {
+            return Err("result channel requires a Linux x86-64 executable".into());
+        }
+        let bytes =
+            native_emit::elf::lower_x86_executable_with_result_channel(&native_module, entry)?;
+        native_emit::write_executable_file(out_path, &bytes)
+            .map_err(|err| format!("write native ELF `{}`: {err}", out_path.display()))?;
+        set_native_artifact_permissions(out_path, request.linkage)?;
+        return Ok(NativeCompileResult {
+            artifact_path: out_path.display().to_string(),
+            eval_exit_code: eval_exit,
+            eval_result: None,
+            abi_path: None,
+            backend_level: "owned-native-subset-x86_64".into(),
+            runtime_level: "linux-syscall-result-channel".into(),
+            reason_code: "native-x86_64-linux-result-channel".into(),
+            reason: "Linux executable emits its typed entry result on descriptor 3".into(),
+            degradations: Vec::new(),
+        });
+    }
     if let Some(target_triple) = request.target_triple.as_deref() {
         // ponytail: these executable writers emit only an exit stub until they lower bodies.
         let exit = if request.linkage == NativeLinkage::Executable

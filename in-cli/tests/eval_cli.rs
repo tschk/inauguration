@@ -6,6 +6,120 @@
 use std::process::Command;
 
 #[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn result_channel_captures_executed_native_and_jit_values() {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("in-result-{}-{stamp}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let source = root.join("main.in");
+    let native = root.join("native");
+    let frame = root.join("result");
+    let in_bin = env!("CARGO_BIN_EXE_in");
+    for (typ, value, tag, expected) in [
+        ("Int", "263", 1, 263i64),
+        ("Int", "-257", 1, -257i64),
+        ("Bool", "true", 2, 1i64),
+        ("Bool", "false", 2, 0i64),
+    ] {
+        std::fs::write(&source, format!("fn main()->{typ}{{return {value};}}")).unwrap();
+        let build = Command::new(in_bin)
+            .arg("build")
+            .arg("--path")
+            .arg(&source)
+            .arg("--out")
+            .arg(&native)
+            .arg("--result-channel")
+            .output()
+            .unwrap();
+        assert!(build.status.success(), "{build:?}");
+        let mut expected_frame = b"INR1".to_vec();
+        expected_frame.push(tag);
+        expected_frame.extend_from_slice(&expected.to_le_bytes());
+        for args in [
+            vec![
+                in_bin,
+                "execute",
+                source.to_str().unwrap(),
+                "--result-channel",
+            ],
+            vec![native.to_str().unwrap()],
+        ] {
+            let output = Command::new("sh")
+                .args(["-c", "exec \"$@\" 3>\"$FRAME\"", "sh"])
+                .args(args)
+                .env("FRAME", &frame)
+                .output()
+                .unwrap();
+            assert_eq!(std::fs::read(&frame).unwrap(), expected_frame, "{output:?}");
+        }
+        let output = Command::new("sh")
+            .args(["-c", "exec \"$1\" 3>\"$FRAME\"", "sh"])
+            .arg(&native)
+            .env("FRAME", &frame)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some((expected as u8).into()));
+        let closed = Command::new("sh")
+            .args(["-c", "exec \"$1\" 3>&-", "sh"])
+            .arg(&native)
+            .output()
+            .unwrap();
+        assert_eq!(closed.status.code(), Some(125));
+        let plain_build = Command::new(in_bin)
+            .arg("build")
+            .arg("--path")
+            .arg(&source)
+            .arg("--out")
+            .arg(&native)
+            .output()
+            .unwrap();
+        assert!(plain_build.status.success(), "{plain_build:?}");
+        let plain = Command::new("sh")
+            .args(["-c", "exec \"$1\" 3>&-", "sh"])
+            .arg(&native)
+            .output()
+            .unwrap();
+        assert_eq!(plain.status.code(), Some((expected as u8).into()));
+    }
+    std::fs::write(&source, "fn main()->Int{throw 9;return 1;}").unwrap();
+    let build = Command::new(in_bin)
+        .arg("build")
+        .arg("--path")
+        .arg(&source)
+        .arg("--out")
+        .arg(&native)
+        .arg("--result-channel")
+        .output()
+        .unwrap();
+    assert!(build.status.success(), "{build:?}");
+    let output = Command::new("sh")
+        .args(["-c", "exec \"$1\" 3>\"$FRAME\"", "sh"])
+        .arg(&native)
+        .env("FRAME", &frame)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(std::fs::read(&frame).unwrap().is_empty());
+    std::fs::remove_file(&native).unwrap();
+    std::fs::write(&source, "fn main()->String{return \"hello\";}").unwrap();
+    let unsupported = Command::new(in_bin)
+        .arg("build")
+        .arg("--path")
+        .arg(&source)
+        .arg("--out")
+        .arg(&native)
+        .arg("--result-channel")
+        .output()
+        .unwrap();
+    assert!(!unsupported.status.success());
+    assert!(!native.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn eval_preserves_zero_unit_prints_and_missing_values() {
     let socket =
         std::env::temp_dir().join(format!("in-eval-test-{}-absent.sock", std::process::id()));

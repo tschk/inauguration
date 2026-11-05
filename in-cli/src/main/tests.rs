@@ -11,6 +11,7 @@ fn parse_build_subcommand() {
             out,
             release,
             module_id,
+            result_channel,
             verbose,
             swiftpm,
             allow_external_toolchain,
@@ -25,6 +26,7 @@ fn parse_build_subcommand() {
             assert_eq!(out, None);
             assert!(!release);
             assert_eq!(module_id, "Foo");
+            assert!(!result_channel);
             assert!(!verbose);
             assert!(!swiftpm);
             assert!(!allow_external_toolchain);
@@ -181,6 +183,7 @@ fn execute_propagates_nonzero_jit_exit() {
         "Nonzero",
         false,
         false,
+        false,
     );
     let _ = std::fs::remove_file(&path);
     let error = result.expect_err("nonzero JIT result should fail execute");
@@ -195,6 +198,7 @@ fn execute_refuses_compile_only_aggregate_entry() {
         std::path::Path::new("."),
         &path.to_string_lossy(),
         "Aggregate",
+        false,
         false,
         false,
     );
@@ -746,11 +750,13 @@ fn parse_execute_subcommand() {
             module_id,
             verbose,
             debug,
+            result_channel,
         } => {
             assert_eq!(path, "apps/in-sample/hello.in");
             assert_eq!(module_id, "Hello");
             assert!(verbose);
             assert!(!debug);
+            assert!(!result_channel);
         }
         _ => panic!("expected execute command"),
     }

@@ -135,17 +135,23 @@ could reasonably expect.
   the low eight bits of an Int. For example, Int 263 and Int 7 have the same
   low byte. Matching output and status cannot prove those values agree.
 
-The differential now treats an unobservable result or a native refusal as an
-incomplete check. Neither can pass the check or update its baseline. Fault
-injection in `scripts/test-backend-differential.sh` checks an unobservable
-String, a truncated Int, and differing exit statuses. The old differential
-fails those controls. CI invokes the control script.
+The differential uses an opt-in descriptor 3 channel to compare full Int and
+Bool results from the JIT and the executed Linux x86-64 ELF. It compares stdout
+and process termination separately. Missing or malformed records and native
+refusals make the check incomplete and prevent a baseline update. The oracle
+controls include equal exit statuses with differing full-width integers.
 
-On Linux x86-64, one run compared 89 fixtures. It reported one observable
-agreement, 72 unobservable results, and 16 native refusals. The check failed as
-intended. A typed native result channel is still needed to compare full return
-values. After adding it, rerun the refused fixtures because each first refusal
-can conceal another limitation.
+An earlier run found one observable agreement, 72 unobservable results, and 16
+native refusals. With the channel, a run of the same 89 fixtures found 72
+agreements and 17 native refusals, with no disagreements or invalid records.
+Fourteen refusals are String or Float entries unsupported by the channel; two
+report unresolved `print` and `str_concat` imports. The additional refusal is
+`conformance/classes/class-methods.in`: its Void entry builds without the
+channel but the channel accepts only Int and Bool. The earlier check classified
+its result as unobservable. This is an instrumentation limitation, not a
+regression in ordinary native emission. These are first failures, so later
+limitations may still be hidden. The check remains failing; the baseline has not
+been updated.
 
 ## Self-host compile memory
 

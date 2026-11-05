@@ -48,6 +48,8 @@ pub enum CompileTarget {
 pub enum OwnedEmit {
     /// Emit a raw SCI component binary loaded at the given virtual base address.
     Sci { base: u64 },
+    /// Emit a Linux executable that writes its typed result to descriptor 3.
+    ResultChannel,
 }
 
 /// Value an executed entry point produced, in the shape the source declared.

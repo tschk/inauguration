@@ -626,6 +626,7 @@ pub(crate) fn cmd_execute(
     module_id: &str,
     verbose: bool,
     debug: bool,
+    result_channel: bool,
 ) -> Result<()> {
     let start = Instant::now();
     let source_path = resolve_invocation_path(cwd, path);
@@ -655,6 +656,30 @@ pub(crate) fn cmd_execute(
         return Err(InError::Message(
             "entry compiled but was not executed (unsupported entry ABI)".into(),
         ));
+    }
+
+    if result_channel {
+        use inauguration::owned_compile::EvalValue;
+        use std::io::Write;
+        let (tag, value) = match report.eval_result.as_ref() {
+            Some(EvalValue::Int(value)) => (1u8, *value),
+            Some(EvalValue::Bool(value)) => (2u8, i64::from(*value)),
+            _ => {
+                return Err(InError::Message(
+                    "result channel requires an Int or Bool result".into(),
+                ));
+            }
+        };
+        let mut record = [0u8; 13];
+        record[..4].copy_from_slice(b"INR1");
+        record[4] = tag;
+        record[5..].copy_from_slice(&value.to_le_bytes());
+        let mut fd = fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/fd/3")
+            .map_err(|error| InError::Message(format!("result channel fd 3: {error}")))?;
+        fd.write_all(&record)
+            .map_err(|error| InError::Message(format!("write result channel: {error}")))?;
     }
 
     if verbose {

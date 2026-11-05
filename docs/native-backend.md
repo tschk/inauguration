@@ -61,6 +61,19 @@ explicitly namespaced, versioned services rather than libc names. Symbol names
 alone do not prove a provider's signature, provenance, or authority. See the
 [proposed target contract](internal/reviews/verification-and-self-host-2026-11-05.md).
 
+### Differential result channel
+
+On Linux x86-64, `in execute --result-channel` writes the JIT entry result to
+file descriptor 3. `in build --result-channel --out <path>` emits an executable
+that writes its entry result to descriptor 3 after it runs. Both accept Int and
+Bool results; the instrumented native executable refuses other return types.
+Without the flag, execution and emitted executables do not use the channel.
+
+Each record contains `INR1`, a one-byte type tag (1 for Int, 2 for Bool), and
+an eight-byte little-endian value. Bool values are 0 or 1. A failed execution or
+write must not be treated as a result. The differential checker also compares
+stdout and checks process termination; it rejects missing or malformed records.
+
 `in compile --target native --target-triple aarch64-apple-darwin --linkage static-lib --entry answer --out target/libanswer.a` emits an `ar` archive containing a Mach-O ARM64 object member with an exported `_answer` symbol. The archive contains real Core IR function bodies, a linker index, and external call relocations. Integer parameters, multiple exports, and libc calls are verified by linking and running C callers. Writable-global references and degraded exports are rejected until the object writer can represent them.
 
 `in compile --target native --target-triple x86_64-unknown-linux-gnu --linkage executable --entry answer --out target/answer` emits a minimal ELF64 Linux executable that exits with the const-evaluated scalar value through the Linux `exit` syscall. This is not general x86_64 native lowering: it has no linker, libc, dynamic loader, relocations, argv/envp contract, heap, imports, or general function ABI support.

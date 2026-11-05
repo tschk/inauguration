@@ -43,7 +43,14 @@ pub(crate) fn cmd_eval_source_or_path(
                         .to_string_lossy()
                         .to_string();
                     let bin_str = bin_path.to_string_lossy().to_string();
-                    return cmd_execute(invocation_cwd, &bin_str, &module_id, verbose, debug);
+                    return cmd_execute(
+                        invocation_cwd,
+                        &bin_str,
+                        &module_id,
+                        verbose,
+                        debug,
+                        false,
+                    );
                 }
             }
             if resolved.exists() {
@@ -60,7 +67,7 @@ pub(crate) fn cmd_eval_source_or_path(
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string();
-                    return cmd_execute(invocation_cwd, s, &module_id, verbose, debug);
+                    return cmd_execute(invocation_cwd, s, &module_id, verbose, debug, false);
                 }
                 std::fs::read_to_string(&resolved)
                     .map_err(|e| InError::Message(format!("read {}: {e}", resolved.display())))?

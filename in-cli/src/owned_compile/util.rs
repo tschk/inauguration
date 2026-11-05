@@ -25,6 +25,7 @@ pub fn default_linkage_label() -> String {
 pub fn emit_label(emit: Option<&OwnedEmit>) -> String {
     match emit {
         Some(OwnedEmit::Sci { base }) => format!("sci:0x{base:x}"),
+        Some(OwnedEmit::ResultChannel) => "result-channel".to_string(),
         None => "default".to_string(),
     }
 }

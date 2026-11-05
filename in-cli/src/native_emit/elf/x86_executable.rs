@@ -5,20 +5,41 @@ use crate::native_emit::NativeSection;
 use crate::native_emit::x86_64_lower::{lower_linux_module, patch_absolute_reference};
 
 pub(crate) fn lower_x86_executable(module: &UnifiedModule, entry: &str) -> Result<Vec<u8>, String> {
-    let returns_status = module
+    lower_executable(module, entry, false)
+}
+
+pub(crate) fn lower_x86_executable_with_result_channel(
+    module: &UnifiedModule,
+    entry: &str,
+) -> Result<Vec<u8>, String> {
+    lower_executable(module, entry, true)
+}
+
+fn lower_executable(
+    module: &UnifiedModule,
+    entry: &str,
+    result_channel: bool,
+) -> Result<Vec<u8>, String> {
+    let result_tag = module
         .decls
         .iter()
         .find_map(|decl| match decl {
             Decl::Function {
                 name, params, ret, ..
             } if name == entry && params.is_empty() => match ret.canonical() {
-                Typ::Int | Typ::Bool => Some(true),
-                Typ::Void => Some(false),
+                Typ::Int => Some(1u8),
+                Typ::Bool => Some(2u8),
+                Typ::Void if !result_channel => Some(0u8),
                 _ => None,
             },
             _ => None,
         })
-        .ok_or("native ELF requires a no-argument Int, Bool or Void entry")?;
+        .ok_or(if result_channel {
+            "native ELF result channel requires a no-argument Int or Bool entry"
+        } else {
+            "native ELF requires a no-argument Int, Bool or Void entry"
+        })?;
+    let returns_status = result_tag != 0;
     struct WidthGuard(bool);
     impl Drop for WidthGuard {
         fn drop(&mut self) {
@@ -74,6 +95,35 @@ pub(crate) fn lower_x86_executable(module: &UnifiedModule, entry: &str) -> Resul
             .map_err(|_| "native ELF entry call exceeds rel32")?;
     lowered.code.push(0xe8);
     lowered.code.extend_from_slice(&displacement.to_le_bytes());
+    if result_channel {
+        // A runtime error must never produce a valid result record.
+        lowered
+            .code
+            .extend_from_slice(&[0x49, 0x83, 0x3f, 0, 0x0f, 0x85]);
+        let error_jump = lowered.code.len();
+        lowered.code.extend_from_slice(&0i32.to_le_bytes());
+        lowered.code.extend_from_slice(&[
+            0x48, 0x83, 0xec, 24, // sub rsp,24
+            0x48, 0x89, 0x44, 0x24, 16, // mov [rsp+16],rax
+            0xc7, 0x04, 0x24, b'I', b'N', b'R', b'1', // magic
+            0xc6, 0x44, 0x24, 4, result_tag, // type
+            0x48, 0x89, 0x44, 0x24, 5, // payload
+            0xb8, 1, 0, 0, 0, // write
+            0xbf, 3, 0, 0, 0, // fd 3
+            0x48, 0x89, 0xe6, // buffer
+            0xba, 13, 0, 0, 0, // length
+            0x0f, 0x05, // syscall
+            0x48, 0x83, 0xf8, 13, // cmp rax,13
+            0x74, 12, // je success
+            0xbf, 125, 0, 0, 0, // failure status
+            0xb8, 60, 0, 0, 0, 0x0f, 0x05, // exit
+            0x48, 0x8b, 0x44, 0x24, 16, // restore result
+            0x48, 0x83, 0xc4, 24, // add rsp,24
+        ]);
+        let displacement = i32::try_from(lowered.code.len() - error_jump - 4)
+            .map_err(|_| "native ELF result error branch exceeds rel32")?;
+        lowered.code[error_jump..error_jump + 4].copy_from_slice(&displacement.to_le_bytes());
+    }
     if returns_status {
         lowered.code.extend_from_slice(&[0x48, 0x89, 0xc7]); // mov rdi,rax
     } else {

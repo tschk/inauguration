@@ -139,6 +139,8 @@ enum Commands {
         harden_out: Option<String>,
         #[arg(long, default_value = "App")]
         module_id: String,
+        #[arg(long, help = "Write the native entry result to descriptor 3")]
+        result_channel: bool,
         #[arg(
             long,
             default_value_t = false,
@@ -384,6 +386,8 @@ enum Commands {
         verbose: bool,
         #[arg(long, default_value_t = false, help = "Show detailed stage report")]
         debug: bool,
+        #[arg(long, help = "Write the JIT entry result to descriptor 3")]
+        result_channel: bool,
     },
     #[command(about = "Report owned backend status and compile-path facts")]
     Backend {
@@ -586,6 +590,7 @@ impl Commands {
                 dual_emit,
                 harden_out,
                 module_id,
+                result_channel,
                 verbose,
                 swiftpm,
                 allow_external_toolchain,
@@ -619,6 +624,7 @@ impl Commands {
                     swiftpm,
                     allow_external_toolchain,
                     parser,
+                    result_channel,
                 )
             }
             Commands::Agent {
@@ -783,7 +789,15 @@ impl Commands {
                 module_id,
                 verbose,
                 debug,
-            } => crate::compile::cmd_execute(invocation_cwd, &path, &module_id, verbose, debug),
+                result_channel,
+            } => crate::compile::cmd_execute(
+                invocation_cwd,
+                &path,
+                &module_id,
+                verbose,
+                debug,
+                result_channel,
+            ),
             Commands::Backend {
                 path,
                 module_id,
