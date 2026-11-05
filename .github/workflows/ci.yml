@@ -20,6 +20,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Test backend differential oracle
+        run: bash scripts/test-backend-differential.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -117,4 +119,3 @@ jobs:
           "$IN" build --path in-cli/src/main.rs --module-id InCli --verbose
       - name: Check diff whitespace
         run: git diff --check
-
