@@ -40,6 +40,76 @@ Two responses are available, and the project owner must choose between them:
    executable ecosystem imports until an execution path exists. This is a
    documentation change; it does not add runtime capability.
 
+## Freestanding SCI arrays require runtime imports
+
+Space reported that its pinned compiler revision `d4a70d23` and a later build
+at `fe28e87a` emit `abort` in `app-sum.sci`, which its loader rejects before
+entry. Source at both revisions emits `malloc` and `abort` for x86-64 array
+allocation. A separate reproduction used the local release binary and Space's
+`app-sum.in` at source blob `c01e0a069764ee5691d359cdc8316600af4a6331`.
+The resulting SCI import table contains both names. This reproduction did not
+run Space or independently inspect the two reported pinned artifacts.
+
+The SCI loader resolves every import before entry, even when a call is only on
+an allocation-failure path. The compiler must make its implicit allocator and
+failure requirements explicit, while the target must provide any required
+allocation service. The current generated calls and failure behavior are
+documented in `docs/native-backend.md`. A fixed-size array can avoid allocation
+only if its lifetime and aliases permit stack storage; no such proof was made
+for this component.
+
+An inline `UD2` would remove `abort`, not `malloc`. It is not a demonstrated
+safe replacement: Space's current invalid-opcode handler halts the nanokernel.
+The target's allocation and failure ABI needs an agreed contract and runtime
+verification before changing the emitted failure path.
+
+This and the ecosystem failure both appear as unresolved imports, but their
+causes differ. SCI array lowering creates implicit runtime calls that need
+providers. Ecosystem adapter declarations have no production execution bridge
+to their adapter commands. Fixing either path does not fix the other.
+
+### Proposed target contract, not yet implemented
+
+The compiler should require an explicit target runtime declaration when an SCI
+contains generated heap allocation calls. The declaration supplies the target's
+allocator and allocation-failure handler symbol names. It must not silently
+default to `malloc`, `abort`, a trap instruction, or a hosted runtime. If a
+required declaration is absent or invalid, compilation should fail before
+writing an SCI and name each missing service. An image with no generated heap
+allocation should not require either service.
+The compiler must distinguish its generated service calls from source-authored
+externs and reject symbol collisions that would bind a service to the wrong
+function. Both SCI layout passes must use the same declaration.
+
+For x86-64, the proposed service ABI uses the existing SysV integer calling
+convention. The allocator receives the required byte count in `RDI` and returns
+an eight-byte-aligned writable pointer or null in `RAX`. Storage must remain
+valid for every use of the array, including after the creating function returns.
+The allocation-failure handler takes no arguments and must not return. Its
+behavior must be appropriate to the target's isolation model. This proposal
+does not yet define reclamation, configuration syntax or an error payload.
+
+The emitter should use the declared target symbols in SCI imports, including in
+every retained export, and report their requirements. It should separately
+account for other generated imports such as `memcpy` when array copy needs it.
+Checking the declaration at compile time does not prove that a provider will be
+installed, reachable or authorized at load time. The loader must still check
+the SCI import table against the deployed providers and their capabilities.
+SCI v2 records names and call sites, not service signatures or provenance, and
+its `call rel32` binding also requires a reachable provider address.
+
+Space would declare the symbols and ABI it supports, provide an allocator and
+failure handler for the component's actual execution domain, and arrange for
+the loader to resolve and authorize them. Its existing heap and fault handlers
+must be assessed against that contract; their names or compatibility cannot be
+assumed. Space also needs a test that loads and runs the emitted image and a
+failure-path test that confirms allocation failure does not halt the nanokernel.
+
+Proven non-escaping stack allocation can remove the heap requirement for
+eligible arrays, but must preserve mutation, aliasing and lifetime semantics.
+It does not replace the contract for escaping arrays. The current compiler does
+not enforce this proposed declaration or generate target-selected service names.
+
 ## Verification results need observable evidence
 
 Two verification tools reported on a different result from the one their users
