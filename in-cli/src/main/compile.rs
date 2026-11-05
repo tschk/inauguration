@@ -671,9 +671,10 @@ pub(crate) fn cmd_execute(
             Some(EvalValue::Int(value)) => (1u8, *value),
             Some(EvalValue::Bool(value)) => (2u8, i64::from(*value)),
             Some(EvalValue::Void) => (3u8, 0),
+            Some(EvalValue::Float(value)) => (4u8, value.to_bits() as i64),
             _ => {
                 return Err(InError::Message(
-                    "result channel requires an Int, Bool or Void result".into(),
+                    "result channel requires an Int, Bool, Void or Float result".into(),
                 ));
             }
         };

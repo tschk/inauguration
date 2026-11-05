@@ -21,10 +21,13 @@ case "$1" in
       jit-malformed) printf 'INR1\002\002\000\000\000\000\000\000\000' >&3 ;;
       jit-void-malformed) printf 'INR1\003\001\000\000\000\000\000\000\000' >&3 ;;
       void|native-void-malformed|void-native-status|void-jit-status) printf 'INR1\003\000\000\000\000\000\000\000\000' >&3 ;;
+      jit-float-truncated) printf 'INR1\004\001' >&3 ;;
+      jit-float-malformed) printf 'INR1\004\001\000\000\000\000\000\370\177\000' >&3 ;;
+      float*|native-float-truncated|native-float-malformed) printf 'INR1\004\001\000\000\000\000\000\370\177' >&3 ;;
       bool) printf 'INR1\002\001\000\000\000\000\000\000\000' >&3 ;;
       *) printf 'INR1\001\007\001\000\000\000\000\000\000' >&3 ;;
     esac
-    case "$CASE" in void|native-void-malformed|void-native-status) exit 0 ;; esac
+    case "$CASE" in void|native-void-malformed|void-native-status|float|float-bits|float-native-status|*-float-truncated|*-float-malformed) exit 0 ;; esac
     [[ "$CASE" != jit-status-mismatch ]] || exit 0
     echo 'in: program exited with status 7' >&2
     exit 1
@@ -43,6 +46,10 @@ case "$CASE" in
   native-malformed) printf 'INR1\001' >&3 ;;
   native-void-malformed) printf 'INR1\003\001\000\000\000\000\000\000\000' >&3 ;;
   void|void-native-status|void-jit-status) printf 'INR1\003\000\000\000\000\000\000\000\000' >&3 ;;
+  native-float-truncated) printf 'INR1\004\001' >&3 ;;
+  native-float-malformed) printf 'INR1\004\001\000\000\000\000\000\370\177\000' >&3 ;;
+  float-bits) printf 'INR1\004\002\000\000\000\000\000\370\177' >&3 ;;
+  float*|jit-float-truncated|jit-float-malformed) printf 'INR1\004\001\000\000\000\000\000\370\177' >&3 ;;
   bool) printf 'INR1\002\001\000\000\000\000\000\000\000' >&3 ;;
   full-width) printf 'INR1\001\007\002\000\000\000\000\000\000' >&3 ;;
   *) printf 'INR1\001\007\001\000\000\000\000\000\000' >&3 ;;
@@ -52,6 +59,8 @@ case "$CASE" in
   exit-mismatch) exit 8 ;;
   stdout-mismatch) echo different ;;
   void|void-jit-status) exit 0 ;;
+  float|float-bits|float-jit-status|*-float-truncated|*-float-malformed) exit 0 ;;
+  float-native-status) exit 1 ;;
   void-native-status|bool) exit 1 ;;
 esac
 exit 7
@@ -79,6 +88,10 @@ check bool agree
 check void agree
 check void-native-status disagree
 check void-jit-status disagree
+check float agree
+check float-bits disagree
+check float-native-status disagree
+check float-jit-status disagree
 check full-width disagree
 check exit-mismatch disagree
 check jit-status-mismatch disagree
@@ -92,6 +105,10 @@ for case_name in jit-missing jit-malformed native-missing native-malformed; do
 done
 check jit-void-malformed jit-frame-malformed --update-baseline
 check native-void-malformed native-frame-malformed --update-baseline
+check jit-float-truncated jit-frame-malformed --update-baseline
+check native-float-truncated native-frame-malformed --update-baseline
+check jit-float-malformed jit-frame-malformed --update-baseline
+check native-float-malformed native-frame-malformed --update-baseline
 grep -qx 'agree conformance/example.in' "$tmp/repo/conformance/backend-differential.txt"
 check refused native-refused --update-baseline
 grep -qx 'agree conformance/example.in' "$tmp/repo/conformance/backend-differential.txt"

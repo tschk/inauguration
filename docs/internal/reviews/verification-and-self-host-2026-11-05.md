@@ -135,8 +135,8 @@ could reasonably expect.
   the low eight bits of an Int. For example, Int 263 and Int 7 have the same
   low byte. Matching output and status cannot prove those values agree.
 
-The differential uses an opt-in descriptor 3 channel to compare full Int, Bool
-and Void results from the JIT and the executed Linux x86-64 ELF. It compares stdout
+The differential uses an opt-in descriptor 3 channel to compare Int, Bool,
+Void and Float results from the JIT and the executed Linux x86-64 ELF. It compares stdout
 and process termination separately. Missing or malformed records and native
 refusals make the check incomplete and prevent a baseline update. The oracle
 controls include equal exit statuses with differing full-width integers.
@@ -148,9 +148,11 @@ The additional refusal was `conformance/classes/class-methods.in`: its Void
 entry built without the channel but was previously unobservable. Adding a
 distinct Void result makes that case a real comparison. A subsequent run found
 73 agreements and 16 refusals, with no disagreements or invalid records.
-Fourteen first refusals are String or Float entries unsupported by the channel;
-two report unresolved `print` and `str_concat` imports. Later limitations may
-still be hidden. The check remains failing; the baseline has not been updated.
+Adding exact-bit Float records moved `conformance/types/float-arithmetic.in`
+to agreement: the next run found 74 agreements and 15 refusals. Thirteen first
+refusals are String entries unsupported by the channel; two report unresolved
+`print` and `str_concat` imports. Later limitations may still be hidden. The
+check remains failing; the baseline has not been updated.
 
 ## Self-host compile memory
 

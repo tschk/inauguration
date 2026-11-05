@@ -7,7 +7,7 @@ use std::process::Command;
 
 #[test]
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn result_channel_captures_void() {
+fn result_channel_captures_void_and_float() {
     let root = std::env::temp_dir().join(format!("in-result-types-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let source = root.join("main.in");
@@ -17,6 +17,10 @@ fn result_channel_captures_void() {
     for (program, tag, bits) in [
         ("fn main()->void{return;}", 3u8, 0u64),
         ("fn main()->void{let value = 7;return;}", 3u8, 0u64),
+        ("fn main()->Float{return 3.75;}", 4u8, 3.75f64.to_bits()),
+        ("fn main()->Float{return 0.1;}", 4u8, 0.1f64.to_bits()),
+        ("fn main()->Float{return -0.0;}", 4u8, (-0.0f64).to_bits()),
+        ("fn main()->Float{return 2.5 + 3.5;}", 4u8, 6.0f64.to_bits()),
     ] {
         std::fs::write(&source, program).unwrap();
         let build = Command::new(in_bin)

@@ -30,12 +30,13 @@ fn lower_executable(
                 Typ::Int => Some(1u8),
                 Typ::Bool => Some(2u8),
                 Typ::Void => Some(if result_channel { 3u8 } else { 0u8 }),
+                Typ::Float if result_channel => Some(4u8),
                 _ => None,
             },
             _ => None,
         })
         .ok_or(if result_channel {
-            "native ELF result channel requires a no-argument Int, Bool or Void entry"
+            "native ELF result channel requires a no-argument Int, Bool, Void or Float entry"
         } else {
             "native ELF requires a no-argument Int, Bool or Void entry"
         })?;

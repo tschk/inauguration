@@ -66,12 +66,13 @@ alone do not prove a provider's signature, provenance, or authority. See the
 On Linux x86-64, `in execute --result-channel` writes the JIT entry result to
 file descriptor 3. `in build --result-channel --out <path>` emits an executable
 that writes its entry result to descriptor 3 after it runs. Both accept Int,
-Bool and Void results; the instrumented native executable refuses other types.
+Bool, Void and Float results; the instrumented native executable refuses other types.
 Without the flag, execution and emitted executables do not use the channel.
 
 Each record contains `INR1`, a one-byte type tag (1 for Int, 2 for Bool, 3 for
-Void), and an eight-byte little-endian value. Bool values are 0 or 1; Void has
-a zero payload. A failed execution or write must not be treated as a result.
+Void, 4 for Float), and an eight-byte little-endian value. Bool values are 0 or
+1; Void has a zero payload; Float uses its exact IEEE-754 bits. A failed
+execution or write must not be treated as a result.
 The differential checker also compares stdout and checks process termination;
 it rejects missing or malformed records.
 

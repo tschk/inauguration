@@ -90,7 +90,7 @@ def read_frame(path, backend):
     data = pathlib.Path(path).read_bytes()
     if not data:
         return None, backend + '-frame-missing'
-    if (len(data) != 13 or data[:4] != b'INR1' or data[4] not in (1, 2, 3)
+    if (len(data) != 13 or data[:4] != b'INR1' or data[4] not in (1, 2, 3, 4)
             or (data[4] == 2 and int.from_bytes(data[5:], 'little', signed=True) not in (0, 1))
             or (data[4] == 3 and data[5:] != bytes(8))):
         return None, backend + '-frame-malformed'
