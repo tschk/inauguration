@@ -376,7 +376,9 @@ require(data.get("symbol_index") == [], "unresolved package import should not cr
 PY
 
 echo "check ecosystem package install and imports"
-if ecosystem_install_json="$tmp_dir/package-ecosystem-install.json" && "${in_cmd[@]}" install --path apps/package-ecosystem-sample --json > "$ecosystem_install_json" 2>/dev/null; then
+ecosystem_root="$tmp_dir/package-ecosystem-sample"
+cp -R apps/package-ecosystem-sample "$ecosystem_root"
+if ecosystem_install_json="$tmp_dir/package-ecosystem-install.json" && "${in_cmd[@]}" install --path "$ecosystem_root" --json > "$ecosystem_install_json" 2>/dev/null; then
 python3 - "$ecosystem_install_json" <<'PY'
 import json
 import sys
@@ -429,7 +431,7 @@ require(
 PY
 
 ecosystem_package_json="$tmp_dir/package-ecosystem.json"
-"${in_cmd[@]}" package --path apps/package-ecosystem-sample/main.in --json > "$ecosystem_package_json"
+"${in_cmd[@]}" package --path "$ecosystem_root/main.in" --json > "$ecosystem_package_json"
 python3 - "$ecosystem_package_json" <<'PY'
 import json
 import sys
@@ -479,7 +481,7 @@ require(data.get("diagnostics") == [], "ecosystem package report unexpectedly ha
 PY
 
 ecosystem_jit_log="$tmp_dir/package-ecosystem-jit.log"
-if "${in_cmd[@]}" execute --verbose apps/package-ecosystem-sample/main.in > "$ecosystem_jit_log" 2>&1; then
+if "${in_cmd[@]}" execute --verbose "$ecosystem_root/main.in" > "$ecosystem_jit_log" 2>&1; then
   python3 - "$ecosystem_jit_log" <<'PY'
 import sys
 from pathlib import Path
@@ -497,7 +499,7 @@ else
 fi
 
 agent_ecosystem_json="$tmp_dir/package-ecosystem-agent.json"
-"${in_cmd[@]}" agent --path apps/package-ecosystem-sample/main.in --module-id ecosystem_demo > "$agent_ecosystem_json"
+"${in_cmd[@]}" agent --path "$ecosystem_root/main.in" --module-id ecosystem_demo > "$agent_ecosystem_json"
 python3 - "$agent_ecosystem_json" <<'PY'
 import json
 import sys
