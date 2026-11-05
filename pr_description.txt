@@ -1,0 +1,3 @@
+🎯 **What:** Added tests for `emit_jit` in `mir_emit.rs`.
+📊 **Coverage:** Covered JIT emission for empty modules, simple functions, functions with arguments and calls, branching, memory operations, arithmetic operations, and error cases for unsupported rodata and parameters.
+✨ **Result:** Improved test coverage and reliability for the AArch64 JIT compiler backend.
