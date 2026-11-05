@@ -1014,7 +1014,7 @@ mod tests {
             storage.extend_from_slice(b"abc");
             let mut module = crate::in_lang_parse::parse_in_source("fn main(value: String) -> Int { match value { \"abc\" { return 42; } _ { return 7; } } return 9; }").unwrap();
             if let crate::core_ir::Decl::Function { params, .. } = &mut module.decls[0] {
-                params[0].1 = crate::core_ir::Typ::Named("str".into());
+                params[0].1 = crate::core_ir::Typ::String;
             }
             assert_eq!(
                 invoke_module(&module, profile, &[storage.as_ptr() as i64]),
