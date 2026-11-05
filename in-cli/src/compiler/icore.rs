@@ -1086,4 +1086,45 @@ mod tests {
                 .any(|d| matches!(d, Decl::Function { name, .. } if name == "person_age"))
         );
     }
+
+    #[test]
+    fn test_parse_icore_file() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.icore");
+
+        let valid_json = r#"{
+            "icoreVersion": 1,
+            "decls": [
+                {"kind": "function", "name": "main", "params": [], "return": "Void", "body": []}
+            ],
+            "boundary": null
+        }"#;
+        fs::write(&file_path, valid_json).unwrap();
+
+        let result = crate::compiler::icore::parse_icore_file(&file_path);
+        assert!(
+            result.is_ok(),
+            "Failed to parse valid icore file: {:?}",
+            result.err()
+        );
+
+        let invalid_json = r#"{ invalid_json }"#;
+        fs::write(&file_path, invalid_json).unwrap();
+
+        let result = crate::compiler::icore::parse_icore_file(&file_path);
+        assert!(
+            result.is_err(),
+            "Expected parsing to fail with invalid JSON"
+        );
+
+        let missing_file_path = dir.path().join("missing.icore");
+        let result = crate::compiler::icore::parse_icore_file(&missing_file_path);
+        assert!(
+            result.is_err(),
+            "Expected parsing to fail with missing file"
+        );
+    }
 }
