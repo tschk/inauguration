@@ -319,3 +319,36 @@ pub fn load_jit(module: &MirModule, runtime: &mut JitRuntime) -> Result<(), Stri
     let (code, functions) = emit_jit(module)?;
     runtime.load(&code, &functions, &[])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_ir::Typ;
+
+    #[test]
+    fn test_emit_jit_returns_code() {
+        let mut module = MirModule::new();
+        let function = MirFunction {
+            name: "test_func".to_string(),
+            instructions: vec![MirInst {
+                op: MirOp::Ret,
+                operands: vec![],
+                offset: 0,
+            }],
+            vreg_count: 0,
+            frame_size: 0,
+            return_type: Some(Typ::Void),
+            param_types: vec![],
+            var_map: vec![],
+            value_types: vec![],
+            local_types: vec![],
+            is_external: false,
+        };
+        module.functions.push(function);
+
+        let result = emit_jit(&module);
+        assert!(result.is_ok(), "Expected Ok, got {:?}", result);
+        let (code, _functions) = result.unwrap();
+        assert!(!code.is_empty(), "Expected generated machine code");
+    }
+}
