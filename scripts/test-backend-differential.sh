@@ -23,11 +23,12 @@ case "$1" in
       void|native-void-malformed|void-native-status|void-jit-status) printf 'INR1\003\000\000\000\000\000\000\000\000' >&3 ;;
       jit-float-truncated) printf 'INR1\004\001' >&3 ;;
       jit-float-malformed) printf 'INR1\004\001\000\000\000\000\000\370\177\000' >&3 ;;
+      float-zero) printf 'INR1\004\000\000\000\000\000\000\000\000' >&3 ;;
       float*|native-float-truncated|native-float-malformed) printf 'INR1\004\001\000\000\000\000\000\370\177' >&3 ;;
       bool) printf 'INR1\002\001\000\000\000\000\000\000\000' >&3 ;;
       *) printf 'INR1\001\007\001\000\000\000\000\000\000' >&3 ;;
     esac
-    case "$CASE" in void|native-void-malformed|void-native-status|float|float-bits|float-native-status|*-float-truncated|*-float-malformed) exit 0 ;; esac
+    case "$CASE" in void|native-void-malformed|void-native-status|float|float-bits|float-zero|float-native-status|*-float-truncated|*-float-malformed) exit 0 ;; esac
     [[ "$CASE" != jit-status-mismatch ]] || exit 0
     echo 'in: program exited with status 7' >&2
     exit 1
@@ -49,6 +50,7 @@ case "$CASE" in
   native-float-truncated) printf 'INR1\004\001' >&3 ;;
   native-float-malformed) printf 'INR1\004\001\000\000\000\000\000\370\177\000' >&3 ;;
   float-bits) printf 'INR1\004\002\000\000\000\000\000\370\177' >&3 ;;
+  float-zero) printf 'INR1\004\000\000\000\000\000\000\000\200' >&3 ;;
   float*|jit-float-truncated|jit-float-malformed) printf 'INR1\004\001\000\000\000\000\000\370\177' >&3 ;;
   bool) printf 'INR1\002\001\000\000\000\000\000\000\000' >&3 ;;
   full-width) printf 'INR1\001\007\002\000\000\000\000\000\000' >&3 ;;
@@ -59,7 +61,7 @@ case "$CASE" in
   exit-mismatch) exit 8 ;;
   stdout-mismatch) echo different ;;
   void|void-jit-status) exit 0 ;;
-  float|float-bits|float-jit-status|*-float-truncated|*-float-malformed) exit 0 ;;
+  float|float-bits|float-zero|float-jit-status|*-float-truncated|*-float-malformed) exit 0 ;;
   float-native-status) exit 1 ;;
   void-native-status|bool) exit 1 ;;
 esac
@@ -90,6 +92,7 @@ check void-native-status disagree
 check void-jit-status disagree
 check float agree
 check float-bits disagree
+check float-zero disagree
 check float-native-status disagree
 check float-jit-status disagree
 check full-width disagree

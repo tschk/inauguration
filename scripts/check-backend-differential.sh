@@ -101,6 +101,9 @@ if not error:
     native, error = read_frame(sys.argv[2], 'native')
 if error:
     print(error)
+# Float frames compare representation, not numeric equality: signed zero and
+# distinct NaN payloads disagree. Such a mismatch needs investigation; it does
+# not by itself prove a difference observable to every source program.
 elif (jit != native or (int.from_bytes(native[5:], 'little', signed=True) & 255 if native[4] in (1, 2) else 0) != int(sys.argv[3])
       or int(sys.argv[6]) != (1 if jit[4] in (1, 2) and int.from_bytes(jit[5:], 'little', signed=True) & 255 else 0)
       or pathlib.Path(sys.argv[4]).read_bytes() != pathlib.Path(sys.argv[5]).read_bytes()):
