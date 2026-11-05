@@ -118,7 +118,8 @@ unobservable=$(grep -c '^result-unobservable ' "$actual" || true)
 echo "backend differential: $agreed/$fixtures agree; $refused native refusals and $unobservable unobservable results were not compared"
 
 if (( refused > 0 || unobservable > 0 )); then
-  echo 'backend differential incomplete: refused or unobservable results cannot pass or update the baseline' >&2
+  echo "backend differential incomplete: refused to claim agreement for $unobservable unobservable results and $refused native refusals" >&2
+  echo 'incomplete results cannot pass or update the baseline' >&2
   exit 1
 fi
 

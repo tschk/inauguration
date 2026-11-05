@@ -38,6 +38,7 @@ done
 
 grep -Eq '^  agree +0$' "$tmp/unobservable.out"
 grep -Eq '^  result-unobservable +[1-9][0-9]*$' "$tmp/unobservable.out"
+grep -Eq 'refused to claim agreement for [1-9][0-9]* unobservable results' "$tmp/unobservable.out"
 grep -Eq '^  agree +0$' "$tmp/truncated.out"
 grep -Eq '^  result-unobservable +[1-9][0-9]*$' "$tmp/truncated.out"
 grep -Eq '^  agree +0$' "$tmp/mismatch.out"
