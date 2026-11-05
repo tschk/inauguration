@@ -319,3 +319,7 @@ pub fn load_jit(module: &MirModule, runtime: &mut JitRuntime) -> Result<(), Stri
     let (code, functions) = emit_jit(module)?;
     runtime.load(&code, &functions, &[])
 }
+
+#[cfg(test)]
+#[path = "mir_emit_tests.rs"]
+mod tests;
