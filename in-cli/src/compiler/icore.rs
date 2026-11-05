@@ -1086,4 +1086,72 @@ mod tests {
                 .any(|d| matches!(d, Decl::Function { name, .. } if name == "person_age"))
         );
     }
+
+    struct TempDirGuard {
+        path: std::path::PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new(name: &str) -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("icore-test-{}-{}", name, unique));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn parses_icore_file_successfully() {
+        let temp = TempDirGuard::new("success");
+        let file_path = temp.path.join("test.icore");
+        let j = r#"{
+            "icoreVersion": 2,
+            "decls": [
+                {
+                    "kind": "function",
+                    "name": "main",
+                    "params": [],
+                    "return": "Void",
+                    "body": []
+                }
+            ]
+        }"#;
+        std::fs::write(&file_path, j).unwrap();
+
+        let module = super::parse_icore_file(&file_path).expect("parse_icore_file should succeed");
+        assert_eq!(module.decls.len(), 1);
+    }
+
+    #[test]
+    fn parses_icore_file_fails_on_missing_file() {
+        let temp = TempDirGuard::new("missing");
+        let file_path = temp.path.join("nonexistent.icore");
+
+        let err = super::parse_icore_file(&file_path).expect_err("should fail");
+        assert!(
+            err.contains("No such file or directory")
+                || err.contains("cannot find the file specified"),
+            "err: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parses_icore_file_fails_on_invalid_json() {
+        let temp = TempDirGuard::new("invalid");
+        let file_path = temp.path.join("invalid.icore");
+        std::fs::write(&file_path, "invalid json").unwrap();
+
+        let err = super::parse_icore_file(&file_path).expect_err("should fail");
+        assert!(err.contains("icore JSON"), "err: {}", err);
+    }
 }
