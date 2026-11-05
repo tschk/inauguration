@@ -375,44 +375,6 @@ require(
 require(data.get("symbol_index") == [], "unresolved package import should not create symbols")
 PY
 
-echo "check imported ecosystem function execution with an argument"
-argument_root="$tmp_dir/package-argument"
-mkdir -p "$argument_root/vendor/demo"
-cat > "$argument_root/inauguration.package" <<'EOF'
-name: package-argument
-version: 0.1.0
-dependencies:
-  npm:demo:
-    version: path:vendor/demo
-    kind: npm
-EOF
-cat > "$argument_root/vendor/demo/package.json" <<'EOF'
-{"name":"demo","version":"1.0.0","main":"index.js"}
-EOF
-cat > "$argument_root/vendor/demo/index.js" <<'EOF'
-exports.greet = name => `hello ${name}`;
-EOF
-"${in_cmd[@]}" install --path "$argument_root" --offline --json > /dev/null
-for name in Ada Lin; do
-  cat > "$argument_root/main.in" <<EOF
-package package-argument;
-module package-argument.main;
-use npm:demo;
-fn main() -> String { return demo_greet("$name"); }
-EOF
-  argument_log="$tmp_dir/package-argument.log"
-  if ! "${in_cmd[@]}" execute --verbose "$argument_root/main.in" > "$argument_log" 2>&1; then
-    echo "error: imported ecosystem function did not execute with argument $name:" >&2
-    cat "$argument_log" >&2
-    exit 1
-  fi
-  if ! grep -Fxq "[jit] Execution completed with result: String(\"hello $name\")" "$argument_log"; then
-    echo "error: imported ecosystem function returned the wrong value for $name:" >&2
-    cat "$argument_log" >&2
-    exit 1
-  fi
-done
-
 echo "check ecosystem package install and imports"
 ecosystem_root="$tmp_dir/package-ecosystem-sample"
 cp -R apps/package-ecosystem-sample "$ecosystem_root"

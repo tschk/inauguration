@@ -23,9 +23,10 @@ Installed adapter metadata produces bodyless extern declarations. The separate
 program, but no production caller connects it to JIT or native execution.
 The adapter protocol currently accepts no arguments. This is an execution gap,
 not evidence that arbitrary ecosystem libraries work as native functions. The
-orchestration integration test now requires a local npm function to accept two
-different arguments and return the corresponding values. It fails today at
-the first call because the synthesized declaration accepts zero arguments.
+independent ecosystem execution CI job requires a local npm function to accept
+two different arguments and return the corresponding values. It fails today at
+the first call because the synthesized declaration accepts zero arguments. Its
+failure does not prevent the other CI jobs from running.
 
 Two responses are available, and the project owner must choose between them:
 
@@ -89,3 +90,12 @@ built release binary. They are not measurements of this Linux run or proof of a
 native self-build. Repeat the exact compile under a peak-RSS recorder, collect a
 time series and allocation profile, and identify retained objects before calling
 the growth a leak or comparing speeds across runs.
+
+## Conclusion
+
+Two green results did not establish the behavior they appeared to measure.
+Package checks confirmed metadata, not executable ecosystem imports. The
+backend differential reported agreement without observing full return values.
+Tests of verification tools must include controls that produce wrong results and
+confirm that the tools reject them. Product claims also need execution tests,
+not only checks that declarations or reports exist.

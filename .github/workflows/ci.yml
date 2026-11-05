@@ -41,6 +41,20 @@ jobs:
       - name: Execute i386 and i686 writable boot data
         run: python3 scripts/check-i386-boot-data.py --compiler in-cli/target/debug/in
 
+  ecosystem-execution:
+    name: Ecosystem import execution (known gap)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build in binary
+        run: cargo build --locked --bin in
+        working-directory: in-cli
+      - name: Check ecosystem import execution
+        run: IN_BIN="$PWD/in-cli/target/debug/in" bash scripts/check-ecosystem-execution.sh
+
   protocol-models:
     name: Protocol models
     runs-on: ubuntu-latest
