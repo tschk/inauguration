@@ -2,7 +2,7 @@ name: ecosystem-demo
 version: 0.1.0
 dependencies:
   cargo:crepuscularity:
-    version: latest
+    version: 0.4.7
     kind: cargo
   npm:hono:
     version: 4.12.25

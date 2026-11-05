@@ -378,7 +378,8 @@ PY
 echo "check ecosystem package install and imports"
 ecosystem_root="$tmp_dir/package-ecosystem-sample"
 cp -R apps/package-ecosystem-sample "$ecosystem_root"
-if ecosystem_install_json="$tmp_dir/package-ecosystem-install.json" && "${in_cmd[@]}" install --path "$ecosystem_root" --json > "$ecosystem_install_json" 2>/dev/null; then
+ecosystem_install_json="$tmp_dir/package-ecosystem-install.json"
+if "${in_cmd[@]}" install --path "$ecosystem_root" --json > "$ecosystem_install_json" 2> "$tmp_dir/package-ecosystem-install.err"; then
 python3 - "$ecosystem_install_json" <<'PY'
 import json
 import sys
@@ -495,7 +496,8 @@ def require(condition, message):
 require("hono:flask:crepuscularity:fiber" in log, "ecosystem jit did not invoke all four real package exports")
 PY
 else
-  echo "warning: ecosystem jit execution skipped (JIT crash on package extern synthesis)"
+  echo "WARNING: ecosystem JIT execution failed; package execution was NOT verified:" >&2
+  cat "$ecosystem_jit_log" >&2
 fi
 
 agent_ecosystem_json="$tmp_dir/package-ecosystem-agent.json"
@@ -518,7 +520,8 @@ require(
 )
 PY
 else
-  echo "warning: ecosystem package install skipped (dependency issue)"
+  echo "WARNING: ecosystem install failed; install, package imports, JIT execution, and agent checks were NOT verified:" >&2
+  cat "$tmp_dir/package-ecosystem-install.err" >&2
 fi
 
 echo "orchestration compiler checks passed"

@@ -3,7 +3,7 @@ name: ecosystem-demo
 version: 0.1.0
 dependencies:
   cargo:crepuscularity:
-    version: latest
+    version: 0.4.7
     kind: cargo
     install_path: .in-packages/cargo/crepuscularity/0.4.7
   go:fiber:
