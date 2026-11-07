@@ -1,0 +1,3 @@
+💡 **What:** Optimized `.into_iter().flatten()` calls on `Option` collections by converting them into direct `if let Some` loops.
+🎯 **Why:** Bypasses unnecessary abstraction overhead associated with `Option::into_iter()` and `flatten()`, leading to more direct mapping of elements.
+📊 **Measured Improvement:** The `remove_debug_insts/small_subset` benchmark within `hybrid_sil` measured an approximate 23-26% improvement.
