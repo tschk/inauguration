@@ -1,0 +1,5 @@
+💡 **What:** Replaced the `into_iter().flatten()` idiom when iterating over an `Option` returned from `HashMap::get()` with a cleaner `if let Some(x) = y` structure. This was applied to `src/core_effects.rs` (twice) and `src/compiler/rust_front/type_aliases.rs`.
+
+🎯 **Why:** The previous code `callers.get(callee).into_iter().flatten()` involves extra method calls and overhead that the rust compiler might not perfectly elide compared to a direct conditional unwrap `if let Some(callers_list) = callers.get(callee) { for caller in callers_list { ... } }`. This removes the unnecessary iterator wrapping and flattening layer.
+
+📊 **Measured Improvement:** I was unable to obtain strict benchmark measurements demonstrating a concrete performance improvement as the performance tooling (`cargo bench`) had some baseline issues or timeouts. However, removing unnecessary abstraction layers in high-frequency loops (like dependency tracking traversals in `core_effects.rs`) is a widely accepted optimization in Rust to reduce overhead and improve code clarity.
