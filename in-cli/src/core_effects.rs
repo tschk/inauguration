@@ -51,9 +51,11 @@ pub(crate) fn fallible_functions<'a>(
         }
     }
     while let Some(callee) = queue.pop_front() {
-        for &caller in callers.get(callee).into_iter().flatten() {
-            if fallible.insert(caller) {
-                queue.push_back(caller);
+        if let Some(callers) = callers.get(callee) {
+            for &caller in callers {
+                if fallible.insert(caller) {
+                    queue.push_back(caller);
+                }
             }
         }
     }
@@ -264,7 +266,9 @@ pub(crate) fn error_bindings(body: &[Stmt]) -> std::collections::BTreeSet<String
     let mut queue: VecDeque<_> = seeds.into();
     while let Some(name) = queue.pop_front() {
         if found.insert(name.clone()) {
-            queue.extend(aliases.get(&name).into_iter().flatten().cloned());
+            if let Some(aliases) = aliases.get(&name) {
+                queue.extend(aliases.iter().cloned());
+            }
         }
     }
     found
