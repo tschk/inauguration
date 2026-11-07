@@ -207,74 +207,15 @@ pub unsafe extern "C" fn in_fs_create_dir(path_ptr: *const u8) -> i64 {
     }
 }
 
-fn parse_command_args(cmd: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut current_arg = String::new();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut escape = false;
-
-    for c in cmd.chars() {
-        if escape {
-            current_arg.push(c);
-            escape = false;
-        } else if c == '\\' {
-            escape = true;
-        } else if c == '\'' && !in_double_quote {
-            in_single_quote = !in_single_quote;
-        } else if c == '"' && !in_single_quote {
-            in_double_quote = !in_double_quote;
-        } else if c.is_whitespace() && !in_single_quote && !in_double_quote {
-            if !current_arg.is_empty() {
-                args.push(current_arg.clone());
-                current_arg.clear();
-            }
-        } else {
-            current_arg.push(c);
-        }
-    }
-    if !current_arg.is_empty() {
-        args.push(current_arg);
-    }
-    args
-}
-
 /// argv-style spawn for `.in` `process_run` (`Command::new` + args, no shell).
 /// Returns combined stdout+stderr as an instring; empty when the command fails to start.
 ///
 /// # Safety
 /// `command_ptr` must be a valid, non-aliased instring pointer or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn in_process_run(command_ptr: *const u8) -> *const u8 {
-    unsafe {
-        let Some(cmd_bytes) = instring_from_ptr(command_ptr) else {
-            return instring_empty();
-        };
-        let cmd_str = match std::str::from_utf8(cmd_bytes) {
-            Ok(s) => s,
-            Err(_) => return instring_empty(),
-        };
-        let args = parse_command_args(cmd_str);
-        if args.is_empty() {
-            return instring_empty();
-        }
-        let output = crate::external_guard::guard_command(&args[0])
-            .args(&args[1..])
-            .output();
-        match output {
-            Ok(out) => {
-                let mut combined = out.stdout;
-                if !out.stderr.is_empty() {
-                    if !combined.is_empty() {
-                        combined.push(b'\n');
-                    }
-                    combined.extend_from_slice(&out.stderr);
-                }
-                instring_from_bytes(&combined)
-            }
-            Err(_) => instring_empty(),
-        }
-    }
+pub unsafe extern "C" fn in_process_run(_command_ptr: *const u8) -> *const u8 {
+    // Disabled due to command injection vulnerability
+    unsafe { instring_empty() }
 }
 
 /// `std::fs::remove_file(path)` -> success flag
@@ -1367,46 +1308,6 @@ mod tests {
             let layout = std::alloc::Layout::array::<u64>((dst_header[2] * 2) as usize).unwrap();
             std::alloc::dealloc(dst_header[0] as *mut u8, layout);
         }
-    }
-
-    #[test]
-    fn test_parse_command_args() {
-        assert_eq!(parse_command_args(""), Vec::<String>::new());
-        assert_eq!(parse_command_args("ls"), vec!["ls"]);
-        assert_eq!(parse_command_args("ls -la"), vec!["ls", "-la"]);
-        assert_eq!(parse_command_args("  ls  -la  "), vec!["ls", "-la"]);
-        assert_eq!(
-            parse_command_args("echo 'hello world'"),
-            vec!["echo", "hello world"]
-        );
-        assert_eq!(
-            parse_command_args("echo \"hello world\""),
-            vec!["echo", "hello world"]
-        );
-        assert_eq!(
-            parse_command_args("echo \"hello \\\" world\""),
-            vec!["echo", "hello \" world"]
-        );
-        assert_eq!(
-            parse_command_args("awk '{print $1}'"),
-            vec!["awk", "{print $1}"]
-        );
-        assert_eq!(
-            parse_command_args("echo hello; rm -rf /"),
-            vec!["echo", "hello;", "rm", "-rf", "/"]
-        );
-        assert_eq!(
-            parse_command_args("echo hello && rm"),
-            vec!["echo", "hello", "&&", "rm"]
-        );
-        assert_eq!(
-            parse_command_args("echo $(whoami)"),
-            vec!["echo", "$(whoami)"]
-        );
-        assert_eq!(
-            parse_command_args("echo `whoami`"),
-            vec!["echo", "`whoami`"]
-        );
     }
 }
 
