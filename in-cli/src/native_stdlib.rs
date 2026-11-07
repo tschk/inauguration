@@ -208,7 +208,7 @@ pub unsafe extern "C" fn in_fs_create_dir(path_ptr: *const u8) -> i64 {
 }
 
 fn parse_command_args(cmd: &str) -> Vec<String> {
-    shlex::split(cmd).unwrap_or_default()
+    shell_words::split(cmd).unwrap_or_default()
 }
 
 /// argv-style spawn for `.in` `process_run` (`Command::new` + args, no shell).
