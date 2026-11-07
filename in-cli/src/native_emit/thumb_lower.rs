@@ -335,12 +335,13 @@ fn main() -> void { return }
         // Back-edge unconditional B must be a backward branch: either the
         // 16-bit form (0xExxx, imm11 > 0x400 for backward) or the 32-bit B.W
         // (low halfword 0x9xxx in memory).
-        let has_backward_b = result.code.windows(2).any(|w| {
-            let insn = u16::from_le_bytes([w[0], w[1]]);
+        let words = result.code.as_chunks::<2>().0;
+        let has_backward_b = words.iter().any(|w| {
+            let insn = u16::from_le_bytes(*w);
             (insn & 0xF800) == 0xE000 && (insn & 0x0400) != 0
-        }) || result.code.windows(4).any(|w| {
-            let hw1 = u16::from_le_bytes([w[0], w[1]]);
-            let hw2 = u16::from_le_bytes([w[2], w[3]]);
+        }) || words.windows(2).any(|w| {
+            let hw1 = u16::from_le_bytes(w[0]);
+            let hw2 = u16::from_le_bytes(w[1]);
             (hw1 & 0xF800) == 0xF000 && (hw1 & 0x0400) != 0 && (hw2 & 0xD000) == 0x9000
         });
         assert!(has_backward_b, "while back-edge missing signed imm11 b");
