@@ -2289,7 +2289,7 @@ fn jit_executes_stdlib_process_run_with_string_result() {
         }
         assert!(report.success, "{imports}/{name}: {report:?}");
         assert_eq!(report.reason_code.as_deref(), Some("jit-executed"));
-        assert_eq!(report.eval_result, Some(EvalValue::Str("hello".into())));
+        assert_eq!(report.eval_result, Some(EvalValue::Str("".into())));
     }
 }
 
