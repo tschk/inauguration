@@ -208,35 +208,7 @@ pub unsafe extern "C" fn in_fs_create_dir(path_ptr: *const u8) -> i64 {
 }
 
 fn parse_command_args(cmd: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut current_arg = String::new();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut escape = false;
-
-    for c in cmd.chars() {
-        if escape {
-            current_arg.push(c);
-            escape = false;
-        } else if c == '\\' {
-            escape = true;
-        } else if c == '\'' && !in_double_quote {
-            in_single_quote = !in_single_quote;
-        } else if c == '"' && !in_single_quote {
-            in_double_quote = !in_double_quote;
-        } else if c.is_whitespace() && !in_single_quote && !in_double_quote {
-            if !current_arg.is_empty() {
-                args.push(current_arg.clone());
-                current_arg.clear();
-            }
-        } else {
-            current_arg.push(c);
-        }
-    }
-    if !current_arg.is_empty() {
-        args.push(current_arg);
-    }
-    args
+    shell_words::split(cmd).unwrap_or_else(|_| Vec::new())
 }
 
 /// argv-style spawn for `.in` `process_run` (`Command::new` + args, no shell).
