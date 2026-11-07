@@ -51,9 +51,11 @@ pub(crate) fn fallible_functions<'a>(
         }
     }
     while let Some(callee) = queue.pop_front() {
-        for &caller in callers.get(callee).into_iter().flatten() {
-            if fallible.insert(caller) {
-                queue.push_back(caller);
+        if let Some(callers_list) = callers.get(callee) {
+            for &caller in callers_list {
+                if fallible.insert(caller) {
+                    queue.push_back(caller);
+                }
             }
         }
     }
