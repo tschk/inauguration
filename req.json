@@ -1,0 +1,6 @@
+{
+  "branch_name": "security-fix-process-run",
+  "commit_message": "Fix command injection in in_process_run\n\nReplaces custom argument parser with shlex.",
+  "title": "🔒 Fix command injection in `in_process_run`",
+  "description": "🎯 **What:** `in_process_run` was vulnerable to command injection due to insecure custom argument parsing. ⚠️ **Risk:** Allowed executing arbitrary OS commands by injecting shell special characters into the `process_run` arguments. 🛡️ **Solution:** Switched to the robust `shlex` crate for correct POSIX shell argument splitting."
+}

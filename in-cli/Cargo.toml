@@ -79,6 +79,7 @@ tree-sitter-v = { version = "0.0.3", optional = true }
 tar = "0.4.46"
 flate2 = "1.1.9"
 zip = "8.6.0"
+shlex = "2.0.1"
 [features]
 default = ["parse-extended"]
 parse-extended = [

@@ -547,6 +547,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "shlex",
  "syn 2.0.119",
  "tar",
  "thiserror",
