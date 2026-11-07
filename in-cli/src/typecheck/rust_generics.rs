@@ -960,7 +960,7 @@ fn validate_template(
         && body.iter().any(|statement| {
             matches!(statement,
                 crate::core_ir::Stmt::Expr(Expr::Unary { op, expr })
-                    if (op == rust_generics::CONSTRAINTS || rust_generics::is_neg_bounds(op))
+                    if (op == rust_generics::CONSTRAINTS || rust_generics::is_neg_bounds(op) || rust_generics::is_callable_bounds(op) || rust_generics::is_trait_bounds(op))
                         && matches!(expr.as_ref(), Expr::UnitLit)
                         || op == rust_generics::ALIAS && matches!(expr.as_ref(), Expr::Ident(_)))
         })
